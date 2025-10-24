@@ -2,6 +2,7 @@
 
 use crate::codec::RespCodec;
 use crate::commands::Command;
+use crate::pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 use crate::types::RedisError;
 use futures::{SinkExt, StreamExt};
 use std::future::Future;
@@ -171,5 +172,80 @@ where
             // Parse the response using the command's type-safe parser
             Cmd::parse_response(response_frame)
         })
+    }
+}
+
+/// Pipeline execution implementation for RedisConnection
+impl PipelineExecutor for RedisConnection {
+    async fn execute_pipeline(&self, pipeline: &Pipeline) -> Result<PipelineResults, RedisError> {
+        let mut framed = self.framed.lock().await;
+
+        // Send all command frames
+        for frame in pipeline.frames() {
+            framed
+                .send(frame)
+                .await
+                .map_err(|e| RedisError::Connection(e.to_string()))?;
+        }
+
+        // Calculate how many responses we expect
+        let expected_responses = if pipeline.is_atomic() {
+            // In atomic mode:
+            // - MULTI returns +OK
+            // - Each command returns +QUEUED
+            // - EXEC returns an array with all results
+            // We only care about the EXEC response
+            pipeline.len() + 2 // +1 for MULTI OK, +1 for EXEC array
+        } else {
+            // In non-atomic mode, we get one response per command
+            pipeline.len()
+        };
+
+        // Read all responses
+        let mut responses = Vec::with_capacity(expected_responses);
+        for _ in 0..expected_responses {
+            let response_frame = framed
+                .next()
+                .await
+                .ok_or_else(|| RedisError::Connection("Connection closed".to_string()))?
+                .map_err(|e| RedisError::Connection(e.to_string()))?;
+
+            responses.push(response_frame);
+        }
+
+        // Handle atomic mode differently
+        if pipeline.is_atomic() {
+            // Skip MULTI response (should be +OK)
+            // Skip QUEUED responses
+            // The last response is the EXEC array containing all results
+            if let Some(exec_response) = responses.pop() {
+                match exec_response {
+                    crate::codec::Frame::Array(results) => {
+                        return Ok(PipelineResults::new(results));
+                    }
+                    crate::codec::Frame::Null => {
+                        return Err(RedisError::Protocol(
+                            "Transaction aborted (EXEC returned null)".to_string(),
+                        ));
+                    }
+                    _ => {
+                        return Err(RedisError::Protocol("Expected array from EXEC".to_string()));
+                    }
+                }
+            } else {
+                return Err(RedisError::Protocol(
+                    "No EXEC response received".to_string(),
+                ));
+            }
+        }
+
+        Ok(PipelineResults::new(responses))
+    }
+}
+
+/// Pipeline execution implementation for RedisClient
+impl PipelineExecutor for RedisClient {
+    async fn execute_pipeline(&self, pipeline: &Pipeline) -> Result<PipelineResults, RedisError> {
+        self.connection.execute_pipeline(pipeline).await
     }
 }

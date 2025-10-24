@@ -84,6 +84,63 @@ impl Command for HSet {
     }
 }
 
+// Read-only trait implementations for cluster read-from-replica support
+use crate::cluster::read_preference::ReadOnly;
+
+impl ReadOnly for HGet {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HExists {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HLen {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HKeys {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HVals {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HMGet {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HStrLen {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for HGetAll {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - explicitly implement with default (false) for clarity
+impl ReadOnly for HSet {}
+impl ReadOnly for HDel {}
+impl ReadOnly for HIncrBy {}
+impl ReadOnly for HIncrByFloat {}
+
 /// HEXISTS command - check if field exists
 #[derive(Debug, Clone)]
 pub struct HExists {

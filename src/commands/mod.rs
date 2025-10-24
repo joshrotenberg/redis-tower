@@ -15,6 +15,7 @@ pub trait Command {
     fn parse_response(frame: Frame) -> Result<Self::Response, RedisError>;
 }
 
+pub mod connection;
 pub mod hashes;
 pub mod lists;
 pub mod pubsub;
@@ -25,6 +26,7 @@ pub mod sorted_sets;
 pub mod streams;
 pub mod strings;
 
+pub use connection::{Auth, AuthAcl, Quit, ReadOnly, ReadWrite, Select};
 pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
 };

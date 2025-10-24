@@ -8,7 +8,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Tower ecosystem
-tower = "0.5"
+tower = { version = "0.5", features = ["make", "reconnect", "timeout", "balance", "buffer", "util"] }
 tower-layer = "0.3"
 tower-service = "0.3"
 
@@ -37,8 +37,10 @@ tower-resilience = { version = "0.3.5", features = ["full"] }
 resp-parser = { version = "0.1.0", path = "../resp-parser-rs" }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
+redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
+fred = { version = "9.3", features = ["i-all"] }
 
 [[bench]]
 name = "comparison"

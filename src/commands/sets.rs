@@ -895,6 +895,78 @@ impl Command for SInterStore {
     }
 }
 
+// Read-only trait implementations for cluster read-from-replica support
+use crate::cluster::read_preference::ReadOnly;
+
+impl ReadOnly for Smembers {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Sismember {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Scard {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Sinter {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Sunion {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Sdiff {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Sscan {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for SRandMember {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for SMIsMember {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for SInterCard {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - explicitly implement with default (false) for clarity
+impl ReadOnly for Sadd {}
+impl ReadOnly for Srem {}
+impl ReadOnly for SPop {}
+impl ReadOnly for SMove {}
+impl ReadOnly for SInterStore {}
+impl ReadOnly for SUnionStore {}
+impl ReadOnly for SDiffStore {}
+
 /// SUNIONSTORE command - store union in destination
 #[derive(Debug, Clone)]
 pub struct SUnionStore {

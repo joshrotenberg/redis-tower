@@ -2,12 +2,18 @@
 
 use crate::client::RedisConnection;
 use crate::cluster::commands::ClusterSlots;
+use crate::cluster::read_preference::ReadPreference;
 use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
+use crate::pool::{ConnectionPool, PoolConfig};
 use crate::types::RedisError;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::RwLock;
+use tower::Service;
 
 /// Redis Cluster client with automatic routing and redirect handling.
 ///
@@ -15,7 +21,7 @@ use tokio::sync::RwLock;
 /// - Automatic slot-based routing to the correct node
 /// - MOVED redirect handling with slot map updates
 /// - ASK redirect handling with ASKING command
-/// - Connection pooling to all cluster nodes
+/// - Connection pooling to all cluster nodes (configurable pool size)
 /// - Automatic topology refresh
 ///
 /// # Example
@@ -38,19 +44,65 @@ use tokio::sync::RwLock;
 /// ```
 #[derive(Clone)]
 pub struct ClusterClient {
-    /// Connections to cluster nodes (by address)
-    connections: Arc<RwLock<HashMap<String, RedisConnection>>>,
+    /// Connection pools to cluster nodes (by address)
+    pools: Arc<RwLock<HashMap<String, ConnectionPool>>>,
     /// Slot to node address mapping
     slot_map: Arc<RwLock<SlotMap>>,
     /// Initial seed nodes for bootstrapping
     seed_nodes: Vec<String>,
+    /// Pool configuration for each node
+    pool_config: Arc<PoolConfig>,
+    /// Read preference for routing
+    read_preference: ReadPreference,
 }
 
 impl ClusterClient {
-    /// Create a new cluster client.
+    /// Create a new cluster client with default settings.
     ///
     /// Connects to seed nodes and discovers the full cluster topology.
+    /// Uses default pool configuration (10 connections per node, health checks enabled).
     pub async fn new(seed_nodes: Vec<impl Into<String>>) -> Result<Self, RedisError> {
+        Self::with_pool_config(seed_nodes, PoolConfig::default()).await
+    }
+
+    /// Create a new cluster client with legacy config (simple max_size).
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `max_connections_per_node` - Maximum connections to maintain per node
+    ///
+    /// # Deprecated
+    /// Use `with_pool_config()` for more control over pool behavior.
+    pub async fn with_config(
+        seed_nodes: Vec<impl Into<String>>,
+        max_connections_per_node: usize,
+    ) -> Result<Self, RedisError> {
+        Self::with_pool_config(seed_nodes, PoolConfig::new(max_connections_per_node)).await
+    }
+
+    /// Create a new cluster client with custom pool configuration.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `pool_config` - Connection pool configuration (max size, health checks, timeouts, etc.)
+    pub async fn with_pool_config(
+        seed_nodes: Vec<impl Into<String>>,
+        pool_config: PoolConfig,
+    ) -> Result<Self, RedisError> {
+        Self::with_full_config(seed_nodes, pool_config, ReadPreference::default()).await
+    }
+
+    /// Create a new cluster client with full configuration including read preference.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `pool_config` - Connection pool configuration
+    /// * `read_preference` - Read preference (Master, Replica, PreferReplica)
+    pub async fn with_full_config(
+        seed_nodes: Vec<impl Into<String>>,
+        pool_config: PoolConfig,
+        read_preference: ReadPreference,
+    ) -> Result<Self, RedisError> {
         let seed_nodes: Vec<String> = seed_nodes.into_iter().map(Into::into).collect();
 
         if seed_nodes.is_empty() {
@@ -59,10 +111,18 @@ impl ClusterClient {
             ));
         }
 
+        if pool_config.max_size == 0 {
+            return Err(RedisError::Protocol(
+                "pool_config.max_size must be at least 1".to_string(),
+            ));
+        }
+
         let client = Self {
-            connections: Arc::new(RwLock::new(HashMap::new())),
+            pools: Arc::new(RwLock::new(HashMap::new())),
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             seed_nodes,
+            pool_config: Arc::new(pool_config),
+            read_preference,
         };
 
         // Discover cluster topology
@@ -95,9 +155,10 @@ impl ClusterClient {
     ///
     /// Automatically routes to the correct node based on the key's hash slot.
     /// Handles MOVED and ASK redirects transparently.
+    /// Routes read-only commands to replicas based on read preference.
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
-        Cmd: Command + Clone + KeyExtractor,
+        Cmd: Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly,
     {
         const MAX_REDIRECTS: usize = 16;
 
@@ -108,16 +169,19 @@ impl ClusterClient {
         let slot = slot_for_key(key.as_bytes());
         let mut current_slot = slot;
         let mut redirects = 0;
+        let is_read_only = command.is_read_only();
 
         loop {
             if redirects >= MAX_REDIRECTS {
                 return Err(RedisError::Protocol("Too many redirects".to_string()));
             }
 
-            // Get the node for this slot
+            // Get the node for this slot based on read preference
             let node_addr = {
                 let slot_map = self.slot_map.read().await;
-                slot_map.get_node(current_slot).map(|s| s.to_string())
+                slot_map
+                    .get_assignment(current_slot)
+                    .map(|assignment| self.select_node(assignment, is_read_only))
             };
 
             if let Some(addr) = node_addr {
@@ -198,26 +262,30 @@ impl ClusterClient {
             // Remap internal Docker IPs to accessible addresses
             let master_addr = self.remap_address(&master_addr);
 
-            // Map all slots in this range to the master
-            for slot in range.start_slot..=range.end_slot {
-                slot_map.set_slot(slot, master_addr.clone());
-            }
+            // Collect replica addresses
+            let replica_addrs: Vec<String> = range
+                .replicas
+                .iter()
+                .map(|r| self.remap_address(&format!("{}:{}", r.host, r.port)))
+                .collect();
 
-            // Ensure we have connections to master and replicas
-            let addrs = vec![master_addr]
-                .into_iter()
-                .chain(
-                    range
-                        .replicas
-                        .iter()
-                        .map(|r| self.remap_address(&format!("{}:{}", r.host, r.port))),
-                )
+            // Map all slots in this range to the master and replicas
+            slot_map.assign_slots_with_replicas(
+                range.start_slot,
+                range.end_slot,
+                master_addr.clone(),
+                replica_addrs.clone(),
+            );
+
+            // Collect all addresses (master + replicas) for connection pre-creation
+            let all_addrs = std::iter::once(master_addr)
+                .chain(replica_addrs)
                 .collect::<Vec<_>>();
 
             drop(slot_map);
 
             // Pre-create connections to all nodes
-            for node_addr in addrs {
+            for node_addr in all_addrs {
                 let _ = self.get_or_create_connection(&node_addr).await;
             }
 
@@ -228,29 +296,92 @@ impl ClusterClient {
     }
 
     async fn get_or_create_connection(&self, addr: &str) -> Result<RedisConnection, RedisError> {
-        // Check if connection exists
+        // Check if pool exists
         {
-            let connections = self.connections.read().await;
-            if let Some(conn) = connections.get(addr) {
-                return Ok(conn.clone());
+            let pools = self.pools.read().await;
+            if let Some(pool) = pools.get(addr) {
+                return pool.get().await;
             }
         }
 
-        // Create new connection
-        let conn = RedisConnection::connect(addr).await?;
+        // Create new pool with the cluster's pool configuration
+        let pool = ConnectionPool::with_config(addr.to_string(), (*self.pool_config).clone());
+        let conn = pool.get().await?;
 
-        // Store it
+        // Store the pool
         {
-            let mut connections = self.connections.write().await;
-            connections.insert(addr.to_string(), conn.clone());
+            let mut pools = self.pools.write().await;
+            pools.insert(addr.to_string(), pool);
         }
 
         Ok(conn)
     }
 
-    /// Get the number of connected nodes.
+    /// Get the number of connected nodes (nodes with connection pools).
     pub async fn connection_count(&self) -> usize {
-        self.connections.read().await.len()
+        self.pools.read().await.len()
+    }
+
+    /// Get the total number of connections across all pools.
+    pub async fn total_connections(&self) -> usize {
+        let pools = self.pools.read().await;
+        let mut total = 0;
+        for pool in pools.values() {
+            total += pool.size().await;
+        }
+        total
+    }
+
+    /// Get the maximum connections per node setting.
+    pub fn max_connections_per_node(&self) -> usize {
+        self.pool_config.max_size
+    }
+
+    /// Get the pool configuration.
+    pub fn pool_config(&self) -> &PoolConfig {
+        &self.pool_config
+    }
+
+    /// Get the read preference.
+    pub fn read_preference(&self) -> ReadPreference {
+        self.read_preference
+    }
+
+    /// Select a node address based on slot assignment and read preference
+    ///
+    /// Returns the appropriate node address based on:
+    /// - Whether the command is read-only
+    /// - The configured read preference
+    /// - Availability of replicas
+    fn select_node(
+        &self,
+        assignment: &crate::cluster::slots::SlotAssignment,
+        is_read_only: bool,
+    ) -> String {
+        // Always use master for write commands
+        if !is_read_only {
+            return assignment.master.clone();
+        }
+
+        match self.read_preference {
+            ReadPreference::Master => assignment.master.clone(),
+            ReadPreference::Replica => {
+                // Use replica if available, otherwise master
+                assignment
+                    .replicas
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| assignment.master.clone())
+            }
+            ReadPreference::PreferReplica => {
+                // Prefer replica, fall back to master
+                assignment
+                    .replicas
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| assignment.master.clone())
+            }
+        }
     }
 }
 
@@ -266,6 +397,125 @@ pub trait KeyExtractor {
 
 // Implement KeyExtractor for common commands
 // We'll add these as we go
+
+/// Tower Service implementation for ClusterClient
+///
+/// This allows ClusterClient to work with Tower middleware like timeouts,
+/// retries, and circuit breakers.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::cluster::ClusterClient;
+/// use redis_tower::commands::Get;
+/// use tower::Service;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut client = ClusterClient::new(vec!["127.0.0.1:7000"]).await?;
+///
+/// // Use as a Tower service
+/// let response = Service::call(&mut client, Get::new("mykey")).await?;
+/// # Ok(())
+/// # }
+/// ```
+impl<Cmd> Service<Cmd> for ClusterClient
+where
+    Cmd:
+        Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly + Send + 'static,
+    Cmd::Response: Send + 'static,
+{
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Always ready - cluster handles routing internally
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, command: Cmd) -> Self::Future {
+        let client = self.clone();
+
+        Box::pin(async move { client.execute(command).await })
+    }
+}
+
+/// Pipeline execution for cluster
+///
+/// Important: All commands in the pipeline MUST target the same hash slot.
+/// This is a cluster requirement - pipelines cannot span multiple nodes.
+impl crate::pipeline::PipelineExecutor for ClusterClient {
+    async fn execute_pipeline(
+        &self,
+        pipeline: &crate::pipeline::Pipeline,
+    ) -> Result<crate::pipeline::PipelineResults, RedisError> {
+        if pipeline.is_empty() {
+            return Ok(crate::pipeline::PipelineResults::new(vec![]));
+        }
+
+        // For cluster pipelines, we need to validate that all commands target the same slot
+        // Since we can't access the actual commands (they're type-erased), we'll send to the
+        // first command's slot and let Redis return an error if commands span multiple slots.
+        //
+        // A better approach would be to track the key/slot in Pipeline, but that requires
+        // more refactoring. For now, we'll execute the pipeline on a single connection
+        // and document the single-slot requirement.
+
+        // Get frames and determine target slot from first command
+        let frames = pipeline.frames();
+        if frames.is_empty() {
+            return Ok(crate::pipeline::PipelineResults::new(vec![]));
+        }
+
+        // Extract key from first frame to determine slot
+        // This is a simplified approach - in production we'd want to validate all keys
+        let first_frame = &frames[0];
+        let slot = self.extract_slot_from_frame(first_frame)?;
+
+        // Get the node for this slot
+        let node_addr = {
+            let slot_map = self.slot_map.read().await;
+            slot_map
+                .get_assignment(slot)
+                .map(|assignment| assignment.master.clone())
+                .ok_or_else(|| RedisError::Protocol(format!("No node found for slot {}", slot)))?
+        };
+
+        // Get connection pool for that node
+        let pools = self.pools.read().await;
+        let pool = pools.get(&node_addr).ok_or_else(|| {
+            RedisError::Protocol(format!("No connection pool for node {}", node_addr))
+        })?;
+
+        // Get a connection from the pool
+        let conn = pool.get().await?;
+
+        // Execute the pipeline on that single connection
+        conn.execute_pipeline(pipeline).await
+    }
+}
+
+impl ClusterClient {
+    /// Extract slot from a frame (helper for pipeline routing)
+    fn extract_slot_from_frame(&self, frame: &crate::codec::Frame) -> Result<u16, RedisError> {
+        use crate::codec::Frame;
+
+        match frame {
+            Frame::Array(elements) if elements.len() >= 2 => {
+                // Second element is typically the key
+                if let Frame::BulkString(Some(key_bytes)) = &elements[1] {
+                    Ok(slot_for_key(key_bytes))
+                } else {
+                    Err(RedisError::Protocol(
+                        "Cannot extract key from pipeline command".to_string(),
+                    ))
+                }
+            }
+            _ => Err(RedisError::Protocol(
+                "Invalid frame format for pipeline".to_string(),
+            )),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
