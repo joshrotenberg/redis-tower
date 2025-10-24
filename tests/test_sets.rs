@@ -3,7 +3,7 @@
 use bytes::Bytes;
 use redis_tower::commands::{
     Del, SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore,
-    Sadd, Smembers,
+    Sadd, Scard, Smembers,
 };
 
 mod common;

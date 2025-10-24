@@ -7,7 +7,10 @@ mod common;
 
 use bytes::Bytes;
 use common::{connect, test_key};
-use redis_tower::commands::{Decr, Del, Echo, Exists, Expire, Get, Incr, Ping, Set, Ttl};
+use redis_tower::commands::{
+    Append, Decr, DecrBy, Del, Echo, Exists, Expire, Get, GetDel, GetEx, GetRange, Incr, IncrBy,
+    IncrByFloat, Ping, Set, SetRange, StrLen, Ttl,
+};
 
 #[tokio::test]
 async fn test_ping() {
@@ -44,6 +47,222 @@ async fn test_set_get() {
 
     // Clean up
     client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_incrby_decrby() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("incrby_decrby");
+
+    // INCRBY on non-existent key starts at 0
+    let value = client.execute(IncrBy::new(&key, 5)).await.unwrap();
+    assert_eq!(value, 5);
+
+    // INCRBY again
+    let value = client.execute(IncrBy::new(&key, 10)).await.unwrap();
+    assert_eq!(value, 15);
+
+    // DECRBY
+    let value = client.execute(DecrBy::new(&key, 3)).await.unwrap();
+    assert_eq!(value, 12);
+
+    // DECRBY again
+    let value = client.execute(DecrBy::new(&key, 7)).await.unwrap();
+    assert_eq!(value, 5);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_incrbyfloat() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("incrbyfloat");
+
+    // INCRBYFLOAT on non-existent key starts at 0.0
+    let value = client.execute(IncrByFloat::new(&key, 2.5)).await.unwrap();
+    assert!((value - 2.5).abs() < 0.001);
+
+    // INCRBYFLOAT again
+    let value = client.execute(IncrByFloat::new(&key, 3.7)).await.unwrap();
+    assert!((value - 6.2).abs() < 0.001);
+
+    // INCRBYFLOAT with negative value (decrement)
+    let value = client.execute(IncrByFloat::new(&key, -1.2)).await.unwrap();
+    assert!((value - 5.0).abs() < 0.001);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_append() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("append");
+
+    // APPEND to non-existent key creates it
+    let length = client.execute(Append::new(&key, "Hello")).await.unwrap();
+    assert_eq!(length, 5);
+
+    // APPEND again
+    let length = client.execute(Append::new(&key, " World")).await.unwrap();
+    assert_eq!(length, 11);
+
+    // Verify the value
+    let value: Option<Bytes> = client.execute(Get::new(&key)).await.unwrap();
+    assert_eq!(value, Some(Bytes::from_static(b"Hello World")));
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_strlen() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("strlen");
+
+    // STRLEN on non-existent key returns 0
+    let length = client.execute(StrLen::new(&key)).await.unwrap();
+    assert_eq!(length, 0);
+
+    // Set a value
+    client.execute(Set::new(&key, "Hello")).await.unwrap();
+
+    // STRLEN should return 5
+    let length = client.execute(StrLen::new(&key)).await.unwrap();
+    assert_eq!(length, 5);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_getrange() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("getrange");
+
+    // Set a value
+    client.execute(Set::new(&key, "Hello World")).await.unwrap();
+
+    // GETRANGE entire string
+    let value = client.execute(GetRange::new(&key, 0, -1)).await.unwrap();
+    assert_eq!(value.as_ref(), b"Hello World");
+
+    // GETRANGE first 5 characters
+    let value = client.execute(GetRange::new(&key, 0, 4)).await.unwrap();
+    assert_eq!(value.as_ref(), b"Hello");
+
+    // GETRANGE last 5 characters
+    let value = client.execute(GetRange::new(&key, 6, 10)).await.unwrap();
+    assert_eq!(value.as_ref(), b"World");
+
+    // GETRANGE with negative indices
+    let value = client.execute(GetRange::new(&key, -5, -1)).await.unwrap();
+    assert_eq!(value.as_ref(), b"World");
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_setrange() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("setrange");
+
+    // SETRANGE on non-existent key
+    let length = client
+        .execute(SetRange::new(&key, 0, "Hello"))
+        .await
+        .unwrap();
+    assert_eq!(length, 5);
+
+    // SETRANGE to replace part of the string
+    let length = client
+        .execute(SetRange::new(&key, 6, "World"))
+        .await
+        .unwrap();
+    assert_eq!(length, 11);
+
+    // Verify the value (should have null bytes between)
+    let value: Option<Bytes> = client.execute(Get::new(&key)).await.unwrap();
+    assert_eq!(value.unwrap().len(), 11);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_getex() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("getex");
+
+    // Set a value
+    client.execute(Set::new(&key, "value")).await.unwrap();
+
+    // GETEX with EX (expire in seconds) - using builder pattern
+    let value = client.execute(GetEx::new(&key).ex(10)).await.unwrap();
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
+
+    // Verify TTL was set
+    let ttl = client.execute(Ttl::new(&key)).await.unwrap();
+    assert!(ttl > 0 && ttl <= 10);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_getex_persist() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("getex_persist");
+
+    // Set a value
+    client.execute(Set::new(&key, "value")).await.unwrap();
+
+    // Set expiration on the key
+    client.execute(Expire::new(&key, 10)).await.unwrap();
+
+    // Verify it has TTL
+    let ttl = client.execute(Ttl::new(&key)).await.unwrap();
+    assert!(ttl > 0);
+
+    // GETEX with PERSIST removes expiration - using builder pattern
+    let value = client.execute(GetEx::new(&key).persist()).await.unwrap();
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
+
+    // Verify TTL was removed
+    let ttl = client.execute(Ttl::new(&key)).await.unwrap();
+    assert_eq!(ttl, -1);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_getdel() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("getdel");
+
+    // Set a value
+    client.execute(Set::new(&key, "value")).await.unwrap();
+
+    // GETDEL returns value and deletes key
+    let value = client.execute(GetDel::new(&key)).await.unwrap();
+    assert_eq!(value, Some(Bytes::from_static(b"value")));
+
+    // Verify key was deleted
+    let value: Option<Bytes> = client.execute(Get::new(&key)).await.unwrap();
+    assert_eq!(value, None);
+}
+
+#[tokio::test]
+async fn test_getdel_nonexistent() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("getdel_nonexistent");
+
+    // GETDEL on non-existent key returns None
+    let value = client.execute(GetDel::new(&key)).await.unwrap();
+    assert_eq!(value, None);
 }
 
 #[tokio::test]

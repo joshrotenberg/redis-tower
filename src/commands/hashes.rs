@@ -254,6 +254,14 @@ impl HMGet {
             fields,
         }
     }
+
+    /// Convenience method for getting a single field
+    pub fn single(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            fields: vec![field.into()],
+        }
+    }
 }
 
 impl Command for HMGet {
@@ -484,6 +492,14 @@ impl HDel {
         Self {
             key: key.into(),
             fields,
+        }
+    }
+
+    /// Convenience method for deleting a single field
+    pub fn single(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            fields: vec![field.into()],
         }
     }
 }
