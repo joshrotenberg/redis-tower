@@ -68,3 +68,13 @@ pub use strings::{
     Incr, IncrBy, IncrByFloat, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
     StrLen, Ttl,
 };
+
+// ============================================================================
+// DEPRECATED COMMANDS (feature-gated with "deprecated")
+// ============================================================================
+
+#[cfg(feature = "deprecated")]
+pub use lists::{BRPopLPush, RPopLPush};
+
+#[cfg(feature = "deprecated")]
+pub use strings::GetSet;

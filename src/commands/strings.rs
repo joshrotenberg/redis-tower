@@ -1233,6 +1233,72 @@ impl ReadOnly for Echo {
     }
 }
 
+// ============================================================================
+// DEPRECATED COMMANDS (feature-gated with "deprecated")
+// ============================================================================
+
+#[cfg(feature = "deprecated")]
+/// GETSET command - Set key to value and return old value (DEPRECATED)
+///
+/// **DEPRECATED**: As of Redis 6.2.0, use `Set::new(key, value).get()` instead.
+///
+/// Atomically sets key to value and returns the old value stored at key.
+///
+/// # Migration Guide
+///
+/// ```no_run
+/// use redis_tower::commands::Set;
+///
+/// // Old (deprecated - requires "deprecated" feature):
+/// // use redis_tower::commands::GetSet;
+/// // let cmd = GetSet::new("mykey", "newvalue");
+///
+/// // New (preferred):
+/// let cmd = Set::new("mykey", "newvalue").get();
+/// ```
+#[derive(Debug, Clone)]
+pub struct GetSet {
+    key: String,
+    value: Bytes,
+}
+
+#[cfg(feature = "deprecated")]
+impl GetSet {
+    /// Create a new GETSET command
+    #[deprecated(since = "6.2.0", note = "Use Set::new(key, value).get() instead")]
+    pub fn new(key: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+#[cfg(feature = "deprecated")]
+impl Command for GetSet {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("GETSET"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+#[cfg(feature = "deprecated")]
+impl ReadOnly for GetSet {}
+
 // Write commands - explicitly implement with default (false) for clarity
 impl ReadOnly for Set {}
 impl ReadOnly for Del {}

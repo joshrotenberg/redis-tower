@@ -811,6 +811,135 @@ impl Command for BLMPop {
     }
 }
 
+// ============================================================================
+// DEPRECATED COMMANDS (feature-gated with "deprecated")
+// ============================================================================
+
+#[cfg(feature = "deprecated")]
+/// RPOPLPUSH command - Pop from source and push to destination (DEPRECATED)
+///
+/// **DEPRECATED**: As of Redis 6.2.0, use `LMove` instead.
+///
+/// Atomically returns and removes the last element of the source list,
+/// and pushes the element to the destination list.
+///
+/// # Migration Guide
+///
+/// ```no_run
+/// use redis_tower::commands::LMove;
+/// use redis_tower::commands::MoveDirection;
+///
+/// // Old (deprecated - requires "deprecated" feature):
+/// // use redis_tower::commands::RPopLPush;
+/// // let cmd = RPopLPush::new("source", "dest");
+///
+/// // New (preferred):
+/// let cmd = LMove::new("source", "dest", MoveDirection::Right, MoveDirection::Left);
+/// ```
+#[derive(Debug, Clone)]
+pub struct RPopLPush {
+    source: String,
+    destination: String,
+}
+
+#[cfg(feature = "deprecated")]
+impl RPopLPush {
+    /// Create a new RPOPLPUSH command
+    #[deprecated(since = "6.2.0", note = "Use LMove instead")]
+    pub fn new(source: impl Into<String>, destination: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+        }
+    }
+}
+
+#[cfg(feature = "deprecated")]
+impl Command for RPopLPush {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("RPOPLPUSH"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+#[cfg(feature = "deprecated")]
+/// BRPOPLPUSH command - Blocking RPOPLPUSH (DEPRECATED)
+///
+/// **DEPRECATED**: As of Redis 6.2.0, use `BLMove` instead.
+///
+/// Blocking version of RPOPLPUSH. Waits for an element to be available
+/// or timeout expires.
+///
+/// # Migration Guide
+///
+/// ```no_run
+/// use redis_tower::commands::BLMove;
+/// use redis_tower::commands::MoveDirection;
+///
+/// // Old (deprecated - requires "deprecated" feature):
+/// // use redis_tower::commands::BRPopLPush;
+/// // let cmd = BRPopLPush::new("source", "dest", 5.0);
+///
+/// // New (preferred):
+/// let cmd = BLMove::new("source", "dest", MoveDirection::Right, MoveDirection::Left, 5.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BRPopLPush {
+    source: String,
+    destination: String,
+    timeout: f64,
+}
+
+#[cfg(feature = "deprecated")]
+impl BRPopLPush {
+    /// Create a new BRPOPLPUSH command
+    #[deprecated(since = "6.2.0", note = "Use BLMove instead")]
+    pub fn new(source: impl Into<String>, destination: impl Into<String>, timeout: f64) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            timeout,
+        }
+    }
+}
+
+#[cfg(feature = "deprecated")]
+impl Command for BRPopLPush {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BRPOPLPUSH"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::read_preference::ReadOnly;
 

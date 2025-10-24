@@ -48,6 +48,12 @@ redis-tower = { version = "0.1", features = ["cluster", "sentinel", "bloom"] }  
 - `cluster` - Redis Cluster support (slot routing, ASKING, MOVED redirects)
 - `sentinel` - Redis Sentinel support (master discovery, replica promotion)
 
+**Backwards Compatibility:**
+- `deprecated` - Include deprecated Redis commands with migration guides
+  - GETSET (use `Set::get()`)
+  - RPOPLPUSH (use `LMove`)
+  - BRPOPLPUSH (use `BLMove`)
+
 **Redis Stack Modules:**
 - `bloom` - RedisBloom probabilistic data structures (11 commands)
 - `json` - RedisJSON document storage (coming soon)

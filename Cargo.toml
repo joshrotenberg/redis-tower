@@ -86,6 +86,8 @@ default = []
 # Deployment topology support (feature-gated)
 cluster = []          # Redis Cluster support
 sentinel = []         # Redis Sentinel support
+# Backwards compatibility (feature-gated)
+deprecated = []       # Include deprecated commands (GETSET, RPOPLPUSH, GEORADIUS, etc.)
 # Redis module support (feature-gated)
 modules = []
 bloom = ["modules"]

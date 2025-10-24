@@ -2,8 +2,9 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 175 (164 core + 11 module)  
-**Coverage:** ~43% (164/400 core commands, 11 module commands behind feature flags)
+**Implemented:** 178 (167 core + 11 module)  
+**Coverage:** ~44% (167/400 core commands, 11 module commands behind feature flags)
+**Deprecated Commands:** 3 (available with `deprecated` feature)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -145,7 +146,14 @@
 - Can be enabled with `features = ["bloom"]`
 - All 11 bloom filter commands implemented (100%)
 
-**Total coverage:** 135 → 175 commands (34% → 43%)
+**Total coverage:** 135 → 178 commands (34% → 44%)
+
+#### Deprecated Commands (3 commands) - Feature-Gated 🔒
+- [x] GETSET (use SET with GET option)
+- [x] RPOPLPUSH (use LMOVE)
+- [x] BRPOPLPUSH (use BLMOVE)
+- Available with `features = ["deprecated"]` for backwards compatibility
+- Each has clear migration guide in documentation
 
 ### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
