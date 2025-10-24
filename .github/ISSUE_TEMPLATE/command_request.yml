@@ -1,0 +1,70 @@
+name: Command Request
+description: Request implementation of a missing Redis command
+labels: ["enhancement", "command"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Request a Redis command that isn't yet implemented. Check [COMMANDS_TRACKING.md](https://github.com/joshrotenberg/redis-tower/blob/main/COMMANDS_TRACKING.md) first!
+
+  - type: input
+    id: command
+    attributes:
+      label: Command Name
+      description: What Redis command do you need?
+      placeholder: "GEORADIUS"
+    validations:
+      required: true
+
+  - type: input
+    id: redis-version
+    attributes:
+      label: Redis Version
+      description: When was this command introduced?
+      placeholder: "6.2.0"
+
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Why do you need this command? What are you building?
+      placeholder: I need this for geospatial queries in my location-based app...
+    validations:
+      required: true
+
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current Workaround
+      description: How are you working around the missing command?
+      placeholder: Currently using GEOSEARCH but it's not quite the same...
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example Usage
+      description: Show how you'd like to use this command
+      render: rust
+      placeholder: |
+        use redis_tower::commands::GeoRadius;
+
+        let results = client.call(
+            GeoRadius::new("locations", 13.361389, 38.115556, 100.0, GeoUnit::Kilometers)
+        ).await?;
+
+  - type: dropdown
+    id: willing
+    attributes:
+      label: Willing to Implement?
+      description: Would you be willing to implement this command?
+      options:
+        - "Yes, I can submit a PR"
+        - "Yes, with guidance"
+        - "No"
+
+  - type: textarea
+    id: documentation
+    attributes:
+      label: Redis Documentation Link
+      description: Link to official Redis documentation for this command
+      placeholder: https://redis.io/commands/georadius/

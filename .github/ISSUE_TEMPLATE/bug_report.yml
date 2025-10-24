@@ -1,0 +1,93 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the information below.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Connect to Redis with...
+        2. Execute command...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: code
+    attributes:
+      label: Code Sample
+      description: Minimal code sample to reproduce the issue
+      render: rust
+      placeholder: |
+        use redis_tower::commands::Get;
+
+        let client = RedisClient::connect("localhost:6379").await?;
+        let result = client.call(Get::new("key")).await?;
+
+  - type: input
+    id: version
+    attributes:
+      label: redis-tower Version
+      description: What version are you using?
+      placeholder: "0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: redis-version
+    attributes:
+      label: Redis Version
+      description: What Redis version are you connecting to?
+      placeholder: "7.2.0"
+
+  - type: dropdown
+    id: features
+    attributes:
+      label: Features Enabled
+      description: Which optional features are you using?
+      multiple: true
+      options:
+        - cluster
+        - sentinel
+        - bloom
+        - deprecated
+        - none
+
+  - type: input
+    id: rust-version
+    attributes:
+      label: Rust Version
+      description: What Rust version are you using?
+      placeholder: "rustc 1.87.0"
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other information that might be helpful
+      placeholder: Stack traces, logs, related issues, etc.
