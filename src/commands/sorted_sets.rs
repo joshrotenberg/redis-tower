@@ -349,8 +349,22 @@ impl Command for Zrange {
                 }
 
                 let mut members = Vec::new();
-                let mut i = 0;
 
+                // Detect if scores are present by checking if we can parse the second element as a float
+                // If WITHSCORES is used, array length is even (member, score pairs)
+                // If not used, array contains only members
+                let has_scores = if items.len() >= 2 {
+                    // Try to parse second element as float to detect WITHSCORES
+                    if let Frame::BulkString(Some(bytes)) = &items[1] {
+                        String::from_utf8_lossy(bytes).parse::<f64>().is_ok()
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                let mut i = 0;
                 while i < items.len() {
                     let member = match &items[i] {
                         Frame::BulkString(Some(bytes)) => bytes.clone(),
@@ -361,7 +375,7 @@ impl Command for Zrange {
                         }
                     };
 
-                    let score = if i + 1 < items.len() {
+                    let score = if has_scores && i + 1 < items.len() {
                         match &items[i + 1] {
                             Frame::BulkString(Some(bytes)) => {
                                 let s = String::from_utf8_lossy(bytes);
@@ -376,11 +390,11 @@ impl Command for Zrange {
                             }
                         }
                     } else {
-                        0.0
+                        0.0 // Default score when WITHSCORES not used
                     };
 
                     members.push((member, score));
-                    i += 2;
+                    i += if has_scores { 2 } else { 1 };
                 }
 
                 Ok(ZrangeResult { members })
