@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 132  
-**Coverage:** ~33% (132/400 core commands, excluding modules)
+**Implemented:** 135  
+**Coverage:** ~34% (135/400 core commands, excluding modules)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -106,12 +106,19 @@
 
 ---
 
-## ⏳ High Priority (Production Use)
+## ✅ Recently Completed
 
-### Transactions (5 commands)
-- [x] WATCH, UNWATCH (implemented)
-- [ ] MULTI, EXEC, DISCARD
-- Note: Need connection state management
+### Transactions (5 commands) - COMPLETED ✅
+- [x] MULTI - Start transaction block
+- [x] EXEC - Execute queued commands (returns Option<Vec<RedisValue>>)
+- [x] DISCARD - Abort transaction
+- [x] WATCH - Watch keys for conditional execution
+- [x] UNWATCH - Clear watched keys
+- Note: Both direct command usage and Transaction builder supported
+
+---
+
+## ⏳ High Priority (Production Use)
 
 ### Advanced Sorted Sets (8 commands)
 - [ ] ZPOPMIN, ZPOPMAX
