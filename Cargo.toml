@@ -15,6 +15,7 @@ tower-service = "0.3"
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
 
 # Core utilities
 bytes = "1.9"
@@ -25,6 +26,9 @@ anyhow = "1.0"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Cryptography
+sha1 = "0.10"
 
 # Logging and tracing
 tracing = "0.1"

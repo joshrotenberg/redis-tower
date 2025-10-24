@@ -54,3 +54,56 @@ pub enum RedisError {
         addr: String,
     },
 }
+
+impl RedisError {
+    /// Parse a Redis error string and convert to appropriate RedisError variant.
+    ///
+    /// Handles special cluster errors:
+    /// - MOVED slot addr -> RedisError::Moved
+    /// - ASK slot addr -> RedisError::Ask
+    /// - Everything else -> RedisError::Redis
+    ///
+    /// # Examples
+    /// ```
+    /// use redis_tower::types::RedisError;
+    ///
+    /// let err = RedisError::from_redis_error("MOVED 7431 127.0.0.1:7001");
+    /// match err {
+    ///     RedisError::Moved { slot, addr } => {
+    ///         assert_eq!(slot, 7431);
+    ///         assert_eq!(addr, "127.0.0.1:7001");
+    ///     }
+    ///     _ => panic!("Expected Moved error"),
+    /// }
+    /// ```
+    pub fn from_redis_error(error_msg: &str) -> Self {
+        // Check for MOVED error: "MOVED slot addr"
+        if error_msg.starts_with("MOVED ") {
+            let parts: Vec<&str> = error_msg.split_whitespace().collect();
+            if parts.len() >= 3
+                && let Ok(slot) = parts[1].parse::<u16>()
+            {
+                return RedisError::Moved {
+                    slot,
+                    addr: parts[2].to_string(),
+                };
+            }
+        }
+
+        // Check for ASK error: "ASK slot addr"
+        if error_msg.starts_with("ASK ") {
+            let parts: Vec<&str> = error_msg.split_whitespace().collect();
+            if parts.len() >= 3
+                && let Ok(slot) = parts[1].parse::<u16>()
+            {
+                return RedisError::Ask {
+                    slot,
+                    addr: parts[2].to_string(),
+                };
+            }
+        }
+
+        // Default to generic Redis error
+        RedisError::Redis(error_msg.to_string())
+    }
+}
