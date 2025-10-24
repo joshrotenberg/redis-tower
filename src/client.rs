@@ -4,10 +4,14 @@ use crate::codec::RespCodec;
 use crate::commands::Command;
 use crate::types::RedisError;
 use futures::{SinkExt, StreamExt};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
+use tower::Service;
 
 /// Redis connection - implements Tower's Service trait
 ///
@@ -49,24 +53,17 @@ impl RedisConnection {
         let mut framed = self.framed.lock().await;
 
         // Send the command frame
-        framed.send(frame).await.map_err(|e| {
-            RedisError::Connection(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                e.to_string(),
-            ))
-        })?;
+        framed
+            .send(frame)
+            .await
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Receive the response frame
         let response_frame = framed
             .next()
             .await
-            .ok_or_else(|| {
-                RedisError::Connection(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "Connection closed",
-                ))
-            })?
-            .map_err(RedisError::Connection)?;
+            .ok_or_else(|| RedisError::Connection("Connection closed".to_string()))?
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Parse the response using the command's type-safe parser
         Cmd::parse_response(response_frame)
@@ -115,5 +112,65 @@ impl RedisClient {
         Cmd: Command,
     {
         self.connection.execute(command).await
+    }
+}
+
+/// Tower Service implementation for RedisConnection
+///
+/// This allows RedisConnection to be used with Tower middleware like
+/// timeouts, retries, circuit breakers, etc.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::client::RedisConnection;
+/// use redis_tower::commands::Get;
+/// use tower::{Service, ServiceExt};
+/// use std::time::Duration;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// // Use as a Tower service
+/// let response = conn.ready().await?.call(Get::new("mykey")).await?;
+/// # Ok(())
+/// # }
+/// ```
+impl<Cmd> Service<Cmd> for RedisConnection
+where
+    Cmd: Command + Send + 'static,
+    Cmd::Response: Send + 'static,
+{
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Always ready - we use a mutex internally to serialize requests
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, command: Cmd) -> Self::Future {
+        let framed = self.framed.clone();
+
+        Box::pin(async move {
+            let frame = command.to_frame();
+            let mut framed_lock = framed.lock().await;
+
+            // Send the command frame
+            framed_lock
+                .send(frame)
+                .await
+                .map_err(|e| RedisError::Connection(e.to_string()))?;
+
+            // Receive the response frame
+            let response_frame = framed_lock
+                .next()
+                .await
+                .ok_or_else(|| RedisError::Connection("Connection closed".to_string()))?
+                .map_err(|e| RedisError::Connection(e.to_string()))?;
+
+            // Parse the response using the command's type-safe parser
+            Cmd::parse_response(response_frame)
+        })
     }
 }

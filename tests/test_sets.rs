@@ -410,9 +410,9 @@ async fn test_smismember() {
         .expect("SMISMEMBER should succeed");
 
     assert_eq!(results.len(), 3);
-    assert_eq!(results[0], true, "member1 should exist");
-    assert_eq!(results[1], false, "nonexistent should not exist");
-    assert_eq!(results[2], true, "member3 should exist");
+    assert!(results[0], "member1 should exist");
+    assert!(!results[1], "nonexistent should not exist");
+    assert!(results[2], "member3 should exist");
 }
 
 #[tokio::test]

@@ -9,11 +9,11 @@ pub use response::RedisResponse;
 pub use value::RedisValue;
 
 /// Redis client errors
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum RedisError {
     /// Connection error
     #[error("Connection error: {0}")]
-    Connection(#[from] std::io::Error),
+    Connection(String),
 
     /// Protocol error
     #[error("Protocol error: {0}")]
@@ -53,6 +53,12 @@ pub enum RedisError {
         /// Target address
         addr: String,
     },
+}
+
+impl From<std::io::Error> for RedisError {
+    fn from(err: std::io::Error) -> Self {
+        RedisError::Connection(err.to_string())
+    }
 }
 
 impl RedisError {

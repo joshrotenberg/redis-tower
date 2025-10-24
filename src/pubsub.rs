@@ -114,7 +114,7 @@ impl PubSubConnection {
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         let codec = RespCodec::new();
         let framed = Framed::new(stream, codec);
@@ -144,7 +144,7 @@ impl PubSubConnection {
         self.framed
             .send(Frame::Array(args))
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         Ok(())
     }
@@ -168,7 +168,7 @@ impl PubSubConnection {
         self.framed
             .send(Frame::Array(args))
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         Ok(())
     }
@@ -204,7 +204,7 @@ impl PubSubConnection {
         self.framed
             .send(Frame::Array(args))
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         Ok(())
     }
@@ -228,7 +228,7 @@ impl PubSubConnection {
         self.framed
             .send(Frame::Array(args))
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         Ok(())
     }
@@ -240,7 +240,7 @@ impl PubSubConnection {
     pub async fn next_message(&mut self) -> Option<Result<PubSubMessage, RedisError>> {
         match self.framed.next().await {
             Some(Ok(frame)) => Some(Self::parse_message(frame)),
-            Some(Err(e)) => Some(Err(RedisError::Connection(e))),
+            Some(Err(e)) => Some(Err(RedisError::Connection(e.to_string()))),
             None => None,
         }
     }

@@ -67,7 +67,10 @@ impl<'a> Transaction<'a> {
         // Send the command
         let frame = command.to_frame();
         let mut framed = self.client.framed.lock().await;
-        framed.send(frame).await.map_err(RedisError::Connection)?;
+        framed
+            .send(frame)
+            .await
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Receive QUEUED response
         let response = framed
@@ -76,7 +79,7 @@ impl<'a> Transaction<'a> {
             .ok_or_else(|| {
                 RedisError::Protocol("Connection closed during transaction".to_string())
             })?
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Verify we got QUEUED
         match response {
@@ -120,14 +123,14 @@ impl<'a> Transaction<'a> {
         framed
             .send(exec_frame)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Receive response
         let response = framed
             .next()
             .await
             .ok_or_else(|| RedisError::Protocol("Connection closed during EXEC".to_string()))?
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         self.in_transaction = false;
 
@@ -162,13 +165,13 @@ impl<'a> Transaction<'a> {
         framed
             .send(discard_frame)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         let response = framed
             .next()
             .await
             .ok_or_else(|| RedisError::Protocol("Connection closed during DISCARD".to_string()))?
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         self.in_transaction = false;
 
@@ -195,13 +198,13 @@ impl<'a> Transaction<'a> {
         framed
             .send(multi_frame)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         let response = framed
             .next()
             .await
             .ok_or_else(|| RedisError::Protocol("Connection closed during MULTI".to_string()))?
-            .map_err(RedisError::Connection)?;
+            .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         match response {
             Frame::SimpleString(s) => {
