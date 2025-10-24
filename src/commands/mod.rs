@@ -49,8 +49,8 @@ pub use sets::{
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
 };
 pub use sorted_sets::{
-    Zadd, Zcard, Zincrby, Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan,
-    ZscanResult, Zscore,
+    BZPopMax, BZPopMin, ZCount, ZMScore, ZPopMax, ZPopMin, ZRangeByScore, Zadd, Zcard, Zincrby,
+    Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
 };
 pub use streams::{
     StreamEntry, StreamId, TrimStrategy, XAdd, XDel, XLen, XRange, XRead, XReadResult, XRevRange,
