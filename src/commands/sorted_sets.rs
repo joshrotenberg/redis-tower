@@ -1472,11 +1472,415 @@ impl Command for ZMScore {
     }
 }
 
+/// ZREVRANGEBYSCORE - Return range of members by score in reverse order
+///
+/// Like ZRANGEBYSCORE but returns members in descending score order (high to low).
+#[derive(Debug, Clone)]
+pub struct ZRevRangeByScore {
+    key: String,
+    max: f64,
+    min: f64,
+    withscores: bool,
+    offset: Option<i64>,
+    count: Option<i64>,
+}
+
+impl ZRevRangeByScore {
+    /// Create a new ZREVRANGEBYSCORE command
+    pub fn new(key: impl Into<String>, max: f64, min: f64) -> Self {
+        Self {
+            key: key.into(),
+            max,
+            min,
+            withscores: false,
+            offset: None,
+            count: None,
+        }
+    }
+
+    /// Include scores in the result
+    pub fn withscores(mut self) -> Self {
+        self.withscores = true;
+        self
+    }
+
+    /// Limit results with offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.offset = Some(offset);
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZRevRangeByScore {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZREVRANGEBYSCORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.max.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.min.to_string()))),
+        ];
+
+        if self.withscores {
+            frames.push(Frame::BulkString(Some(Bytes::from("WITHSCORES"))));
+        }
+
+        if let (Some(offset), Some(count)) = (self.offset, self.count) {
+            frames.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZRANGEBYLEX - Return range of members by lexicographic order
+#[derive(Debug, Clone)]
+pub struct ZRangeByLex {
+    key: String,
+    min: String,
+    max: String,
+    offset: Option<i64>,
+    count: Option<i64>,
+}
+
+impl ZRangeByLex {
+    /// Create a new ZRANGEBYLEX command
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+            offset: None,
+            count: None,
+        }
+    }
+
+    /// Limit results with offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.offset = Some(offset);
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZRangeByLex {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZRANGEBYLEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.max.clone()))),
+        ];
+
+        if let (Some(offset), Some(count)) = (self.offset, self.count) {
+            frames.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZREVRANGEBYLEX - Return range by lexicographic order in reverse
+#[derive(Debug, Clone)]
+pub struct ZRevRangeByLex {
+    key: String,
+    max: String,
+    min: String,
+    offset: Option<i64>,
+    count: Option<i64>,
+}
+
+impl ZRevRangeByLex {
+    /// Create a new ZREVRANGEBYLEX command
+    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            max: max.into(),
+            min: min.into(),
+            offset: None,
+            count: None,
+        }
+    }
+
+    /// Limit results with offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.offset = Some(offset);
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZRevRangeByLex {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZREVRANGEBYLEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.max.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.min.clone()))),
+        ];
+
+        if let (Some(offset), Some(count)) = (self.offset, self.count) {
+            frames.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZLEXCOUNT - Count members between lexicographic range
+#[derive(Debug, Clone)]
+pub struct ZLexCount {
+    key: String,
+    min: String,
+    max: String,
+}
+
+impl ZLexCount {
+    /// Create a new ZLEXCOUNT command
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+        }
+    }
+}
+
+impl Command for ZLexCount {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("ZLEXCOUNT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.max.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZREMRANGEBYSCORE - Remove members by score range
+#[derive(Debug, Clone)]
+pub struct ZRemRangeByScore {
+    key: String,
+    min: f64,
+    max: f64,
+}
+
+impl ZRemRangeByScore {
+    /// Create a new ZREMRANGEBYSCORE command
+    pub fn new(key: impl Into<String>, min: f64, max: f64) -> Self {
+        Self {
+            key: key.into(),
+            min,
+            max,
+        }
+    }
+}
+
+impl Command for ZRemRangeByScore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("ZREMRANGEBYSCORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.max.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZREMRANGEBYLEX - Remove members by lexicographic range
+#[derive(Debug, Clone)]
+pub struct ZRemRangeByLex {
+    key: String,
+    min: String,
+    max: String,
+}
+
+impl ZRemRangeByLex {
+    /// Create a new ZREMRANGEBYLEX command
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+        }
+    }
+}
+
+impl Command for ZRemRangeByLex {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("ZREMRANGEBYLEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.max.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZREMRANGEBYRANK - Remove members by rank range
+#[derive(Debug, Clone)]
+pub struct ZRemRangeByRank {
+    key: String,
+    start: i64,
+    stop: i64,
+}
+
+impl ZRemRangeByRank {
+    /// Create a new ZREMRANGEBYRANK command
+    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for ZRemRangeByRank {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("ZREMRANGEBYRANK"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.start.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.stop.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 impl ReadOnly for ZMScore {
     fn is_read_only(&self) -> bool {
         true
     }
 }
+
+impl ReadOnly for ZRevRangeByScore {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for ZRangeByLex {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for ZRevRangeByLex {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for ZLexCount {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands
+impl ReadOnly for ZRemRangeByScore {}
+impl ReadOnly for ZRemRangeByLex {}
+impl ReadOnly for ZRemRangeByRank {}
 
 #[cfg(test)]
 mod advanced_tests {

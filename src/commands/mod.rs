@@ -25,6 +25,7 @@ pub mod lists;
 pub mod pubsub;
 pub mod scan;
 pub mod scripting;
+pub mod server;
 pub mod sets;
 pub mod sorted_sets;
 pub mod streams;
@@ -44,13 +45,16 @@ pub use lists::{
 };
 pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
 pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
+pub use server::{DbSize, FlushAll, FlushDb, LastSave, RandomKey, Time};
 pub use sets::{
     SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore, Sadd,
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
 };
 pub use sorted_sets::{
-    BZPopMax, BZPopMin, ZCount, ZMScore, ZPopMax, ZPopMin, ZRangeByScore, Zadd, Zcard, Zincrby,
-    Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
+    BZPopMax, BZPopMin, ZCount, ZLexCount, ZMScore, ZPopMax, ZPopMin, ZRangeByLex, ZRangeByScore,
+    ZRemRangeByLex, ZRemRangeByRank, ZRemRangeByScore, ZRevRangeByLex, ZRevRangeByScore, Zadd,
+    Zcard, Zincrby, Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult,
+    Zscore,
 };
 pub use streams::{
     StreamEntry, StreamId, TrimStrategy, XAdd, XDel, XLen, XRange, XRead, XReadResult, XRevRange,

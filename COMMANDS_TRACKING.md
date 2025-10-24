@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 151 (145 core + 6 module)  
-**Coverage:** ~38% (151/400 core commands, 6 module commands behind feature flags)
+**Implemented:** 164 (158 core + 6 module)  
+**Coverage:** ~40% (164/400 core commands, 6 module commands behind feature flags)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -47,14 +47,17 @@
 - [x] SMISMEMBER, SINTERCARD
 - [x] SSCAN
 
-#### Sorted Sets (17 commands) ✅ EXPANDED
+#### Sorted Sets (24 commands) ✅ COMPLETE
 - [x] ZADD, ZREM, ZCARD, ZSCORE
 - [x] ZRANGE, ZREVRANGE, ZRANK, ZREVRANK
 - [x] ZINCRBY, ZSCAN
 - [x] ZPOPMIN, ZPOPMAX (pop lowest/highest scores)
 - [x] BZPOPMIN, BZPOPMAX (blocking variants)
 - [x] ZCOUNT (count members in range)
-- [x] ZRANGEBYSCORE (range query with options)
+- [x] ZRANGEBYSCORE, ZREVRANGEBYSCORE (range by score)
+- [x] ZRANGEBYLEX, ZREVRANGEBYLEX (range by lexicographic order)
+- [x] ZLEXCOUNT (count in lexicographic range)
+- [x] ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZREMRANGEBYRANK (remove by range)
 - [x] ZMSCORE (get multiple member scores)
 
 #### Streams (8 commands)
@@ -102,17 +105,28 @@
 - [x] GEOPOS (get coordinates)
 - [x] GEOSEARCH (modern radius/box queries with options)
 
+#### Server/Admin (6 commands) ✅ COMPLETED
+- [x] DBSIZE (count keys in database)
+- [x] FLUSHDB, FLUSHALL (delete all keys - with ASYNC option)
+- [x] RANDOMKEY (get random key)
+- [x] TIME (server time as seconds + microseconds)
+- [x] LASTSAVE (timestamp of last save)
+
 ---
 
 ## ✅ Recently Completed
 
-### Today's Session (2025-10-24) - 16 Commands Added! 🎉
+### Today's Session (2025-10-24) - 29 Commands Added! 🎉
 
-#### Core Commands (10 commands)
+#### Core Commands (23 commands)
 - [x] **Advanced Strings (4):** SETEX, PSETEX, SETNX, MSETNX
 - [x] **Advanced Lists (6):** LPUSHX, RPUSHX, LMOVE, BLMOVE, LMPOP, BLMPOP
+- [x] **Sorted Sets (7):** ZREVRANGEBYSCORE, ZRANGEBYLEX, ZREVRANGEBYLEX, ZLEXCOUNT, ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZREMRANGEBYRANK
+- [x] **Server/Admin (6):** DBSIZE, FLUSHDB, FLUSHALL, RANDOMKEY, TIME, LASTSAVE
 - Brought string commands from 23 to 27
 - Brought list commands from 16 to 22
+- Brought sorted set commands from 17 to 24 (✅ COMPLETE)
+- Added server/admin commands: 0 to 6
 
 #### Module Support - RedisBloom (6 commands) 🌸
 - [x] **Feature-gated module pattern established**
@@ -121,7 +135,7 @@
 - First module implementation with proper feature flags
 - Can be enabled with `features = ["bloom"]`
 
-**Total coverage:** 135 → 151 commands (34% → 38%)
+**Total coverage:** 135 → 164 commands (34% → 40%)
 
 ### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
