@@ -928,3 +928,667 @@ mod tests {
         assert_eq!(result.members[1].1, 2.0);
     }
 }
+
+/// ZPOPMIN command - Remove and return members with the lowest scores
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZPopMin;
+///
+/// // Pop single member with lowest score
+/// let cmd = ZPopMin::new("leaderboard");
+///
+/// // Pop 3 members with lowest scores
+/// let cmd = ZPopMin::new("leaderboard").count(3);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZPopMin {
+    key: String,
+    count: Option<i64>,
+}
+
+impl ZPopMin {
+    /// Create a new ZPOPMIN command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+        }
+    }
+
+    /// Set number of members to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZPopMin {
+    type Response = Vec<(String, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("ZPOPMIN"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                let mut i = 0;
+                while i < items.len() {
+                    if i + 1 < items.len() {
+                        let member = match &items[i] {
+                            Frame::BulkString(Some(data)) => {
+                                String::from_utf8_lossy(data).into_owned()
+                            }
+                            _ => return Err(RedisError::UnexpectedResponse),
+                        };
+
+                        let score = match &items[i + 1] {
+                            Frame::BulkString(Some(data)) => String::from_utf8_lossy(data)
+                                .parse::<f64>()
+                                .map_err(|_| RedisError::UnexpectedResponse)?,
+                            _ => return Err(RedisError::UnexpectedResponse),
+                        };
+
+                        result.push((member, score));
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZPOPMAX command - Remove and return members with the highest scores
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZPopMax;
+///
+/// // Pop single member with highest score
+/// let cmd = ZPopMax::new("leaderboard");
+///
+/// // Pop 5 members with highest scores
+/// let cmd = ZPopMax::new("leaderboard").count(5);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZPopMax {
+    key: String,
+    count: Option<i64>,
+}
+
+impl ZPopMax {
+    /// Create a new ZPOPMAX command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+        }
+    }
+
+    /// Set number of members to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZPopMax {
+    type Response = Vec<(String, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("ZPOPMAX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                let mut i = 0;
+                while i < items.len() {
+                    if i + 1 < items.len() {
+                        let member = match &items[i] {
+                            Frame::BulkString(Some(data)) => {
+                                String::from_utf8_lossy(data).into_owned()
+                            }
+                            _ => return Err(RedisError::UnexpectedResponse),
+                        };
+
+                        let score = match &items[i + 1] {
+                            Frame::BulkString(Some(data)) => String::from_utf8_lossy(data)
+                                .parse::<f64>()
+                                .map_err(|_| RedisError::UnexpectedResponse)?,
+                            _ => return Err(RedisError::UnexpectedResponse),
+                        };
+
+                        result.push((member, score));
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BZPOPMIN command - Blocking ZPOPMIN
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::BZPopMin;
+///
+/// // Block for 5 seconds waiting for element
+/// let cmd = BZPopMin::new(vec!["queue1", "queue2"], 5.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BZPopMin {
+    keys: Vec<String>,
+    timeout: f64,
+}
+
+impl BZPopMin {
+    /// Create a new BZPOPMIN command with timeout in seconds
+    pub fn new(keys: Vec<impl Into<String>>, timeout: f64) -> Self {
+        Self {
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            timeout,
+        }
+    }
+}
+
+impl Command for BZPopMin {
+    type Response = Option<(String, String, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![Frame::BulkString(Some(Bytes::from("BZPOPMIN")))];
+
+        for key in &self.keys {
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        args.push(Frame::BulkString(Some(Bytes::from(
+            self.timeout.to_string(),
+        ))));
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) if items.len() == 3 => {
+                let key = match &items[0] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data).into_owned(),
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let member = match &items[1] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data).into_owned(),
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let score = match &items[2] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data)
+                        .parse::<f64>()
+                        .map_err(|_| RedisError::UnexpectedResponse)?,
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                Ok(Some((key, member, score)))
+            }
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BZPOPMAX command - Blocking ZPOPMAX
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::BZPopMax;
+///
+/// // Block for 10 seconds waiting for element
+/// let cmd = BZPopMax::new(vec!["priority_queue"], 10.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BZPopMax {
+    keys: Vec<String>,
+    timeout: f64,
+}
+
+impl BZPopMax {
+    /// Create a new BZPOPMAX command with timeout in seconds
+    pub fn new(keys: Vec<impl Into<String>>, timeout: f64) -> Self {
+        Self {
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            timeout,
+        }
+    }
+}
+
+impl Command for BZPopMax {
+    type Response = Option<(String, String, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![Frame::BulkString(Some(Bytes::from("BZPOPMAX")))];
+
+        for key in &self.keys {
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        args.push(Frame::BulkString(Some(Bytes::from(
+            self.timeout.to_string(),
+        ))));
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) if items.len() == 3 => {
+                let key = match &items[0] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data).into_owned(),
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let member = match &items[1] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data).into_owned(),
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let score = match &items[2] {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(data)
+                        .parse::<f64>()
+                        .map_err(|_| RedisError::UnexpectedResponse)?,
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                Ok(Some((key, member, score)))
+            }
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZCOUNT command - Count members in a score range
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZCount;
+///
+/// // Count members with scores between 1.0 and 5.0 (inclusive)
+/// let cmd = ZCount::new("leaderboard", 1.0, 5.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZCount {
+    key: String,
+    min: f64,
+    max: f64,
+}
+
+impl ZCount {
+    /// Create a new ZCOUNT command
+    pub fn new(key: impl Into<String>, min: f64, max: f64) -> Self {
+        Self {
+            key: key.into(),
+            min,
+            max,
+        }
+    }
+}
+
+impl Command for ZCount {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("ZCOUNT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.max.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(count) => Ok(count),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+impl ReadOnly for ZCount {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+/// ZRANGEBYSCORE command - Return members in a score range
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZRangeByScore;
+///
+/// // Get all members with scores 0-100
+/// let cmd = ZRangeByScore::new("leaderboard", 0.0, 100.0);
+///
+/// // With scores and limit
+/// let cmd = ZRangeByScore::new("leaderboard", 0.0, 100.0)
+///     .withscores()
+///     .limit(0, 10);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZRangeByScore {
+    key: String,
+    min: f64,
+    max: f64,
+    withscores: bool,
+    offset: Option<i64>,
+    count: Option<i64>,
+}
+
+impl ZRangeByScore {
+    /// Create a new ZRANGEBYSCORE command
+    pub fn new(key: impl Into<String>, min: f64, max: f64) -> Self {
+        Self {
+            key: key.into(),
+            min,
+            max,
+            withscores: false,
+            offset: None,
+            count: None,
+        }
+    }
+
+    /// Include scores in the result
+    pub fn withscores(mut self) -> Self {
+        self.withscores = true;
+        self
+    }
+
+    /// Limit results with offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.offset = Some(offset);
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZRangeByScore {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("ZRANGEBYSCORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.max.to_string()))),
+        ];
+
+        if self.withscores {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHSCORES"))));
+        }
+
+        if let (Some(offset), Some(count)) = (self.offset, self.count) {
+            args.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            result.push(String::from_utf8_lossy(&data).into_owned());
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+impl ReadOnly for ZRangeByScore {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+/// ZMSCORE command - Get scores of multiple members
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZMScore;
+///
+/// let cmd = ZMScore::new("leaderboard", vec!["player1", "player2", "player3"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZMScore {
+    key: String,
+    members: Vec<String>,
+}
+
+impl ZMScore {
+    /// Create a new ZMSCORE command
+    pub fn new(key: impl Into<String>, members: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            members: members.into_iter().map(|m| m.into()).collect(),
+        }
+    }
+}
+
+impl Command for ZMScore {
+    type Response = Vec<Option<f64>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("ZMSCORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        for member in &self.members {
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                member.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            let score = String::from_utf8_lossy(&data)
+                                .parse::<f64>()
+                                .map_err(|_| RedisError::UnexpectedResponse)?;
+                            result.push(Some(score));
+                        }
+                        Frame::Null | Frame::BulkString(None) => {
+                            result.push(None);
+                        }
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+impl ReadOnly for ZMScore {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod advanced_tests {
+    use super::*;
+
+    #[test]
+    fn test_zpopmin_frame() {
+        let cmd = ZPopMin::new("myzset").count(3);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3); // ZPOPMIN + key + count
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_zpopmax_frame() {
+        let cmd = ZPopMax::new("myzset");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 2); // ZPOPMAX + key
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bzpopmin_frame() {
+        let cmd = BZPopMin::new(vec!["key1", "key2"], 5.0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 4); // BZPOPMIN + 2 keys + timeout
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bzpopmax_response_null() {
+        let response = BZPopMax::parse_response(Frame::Null).unwrap();
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_zcount_frame() {
+        let cmd = ZCount::new("myzset", 1.0, 5.0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 4); // ZCOUNT + key + min + max
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_zcount_response() {
+        let response = ZCount::parse_response(Frame::Integer(42)).unwrap();
+        assert_eq!(response, 42);
+    }
+
+    #[test]
+    fn test_zrangebyscore_frame() {
+        let cmd = ZRangeByScore::new("myzset", 0.0, 100.0)
+            .withscores()
+            .limit(0, 10);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert!(args.len() >= 7); // ZRANGEBYSCORE + key + min + max + WITHSCORES + LIMIT + offset + count
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_zmscore_frame() {
+        let cmd = ZMScore::new("myzset", vec!["member1", "member2"]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 4); // ZMSCORE + key + 2 members
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_zmscore_response() {
+        let frame = Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("1.5"))),
+            Frame::Null,
+            Frame::BulkString(Some(Bytes::from("3.0"))),
+        ]);
+
+        let response = ZMScore::parse_response(frame).unwrap();
+        assert_eq!(response.len(), 3);
+        assert_eq!(response[0], Some(1.5));
+        assert_eq!(response[1], None);
+        assert_eq!(response[2], Some(3.0));
+    }
+}
