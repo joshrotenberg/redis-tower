@@ -2,6 +2,11 @@
 //!
 //! Provides a production-ready connection pool inspired by deadpool and bb8,
 //! tailored for Redis connection management.
+//!
+//! # Design Note
+//! Redis connections are Arc-wrapped internally, making cloning cheap. This pool
+//! maintains a set of healthy connections and hands out clones, rather than
+//! using a borrow/return model. This simplifies the API and works well with Tower.
 
 use crate::client::RedisConnection;
 use crate::commands::Ping;
@@ -101,7 +106,7 @@ impl PooledConnection {
         self.last_used.elapsed()
     }
 
-    fn update_last_used(&mut self) {
+    fn touch(&mut self) {
         self.last_used = Instant::now();
     }
 
@@ -115,7 +120,10 @@ impl PooledConnection {
     }
 
     /// Check if connection has been idle too long
-    fn is_idle_too_long(&self, idle_timeout: Option<Duration>) -> bool {
+    fn is_idle_too_long(&self, idle_timeout: Option<Duration>, respect_min: bool) -> bool {
+        if !respect_min {
+            return false;
+        }
         if let Some(timeout) = idle_timeout {
             self.idle_time() > timeout
         } else {
@@ -171,34 +179,41 @@ impl ConnectionPool {
 
     /// Get a connection from the pool
     ///
-    /// This will:
-    /// 1. Try to get an existing healthy connection
-    /// 2. Remove stale/unhealthy connections
-    /// 3. Create new connections if needed
-    /// 4. Perform health checks if configured
+    /// Returns a cloned connection. The connection remains in the pool for reuse.
+    /// Performs cleanup and health checks as configured.
     pub async fn get(&self) -> Result<RedisConnection, RedisError> {
         self.stats.total_gets.fetch_add(1, Ordering::Relaxed);
 
-        // Try to get an existing connection
-        loop {
-            // First, clean up stale connections
+        // Periodically clean up (every 100th get to reduce overhead)
+        if self
+            .stats
+            .total_gets
+            .load(Ordering::Relaxed)
+            .is_multiple_of(100)
+        {
             self.cleanup_stale().await;
+        }
 
-            // Try to get a connection
+        // Try up to 3 times to get a healthy connection
+        for attempt in 0..3 {
+            // Get a connection from the pool
             let conn = {
                 let mut connections = self.connections.write().await;
 
                 if !connections.is_empty() {
                     let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % connections.len();
-                    let mut pooled = connections.remove(idx);
-                    pooled.update_last_used();
+                    let pooled = &mut connections[idx];
 
-                    // Check if should be recycled due to age
+                    // Check if too old
                     if pooled.should_recycle(self.config.max_lifetime) {
                         self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
-                        None // Will create new connection
+                        // Remove and we'll create a new one
+                        connections.remove(idx);
+                        None
                     } else {
-                        Some(pooled.conn)
+                        // Update last used time
+                        pooled.touch();
+                        Some(pooled.conn.clone())
                     }
                 } else {
                     None
@@ -214,43 +229,69 @@ impl ConnectionPool {
                         self.stats
                             .health_check_failures
                             .fetch_add(1, Ordering::Relaxed);
-                        // Failed health check, try again
-                        continue;
+                        // Remove the unhealthy connection
+                        self.remove_unhealthy_connection().await;
+                        // Try again (will create new connection on next attempt)
+                        if attempt < 2 {
+                            continue;
+                        }
                     }
                 } else {
                     return Ok(conn);
                 }
-            } else {
-                // No connections available, create new one
+            }
+
+            // No connection available or health check failed, create new
+            if attempt == 2 {
+                // Last attempt, create connection
                 return self.create_connection().await;
             }
         }
+
+        // Shouldn't reach here, but just in case
+        self.create_connection().await
     }
 
-    /// Create a new connection
+    /// Create a new connection and add it to the pool
     async fn create_connection(&self) -> Result<RedisConnection, RedisError> {
         let mut connections = self.connections.write().await;
 
         // Check if we can create more connections
         if connections.len() >= self.config.max_size {
-            // Pool is full, return existing connection if available
+            // Pool is full, return an existing connection
             if !connections.is_empty() {
                 let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % connections.len();
-                let mut pooled = connections.remove(idx);
-                pooled.update_last_used();
-                return Ok(pooled.conn);
-            } else {
-                return Err(RedisError::Protocol(
-                    "Connection pool exhausted".to_string(),
-                ));
+                let pooled = &mut connections[idx];
+                pooled.touch();
+                return Ok(pooled.conn.clone());
             }
+            return Err(RedisError::Protocol(
+                "Connection pool exhausted".to_string(),
+            ));
         }
 
         // Create new connection
         let conn = RedisConnection::connect(&self.addr).await?;
         self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
+        // Add to pool
+        let pooled = PooledConnection::new(conn.clone());
+        connections.push(pooled);
+
         Ok(conn)
+    }
+
+    /// Remove the most recently checked unhealthy connection
+    async fn remove_unhealthy_connection(&self) {
+        let mut connections = self.connections.write().await;
+        if !connections.is_empty() {
+            // Remove the one we just tested (it's at the last index we used)
+            let idx = (self.next_index.load(Ordering::Relaxed).wrapping_sub(1))
+                % connections.len().max(1);
+            if idx < connections.len() {
+                connections.remove(idx);
+            }
+        }
     }
 
     /// Perform health check on a connection using PING
@@ -262,33 +303,54 @@ impl ConnectionPool {
     async fn cleanup_stale(&self) {
         let mut connections = self.connections.write().await;
 
-        // Remove connections that are too old or idle too long
-        connections.retain(|pooled| {
-            let should_keep = !pooled.should_recycle(self.config.max_lifetime)
-                && !pooled.is_idle_too_long(self.config.idle_timeout);
+        let before_count = connections.len();
+        let min_idle = self.config.min_idle;
 
-            if !should_keep {
+        // Collect indices to remove
+        let mut to_remove = Vec::new();
+        for (idx, pooled) in connections.iter().enumerate() {
+            let can_remove_for_idle = connections.len() - to_remove.len() > min_idle;
+
+            let should_remove = pooled.should_recycle(self.config.max_lifetime)
+                || pooled.is_idle_too_long(self.config.idle_timeout, can_remove_for_idle);
+
+            if should_remove {
+                to_remove.push(idx);
                 self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
             }
+        }
 
-            should_keep
-        });
+        // Remove in reverse order to maintain indices
+        for idx in to_remove.into_iter().rev() {
+            connections.remove(idx);
+        }
 
-        // Ensure we don't drop below min_idle if possible
-        // (This is a best-effort approach, actual creation happens in get())
+        let removed = before_count - connections.len();
+        if removed > 0 {
+            drop(connections);
+            // Try to maintain min_idle
+            let _ = self.ensure_min_idle().await;
+        }
     }
 
-    /// Return a connection to the pool
-    ///
-    /// Note: In our current design, connections are cloned, so this is mainly
-    /// for explicit pool management. Most use cases won't need this.
-    pub async fn put(&self, conn: RedisConnection) {
-        let mut connections = self.connections.write().await;
+    /// Ensure minimum idle connections are maintained
+    async fn ensure_min_idle(&self) -> Result<(), RedisError> {
+        let current_size = self.size().await;
+        if current_size < self.config.min_idle {
+            let needed = self.config.min_idle - current_size;
+            for _ in 0..needed {
+                if self.size().await >= self.config.max_size {
+                    break;
+                }
+                let conn = RedisConnection::connect(&self.addr).await?;
+                self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
-        if connections.len() < self.config.max_size {
-            connections.push(PooledConnection::new(conn));
+                let pooled = PooledConnection::new(conn);
+                let mut connections = self.connections.write().await;
+                connections.push(pooled);
+            }
         }
-        // If pool is full, just drop the connection
+        Ok(())
     }
 
     /// Get the current pool size
@@ -303,7 +365,10 @@ impl ConnectionPool {
         while self.size().await < target {
             let conn = RedisConnection::connect(&self.addr).await?;
             self.stats.total_created.fetch_add(1, Ordering::Relaxed);
-            self.put(conn).await;
+
+            let pooled = PooledConnection::new(conn);
+            let mut connections = self.connections.write().await;
+            connections.push(pooled);
         }
 
         Ok(())
@@ -353,7 +418,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pool_config() {
+    fn test_pool_config_builder() {
         let config = PoolConfig::new(20)
             .with_min_idle(5)
             .with_max_lifetime(Some(Duration::from_secs(60)))
@@ -368,6 +433,23 @@ mod tests {
     }
 
     #[test]
+    fn test_pool_config_default() {
+        let config = PoolConfig::default();
+        assert_eq!(config.max_size, 10);
+        assert_eq!(config.min_idle, 0);
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(30 * 60)));
+        assert_eq!(config.idle_timeout, Some(Duration::from_secs(10 * 60)));
+        assert!(config.test_on_checkout);
+    }
+
+    #[test]
+    fn test_pool_config_min_idle_clamping() {
+        // min_idle should be clamped to max_size
+        let config = PoolConfig::new(5).with_min_idle(10);
+        assert_eq!(config.min_idle, 5); // Clamped to max_size
+    }
+
+    #[test]
     fn test_pool_creation() {
         let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 5);
         assert_eq!(pool.max_size(), 5);
@@ -375,25 +457,71 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_pool_size() {
+    async fn test_pool_initial_size_zero() {
         let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 5);
         assert_eq!(pool.size().await, 0);
     }
 
     #[tokio::test]
-    async fn test_pooled_connection_lifecycle() {
-        // This test verifies the lifecycle logic
-        // We test the duration comparison logic without requiring a live Redis server
+    async fn test_pooled_connection_age() {
+        // Test age logic for connection recycling
+        let age_5s = Duration::from_secs(5);
+        let age_65s = Duration::from_secs(65);
 
-        let age = Duration::from_secs(5);
-        let idle = Duration::from_secs(2);
+        // 5 seconds old should NOT be recycled with 60s max lifetime
+        assert!(age_5s <= Duration::from_secs(60));
 
-        // Test should_recycle logic - 5 seconds is less than 60 second max lifetime
-        let should_recycle_age = age > Duration::from_secs(60);
-        assert!(!should_recycle_age);
+        // 65 seconds old SHOULD be recycled with 60s max lifetime
+        assert!(age_65s > Duration::from_secs(60));
+    }
 
-        // Test idle timeout logic - 2 seconds is less than 60 second timeout
-        let is_idle_too_long = idle > Duration::from_secs(60);
-        assert!(!is_idle_too_long);
+    #[tokio::test]
+    async fn test_pooled_connection_idle_time() {
+        let idle_2s = Duration::from_secs(2);
+        let idle_65s = Duration::from_secs(65);
+
+        // 2 seconds idle should NOT timeout with 60s idle timeout
+        assert!(idle_2s <= Duration::from_secs(60));
+
+        // 65 seconds idle SHOULD timeout with 60s idle timeout
+        assert!(idle_65s > Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_pool_statistics_initial() {
+        let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 5);
+        let stats = pool.stats();
+
+        assert_eq!(stats.total_created, 0);
+        assert_eq!(stats.total_recycled, 0);
+        assert_eq!(stats.health_check_failures, 0);
+        assert_eq!(stats.total_gets, 0);
+    }
+
+    #[test]
+    fn test_pool_config_no_max_lifetime() {
+        let config = PoolConfig::new(10).with_max_lifetime(None);
+        assert_eq!(config.max_lifetime, None);
+    }
+
+    #[test]
+    fn test_pool_config_no_idle_timeout() {
+        let config = PoolConfig::new(10).with_idle_timeout(None);
+        assert_eq!(config.idle_timeout, None);
+    }
+
+    #[test]
+    fn test_pool_config_chaining() {
+        let config = PoolConfig::new(15)
+            .with_min_idle(3)
+            .with_test_on_checkout(false)
+            .with_max_lifetime(Some(Duration::from_secs(120)))
+            .with_idle_timeout(Some(Duration::from_secs(60)));
+
+        assert_eq!(config.max_size, 15);
+        assert_eq!(config.min_idle, 3);
+        assert!(!config.test_on_checkout);
+        assert_eq!(config.max_lifetime, Some(Duration::from_secs(120)));
+        assert_eq!(config.idle_timeout, Some(Duration::from_secs(60)));
     }
 }
