@@ -313,7 +313,7 @@ impl Command for LastSave {
 }
 
 // Read-only trait implementations
-use crate::cluster::read_preference::ReadOnly;
+use crate::read_preference::ReadOnly;
 
 impl ReadOnly for DbSize {
     fn is_read_only(&self) -> bool {

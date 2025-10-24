@@ -1177,7 +1177,7 @@ impl Command for MGet {
 }
 
 // Read-only trait implementations for cluster read-from-replica support
-use crate::cluster::read_preference::ReadOnly;
+use crate::read_preference::ReadOnly;
 
 impl ReadOnly for Get {
     fn is_read_only(&self) -> bool {

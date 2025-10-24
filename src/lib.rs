@@ -6,15 +6,21 @@
 #![warn(clippy::all)]
 
 pub mod client;
-pub mod cluster;
 pub mod codec;
 pub mod commands;
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
-pub mod sentinel;
+pub mod read_preference;
 pub mod transaction;
 pub mod types;
+
+// Deployment topology support (feature-gated)
+#[cfg(feature = "cluster")]
+pub mod cluster;
+
+#[cfg(feature = "sentinel")]
+pub mod sentinel;
 
 // Redis Stack modules (feature-gated)
 #[cfg(feature = "modules")]

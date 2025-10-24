@@ -56,6 +56,9 @@ inherits = "release"
 
 [features]
 default = []
+# Deployment topology support (feature-gated)
+cluster = []          # Redis Cluster support
+sentinel = []         # Redis Sentinel support
 # Redis module support (feature-gated)
 modules = []
 bloom = ["modules"]

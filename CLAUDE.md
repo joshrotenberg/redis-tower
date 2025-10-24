@@ -22,6 +22,45 @@ Build an experimental Redis **client** (not proxy) using Tower's middleware arch
 - **Type-safe**: No stringly-typed APIs, compile-time command validation
 - **Modern async**: Built on latest Tokio patterns
 
+## Optional Features
+
+redis-tower uses Cargo features to keep binary sizes minimal. Only compile what you need:
+
+```toml
+[dependencies]
+# Minimal - just core Redis commands (144 tests)
+redis-tower = "0.1"
+
+# With deployment topology support
+redis-tower = { version = "0.1", features = ["cluster"] }      # +14 tests (158 total)
+redis-tower = { version = "0.1", features = ["sentinel"] }     # +11 tests (155 total)
+
+# With Redis Stack modules
+redis-tower = { version = "0.1", features = ["bloom"] }        # +16 tests (160 total)
+
+# Everything
+redis-tower = { version = "0.1", features = ["cluster", "sentinel", "bloom"] }  # 194 tests
+```
+
+### Available Features
+
+**Deployment Topologies:**
+- `cluster` - Redis Cluster support (slot routing, ASKING, MOVED redirects)
+- `sentinel` - Redis Sentinel support (master discovery, replica promotion)
+
+**Redis Stack Modules:**
+- `bloom` - RedisBloom probabilistic data structures (11 commands)
+- `json` - RedisJSON document storage (coming soon)
+- `search` - RediSearch full-text search (coming soon)
+- `timeseries` - RedisTimeSeries time-series data (coming soon)
+- `graph` - RedisGraph graph database (coming soon)
+
+**Design Philosophy:**
+- **Zero overhead** - Don't pay for features you don't use
+- **Compile-time exclusion** - Unused code never enters your binary
+- **Consistent patterns** - All optional features follow same gating approach
+- **Test coverage** - Each feature adds its own tests (shown in test counts above)
+
 ## Core Dependencies
 
 ### Tower Ecosystem
