@@ -38,7 +38,10 @@ pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
-pub use keys::{ExpireAt, Keys, PExpire, PExpireAt, PTtl, Persist, Rename, RenameNx, Type};
+pub use keys::{
+    Copy, ExpireAt, ExpireTime, Keys, Move, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename,
+    RenameNx, Touch, Type, Unlink,
+};
 pub use lists::{
     BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,
     LPop, LPos, LPush, LPushX, LRange, LRem, LSet, LTrim, MoveDirection, RPop, RPush, RPushX,

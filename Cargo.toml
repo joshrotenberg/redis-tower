@@ -46,6 +46,33 @@ fred = { version = "9.3", features = ["i-all"] }
 name = "comparison"
 harness = false
 
+# Cluster-specific examples
+[[example]]
+name = "cluster_with_tower"
+required-features = ["cluster"]
+
+[[example]]
+name = "pipeline_cluster"
+required-features = ["cluster"]
+
+[[example]]
+name = "cluster_read_from_replica"
+required-features = ["cluster"]
+
+# Sentinel-specific examples
+[[example]]
+name = "sentinel_basic"
+required-features = ["sentinel"]
+
+# Cluster-specific tests
+[[test]]
+name = "test_cluster"
+required-features = ["cluster"]
+
+[[test]]
+name = "test_cluster_simple"
+required-features = ["cluster"]
+
 [profile.release]
 opt-level = 3
 lto = true

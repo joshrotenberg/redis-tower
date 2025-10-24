@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 169 (158 core + 11 module)  
-**Coverage:** ~42% (164/400 core commands, 11 module commands behind feature flags)
+**Implemented:** 175 (164 core + 11 module)  
+**Coverage:** ~43% (164/400 core commands, 11 module commands behind feature flags)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -92,11 +92,16 @@
 - [x] SETBIT, GETBIT, BITCOUNT
 - [x] BITOP, BITPOS
 
-#### Keys (9 commands) ✅ COMPLETED
+#### Keys (15 commands) ✅ EXPANDED
 - [x] PERSIST, PEXPIRE, PTTL
 - [x] EXPIREAT, PEXPIREAT
 - [x] RENAME, RENAMENX
 - [x] TYPE, KEYS
+- [x] TOUCH (update access time)
+- [x] UNLINK (async delete)
+- [x] COPY (Redis 6.2+)
+- [x] MOVE (move to different DB)
+- [x] EXPIRETIME, PEXPIRETIME (Redis 7.0+)
 
 #### Geospatial (5 commands) ✅ COMPLETED
 - [x] GEOADD (add coordinates)
@@ -140,7 +145,7 @@
 - Can be enabled with `features = ["bloom"]`
 - All 11 bloom filter commands implemented (100%)
 
-**Total coverage:** 135 → 169 commands (34% → 42%)
+**Total coverage:** 135 → 175 commands (34% → 43%)
 
 ### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
@@ -175,14 +180,14 @@
 - [x] RANDOMKEY
 
 ### Key Management (Additional - 10 commands)
+- [x] TOUCH (update access time)
+- [x] UNLINK (async delete)
+- [x] COPY (Redis 6.2+)
+- [x] MOVE (move to different DB)
+- [x] EXPIRETIME, PEXPIRETIME (Redis 7.0+)
 - [ ] DUMP, RESTORE
 - [ ] MIGRATE
-- [ ] COPY
-- [ ] MOVE
-- [ ] TOUCH
-- [ ] UNLINK (async DEL)
 - [ ] WAIT, WAITAOF
-- [ ] EXPIRETIME, PEXPIRETIME
 
 ---
 

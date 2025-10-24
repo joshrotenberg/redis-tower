@@ -436,6 +436,355 @@ impl Command for Keys {
     }
 }
 
+/// TOUCH command - Update the access time of one or more keys
+///
+/// Returns the number of keys that were touched (existed).
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Touch;
+///
+/// let cmd = Touch::new(vec!["key1".to_string(), "key2".to_string()]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Touch {
+    keys: Vec<String>,
+}
+
+impl Touch {
+    /// Create a new TOUCH command
+    pub fn new(keys: Vec<String>) -> Self {
+        Self { keys }
+    }
+
+    /// Create a TOUCH command for a single key
+    pub fn single(key: impl Into<String>) -> Self {
+        Self {
+            keys: vec![key.into()],
+        }
+    }
+}
+
+impl Command for Touch {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![Frame::BulkString(Some(Bytes::from("TOUCH")))];
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// UNLINK command - Async delete of one or more keys
+///
+/// Like DEL but performs the actual memory reclamation in a different thread,
+/// so it doesn't block. Returns the number of keys that were unlinked.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Unlink;
+///
+/// let cmd = Unlink::new(vec!["key1".to_string(), "key2".to_string()]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Unlink {
+    keys: Vec<String>,
+}
+
+impl Unlink {
+    /// Create a new UNLINK command
+    pub fn new(keys: Vec<String>) -> Self {
+        Self { keys }
+    }
+
+    /// Create an UNLINK command for a single key
+    pub fn single(key: impl Into<String>) -> Self {
+        Self {
+            keys: vec![key.into()],
+        }
+    }
+}
+
+impl Command for Unlink {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![Frame::BulkString(Some(Bytes::from("UNLINK")))];
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// COPY command - Copy a key to a new key (Redis 6.2+)
+///
+/// Returns true if the copy was successful, false otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Copy;
+///
+/// // Simple copy
+/// let cmd = Copy::new("source", "dest");
+///
+/// // Copy with REPLACE option
+/// let cmd = Copy::new("source", "dest").replace();
+///
+/// // Copy to different database
+/// let cmd = Copy::new("source", "dest").db(2);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Copy {
+    source: String,
+    destination: String,
+    db: Option<i64>,
+    replace: bool,
+}
+
+impl Copy {
+    /// Create a new COPY command
+    pub fn new(source: impl Into<String>, destination: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            db: None,
+            replace: false,
+        }
+    }
+
+    /// Copy to a specific database
+    pub fn db(mut self, db: i64) -> Self {
+        self.db = Some(db);
+        self
+    }
+
+    /// Replace destination key if it exists
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+}
+
+impl Command for Copy {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("COPY"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+        ];
+
+        if let Some(db) = self.db {
+            frames.push(Frame::BulkString(Some(Bytes::from("DB"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(db.to_string()))));
+        }
+
+        if self.replace {
+            frames.push(Frame::BulkString(Some(Bytes::from("REPLACE"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MOVE command - Move a key to a different database
+///
+/// Returns true if the key was moved, false if the key doesn't exist
+/// or the target database already has a key with that name.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Move;
+///
+/// let cmd = Move::new("mykey", 2); // Move to database 2
+/// ```
+#[derive(Debug, Clone)]
+pub struct Move {
+    key: String,
+    db: i64,
+}
+
+impl Move {
+    /// Create a new MOVE command
+    pub fn new(key: impl Into<String>, db: i64) -> Self {
+        Self {
+            key: key.into(),
+            db,
+        }
+    }
+}
+
+impl Command for Move {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MOVE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.db.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// EXPIRETIME command - Get the absolute Unix timestamp at which a key will expire
+///
+/// Returns the expiration Unix timestamp in seconds, or:
+/// - -1 if the key exists but has no expiration
+/// - -2 if the key does not exist
+///
+/// Available since Redis 7.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ExpireTime;
+///
+/// let cmd = ExpireTime::new("mykey");
+/// ```
+#[derive(Debug, Clone)]
+pub struct ExpireTime {
+    key: String,
+}
+
+impl ExpireTime {
+    /// Create a new EXPIRETIME command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ExpireTime {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("EXPIRETIME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// PEXPIRETIME command - Get the absolute Unix timestamp at which a key will expire (milliseconds)
+///
+/// Returns the expiration Unix timestamp in milliseconds, or:
+/// - -1 if the key exists but has no expiration
+/// - -2 if the key does not exist
+///
+/// Available since Redis 7.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::PExpireTime;
+///
+/// let cmd = PExpireTime::new("mykey");
+/// ```
+#[derive(Debug, Clone)]
+pub struct PExpireTime {
+    key: String,
+}
+
+impl PExpireTime {
+    /// Create a new PEXPIRETIME command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for PExpireTime {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("PEXPIRETIME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+// ReadOnly trait implementations
+use crate::read_preference::ReadOnly;
+
+impl ReadOnly for ExpireTime {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for PExpireTime {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands (default is_read_only = false)
+impl ReadOnly for Touch {}
+impl ReadOnly for Unlink {}
+impl ReadOnly for Copy {}
+impl ReadOnly for Move {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -649,5 +998,193 @@ mod tests {
         let frame = Frame::Array(vec![]);
         let keys = Keys::parse_response(frame).unwrap();
         assert_eq!(keys.len(), 0);
+    }
+
+    #[test]
+    fn test_touch_single_frame() {
+        let cmd = Touch::single("mykey");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("TOUCH"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_touch_multiple_frame() {
+        let cmd = Touch::new(vec!["key1".to_string(), "key2".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3);
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_touch_response() {
+        let frame = Frame::Integer(2);
+        let count = Touch::parse_response(frame).unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_unlink_frame() {
+        let cmd = Unlink::new(vec!["key1".to_string(), "key2".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("UNLINK"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_unlink_response() {
+        let frame = Frame::Integer(1);
+        let count = Unlink::parse_response(frame).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_copy_simple_frame() {
+        let cmd = Copy::new("source", "dest");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("COPY"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("source"))));
+                assert_eq!(args[2], Frame::BulkString(Some(Bytes::from("dest"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_copy_with_replace_frame() {
+        let cmd = Copy::new("source", "dest").replace();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 4);
+                assert_eq!(args[3], Frame::BulkString(Some(Bytes::from("REPLACE"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_copy_with_db_frame() {
+        let cmd = Copy::new("source", "dest").db(2);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 5);
+                assert_eq!(args[3], Frame::BulkString(Some(Bytes::from("DB"))));
+                assert_eq!(args[4], Frame::BulkString(Some(Bytes::from("2"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_copy_response_success() {
+        let frame = Frame::Integer(1);
+        let result = Copy::parse_response(frame).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_copy_response_failure() {
+        let frame = Frame::Integer(0);
+        let result = Copy::parse_response(frame).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_move_frame() {
+        let cmd = Move::new("mykey", 2);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("MOVE"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(args[2], Frame::BulkString(Some(Bytes::from("2"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_move_response() {
+        let frame = Frame::Integer(1);
+        let result = Move::parse_response(frame).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_expiretime_frame() {
+        let cmd = ExpireTime::new("mykey");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("EXPIRETIME"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_expiretime_response() {
+        let frame = Frame::Integer(1735689600); // Some future timestamp
+        let timestamp = ExpireTime::parse_response(frame).unwrap();
+        assert_eq!(timestamp, 1735689600);
+    }
+
+    #[test]
+    fn test_expiretime_response_no_expiry() {
+        let frame = Frame::Integer(-1);
+        let timestamp = ExpireTime::parse_response(frame).unwrap();
+        assert_eq!(timestamp, -1);
+    }
+
+    #[test]
+    fn test_pexpiretime_frame() {
+        let cmd = PExpireTime::new("mykey");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("PEXPIRETIME"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_pexpiretime_response() {
+        let frame = Frame::Integer(1735689600000); // Some future timestamp in ms
+        let timestamp = PExpireTime::parse_response(frame).unwrap();
+        assert_eq!(timestamp, 1735689600000);
     }
 }
