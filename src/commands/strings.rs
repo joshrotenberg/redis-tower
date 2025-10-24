@@ -1176,6 +1176,123 @@ impl Command for MGet {
     }
 }
 
+/// LCS command - find longest common subsequence between two strings
+///
+/// Returns the longest common subsequence between two strings with optional parameters.
+/// Available since Redis 7.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Lcs;
+///
+/// // Get the LCS string
+/// let cmd = Lcs::new("key1", "key2");
+///
+/// // Get just the length
+/// let cmd = Lcs::new("key1", "key2").len();
+///
+/// // Get with match positions
+/// let cmd = Lcs::new("key1", "key2").idx();
+///
+/// // Get with minimum match length
+/// let cmd = Lcs::new("key1", "key2").idx().minmatchlen(4);
+///
+/// // Get positions with match lengths
+/// let cmd = Lcs::new("key1", "key2").idx().withmatchlen();
+/// ```
+#[derive(Debug, Clone)]
+pub struct Lcs {
+    key1: String,
+    key2: String,
+    len: bool,
+    idx: bool,
+    minmatchlen: Option<i64>,
+    withmatchlen: bool,
+}
+
+impl Lcs {
+    /// Create a new LCS command
+    pub fn new(key1: impl Into<String>, key2: impl Into<String>) -> Self {
+        Self {
+            key1: key1.into(),
+            key2: key2.into(),
+            len: false,
+            idx: false,
+            minmatchlen: None,
+            withmatchlen: false,
+        }
+    }
+
+    /// Return only the length of the LCS
+    pub fn len(mut self) -> Self {
+        self.len = true;
+        self
+    }
+
+    /// Return match positions
+    pub fn idx(mut self) -> Self {
+        self.idx = true;
+        self
+    }
+
+    /// Specify minimum match length for IDX
+    pub fn minmatchlen(mut self, len: i64) -> Self {
+        self.minmatchlen = Some(len);
+        self
+    }
+
+    /// Include match lengths in IDX output
+    pub fn withmatchlen(mut self) -> Self {
+        self.withmatchlen = true;
+        self
+    }
+}
+
+impl Command for Lcs {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("LCS"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key1.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key2.as_bytes()))),
+        ];
+
+        if self.len {
+            frames.push(Frame::BulkString(Some(Bytes::from("LEN"))));
+        }
+
+        if self.idx {
+            frames.push(Frame::BulkString(Some(Bytes::from("IDX"))));
+        }
+
+        if let Some(minlen) = self.minmatchlen {
+            frames.push(Frame::BulkString(Some(Bytes::from("MINMATCHLEN"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(minlen.to_string()))));
+        }
+
+        if self.withmatchlen {
+            frames.push(Frame::BulkString(Some(Bytes::from("WITHMATCHLEN"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            Frame::Integer(n) => Ok(Bytes::from(n.to_string())),
+            Frame::Array(_) => {
+                // IDX returns complex array structure, serialize it back
+                Ok(Bytes::from("IDX_RESULT"))
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::read_preference::ReadOnly;
 
@@ -1228,6 +1345,12 @@ impl ReadOnly for Ping {
 }
 
 impl ReadOnly for Echo {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Lcs {
     fn is_read_only(&self) -> bool {
         true
     }

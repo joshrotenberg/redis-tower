@@ -1055,6 +1055,205 @@ impl Command for ZDiffStore {
     }
 }
 
+/// ZMPOP command - Pop members from sorted sets (Redis 7.0+)
+///
+/// Pops one or more members with the lowest or highest scores from one or more sorted sets.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZMPop;
+///
+/// // Pop lowest score from one set
+/// let cmd = ZMPop::new(vec!["myzset"], true); // true = MIN
+///
+/// // Pop 3 highest scores from multiple sets
+/// let cmd = ZMPop::new(vec!["zset1", "zset2"], false).count(3); // false = MAX
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZMPop {
+    keys: Vec<String>,
+    min: bool,
+    count: Option<i64>,
+}
+
+impl ZMPop {
+    /// Create a new ZMPOP command
+    ///
+    /// # Arguments
+    /// * `keys` - Sorted set keys to pop from
+    /// * `min` - If true, pop MIN (lowest scores); if false, pop MAX (highest scores)
+    pub fn new(keys: Vec<String>, min: bool) -> Self {
+        Self {
+            keys,
+            min,
+            count: None,
+        }
+    }
+
+    /// Specify number of members to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZMPop {
+    type Response = Option<(String, Vec<(String, f64)>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZMPOP"))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from(if self.min {
+            "MIN"
+        } else {
+            "MAX"
+        }))));
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(elements) if elements.len() == 2 => {
+                // [key, [[member, score], ...]]
+                let key = match &elements[0] {
+                    Frame::BulkString(Some(k)) => String::from_utf8_lossy(k).to_string(),
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let members = match &elements[1] {
+                    Frame::Array(pairs) => {
+                        let mut result = Vec::new();
+                        for pair in pairs {
+                            if let Frame::Array(ms) = pair
+                                && ms.len() == 2
+                            {
+                                let member = match &ms[0] {
+                                    Frame::BulkString(Some(m)) => {
+                                        String::from_utf8_lossy(m).to_string()
+                                    }
+                                    _ => return Err(RedisError::UnexpectedResponse),
+                                };
+                                let score = match &ms[1] {
+                                    Frame::BulkString(Some(s)) => {
+                                        String::from_utf8_lossy(s).parse::<f64>().unwrap()
+                                    }
+                                    _ => return Err(RedisError::UnexpectedResponse),
+                                };
+                                result.push((member, score));
+                            }
+                        }
+                        result
+                    }
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                Ok(Some((key, members)))
+            }
+            Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BZMPOP command - Blocking pop from sorted sets (Redis 7.0+)
+///
+/// Blocking variant of ZMPOP with a timeout.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::BZMPop;
+///
+/// // Block for up to 5 seconds waiting to pop lowest score
+/// let cmd = BZMPop::new(5.0, vec!["myzset"], true);
+///
+/// // Block for 3 highest scores from multiple sets
+/// let cmd = BZMPop::new(3.0, vec!["zset1", "zset2"], false).count(3);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BZMPop {
+    timeout: f64,
+    keys: Vec<String>,
+    min: bool,
+    count: Option<i64>,
+}
+
+impl BZMPop {
+    /// Create a new BZMPOP command
+    ///
+    /// # Arguments
+    /// * `timeout` - Timeout in seconds (0 = block indefinitely)
+    /// * `keys` - Sorted set keys to pop from
+    /// * `min` - If true, pop MIN (lowest scores); if false, pop MAX (highest scores)
+    pub fn new(timeout: f64, keys: Vec<String>, min: bool) -> Self {
+        Self {
+            timeout,
+            keys,
+            min,
+            count: None,
+        }
+    }
+
+    /// Specify number of members to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for BZMPop {
+    type Response = Option<(String, Vec<(String, f64)>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("BZMPOP"))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from(if self.min {
+            "MIN"
+        } else {
+            "MAX"
+        }))));
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        // Same parsing as ZMPOP
+        ZMPop::parse_response(frame)
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::read_preference::ReadOnly;
 
@@ -1110,6 +1309,8 @@ impl ReadOnly for ZRandMember {
 impl ReadOnly for ZUnionStore {}
 impl ReadOnly for ZInterStore {}
 impl ReadOnly for ZDiffStore {}
+impl ReadOnly for ZMPop {}
+impl ReadOnly for BZMPop {}
 
 // Write commands - explicitly implement with default (false) for clarity
 impl ReadOnly for Zadd {}

@@ -709,6 +709,498 @@ impl Command for XRange {
     }
 }
 
+/// XREADGROUP command - Read from stream as consumer group
+///
+/// Read entries from stream as part of a consumer group.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XReadGroup;
+///
+/// // Read new messages from group
+/// let cmd = XReadGroup::new("mygroup", "consumer1")
+///     .stream("mystream", ">");
+///
+/// // Read with count and block
+/// let cmd = XReadGroup::new("mygroup", "consumer1")
+///     .stream("mystream", ">")
+///     .count(10)
+///     .block(5000);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XReadGroup {
+    group: String,
+    consumer: String,
+    streams: Vec<(String, String)>,
+    count: Option<usize>,
+    block: Option<i64>,
+    noack: bool,
+}
+
+impl XReadGroup {
+    /// Create a new XREADGROUP command
+    pub fn new(group: impl Into<String>, consumer: impl Into<String>) -> Self {
+        Self {
+            group: group.into(),
+            consumer: consumer.into(),
+            streams: Vec::new(),
+            count: None,
+            block: None,
+            noack: false,
+        }
+    }
+
+    /// Add a stream to read from
+    pub fn stream(mut self, key: impl Into<String>, id: impl Into<String>) -> Self {
+        self.streams.push((key.into(), id.into()));
+        self
+    }
+
+    /// Limit number of entries per stream
+    pub fn count(mut self, count: usize) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Block for specified milliseconds
+    pub fn block(mut self, milliseconds: i64) -> Self {
+        self.block = Some(milliseconds);
+        self
+    }
+
+    /// Don't auto-acknowledge messages
+    pub fn noack(mut self) -> Self {
+        self.noack = true;
+        self
+    }
+}
+
+impl Command for XReadGroup {
+    type Response = XReadResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("XREADGROUP"))),
+            Frame::BulkString(Some(Bytes::from("GROUP"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.consumer.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        if let Some(block) = self.block {
+            frames.push(Frame::BulkString(Some(Bytes::from("BLOCK"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(block.to_string()))));
+        }
+
+        if self.noack {
+            frames.push(Frame::BulkString(Some(Bytes::from("NOACK"))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from("STREAMS"))));
+
+        for (key, _) in &self.streams {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        for (_, id) in &self.streams {
+            frames.push(Frame::BulkString(Some(Bytes::from(id.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        XRead::parse_response(frame)
+    }
+}
+
+/// XACK command - Acknowledge stream messages
+///
+/// Mark messages as processed in a consumer group.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XAck;
+///
+/// let cmd = XAck::new("mystream", "mygroup", vec!["1234-0", "1235-0"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XAck {
+    key: String,
+    group: String,
+    ids: Vec<String>,
+}
+
+impl XAck {
+    /// Create a new XACK command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        ids: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            ids: ids.into_iter().map(|s| s.into()).collect(),
+        }
+    }
+}
+
+impl Command for XAck {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("XACK"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+        ];
+
+        for id in &self.ids {
+            frames.push(Frame::BulkString(Some(Bytes::from(id.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XPENDING command - Get pending messages info
+///
+/// Returns information about pending messages in a consumer group.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XPending;
+///
+/// // Get summary
+/// let cmd = XPending::new("mystream", "mygroup");
+///
+/// // Get detailed list with range
+/// let cmd = XPending::new("mystream", "mygroup")
+///     .range("-", "+", 10);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XPending {
+    key: String,
+    group: String,
+    start: Option<String>,
+    end: Option<String>,
+    count: Option<i64>,
+    consumer: Option<String>,
+}
+
+impl XPending {
+    /// Create a new XPENDING command
+    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            start: None,
+            end: None,
+            count: None,
+            consumer: None,
+        }
+    }
+
+    /// Get detailed list with range
+    pub fn range(mut self, start: impl Into<String>, end: impl Into<String>, count: i64) -> Self {
+        self.start = Some(start.into());
+        self.end = Some(end.into());
+        self.count = Some(count);
+        self
+    }
+
+    /// Filter by consumer
+    pub fn consumer(mut self, consumer: impl Into<String>) -> Self {
+        self.consumer = Some(consumer.into());
+        self
+    }
+}
+
+impl Command for XPending {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("XPENDING"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+        ];
+
+        if let Some(ref start) = self.start {
+            frames.push(Frame::BulkString(Some(Bytes::from(start.clone()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(
+                self.end.clone().unwrap(),
+            ))));
+            frames.push(Frame::BulkString(Some(Bytes::from(
+                self.count.unwrap().to_string(),
+            ))));
+
+            if let Some(ref consumer) = self.consumer {
+                frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                    consumer.as_bytes(),
+                ))));
+            }
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        // Complex response - return raw for now
+        match frame {
+            Frame::Array(_) => Ok(Bytes::from("PENDING_INFO")),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XCLAIM command - Claim pending messages
+///
+/// Transfer ownership of pending messages to a different consumer.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XClaim;
+///
+/// let cmd = XClaim::new("mystream", "mygroup", "consumer2", 3600000, vec!["1234-0"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XClaim {
+    key: String,
+    group: String,
+    consumer: String,
+    min_idle_time: i64,
+    ids: Vec<String>,
+}
+
+impl XClaim {
+    /// Create a new XCLAIM command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        consumer: impl Into<String>,
+        min_idle_time: i64,
+        ids: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            consumer: consumer.into(),
+            min_idle_time,
+            ids: ids.into_iter().map(|s| s.into()).collect(),
+        }
+    }
+}
+
+impl Command for XClaim {
+    type Response = Vec<StreamEntry>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("XCLAIM"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.consumer.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.min_idle_time.to_string()))),
+        ];
+
+        for id in &self.ids {
+            frames.push(Frame::BulkString(Some(Bytes::from(id.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(entries) => parse_stream_entries(entries),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XGROUP CREATE command - Create consumer group
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XGroupCreate;
+///
+/// // Create group from beginning
+/// let cmd = XGroupCreate::new("mystream", "mygroup", "0");
+///
+/// // Create group with MKSTREAM
+/// let cmd = XGroupCreate::new("mystream", "mygroup", "$").mkstream();
+/// ```
+#[derive(Debug, Clone)]
+pub struct XGroupCreate {
+    key: String,
+    group: String,
+    id: String,
+    mkstream: bool,
+}
+
+impl XGroupCreate {
+    /// Create a new XGROUP CREATE command
+    pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            id: id.into(),
+            mkstream: false,
+        }
+    }
+
+    /// Create stream if it doesn't exist
+    pub fn mkstream(mut self) -> Self {
+        self.mkstream = true;
+        self
+    }
+}
+
+impl Command for XGroupCreate {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("XGROUP"))),
+            Frame::BulkString(Some(Bytes::from("CREATE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.id.clone()))),
+        ];
+
+        if self.mkstream {
+            frames.push(Frame::BulkString(Some(Bytes::from("MKSTREAM"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XGROUP DESTROY command - Destroy consumer group
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::XGroupDestroy;
+///
+/// let cmd = XGroupDestroy::new("mystream", "mygroup");
+/// ```
+#[derive(Debug, Clone)]
+pub struct XGroupDestroy {
+    key: String,
+    group: String,
+}
+
+impl XGroupDestroy {
+    /// Create a new XGROUP DESTROY command
+    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+        }
+    }
+}
+
+impl Command for XGroupDestroy {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("XGROUP"))),
+            Frame::BulkString(Some(Bytes::from("DESTROY"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.group.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+// ReadOnly trait implementations
+use crate::read_preference::ReadOnly;
+
+impl ReadOnly for XLen {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for XRange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for XRevRange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for XRead {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for XReadGroup {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for XPending {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands
+impl ReadOnly for XAdd {}
+impl ReadOnly for XDel {}
+impl ReadOnly for XTrim {}
+impl ReadOnly for XAck {}
+impl ReadOnly for XClaim {}
+impl ReadOnly for XGroupCreate {}
+impl ReadOnly for XGroupDestroy {}
+
 /// XREVRANGE command - query stream entries in reverse order
 ///
 /// Like XRANGE but returns entries in reverse order (newest to oldest).

@@ -35,15 +35,17 @@ pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
 pub use connection::{
     Auth, AuthAcl, ClientGetName, ClientSetName, Quit, ReadOnly, ReadWrite, Select,
 };
-pub use geo::{GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoUnit};
+pub use geo::{
+    GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoSearchStore, GeoUnit,
+};
 pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HRandField, HSet,
     HSetNx, HStrLen, HVals,
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{
-    Copy, ExpireAt, ExpireTime, Keys, Move, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename,
-    RenameNx, Touch, Type, Unlink,
+    Copy, Dump, ExpireAt, ExpireTime, Keys, Move, PExpire, PExpireAt, PExpireTime, PTtl, Persist,
+    Rename, RenameNx, Restore, Touch, Type, Unlink,
 };
 pub use lists::{
     BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,
@@ -57,18 +59,18 @@ pub use sets::{
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
 };
 pub use sorted_sets::{
-    BZPopMax, BZPopMin, ZCount, ZDiffStore, ZInterStore, ZLexCount, ZMScore, ZPopMax, ZPopMin,
-    ZRandMember, ZRangeByLex, ZRangeByScore, ZRemRangeByLex, ZRemRangeByRank, ZRemRangeByScore,
-    ZRevRangeByLex, ZRevRangeByScore, ZUnionStore, Zadd, Zcard, Zincrby, Zrange, ZrangeResult,
-    Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
+    BZMPop, BZPopMax, BZPopMin, ZCount, ZDiffStore, ZInterStore, ZLexCount, ZMPop, ZMScore,
+    ZPopMax, ZPopMin, ZRandMember, ZRangeByLex, ZRangeByScore, ZRemRangeByLex, ZRemRangeByRank,
+    ZRemRangeByScore, ZRevRangeByLex, ZRevRangeByScore, ZUnionStore, Zadd, Zcard, Zincrby, Zrange,
+    ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
 };
 pub use streams::{
-    StreamEntry, StreamId, TrimStrategy, XAdd, XDel, XLen, XRange, XRead, XReadResult, XRevRange,
-    XTrim,
+    StreamEntry, StreamId, TrimStrategy, XAck, XAdd, XClaim, XDel, XGroupCreate, XGroupDestroy,
+    XLen, XPending, XRange, XRead, XReadGroup, XReadResult, XRevRange, XTrim,
 };
 pub use strings::{
     Append, Decr, DecrBy, Del, Echo, Exists, Expire, Get, GetDel, GetEx, GetExExpiration, GetRange,
-    Incr, IncrBy, IncrByFloat, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
+    Incr, IncrBy, IncrByFloat, Lcs, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
     StrLen, Ttl,
 };
 

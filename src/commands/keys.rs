@@ -764,6 +764,169 @@ impl Command for PExpireTime {
     }
 }
 
+/// DUMP command - Serialize value at key
+///
+/// Returns a serialized version of the value stored at the specified key.
+/// The returned value can be restored using RESTORE.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Dump;
+///
+/// let cmd = Dump::new("mykey");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Dump {
+    key: String,
+}
+
+impl Dump {
+    /// Create a new DUMP command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for Dump {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("DUMP"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// RESTORE command - Deserialize value to key
+///
+/// Creates a key associated with a value that is obtained via DUMP.
+/// Available with TTL and optional REPLACE modifier.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Restore;
+/// use bytes::Bytes;
+///
+/// // Restore without TTL
+/// let cmd = Restore::new("mykey", 0, Bytes::from(vec![1, 2, 3]));
+///
+/// // Restore with 10 second TTL
+/// let cmd = Restore::new("mykey", 10000, Bytes::from(vec![1, 2, 3]));
+///
+/// // Restore with REPLACE option
+/// let cmd = Restore::new("mykey", 0, Bytes::from(vec![1, 2, 3])).replace();
+///
+/// // Restore with absolute TTL (Redis 5.0+)
+/// let cmd = Restore::new("mykey", 1735689600000, Bytes::from(vec![1, 2, 3])).absttl();
+/// ```
+#[derive(Debug, Clone)]
+pub struct Restore {
+    key: String,
+    ttl: i64,
+    serialized_value: Bytes,
+    replace: bool,
+    absttl: bool,
+    idletime: Option<i64>,
+    freq: Option<i64>,
+}
+
+impl Restore {
+    /// Create a new RESTORE command
+    ///
+    /// # Arguments
+    /// * `key` - The key to restore
+    /// * `ttl` - Time to live in milliseconds (0 for no expiry)
+    /// * `serialized_value` - Serialized value from DUMP
+    pub fn new(key: impl Into<String>, ttl: i64, serialized_value: Bytes) -> Self {
+        Self {
+            key: key.into(),
+            ttl,
+            serialized_value,
+            replace: false,
+            absttl: false,
+            idletime: None,
+            freq: None,
+        }
+    }
+
+    /// Replace existing key if it exists
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+
+    /// TTL is absolute Unix timestamp in milliseconds (Redis 5.0+)
+    pub fn absttl(mut self) -> Self {
+        self.absttl = true;
+        self
+    }
+
+    /// Set the idle time for LRU eviction (Redis 5.0+)
+    pub fn idletime(mut self, seconds: i64) -> Self {
+        self.idletime = Some(seconds);
+        self
+    }
+
+    /// Set the frequency counter for LFU eviction (Redis 5.0+)
+    pub fn freq(mut self, frequency: i64) -> Self {
+        self.freq = Some(frequency);
+        self
+    }
+}
+
+impl Command for Restore {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("RESTORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.ttl.to_string()))),
+            Frame::BulkString(Some(self.serialized_value.clone())),
+        ];
+
+        if self.replace {
+            frames.push(Frame::BulkString(Some(Bytes::from("REPLACE"))));
+        }
+
+        if self.absttl {
+            frames.push(Frame::BulkString(Some(Bytes::from("ABSTTL"))));
+        }
+
+        if let Some(idletime) = self.idletime {
+            frames.push(Frame::BulkString(Some(Bytes::from("IDLETIME"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(idletime.to_string()))));
+        }
+
+        if let Some(freq) = self.freq {
+            frames.push(Frame::BulkString(Some(Bytes::from("FREQ"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(freq.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // ReadOnly trait implementations
 use crate::read_preference::ReadOnly;
 
@@ -779,11 +942,18 @@ impl ReadOnly for PExpireTime {
     }
 }
 
+impl ReadOnly for Dump {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 // Write commands (default is_read_only = false)
 impl ReadOnly for Touch {}
 impl ReadOnly for Unlink {}
 impl ReadOnly for Copy {}
 impl ReadOnly for Move {}
+impl ReadOnly for Restore {}
 
 #[cfg(test)]
 mod tests {

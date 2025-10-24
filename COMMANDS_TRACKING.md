@@ -2,9 +2,11 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 189 (178 core + 11 module)  
-**Coverage:** ~47% (178/400 core commands, 11 module commands behind feature flags)
+**Implemented:** 200 (189 core + 11 module)  
+**Coverage:** 50% (189/400 core commands, 11 module commands behind feature flags)
 **Deprecated Commands:** 3 (available with `deprecated` feature)
+
+🎉 **MILESTONE: 200 COMMANDS (50% COVERAGE)** 🎉
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -16,7 +18,7 @@
 
 ### ✅ Fully Implemented Categories
 
-#### Strings (27 commands) ✅ EXPANDED
+#### Strings (28 commands) ✅ EXPANDED
 - [x] GET, SET, DEL, MGET, MSET
 - [x] INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT
 - [x] APPEND, STRLEN, GETRANGE, SETRANGE
@@ -25,6 +27,7 @@
 - [x] SETNX, MSETNX (set if not exists)
 - [x] PING, ECHO
 - [x] EXISTS, EXPIRE, TTL
+- [x] LCS (longest common subsequence - Redis 7.0+)
 
 #### Hashes (14 commands) ✅ EXPANDED
 - [x] HGET, HSET, HDEL, HGETALL, HMGET
@@ -50,7 +53,7 @@
 - [x] SMISMEMBER, SINTERCARD
 - [x] SSCAN
 
-#### Sorted Sets (28 commands) ✅ COMPLETE
+#### Sorted Sets (32 commands) ✅ COMPLETE
 - [x] ZADD, ZREM, ZCARD, ZSCORE
 - [x] ZRANGE, ZREVRANGE, ZRANK, ZREVRANK
 - [x] ZINCRBY, ZSCAN
@@ -64,10 +67,16 @@
 - [x] ZMSCORE (get multiple member scores)
 - [x] ZRANDMEMBER (get random member with count/scores - Redis 6.2+)
 - [x] ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE (set operations with storage)
+- [x] ZMPOP, BZMPOP (pop from multiple sorted sets - Redis 7.0+)
 
-#### Streams (8 commands)
+#### Streams (14 commands) ✅ EXPANDED
 - [x] XADD, XREAD (with blocking), XLEN, XDEL
 - [x] XTRIM, XRANGE, XREVRANGE
+- [x] XREADGROUP (consumer group reads)
+- [x] XACK (acknowledge messages)
+- [x] XPENDING (get pending messages info)
+- [x] XCLAIM (claim pending messages)
+- [x] XGROUP CREATE, XGROUP DESTROY (consumer group management)
 
 #### Pub/Sub (3 commands)
 - [x] PUBLISH, PUBSUB NUMSUB, PUBSUB NUMPAT
@@ -98,8 +107,9 @@
 - [x] SETBIT, GETBIT, BITCOUNT
 - [x] BITOP, BITPOS
 
-#### Keys (15 commands) ✅ EXPANDED
+#### Keys (17 commands) ✅ EXPANDED
 - [x] PERSIST, PEXPIRE, PTTL
+- [x] DUMP, RESTORE (serialization and deserialization)
 - [x] EXPIREAT, PEXPIREAT
 - [x] RENAME, RENAMENX
 - [x] TYPE, KEYS
@@ -109,12 +119,13 @@
 - [x] MOVE (move to different DB)
 - [x] EXPIRETIME, PEXPIRETIME (Redis 7.0+)
 
-#### Geospatial (5 commands) ✅ COMPLETED
+#### Geospatial (6 commands) ✅ COMPLETED
 - [x] GEOADD (add coordinates)
 - [x] GEODIST (distance between members)
 - [x] GEOHASH (geohash representation)
 - [x] GEOPOS (get coordinates)
 - [x] GEOSEARCH (modern radius/box queries with options)
+- [x] GEOSEARCHSTORE (search and store results - Redis 6.2+)
 
 #### Server/Admin (9 commands) ✅ EXPANDED
 - [x] DBSIZE (count keys in database)

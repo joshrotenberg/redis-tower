@@ -537,6 +537,179 @@ impl Command for GeoSearch {
     }
 }
 
+/// GEOSEARCHSTORE command - Search and store results
+///
+/// Performs a GEOSEARCH and stores the results in a destination key.
+/// Available since Redis 6.2.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{GeoSearchStore, GeoUnit};
+///
+/// // Search by radius from member and store
+/// let cmd = GeoSearchStore::new("dest", "locations")
+///     .from_member("Palermo")
+///     .by_radius(100.0, GeoUnit::Kilometers);
+///
+/// // Search by box from coordinates and store with distances
+/// let cmd = GeoSearchStore::new("dest", "locations")
+///     .from_lonlat(15.0, 37.0)
+///     .by_box(200.0, 200.0, GeoUnit::Kilometers)
+///     .storedist();
+/// ```
+#[derive(Debug, Clone)]
+pub struct GeoSearchStore {
+    destination: String,
+    source: String,
+    from_member: Option<String>,
+    from_lonlat: Option<(f64, f64)>,
+    by_radius: Option<(f64, GeoUnit)>,
+    by_box: Option<(f64, f64, GeoUnit)>,
+    count: Option<i64>,
+    storedist: bool,
+}
+
+impl GeoSearchStore {
+    /// Create a new GEOSEARCHSTORE command
+    pub fn new(destination: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            destination: destination.into(),
+            source: source.into(),
+            from_member: None,
+            from_lonlat: None,
+            by_radius: None,
+            by_box: None,
+            count: None,
+            storedist: false,
+        }
+    }
+
+    /// Search from a member
+    pub fn from_member(mut self, member: impl Into<String>) -> Self {
+        self.from_member = Some(member.into());
+        self
+    }
+
+    /// Search from coordinates
+    pub fn from_lonlat(mut self, longitude: f64, latitude: f64) -> Self {
+        self.from_lonlat = Some((longitude, latitude));
+        self
+    }
+
+    /// Search by radius
+    pub fn by_radius(mut self, radius: f64, unit: GeoUnit) -> Self {
+        self.by_radius = Some((radius, unit));
+        self
+    }
+
+    /// Search by box dimensions
+    pub fn by_box(mut self, width: f64, height: f64, unit: GeoUnit) -> Self {
+        self.by_box = Some((width, height, unit));
+        self
+    }
+
+    /// Limit result count
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Store distances instead of just members
+    pub fn storedist(mut self) -> Self {
+        self.storedist = true;
+        self
+    }
+}
+
+impl Command for GeoSearchStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("GEOSEARCHSTORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+        ];
+
+        // FROM clause (required)
+        if let Some(ref member) = self.from_member {
+            args.push(Frame::BulkString(Some(Bytes::from("FROMMEMBER"))));
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                member.as_bytes(),
+            ))));
+        } else if let Some((lon, lat)) = self.from_lonlat {
+            args.push(Frame::BulkString(Some(Bytes::from("FROMLONLAT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(lon.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(lat.to_string()))));
+        }
+
+        // BY clause (required)
+        if let Some((radius, unit)) = self.by_radius {
+            args.push(Frame::BulkString(Some(Bytes::from("BYRADIUS"))));
+            args.push(Frame::BulkString(Some(Bytes::from(radius.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(unit.as_str()))));
+        } else if let Some((width, height, unit)) = self.by_box {
+            args.push(Frame::BulkString(Some(Bytes::from("BYBOX"))));
+            args.push(Frame::BulkString(Some(Bytes::from(width.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(height.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(unit.as_str()))));
+        }
+
+        // Optional COUNT
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        // STOREDIST option
+        if self.storedist {
+            args.push(Frame::BulkString(Some(Bytes::from("STOREDIST"))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+// Read-only trait implementations
+use crate::read_preference::ReadOnly;
+
+impl ReadOnly for GeoSearch {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for GeoDist {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for GeoHash {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for GeoPos {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands
+impl ReadOnly for GeoAdd {}
+impl ReadOnly for GeoSearchStore {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
