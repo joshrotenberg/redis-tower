@@ -19,6 +19,7 @@ pub mod bitmap;
 pub mod connection;
 pub mod hashes;
 pub mod hyperloglog;
+pub mod keys;
 pub mod lists;
 pub mod pubsub;
 pub mod scan;
@@ -34,6 +35,7 @@ pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
+pub use keys::{ExpireAt, Keys, PExpire, PExpireAt, PTtl, Persist, Rename, RenameNx, Type};
 pub use lists::{
     BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LPop, LPos, LPush, LRange, LRem, LSet,
     LTrim, RPop, RPush,
