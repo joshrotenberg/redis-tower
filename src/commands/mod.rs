@@ -30,6 +30,7 @@ pub mod sets;
 pub mod sorted_sets;
 pub mod streams;
 pub mod strings;
+pub mod transactions;
 
 pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
 pub use connection::{
@@ -46,7 +47,7 @@ pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{
     Copy, Dump, ExpireAt, ExpireTime, Keys, Move, ObjectEncoding, ObjectFreq, ObjectIdleTime,
     ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename, RenameNx, Restore,
-    Touch, Type, Unlink,
+    Sort, SortOrder, SortResult, Touch, Type, Unlink,
 };
 pub use lists::{
     BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,
@@ -54,7 +55,7 @@ pub use lists::{
 };
 pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
 pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
-pub use server::{BgSave, DbSize, FlushAll, FlushDb, Info, LastSave, RandomKey, Save, Time};
+pub use server::{BgSave, DbSize, FlushAll, FlushDb, Info, LastSave, RandomKey, Save, Time, Wait};
 pub use sets::{
     SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore, Sadd,
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
@@ -75,6 +76,7 @@ pub use strings::{
     Incr, IncrBy, IncrByFloat, Lcs, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
     StrLen, Ttl,
 };
+pub use transactions::{Discard, Exec, Multi, Unwatch, Watch};
 
 // ============================================================================
 // DEPRECATED COMMANDS (feature-gated with "deprecated")

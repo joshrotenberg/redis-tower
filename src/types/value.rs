@@ -196,12 +196,37 @@ impl std::hash::Hash for RedisValue {
                 5.hash(state);
                 e.hash(state);
             }
-            // Arrays, Maps, Sets, Doubles are not hashable
-            // This is a limitation for using them as map keys
-            RedisValue::Array(_) => panic!("Cannot hash array"),
-            RedisValue::Map(_) => panic!("Cannot hash map"),
-            RedisValue::Set(_) => panic!("Cannot hash set"),
-            RedisValue::Double(_) => panic!("Cannot hash double"),
+            // Complex types: hash their debug representation instead of panicking
+            // This allows RESP3 maps with complex keys to be processed without crashes
+            // Note: Two structurally identical arrays/maps/sets will hash the same
+            RedisValue::Array(arr) => {
+                6.hash(state);
+                // Hash each element's discriminant and simple representation
+                arr.len().hash(state);
+                for item in arr {
+                    item.hash(state);
+                }
+            }
+            RedisValue::Map(map) => {
+                7.hash(state);
+                // Hash the map size - we can't reliably hash the contents
+                // since HashMap iteration order is non-deterministic
+                map.len().hash(state);
+            }
+            RedisValue::Set(set) => {
+                8.hash(state);
+                // Hash each element
+                set.len().hash(state);
+                for item in set {
+                    item.hash(state);
+                }
+            }
+            RedisValue::Double(d) => {
+                9.hash(state);
+                // Hash the bit representation of the float
+                // This ensures that equal floats hash the same
+                d.to_bits().hash(state);
+            }
         }
     }
 }
@@ -293,5 +318,189 @@ mod tests {
         } else {
             panic!("Expected array");
         }
+    }
+
+    #[test]
+    fn test_hash_array_no_panic() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Arrays should hash without panicking
+        let value = RedisValue::Array(vec![RedisValue::Integer(1), RedisValue::Integer(2)]);
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let hash1 = hasher.finish();
+
+        // Same array should produce same hash
+        let mut hasher2 = DefaultHasher::new();
+        value.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_map_no_panic() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Maps should hash without panicking
+        let mut inner_map = HashMap::new();
+        inner_map.insert(
+            RedisValue::Integer(1),
+            RedisValue::Status("one".to_string()),
+        );
+        let value = RedisValue::Map(inner_map);
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let hash1 = hasher.finish();
+
+        // Same map should produce same hash (based on size)
+        let mut hasher2 = DefaultHasher::new();
+        value.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_set_no_panic() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Sets should hash without panicking
+        let value = RedisValue::Set(vec![RedisValue::Integer(1), RedisValue::Integer(2)]);
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let hash1 = hasher.finish();
+
+        // Same set should produce same hash
+        let mut hasher2 = DefaultHasher::new();
+        value.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_double_no_panic() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Doubles should hash without panicking
+        let value = RedisValue::Double(123.456);
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let hash1 = hasher.finish();
+
+        // Same double should produce same hash
+        let mut hasher2 = DefaultHasher::new();
+        value.hash(&mut hasher2);
+        let hash2 = hasher2.finish();
+
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_hash_nested_array_no_panic() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        // Nested arrays should hash without panicking
+        let value = RedisValue::Array(vec![
+            RedisValue::Array(vec![RedisValue::Integer(1)]),
+            RedisValue::Array(vec![RedisValue::Integer(2)]),
+        ]);
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let _hash = hasher.finish();
+        // If we got here without panicking, the test passes
+    }
+
+    #[test]
+    fn test_complex_types_as_map_keys() {
+        // This is the critical test - ensure we can decode RESP3 maps with complex keys
+        // without the process crashing
+
+        let frame = Frame::Map(vec![
+            // Array as key
+            (
+                Frame::Array(vec![Frame::Integer(1), Frame::Integer(2)]),
+                Frame::SimpleString(Bytes::from("array_key")),
+            ),
+            // Double as key
+            (
+                Frame::Double(2.5),
+                Frame::SimpleString(Bytes::from("double_key")),
+            ),
+            // Set as key
+            (
+                Frame::Set(vec![Frame::Integer(1)]),
+                Frame::SimpleString(Bytes::from("set_key")),
+            ),
+        ]);
+
+        // This should not panic
+        let value = RedisValue::from_frame(frame);
+        assert!(value.is_ok());
+
+        if let Ok(RedisValue::Map(map)) = value {
+            // Verify the map was created successfully
+            assert_eq!(map.len(), 3);
+        } else {
+            panic!("Expected map");
+        }
+    }
+
+    #[test]
+    fn test_nested_map_as_key() {
+        // Even more extreme case: map containing a map as a key
+        let mut inner_map = HashMap::new();
+        inner_map.insert(RedisValue::Integer(1), RedisValue::Integer(2));
+
+        let outer_key = RedisValue::Map(inner_map);
+        let outer_value = RedisValue::Status("nested".to_string());
+
+        let mut outer_map = HashMap::new();
+        outer_map.insert(outer_key, outer_value);
+
+        let value = RedisValue::Map(outer_map);
+
+        // Should not panic when hashing
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        let _hash = hasher.finish();
+        // If we got here without panicking, the test passes
+    }
+
+    #[test]
+    fn test_special_float_values() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hash;
+
+        // Test special float values: infinity, negative infinity, NaN
+        let inf = RedisValue::Double(f64::INFINITY);
+        let neg_inf = RedisValue::Double(f64::NEG_INFINITY);
+        let nan = RedisValue::Double(f64::NAN);
+
+        // All should hash without panicking
+        let mut hasher = DefaultHasher::new();
+        inf.hash(&mut hasher);
+
+        let mut hasher = DefaultHasher::new();
+        neg_inf.hash(&mut hasher);
+
+        let mut hasher = DefaultHasher::new();
+        nan.hash(&mut hasher);
+
+        // If we got here, all special floats hashed successfully
     }
 }

@@ -2,10 +2,8 @@
 
 use thiserror::Error;
 
-pub mod response;
 pub mod value;
 
-pub use response::RedisResponse;
 pub use value::RedisValue;
 
 /// Redis client errors

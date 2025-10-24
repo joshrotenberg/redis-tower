@@ -635,3 +635,118 @@ mod tests {
         assert_eq!(result, 1609459200);
     }
 }
+
+/// WAIT - Wait for the synchronous replication of all write commands
+///
+/// This command blocks the current client until all the previous write commands
+/// are successfully transferred and acknowledged by at least the specified number
+/// of replicas. If the timeout (specified in milliseconds) is reached, the command
+/// returns even if the specified number of replicas were not yet reached.
+///
+/// # Returns
+/// The number of replicas that acknowledged the write commands
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Wait;
+///
+/// // Wait for 2 replicas with 1 second timeout
+/// let cmd = Wait::new(2, 1000);
+///
+/// // Wait for 1 replica with no timeout (0 means wait forever)
+/// let cmd = Wait::new(1, 0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Wait {
+    numreplicas: i64,
+    timeout: i64,
+}
+
+impl Wait {
+    /// Create a new WAIT command
+    ///
+    /// # Arguments
+    /// * `numreplicas` - Minimum number of replicas to reach
+    /// * `timeout` - Timeout in milliseconds (0 means wait forever)
+    pub fn new(numreplicas: i64, timeout: i64) -> Self {
+        Self {
+            numreplicas,
+            timeout,
+        }
+    }
+}
+
+impl Command for Wait {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("WAIT"))),
+            Frame::BulkString(Some(Bytes::from(self.numreplicas.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn test_wait_to_frame() {
+        let cmd = Wait::new(2, 1000);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("WAIT"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("2"))));
+                assert_eq!(args[2], Frame::BulkString(Some(Bytes::from("1000"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_wait_no_timeout() {
+        let cmd = Wait::new(1, 0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args[2], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_wait_parse_response() {
+        let frame = Frame::Integer(2);
+        let result = Wait::parse_response(frame).unwrap();
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn test_wait_parse_zero() {
+        let frame = Frame::Integer(0);
+        let result = Wait::parse_response(frame).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_wait_parse_error() {
+        let frame = Frame::Error(Bytes::from("ERR invalid arguments"));
+        assert!(Wait::parse_response(frame).is_err());
+    }
+}

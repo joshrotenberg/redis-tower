@@ -1,8 +1,9 @@
 [package]
 name = "redis-tower"
 version = "0.1.0"
+# Rust 2024 edition (requires Rust 1.85+, released Feb 2025)
 edition = "2024"
-authors = ["Josh Rotenberg <josh@gifsicle.net>"]
+authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
 description = "A Tower-based Redis client with strong typing, composable middleware, and 200+ commands"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/redis-tower"
@@ -11,6 +12,7 @@ homepage = "https://github.com/joshrotenberg/redis-tower"
 readme = "README.md"
 keywords = ["redis", "tower", "async", "client", "database"]
 categories = ["database", "asynchronous", "network-programming"]
+# MSRV: Rust 1.87 (for `usize::is_multiple_of` stabilized in 1.86, plus safety margin)
 rust-version = "1.87"
 exclude = [
     "docs/",
@@ -47,6 +49,11 @@ sha1 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tower-resilience = { version = "0.3.5", features = ["full"] }
+
+# Protocol parser (local development dependency)
+# NOTE: Before publishing to crates.io, resp-parser must either be:
+#   1. Published to crates.io separately and referenced by version
+#   2. Vendored into this crate
 resp-parser = { version = "0.1.0", path = "../resp-parser-rs" }
 
 [dev-dependencies]

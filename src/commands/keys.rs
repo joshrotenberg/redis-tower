@@ -1518,3 +1518,289 @@ impl Command for ObjectFreq {
         }
     }
 }
+
+/// Sort order for SORT command
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    /// Ascending order (default)
+    Asc,
+    /// Descending order
+    Desc,
+}
+
+/// SORT - Sort the elements in a list, set or sorted set
+///
+/// Returns or stores the sorted elements of the list, set or sorted set stored at key.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{Sort, SortOrder};
+///
+/// // Basic sort
+/// let cmd = Sort::new("mylist");
+///
+/// // Sort with options
+/// let cmd = Sort::new("mylist")
+///     .by("weight_*")
+///     .limit(0, 10)
+///     .get("object_*")
+///     .order(SortOrder::Desc)
+///     .alpha();
+///
+/// // Sort and store result
+/// let cmd = Sort::new("mylist").store("result");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Sort {
+    key: String,
+    by: Option<String>,
+    limit: Option<(i64, i64)>,
+    get: Vec<String>,
+    order: Option<SortOrder>,
+    alpha: bool,
+    store: Option<String>,
+}
+
+impl Sort {
+    /// Create a new SORT command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            by: None,
+            limit: None,
+            get: Vec::new(),
+            order: None,
+            alpha: false,
+            store: None,
+        }
+    }
+
+    /// Use external key for sorting
+    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+        self.by = Some(pattern.into());
+        self
+    }
+
+    /// Limit results to offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+
+    /// Get external keys for the sorted elements
+    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+        self.get.push(pattern.into());
+        self
+    }
+
+    /// Set sort order
+    pub fn order(mut self, order: SortOrder) -> Self {
+        self.order = Some(order);
+        self
+    }
+
+    /// Sort lexicographically instead of numerically
+    pub fn alpha(mut self) -> Self {
+        self.alpha = true;
+        self
+    }
+
+    /// Store result in destination key instead of returning it
+    pub fn store(mut self, destination: impl Into<String>) -> Self {
+        self.store = Some(destination.into());
+        self
+    }
+}
+
+impl Command for Sort {
+    type Response = SortResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut parts = vec![
+            Frame::BulkString(Some(Bytes::from("SORT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(ref by) = self.by {
+            parts.push(Frame::BulkString(Some(Bytes::from("BY"))));
+            parts.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                by.as_bytes(),
+            ))));
+        }
+
+        if let Some((offset, count)) = self.limit {
+            parts.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            parts.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            parts.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        for pattern in &self.get {
+            parts.push(Frame::BulkString(Some(Bytes::from("GET"))));
+            parts.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                pattern.as_bytes(),
+            ))));
+        }
+
+        if let Some(order) = self.order {
+            let order_str = match order {
+                SortOrder::Asc => "ASC",
+                SortOrder::Desc => "DESC",
+            };
+            parts.push(Frame::BulkString(Some(Bytes::from(order_str))));
+        }
+
+        if self.alpha {
+            parts.push(Frame::BulkString(Some(Bytes::from("ALPHA"))));
+        }
+
+        if let Some(ref dest) = self.store {
+            parts.push(Frame::BulkString(Some(Bytes::from("STORE"))));
+            parts.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                dest.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(parts)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let elements = items
+                    .into_iter()
+                    .map(|f| match f {
+                        Frame::BulkString(Some(b)) => Ok(b),
+                        Frame::BulkString(None) => Ok(Bytes::new()),
+                        _ => Err(RedisError::UnexpectedResponse),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(SortResult::Elements(elements))
+            }
+            Frame::Integer(n) => Ok(SortResult::Stored(n)), // When using STORE
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Result of SORT command
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SortResult {
+    /// Sorted elements (when not using STORE)
+    Elements(Vec<Bytes>),
+    /// Number of elements stored (when using STORE)
+    Stored(i64),
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use super::*;
+
+    #[test]
+    fn test_sort_basic() {
+        let cmd = Sort::new("mylist");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert_eq!(args.len(), 2);
+                assert_eq!(args[0], Frame::BulkString(Some(Bytes::from("SORT"))));
+                assert_eq!(args[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_with_all_options() {
+        let cmd = Sort::new("mylist")
+            .by("weight_*")
+            .limit(0, 10)
+            .get("object_*")
+            .get("value_*")
+            .order(SortOrder::Desc)
+            .alpha();
+
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("BY")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("weight_*")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("LIMIT")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("0")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("10")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("GET")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("object_*")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("value_*")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("DESC")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("ALPHA")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_with_store() {
+        let cmd = Sort::new("mylist").store("result");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("STORE")))));
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("result")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_order_asc() {
+        let cmd = Sort::new("mylist").order(SortOrder::Asc);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(args) => {
+                assert!(args.contains(&Frame::BulkString(Some(Bytes::from("ASC")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_parse_elements() {
+        let frame = Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::BulkString(Some(Bytes::from("c"))),
+        ]);
+
+        let result = Sort::parse_response(frame).unwrap();
+        match result {
+            SortResult::Elements(elements) => {
+                assert_eq!(elements.len(), 3);
+                assert_eq!(elements[0], Bytes::from("a"));
+                assert_eq!(elements[1], Bytes::from("b"));
+                assert_eq!(elements[2], Bytes::from("c"));
+            }
+            _ => panic!("Expected Elements variant"),
+        }
+    }
+
+    #[test]
+    fn test_sort_parse_stored() {
+        let frame = Frame::Integer(42);
+        let result = Sort::parse_response(frame).unwrap();
+        match result {
+            SortResult::Stored(n) => assert_eq!(n, 42),
+            _ => panic!("Expected Stored variant"),
+        }
+    }
+
+    #[test]
+    fn test_sort_parse_error() {
+        let frame = Frame::Error(Bytes::from("ERR syntax error"));
+        assert!(Sort::parse_response(frame).is_err());
+    }
+}
