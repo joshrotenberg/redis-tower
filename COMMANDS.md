@@ -420,19 +420,20 @@ Based on this analysis, here are recommended priorities:
 
 ## Testing Coverage
 
-### Integration Tests (179 total):
+### Integration Tests (229 total):
 - ✅ 57 unit tests (command encoding/parsing)
-- ✅ 114 integration tests (9 categories)
-  - Basic commands (strings, hashes, lists, sets)
-  - Complex commands (SCAN iteration)
-  - Level 4 commands (blocking, streams)
-  - Sets operations (union, intersect, diff, scan)
-  - Scripting (EVAL, EVALSHA, caching)
-  - Transactions (MULTI/EXEC, WATCH, optimistic locking)
-  - Cluster (8 tests with Docker cluster)
-  - Pub/Sub (8 tests with patterns, binary data, timeouts)
+- ✅ 115 integration tests (11 categories)
+  - Strings (22 tests: basic + new commands)
+  - Hashes (13 tests: all hash operations)
+  - Lists (13 tests: all list operations)
+  - Sets (13 tests: set operations, scan)
+  - Sorted Sets (11 tests)
   - Streams (14 tests: XADD, XLEN, XRANGE, XREVRANGE, XDEL, XTRIM)
-- ✅ 8 doctests (examples in documentation)
+  - Transactions (8 tests: MULTI/EXEC, WATCH, optimistic locking)
+  - Cluster (8 tests with Docker cluster)
+  - Cluster Simple (5 tests)
+  - Pub/Sub (8 tests with patterns, binary data, timeouts)
+- ✅ 57 doctests (examples in documentation)
 
 ### Examples:
 - ✅ `basic.rs` - Simple commands
@@ -443,7 +444,9 @@ Based on this analysis, here are recommended priorities:
 - ✅ `complex_commands.rs` - SCAN iteration
 - ✅ `level4_commands.rs` - Blocking & Streams
 - ✅ `scripting.rs` - Lua scripts
-- ✅ `resilient.rs` - Tower middleware
+- ✅ `resilient.rs` - Tower middleware patterns (concept)
+- ✅ `tower_service.rs` - Tower Service trait usage
+- ✅ `tower_middleware.rs` - Middleware composition examples
 
 ## Command Complexity Classification
 
