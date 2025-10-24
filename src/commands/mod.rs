@@ -57,10 +57,10 @@ pub use sets::{
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
 };
 pub use sorted_sets::{
-    BZPopMax, BZPopMin, ZCount, ZLexCount, ZMScore, ZPopMax, ZPopMin, ZRangeByLex, ZRangeByScore,
-    ZRemRangeByLex, ZRemRangeByRank, ZRemRangeByScore, ZRevRangeByLex, ZRevRangeByScore, Zadd,
-    Zcard, Zincrby, Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult,
-    Zscore,
+    BZPopMax, BZPopMin, ZCount, ZDiffStore, ZInterStore, ZLexCount, ZMScore, ZPopMax, ZPopMin,
+    ZRandMember, ZRangeByLex, ZRangeByScore, ZRemRangeByLex, ZRemRangeByRank, ZRemRangeByScore,
+    ZRevRangeByLex, ZRevRangeByScore, ZUnionStore, Zadd, Zcard, Zincrby, Zrange, ZrangeResult,
+    Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
 };
 pub use streams::{
     StreamEntry, StreamId, TrimStrategy, XAdd, XDel, XLen, XRange, XRead, XReadResult, XRevRange,

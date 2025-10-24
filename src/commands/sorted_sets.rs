@@ -734,6 +734,327 @@ impl Command for Zscan {
     }
 }
 
+/// ZRANDMEMBER command - Get random member(s) from a sorted set
+///
+/// Returns one or more random members from the sorted set.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZRandMember;
+///
+/// // Get one random member
+/// let cmd = ZRandMember::new("myzset");
+///
+/// // Get 3 random members
+/// let cmd = ZRandMember::new("myzset").count(3);
+///
+/// // Get 3 random members with scores
+/// let cmd = ZRandMember::new("myzset").count(3).withscores();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZRandMember {
+    key: String,
+    count: Option<i64>,
+    withscores: bool,
+}
+
+impl ZRandMember {
+    /// Create a new ZRANDMEMBER command (returns single member)
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+            withscores: false,
+        }
+    }
+
+    /// Specify number of members to return
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Return members with their scores
+    pub fn withscores(mut self) -> Self {
+        self.withscores = true;
+        self
+    }
+}
+
+impl Command for ZRandMember {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZRANDMEMBER"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        if self.withscores {
+            frames.push(Frame::BulkString(Some(Bytes::from("WITHSCORES"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => {
+                // Single member without count
+                Ok(vec![String::from_utf8_lossy(&data).into_owned()])
+            }
+            Frame::Array(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    if let Frame::BulkString(Some(data)) = item {
+                        members.push(String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                Ok(members)
+            }
+            Frame::Null => Ok(vec![]),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZUNIONSTORE command - Union multiple sorted sets and store result
+///
+/// Computes the union of multiple sorted sets and stores the result in destination.
+/// By default, the resulting score is the sum of all scores from the input sets.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZUnionStore;
+///
+/// // Simple union
+/// let cmd = ZUnionStore::new("dest", vec!["set1".to_string(), "set2".to_string()]);
+///
+/// // With weights
+/// let cmd = ZUnionStore::new("dest", vec!["set1".to_string(), "set2".to_string()])
+///     .weights(vec![2.0, 3.0]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZUnionStore {
+    destination: String,
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<String>,
+}
+
+impl ZUnionStore {
+    /// Create a new ZUNIONSTORE command
+    pub fn new(destination: impl Into<String>, keys: Vec<String>) -> Self {
+        Self {
+            destination: destination.into(),
+            keys,
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Set weights for each sorted set
+    pub fn weights(mut self, weights: Vec<f64>) -> Self {
+        self.weights = Some(weights);
+        self
+    }
+
+    /// Set aggregation method (SUM, MIN, MAX)
+    pub fn aggregate(mut self, aggregate: impl Into<String>) -> Self {
+        self.aggregate = Some(aggregate.into());
+        self
+    }
+}
+
+impl Command for ZUnionStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZUNIONSTORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        if let Some(weights) = &self.weights {
+            frames.push(Frame::BulkString(Some(Bytes::from("WEIGHTS"))));
+            for weight in weights {
+                frames.push(Frame::BulkString(Some(Bytes::from(weight.to_string()))));
+            }
+        }
+
+        if let Some(aggregate) = &self.aggregate {
+            frames.push(Frame::BulkString(Some(Bytes::from("AGGREGATE"))));
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                aggregate.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZINTERSTORE command - Intersect multiple sorted sets and store result
+///
+/// Computes the intersection of multiple sorted sets and stores the result in destination.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZInterStore;
+///
+/// let cmd = ZInterStore::new("dest", vec!["set1".to_string(), "set2".to_string()]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZInterStore {
+    destination: String,
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<String>,
+}
+
+impl ZInterStore {
+    /// Create a new ZINTERSTORE command
+    pub fn new(destination: impl Into<String>, keys: Vec<String>) -> Self {
+        Self {
+            destination: destination.into(),
+            keys,
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Set weights for each sorted set
+    pub fn weights(mut self, weights: Vec<f64>) -> Self {
+        self.weights = Some(weights);
+        self
+    }
+
+    /// Set aggregation method (SUM, MIN, MAX)
+    pub fn aggregate(mut self, aggregate: impl Into<String>) -> Self {
+        self.aggregate = Some(aggregate.into());
+        self
+    }
+}
+
+impl Command for ZInterStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZINTERSTORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        if let Some(weights) = &self.weights {
+            frames.push(Frame::BulkString(Some(Bytes::from("WEIGHTS"))));
+            for weight in weights {
+                frames.push(Frame::BulkString(Some(Bytes::from(weight.to_string()))));
+            }
+        }
+
+        if let Some(aggregate) = &self.aggregate {
+            frames.push(Frame::BulkString(Some(Bytes::from("AGGREGATE"))));
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                aggregate.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZDIFFSTORE command - Diff multiple sorted sets and store result (Redis 6.2+)
+///
+/// Computes the difference of multiple sorted sets and stores the result in destination.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ZDiffStore;
+///
+/// let cmd = ZDiffStore::new("dest", vec!["set1".to_string(), "set2".to_string()]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZDiffStore {
+    destination: String,
+    keys: Vec<String>,
+}
+
+impl ZDiffStore {
+    /// Create a new ZDIFFSTORE command
+    pub fn new(destination: impl Into<String>, keys: Vec<String>) -> Self {
+        Self {
+            destination: destination.into(),
+            keys,
+        }
+    }
+}
+
+impl Command for ZDiffStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ZDIFFSTORE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::read_preference::ReadOnly;
 
@@ -778,6 +1099,17 @@ impl ReadOnly for Zscan {
         true
     }
 }
+
+impl ReadOnly for ZRandMember {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - not read-only
+impl ReadOnly for ZUnionStore {}
+impl ReadOnly for ZInterStore {}
+impl ReadOnly for ZDiffStore {}
 
 // Write commands - explicitly implement with default (false) for clarity
 impl ReadOnly for Zadd {}

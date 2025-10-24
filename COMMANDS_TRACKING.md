@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 185 (174 core + 11 module)  
-**Coverage:** ~46% (174/400 core commands, 11 module commands behind feature flags)
+**Implemented:** 189 (178 core + 11 module)  
+**Coverage:** ~47% (178/400 core commands, 11 module commands behind feature flags)
 **Deprecated Commands:** 3 (available with `deprecated` feature)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
@@ -50,7 +50,7 @@
 - [x] SMISMEMBER, SINTERCARD
 - [x] SSCAN
 
-#### Sorted Sets (24 commands) ✅ COMPLETE
+#### Sorted Sets (28 commands) ✅ COMPLETE
 - [x] ZADD, ZREM, ZCARD, ZSCORE
 - [x] ZRANGE, ZREVRANGE, ZRANK, ZREVRANK
 - [x] ZINCRBY, ZSCAN
@@ -62,6 +62,8 @@
 - [x] ZLEXCOUNT (count in lexicographic range)
 - [x] ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZREMRANGEBYRANK (remove by range)
 - [x] ZMSCORE (get multiple member scores)
+- [x] ZRANDMEMBER (get random member with count/scores - Redis 6.2+)
+- [x] ZUNIONSTORE, ZINTERSTORE, ZDIFFSTORE (set operations with storage)
 
 #### Streams (8 commands)
 - [x] XADD, XREAD (with blocking), XLEN, XDEL
