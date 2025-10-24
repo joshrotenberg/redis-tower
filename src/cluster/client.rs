@@ -6,8 +6,12 @@ use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
 use crate::types::RedisError;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::RwLock;
+use tower::Service;
 
 /// Redis Cluster client with automatic routing and redirect handling.
 ///
@@ -266,6 +270,46 @@ pub trait KeyExtractor {
 
 // Implement KeyExtractor for common commands
 // We'll add these as we go
+
+/// Tower Service implementation for ClusterClient
+///
+/// This allows ClusterClient to work with Tower middleware like timeouts,
+/// retries, and circuit breakers.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::cluster::ClusterClient;
+/// use redis_tower::commands::Get;
+/// use tower::Service;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut client = ClusterClient::new(vec!["127.0.0.1:7000"]).await?;
+///
+/// // Use as a Tower service
+/// let response = Service::call(&mut client, Get::new("mykey")).await?;
+/// # Ok(())
+/// # }
+/// ```
+impl<Cmd> Service<Cmd> for ClusterClient
+where
+    Cmd: Command + Clone + KeyExtractor + Send + 'static,
+    Cmd::Response: Send + 'static,
+{
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Always ready - cluster handles routing internally
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, command: Cmd) -> Self::Future {
+        let client = self.clone();
+
+        Box::pin(async move { client.execute(command).await })
+    }
+}
 
 #[cfg(test)]
 mod tests {

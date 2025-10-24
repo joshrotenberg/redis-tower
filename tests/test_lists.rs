@@ -5,8 +5,7 @@ mod common;
 use bytes::Bytes;
 use common::{connect, test_key};
 use redis_tower::commands::{
-    Del, InsertPosition, LIndex, LInsert, LLen, LPop, LPos, LPush, LRange, LRem, LSet, LTrim, RPop,
-    RPush,
+    Del, LIndex, LInsert, LLen, LPop, LPos, LPush, LRange, LRem, LSet, LTrim, RPop, RPush,
 };
 
 #[tokio::test]
