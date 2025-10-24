@@ -240,26 +240,30 @@ impl ClusterClient {
             // Remap internal Docker IPs to accessible addresses
             let master_addr = self.remap_address(&master_addr);
 
-            // Map all slots in this range to the master
-            for slot in range.start_slot..=range.end_slot {
-                slot_map.set_slot(slot, master_addr.clone());
-            }
+            // Collect replica addresses
+            let replica_addrs: Vec<String> = range
+                .replicas
+                .iter()
+                .map(|r| self.remap_address(&format!("{}:{}", r.host, r.port)))
+                .collect();
 
-            // Ensure we have connections to master and replicas
-            let addrs = vec![master_addr]
-                .into_iter()
-                .chain(
-                    range
-                        .replicas
-                        .iter()
-                        .map(|r| self.remap_address(&format!("{}:{}", r.host, r.port))),
-                )
+            // Map all slots in this range to the master and replicas
+            slot_map.assign_slots_with_replicas(
+                range.start_slot,
+                range.end_slot,
+                master_addr.clone(),
+                replica_addrs.clone(),
+            );
+
+            // Collect all addresses (master + replicas) for connection pre-creation
+            let all_addrs = std::iter::once(master_addr)
+                .chain(replica_addrs)
                 .collect::<Vec<_>>();
 
             drop(slot_map);
 
             // Pre-create connections to all nodes
-            for node_addr in addrs {
+            for node_addr in all_addrs {
                 let _ = self.get_or_create_connection(&node_addr).await;
             }
 

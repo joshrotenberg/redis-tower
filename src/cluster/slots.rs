@@ -76,11 +76,20 @@ fn crc16_xmodem(data: &[u8]) -> u16 {
     crc
 }
 
+/// Node assignment for a slot
+#[derive(Debug, Clone)]
+pub struct SlotAssignment {
+    /// Master node address
+    pub master: String,
+    /// Replica node addresses (if any)
+    pub replicas: Vec<String>,
+}
+
 /// Mapping of slots to node addresses
 #[derive(Debug, Clone)]
 pub struct SlotMap {
-    /// Maps each slot (0-16383) to the node address serving it
-    slots: Vec<Option<String>>,
+    /// Maps each slot (0-16383) to its master and replicas
+    slots: Vec<Option<SlotAssignment>>,
 }
 
 impl SlotMap {
@@ -91,31 +100,75 @@ impl SlotMap {
         }
     }
 
-    /// Assign a range of slots to a node
+    /// Assign a range of slots to a node (master only, for backward compatibility)
     pub fn assign_slots(&mut self, start: u16, end: u16, node_addr: String) {
         for slot in start..=end {
             if (slot as usize) < self.slots.len() {
-                self.slots[slot as usize] = Some(node_addr.clone());
+                self.slots[slot as usize] = Some(SlotAssignment {
+                    master: node_addr.clone(),
+                    replicas: Vec::new(),
+                });
             }
         }
     }
 
-    /// Get the node address for a given slot
-    pub fn get_node(&self, slot: u16) -> Option<&str> {
-        self.slots.get(slot as usize).and_then(|opt| opt.as_deref())
-    }
-
-    /// Set the node address for a single slot
-    pub fn set_slot(&mut self, slot: u16, node_addr: String) {
-        if (slot as usize) < self.slots.len() {
-            self.slots[slot as usize] = Some(node_addr);
+    /// Assign a range of slots with master and replicas
+    pub fn assign_slots_with_replicas(
+        &mut self,
+        start: u16,
+        end: u16,
+        master: String,
+        replicas: Vec<String>,
+    ) {
+        for slot in start..=end {
+            if (slot as usize) < self.slots.len() {
+                self.slots[slot as usize] = Some(SlotAssignment {
+                    master: master.clone(),
+                    replicas: replicas.clone(),
+                });
+            }
         }
     }
 
-    /// Get the node address for a given key
+    /// Get the master node address for a given slot
+    pub fn get_node(&self, slot: u16) -> Option<&str> {
+        self.slots
+            .get(slot as usize)
+            .and_then(|opt| opt.as_ref().map(|a| a.master.as_str()))
+    }
+
+    /// Get the slot assignment (master + replicas) for a given slot
+    pub fn get_assignment(&self, slot: u16) -> Option<&SlotAssignment> {
+        self.slots.get(slot as usize).and_then(|opt| opt.as_ref())
+    }
+
+    /// Set the node address for a single slot (master only)
+    pub fn set_slot(&mut self, slot: u16, node_addr: String) {
+        if (slot as usize) < self.slots.len() {
+            self.slots[slot as usize] = Some(SlotAssignment {
+                master: node_addr,
+                replicas: Vec::new(),
+            });
+        }
+    }
+
+    /// Set the slot assignment with master and replicas
+    pub fn set_slot_assignment(&mut self, slot: u16, assignment: SlotAssignment) {
+        if (slot as usize) < self.slots.len() {
+            self.slots[slot as usize] = Some(assignment);
+        }
+    }
+
+    /// Get the master node address for a given key
     pub fn get_node_for_key(&self, key: &[u8]) -> Option<&str> {
         let slot = slot_for_key(key);
         self.get_node(slot)
+    }
+
+    /// Get the slot assignment for a given key
+    pub fn get_assignment_for_key(&self, key: &[u8]) -> Option<&SlotAssignment> {
+        let slot = slot_for_key(key);
+        self.get_assignment(slot)
     }
 
     /// Check if all slots are assigned
@@ -129,8 +182,8 @@ impl SlotMap {
         let mut unassigned = 0;
 
         for slot_opt in &self.slots {
-            if let Some(node) = slot_opt {
-                *node_slots.entry(node.clone()).or_insert(0) += 1;
+            if let Some(assignment) = slot_opt {
+                *node_slots.entry(assignment.master.clone()).or_insert(0) += 1;
             } else {
                 unassigned += 1;
             }
