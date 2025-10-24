@@ -6,7 +6,10 @@
 mod common;
 
 use common::{connect, test_key};
-use redis_tower::commands::{Del, Zadd, Zcard, Zincrby, Zrange, Zrank, Zrem, Zrevrank, Zscore};
+use redis_tower::commands::{
+    Del, ZRandMember, Zadd, Zcard, Zdiff, Zincrby, Zinter, Zrange, Zrank, Zrem, Zrevrank, Zscore,
+    Zunion,
+};
 
 #[tokio::test]
 async fn test_zadd_basic() {
@@ -369,4 +372,285 @@ async fn test_empty_sorted_set() {
         .await
         .unwrap();
     assert_eq!(result.members.len(), 0);
+}
+
+#[tokio::test]
+async fn test_zinter() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key1 = test_key("zinter_set1");
+    let key2 = test_key("zinter_set2");
+
+    // Create two sorted sets
+    client
+        .execute(
+            Zadd::new(&key1)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c"),
+        )
+        .await
+        .unwrap();
+
+    client
+        .execute(
+            Zadd::new(&key2)
+                .member(2.0, "b")
+                .member(3.0, "c")
+                .member(4.0, "d"),
+        )
+        .await
+        .unwrap();
+
+    // Intersection without scores
+    let result: Vec<bytes::Bytes> = client
+        .execute(Zinter::new(vec![&key1, &key2]))
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    let result_strs: Vec<String> = result
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+    assert!(result_strs.contains(&"b".to_string()));
+    assert!(result_strs.contains(&"c".to_string()));
+
+    // Clean up
+    client.execute(Del::new(vec![key1, key2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zinter_with_weights() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key1 = test_key("zinter_weighted1");
+    let key2 = test_key("zinter_weighted2");
+
+    // Create two sorted sets
+    client
+        .execute(Zadd::new(&key1).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    client
+        .execute(Zadd::new(&key2).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    // Intersection with weights and scores
+    let result: Vec<bytes::Bytes> = client
+        .execute(
+            Zinter::new(vec![&key1, &key2])
+                .weights(vec![2.0, 3.0])
+                .withscores(),
+        )
+        .await
+        .unwrap();
+
+    // With WITHSCORES, result contains [member1, score1, member2, score2] = 4 elements
+    assert_eq!(result.len(), 4);
+
+    // Clean up
+    client.execute(Del::new(vec![key1, key2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zunion() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key1 = test_key("zunion_set1");
+    let key2 = test_key("zunion_set2");
+
+    // Create two sorted sets
+    client
+        .execute(Zadd::new(&key1).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    client
+        .execute(Zadd::new(&key2).member(2.0, "b").member(3.0, "c"))
+        .await
+        .unwrap();
+
+    // Union without scores
+    let result: Vec<bytes::Bytes> = client
+        .execute(Zunion::new(vec![&key1, &key2]))
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 3);
+    let result_strs: Vec<String> = result
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+    assert!(result_strs.contains(&"a".to_string()));
+    assert!(result_strs.contains(&"b".to_string()));
+    assert!(result_strs.contains(&"c".to_string()));
+
+    // Clean up
+    client.execute(Del::new(vec![key1, key2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zunion_aggregate_min() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key1 = test_key("zunion_min1");
+    let key2 = test_key("zunion_min2");
+
+    // Create two sorted sets
+    client
+        .execute(Zadd::new(&key1).member(1.0, "a").member(5.0, "b"))
+        .await
+        .unwrap();
+
+    client
+        .execute(Zadd::new(&key2).member(3.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    // Union with MIN aggregate
+    let result: Vec<bytes::Bytes> = client
+        .execute(Zunion::new(vec![&key1, &key2]).aggregate_min().withscores())
+        .await
+        .unwrap();
+
+    // With WITHSCORES, result contains [member1, score1, member2, score2] = 4 elements
+    assert_eq!(result.len(), 4);
+
+    // Clean up
+    client.execute(Del::new(vec![key1, key2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zdiff() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key1 = test_key("zdiff_set1");
+    let key2 = test_key("zdiff_set2");
+
+    // Create two sorted sets
+    client
+        .execute(
+            Zadd::new(&key1)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c"),
+        )
+        .await
+        .unwrap();
+
+    client
+        .execute(Zadd::new(&key2).member(2.0, "b").member(4.0, "d"))
+        .await
+        .unwrap();
+
+    // Difference (members in key1 but not in key2)
+    let result: Vec<bytes::Bytes> = client
+        .execute(Zdiff::new(vec![&key1, &key2]))
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 2);
+    let result_strs: Vec<String> = result
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+    assert!(result_strs.contains(&"a".to_string()));
+    assert!(result_strs.contains(&"c".to_string()));
+    assert!(!result_strs.contains(&"b".to_string())); // b is in both, so excluded
+    assert!(!result_strs.contains(&"d".to_string())); // d is only in key2
+
+    // Clean up
+    client.execute(Del::new(vec![key1, key2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zrandmember_single() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("zrandmember_single");
+
+    // Create sorted set
+    client
+        .execute(
+            Zadd::new(&key)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c"),
+        )
+        .await
+        .unwrap();
+
+    // Get single random member
+    let result: Vec<String> = client.execute(ZRandMember::new(&key)).await.unwrap();
+
+    assert_eq!(result.len(), 1);
+    // Should be one of a, b, or c
+    assert!(result[0] == "a" || result[0] == "b" || result[0] == "c");
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zrandmember_multiple() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("zrandmember_multiple");
+
+    // Create sorted set
+    client
+        .execute(
+            Zadd::new(&key)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c")
+                .member(4.0, "d")
+                .member(5.0, "e"),
+        )
+        .await
+        .unwrap();
+
+    // Get 3 random members
+    let result: Vec<String> = client
+        .execute(ZRandMember::new(&key).count(3))
+        .await
+        .unwrap();
+
+    assert_eq!(result.len(), 3);
+    // All should be unique
+    assert_eq!(
+        result
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_zrandmember_with_scores() {
+    let client = connect().await.expect("Failed to connect to Redis");
+    let key = test_key("zrandmember_scores");
+
+    // Create sorted set
+    client
+        .execute(
+            Zadd::new(&key)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c"),
+        )
+        .await
+        .unwrap();
+
+    // Get 2 random members with scores
+    let result: Vec<String> = client
+        .execute(ZRandMember::new(&key).count(2).withscores())
+        .await
+        .unwrap();
+
+    // With WITHSCORES, result contains [member1, score1, member2, score2] = 4 elements
+    assert_eq!(result.len(), 4);
+
+    // Clean up
+    client.execute(Del::new(vec![key])).await.unwrap();
 }

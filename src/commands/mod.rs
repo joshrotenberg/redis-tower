@@ -61,8 +61,9 @@ pub use sets::{
 pub use sorted_sets::{
     BZMPop, BZPopMax, BZPopMin, ZCount, ZDiffStore, ZInterStore, ZLexCount, ZMPop, ZMScore,
     ZPopMax, ZPopMin, ZRandMember, ZRangeByLex, ZRangeByScore, ZRemRangeByLex, ZRemRangeByRank,
-    ZRemRangeByScore, ZRevRangeByLex, ZRevRangeByScore, ZUnionStore, Zadd, Zcard, Zincrby, Zrange,
-    ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
+    ZRemRangeByScore, ZRevRangeByLex, ZRevRangeByScore, ZUnionStore, Zadd, Zcard, Zdiff, Zincrby,
+    Zinter, Zrange, ZrangeResult, Zrank, Zrem, Zrevrange, Zrevrank, Zscan, ZscanResult, Zscore,
+    Zunion,
 };
 pub use streams::{
     StreamEntry, StreamId, TrimStrategy, XAck, XAdd, XClaim, XDel, XGroupCreate, XGroupDestroy,
