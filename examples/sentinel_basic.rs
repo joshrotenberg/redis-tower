@@ -7,9 +7,9 @@
 //! 1. Set up a Redis Sentinel cluster (see SENTINEL_DESIGN.md for setup instructions)
 //! 2. Run: cargo run --example sentinel_basic
 
-use redis_tower::commands::{Get, Set};
+use redis_tower::commands::{Get, Incr, Set};
 use redis_tower::sentinel::{SentinelClient, SentinelConfig};
-use tower::ServiceExt;
+use tower::Service;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -32,18 +32,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // if a failover occurs
     let mut master = client.master();
 
-    println!("Waiting for master connection to be ready...");
-    master.ready().await?;
-
-    // Execute SET command
+    // Execute SET command (Tower will automatically ready the connection)
     println!("Setting key 'greeting' to 'Hello from Sentinel'");
     master
         .call(Set::new("greeting", "Hello from Sentinel"))
-        .await?;
+        .await
+        .map_err(|e| format!("Failed to set key: {}", e))?;
 
     // Execute GET command
     println!("Getting key 'greeting'");
-    let value: Option<bytes::Bytes> = master.call(Get::new("greeting")).await?;
+    let value: Option<bytes::Bytes> = master
+        .call(Get::new("greeting"))
+        .await
+        .map_err(|e| format!("Failed to get key: {}", e))?;
 
     match value {
         Some(v) => println!("Value: {}", String::from_utf8_lossy(&v)),
@@ -52,12 +53,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Increment a counter
     println!("\nTesting counter increment...");
-    use redis_tower::commands::Incr;
 
-    master.call(Set::new("counter", "0")).await?;
+    master
+        .call(Set::new("counter", "0"))
+        .await
+        .map_err(|e| format!("Failed to set counter: {}", e))?;
 
     for i in 1..=5 {
-        let count: i64 = master.call(Incr::new("counter")).await?;
+        let count: i64 = master
+            .call(Incr::new("counter"))
+            .await
+            .map_err(|e| format!("Failed to increment counter: {}", e))?;
         println!("Counter incremented to: {}", count);
         assert_eq!(count, i);
     }
