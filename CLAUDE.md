@@ -373,6 +373,151 @@ Follow the same high standards as the redis-proxy project:
 - Branch naming: `feat/`, `fix/`, `docs/`, `refactor/`, `test/`
 - Use conventional commit format (no emojis, no "Generated with Claude Code")
 
+### GitHub Issue Management
+
+**CRITICAL**: Keep GitHub issues synchronized with development progress at all times.
+
+#### When Starting Work
+1. **Check the roadmap**: Review issue #1 to understand current priorities
+2. **Find/create an issue**: Every piece of work should have a tracking issue
+3. **Comment on issue**: Post "Working on this" to claim the work
+4. **Reference in commits**: Use "Part of #N" or "Closes #N" in commit messages
+5. **Reference in PRs**: Link to the issue in PR description
+
+#### During Development
+1. **Update issue progress**: Add comments with status updates
+2. **Mark blockers**: If blocked, comment on the issue with details
+3. **Cross-reference**: Link to related issues/PRs as discovered
+4. **Document decisions**: Record key decisions in issue comments
+
+#### After Completing Work
+1. **Update checkboxes**: Mark completed items in umbrella issues
+2. **Close with PR**: Use "Closes #N" or "Fixes #N" in PR description
+3. **Update roadmap**: Update issue #1 if major milestone completed
+4. **Create follow-ups**: Open new issues for discovered work
+
+#### Issue Hygiene Rules
+- **Never leave stale issues open**: Close or update every 2 weeks
+- **Always use labels**: Apply appropriate area/priority/type labels
+- **Keep descriptions current**: Edit issue body as requirements evolve
+- **Link everything**: Cross-reference related issues, PRs, commits
+- **Document blockers**: Update issues when blocked by external factors
+
+#### Commit Message Format
+```bash
+# Good: References issue and describes work
+git commit -m "feat: implement key commands (DEL, EXISTS, EXPIRE)
+
+Part of #4 - Key Operations
+- Add DEL command with multi-key support
+- Add EXISTS command
+- Add EXPIRE/EXPIREAT commands
+- All commands have unit tests"
+
+# Good: Closes issue when work is complete
+git commit -m "feat: complete HyperLogLog commands
+
+Closes #6
+- Implement PFADD, PFCOUNT, PFMERGE
+- Add comprehensive tests
+- Add usage examples in docs"
+
+# Bad: No issue reference
+git commit -m "add some commands"
+
+# Bad: Vague issue reference
+git commit -m "work on #2"
+```
+
+#### Pull Request Requirements
+Every PR must:
+1. **Reference an issue**: Link to tracking issue in description
+2. **Update umbrella issue**: Check off completed items if applicable
+3. **Pass CI**: All tests and checks must pass
+4. **Include tests**: New code must have tests
+5. **Update docs**: Update relevant documentation
+
+#### Creating New Issues
+When creating issues:
+1. **Check for duplicates**: Search existing issues first
+2. **Use templates**: Follow existing issue format (see #4-#14 for examples)
+3. **Link to umbrella**: Reference parent umbrella issue (e.g., "Part of #2")
+4. **Add labels**: Apply appropriate labels immediately
+5. **Be specific**: Provide clear acceptance criteria
+6. **Add examples**: Include code examples for command implementations
+
+#### Issue Labels - Quick Reference
+- `area: commands` - Redis command implementation
+- `area: tower` - Tower middleware/Service work
+- `area: cluster` - Cluster support
+- `area: testing` - Test coverage
+- `priority: high` - Must have for current milestone
+- `priority: medium` - Important but not blocking
+- `priority: low` - Nice to have
+- `good first issue` - Good for new contributors
+- `type: feature` - New functionality
+- `type: refactor` - Code improvement
+
+#### Example Workflow
+```bash
+# 1. Check roadmap
+gh issue view 1
+
+# 2. Find work (Key commands)
+gh issue view 4
+
+# 3. Create branch
+git checkout -b feat/key-commands
+
+# 4. Claim issue (comment on GitHub or in commit)
+git commit -m "feat: start implementing key commands
+
+Part of #4
+- Setting up module structure"
+
+# 5. Do work with regular commits
+git commit -m "feat: add DEL command
+
+Part of #4
+- Multi-key support
+- Response parsing
+- Unit tests"
+
+# 6. Complete work
+git commit -m "feat: complete key commands
+
+Closes #4
+- All commands implemented
+- Tests passing
+- Documentation updated"
+
+# 7. Push and create PR
+git push origin feat/key-commands
+gh pr create --title "feat: implement key commands" --body "Closes #4
+
+Implements essential key management commands:
+- DEL (multi-key)
+- EXISTS
+- EXPIRE/EXPIREAT
+- TTL/PTTL
+- PERSIST
+- TYPE
+
+All commands have tests and documentation."
+
+# 8. After merge, update roadmap if needed
+# Edit issue #1 to check off "Key commands" if it's listed
+```
+
+#### Keeping CLAUDE.md In Sync
+When the project direction changes:
+1. Update CLAUDE.md with new information
+2. Reference the issue that caused the change
+3. Keep the "Current Status" section current
+4. Update roadmap/timeline if milestones shift
+
+**Remember**: GitHub issues are our source of truth for project management. When in doubt, check the issues!
+
 ## Current Status
 
 **Project Created**: 2025-10-23
