@@ -2,9 +2,22 @@
 name = "redis-tower"
 version = "0.1.0"
 edition = "2024"
-authors = ["Josh Rotenberg"]
-description = "Experimental Tower-based Redis client with strong typing"
+authors = ["Josh Rotenberg <josh@gifsicle.net>"]
+description = "A Tower-based Redis client with strong typing, composable middleware, and 200+ commands"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshrotenberg/redis-tower"
+documentation = "https://docs.rs/redis-tower"
+homepage = "https://github.com/joshrotenberg/redis-tower"
+readme = "README.md"
+keywords = ["redis", "tower", "async", "client", "database"]
+categories = ["database", "asynchronous", "network-programming"]
+rust-version = "1.87"
+exclude = [
+    "docs/",
+    ".github/",
+    "benches/",
+    "examples/",
+]
 
 [dependencies]
 # Tower ecosystem
