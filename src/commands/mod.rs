@@ -17,6 +17,7 @@ pub trait Command {
 
 pub mod bitmap;
 pub mod connection;
+pub mod geo;
 pub mod hashes;
 pub mod hyperloglog;
 pub mod keys;
@@ -31,6 +32,7 @@ pub mod strings;
 
 pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
 pub use connection::{Auth, AuthAcl, Quit, ReadOnly, ReadWrite, Select};
+pub use geo::{GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoUnit};
 pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
 };
