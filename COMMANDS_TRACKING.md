@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 125  
-**Coverage:** ~31% (125/400 core commands, excluding modules)
+**Implemented:** 132  
+**Coverage:** ~33% (132/400 core commands, excluding modules)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -42,11 +42,15 @@
 - [x] SMISMEMBER, SINTERCARD
 - [x] SSCAN
 
-#### Sorted Sets (10 commands)
+#### Sorted Sets (17 commands) ✅ EXPANDED
 - [x] ZADD, ZREM, ZCARD, ZSCORE
 - [x] ZRANGE, ZREVRANGE, ZRANK, ZREVRANK
-- [x] ZINCRBY
-- [x] ZSCAN
+- [x] ZINCRBY, ZSCAN
+- [x] ZPOPMIN, ZPOPMAX (pop lowest/highest scores)
+- [x] BZPOPMIN, BZPOPMAX (blocking variants)
+- [x] ZCOUNT (count members in range)
+- [x] ZRANGEBYSCORE (range query with options)
+- [x] ZMSCORE (get multiple member scores)
 
 #### Streams (8 commands)
 - [x] XADD, XREAD (with blocking), XLEN, XDEL
