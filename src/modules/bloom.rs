@@ -502,6 +502,342 @@ impl Command for BfInfo {
     }
 }
 
+/// BF.INSERT - Add items with creation options
+///
+/// More flexible version of BF.ADD that allows creating filters on-the-fly
+/// with custom parameters and adding multiple items.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::bloom::BfInsert;
+///
+/// // Simple insert (creates filter with defaults if needed)
+/// let cmd = BfInsert::new("myfilter", vec![b"item1".to_vec()]);
+///
+/// // With custom parameters if filter doesn't exist
+/// let cmd = BfInsert::new("myfilter", vec![b"item1".to_vec()])
+///     .capacity(10000)
+///     .error(0.001)
+///     .nocreate(); // Fail if filter doesn't exist
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfInsert {
+    key: String,
+    items: Vec<Bytes>,
+    capacity: Option<i64>,
+    error: Option<f64>,
+    expansion: Option<i64>,
+    nocreate: bool,
+    nonscaling: bool,
+}
+
+impl BfInsert {
+    /// Create a new BF.INSERT command
+    pub fn new(key: impl Into<String>, items: Vec<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            items,
+            capacity: None,
+            error: None,
+            expansion: None,
+            nocreate: false,
+            nonscaling: false,
+        }
+    }
+
+    /// Set capacity if filter needs to be created
+    pub fn capacity(mut self, capacity: i64) -> Self {
+        self.capacity = Some(capacity);
+        self
+    }
+
+    /// Set error rate if filter needs to be created
+    pub fn error(mut self, error: f64) -> Self {
+        self.error = Some(error);
+        self
+    }
+
+    /// Set expansion factor if filter needs to be created
+    pub fn expansion(mut self, expansion: i64) -> Self {
+        self.expansion = Some(expansion);
+        self
+    }
+
+    /// Don't create filter if it doesn't exist (fail instead)
+    pub fn nocreate(mut self) -> Self {
+        self.nocreate = true;
+        self
+    }
+
+    /// Prevent auto-scaling
+    pub fn nonscaling(mut self) -> Self {
+        self.nonscaling = true;
+        self
+    }
+}
+
+impl Command for BfInsert {
+    type Response = Vec<bool>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("BF.INSERT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(cap) = self.capacity {
+            frames.push(Frame::BulkString(Some(Bytes::from("CAPACITY"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(cap.to_string()))));
+        }
+
+        if let Some(err) = self.error {
+            frames.push(Frame::BulkString(Some(Bytes::from("ERROR"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(err.to_string()))));
+        }
+
+        if let Some(exp) = self.expansion {
+            frames.push(Frame::BulkString(Some(Bytes::from("EXPANSION"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(exp.to_string()))));
+        }
+
+        if self.nocreate {
+            frames.push(Frame::BulkString(Some(Bytes::from("NOCREATE"))));
+        }
+
+        if self.nonscaling {
+            frames.push(Frame::BulkString(Some(Bytes::from("NONSCALING"))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from("ITEMS"))));
+
+        for item in &self.items {
+            frames.push(Frame::BulkString(Some(item.clone())));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut results = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => results.push(n != 0),
+                        Frame::Error(e) => {
+                            return Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e)));
+                        }
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(results)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BF.CARD - Get the cardinality (approximate count of items) in the filter
+///
+/// Returns an approximation of the number of unique items added to the filter.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::bloom::BfCard;
+///
+/// let cmd = BfCard::new("myfilter");
+/// // Response: i64 - approximate count of items
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfCard {
+    key: String,
+}
+
+impl BfCard {
+    /// Create a new BF.CARD command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for BfCard {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BF.CARD"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BF.SCANDUMP - Begin incremental save of the bloom filter
+///
+/// Returns an iterator (state) and data chunk. Used for migrating bloom filters.
+/// Call repeatedly with the returned iterator until it returns 0.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::bloom::BfScanDump;
+///
+/// let cmd = BfScanDump::new("myfilter", 0); // Start with iterator 0
+/// // Response: (next_iterator, data_chunk)
+/// // Keep calling with returned iterator until it's 0
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfScanDump {
+    key: String,
+    iterator: i64,
+}
+
+impl BfScanDump {
+    /// Create a new BF.SCANDUMP command
+    /// Start with iterator = 0, then use returned iterator for next call
+    pub fn new(key: impl Into<String>, iterator: i64) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+        }
+    }
+}
+
+/// Result from BF.SCANDUMP - (next_iterator, data)
+/// When next_iterator is 0, the dump is complete
+pub type BfScanDumpResult = (i64, Bytes);
+
+impl Command for BfScanDump {
+    type Response = BfScanDumpResult;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BF.SCANDUMP"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.iterator.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(mut items) if items.len() == 2 => {
+                let data = items.pop().unwrap();
+                let iter = items.pop().unwrap();
+
+                match (iter, data) {
+                    (Frame::Integer(i), Frame::BulkString(Some(d))) => Ok((i, d)),
+                    (Frame::Integer(i), Frame::BulkString(None)) => Ok((i, Bytes::new())),
+                    _ => Err(RedisError::UnexpectedResponse),
+                }
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BF.LOADCHUNK - Restore a filter chunk from BF.SCANDUMP
+///
+/// Used to restore a filter that was dumped with BF.SCANDUMP.
+/// Call this for each chunk returned by BF.SCANDUMP.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::bloom::BfLoadChunk;
+///
+/// let cmd = BfLoadChunk::new("myfilter", 1, b"chunk_data".to_vec());
+/// // Load each chunk with its iterator value
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfLoadChunk {
+    key: String,
+    iterator: i64,
+    data: Bytes,
+}
+
+impl BfLoadChunk {
+    /// Create a new BF.LOADCHUNK command
+    pub fn new(key: impl Into<String>, iterator: i64, data: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+            data: data.into(),
+        }
+    }
+}
+
+impl Command for BfLoadChunk {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BF.LOADCHUNK"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.iterator.to_string()))),
+            Frame::BulkString(Some(self.data.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BF.DEBUG - Get internal debug information
+///
+/// Returns debugging information about the bloom filter internals.
+/// Mainly useful for development and troubleshooting.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::bloom::BfDebug;
+///
+/// let cmd = BfDebug::new("myfilter");
+/// // Response: String with debug information
+/// ```
+#[derive(Debug, Clone)]
+pub struct BfDebug {
+    key: String,
+}
+
+impl BfDebug {
+    /// Create a new BF.DEBUG command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for BfDebug {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BF.DEBUG"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::SimpleString(data) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations
 use crate::cluster::read_preference::ReadOnly;
 
@@ -523,10 +859,30 @@ impl ReadOnly for BfInfo {
     }
 }
 
+impl ReadOnly for BfCard {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for BfScanDump {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for BfDebug {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 // Write commands
 impl ReadOnly for BfReserve {}
 impl ReadOnly for BfAdd {}
 impl ReadOnly for BfMadd {}
+impl ReadOnly for BfInsert {}
+impl ReadOnly for BfLoadChunk {}
 
 #[cfg(test)]
 mod tests {
@@ -703,5 +1059,150 @@ mod tests {
         assert_eq!(result.num_filters, 1);
         assert_eq!(result.num_items_inserted, 42);
         assert_eq!(result.expansion_rate, 2);
+    }
+
+    #[test]
+    fn test_bf_insert_frame() {
+        let cmd = BfInsert::new("myfilter", vec![Bytes::from("item1"), Bytes::from("item2")])
+            .capacity(10000)
+            .error(0.001)
+            .nocreate();
+
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BF.INSERT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myfilter"))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("CAPACITY")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("ERROR")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("NOCREATE")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("ITEMS")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bf_insert_response() {
+        let frame = Frame::Array(vec![Frame::Integer(1), Frame::Integer(0)]);
+        let result = BfInsert::parse_response(frame).unwrap();
+        assert_eq!(result, vec![true, false]);
+    }
+
+    #[test]
+    fn test_bf_card_frame() {
+        let cmd = BfCard::new("myfilter");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BF.CARD"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myfilter"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bf_card_response() {
+        let frame = Frame::Integer(42);
+        let result = BfCard::parse_response(frame).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_bf_scandump_frame() {
+        let cmd = BfScanDump::new("myfilter", 0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("BF.SCANDUMP")))
+                );
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myfilter"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bf_scandump_response() {
+        let frame = Frame::Array(vec![
+            Frame::Integer(5),
+            Frame::BulkString(Some(Bytes::from("chunk_data"))),
+        ]);
+        let result = BfScanDump::parse_response(frame).unwrap();
+        assert_eq!(result.0, 5);
+        assert_eq!(result.1, Bytes::from("chunk_data"));
+    }
+
+    #[test]
+    fn test_bf_scandump_response_complete() {
+        let frame = Frame::Array(vec![Frame::Integer(0), Frame::BulkString(None)]);
+        let result = BfScanDump::parse_response(frame).unwrap();
+        assert_eq!(result.0, 0);
+        assert_eq!(result.1, Bytes::new());
+    }
+
+    #[test]
+    fn test_bf_loadchunk_frame() {
+        let cmd = BfLoadChunk::new("myfilter", 1, b"chunk_data".to_vec());
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("BF.LOADCHUNK")))
+                );
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myfilter"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("1"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("chunk_data"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bf_loadchunk_response() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        let result = BfLoadChunk::parse_response(frame);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_bf_debug_frame() {
+        let cmd = BfDebug::new("myfilter");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BF.DEBUG"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myfilter"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bf_debug_response() {
+        let frame = Frame::BulkString(Some(Bytes::from("debug info here")));
+        let result = BfDebug::parse_response(frame).unwrap();
+        assert_eq!(result, "debug info here");
+    }
+
+    #[test]
+    fn test_bf_debug_response_simple_string() {
+        let frame = Frame::SimpleString(Bytes::from("debug info"));
+        let result = BfDebug::parse_response(frame).unwrap();
+        assert_eq!(result, "debug info");
     }
 }

@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 164 (158 core + 6 module)  
-**Coverage:** ~40% (164/400 core commands, 6 module commands behind feature flags)
+**Implemented:** 169 (158 core + 11 module)  
+**Coverage:** ~42% (164/400 core commands, 11 module commands behind feature flags)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -128,14 +128,19 @@
 - Brought sorted set commands from 17 to 24 (✅ COMPLETE)
 - Added server/admin commands: 0 to 6
 
-#### Module Support - RedisBloom (6 commands) 🌸
+#### Module Support - RedisBloom (11 commands) 🌸 ✅ COMPLETE
 - [x] **Feature-gated module pattern established**
 - [x] BF.RESERVE, BF.ADD, BF.MADD
 - [x] BF.EXISTS, BF.MEXISTS, BF.INFO
-- First module implementation with proper feature flags
+- [x] BF.INSERT (with builder pattern)
+- [x] BF.CARD (cardinality)
+- [x] BF.SCANDUMP, BF.LOADCHUNK (incremental save/restore)
+- [x] BF.DEBUG (debug information)
+- First complete module implementation with proper feature flags
 - Can be enabled with `features = ["bloom"]`
+- All 11 bloom filter commands implemented (100%)
 
-**Total coverage:** 135 → 164 commands (34% → 40%)
+**Total coverage:** 135 → 169 commands (34% → 42%)
 
 ### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
@@ -160,14 +165,16 @@
 - [ ] INFO
 - [ ] CONFIG GET, CONFIG SET
 - [ ] CLIENT LIST, CLIENT KILL, CLIENT SETNAME
-- [ ] DBSIZE
-- [ ] FLUSHDB, FLUSHALL
-- [ ] SAVE, BGSAVE, LASTSAVE
+- [x] DBSIZE
+- [x] FLUSHDB, FLUSHALL
+- [ ] SAVE, BGSAVE
+- [x] LASTSAVE
 - [ ] SLOWLOG GET, SLOWLOG LEN, SLOWLOG RESET
 - [ ] MEMORY STATS, MEMORY USAGE
+- [x] TIME
+- [x] RANDOMKEY
 
 ### Key Management (Additional - 10 commands)
-- [ ] RANDOMKEY
 - [ ] DUMP, RESTORE
 - [ ] MIGRATE
 - [ ] COPY
@@ -329,18 +336,18 @@
 ### RedisBloom (25+ commands)
 **Feature:** `bloom` - Enable with `features = ["bloom"]`
 
-#### Bloom Filter (6/11 commands) ✅ STARTED
+#### Bloom Filter (11/11 commands) ✅ COMPLETE
 - [x] BF.RESERVE - Create filter with custom parameters
 - [x] BF.ADD - Add single item
 - [x] BF.MADD - Add multiple items
 - [x] BF.EXISTS - Check single item
 - [x] BF.MEXISTS - Check multiple items
 - [x] BF.INFO - Get filter information
-- [ ] BF.INSERT - Add with options (NX, CAPACITY, ERROR)
-- [ ] BF.CARD - Get cardinality (number of items)
-- [ ] BF.SCANDUMP - Dump filter for migration
-- [ ] BF.LOADCHUNK - Load dumped data
-- [ ] BF.DEBUG - Debug information
+- [x] BF.INSERT - Add with options (CAPACITY, ERROR, NOCREATE, NONSCALING)
+- [x] BF.CARD - Get cardinality (number of items)
+- [x] BF.SCANDUMP - Dump filter for migration
+- [x] BF.LOADCHUNK - Load dumped data
+- [x] BF.DEBUG - Debug information
 
 #### Cuckoo Filter (0/14 commands)
 - [ ] CF.RESERVE, CF.ADD, CF.ADDNX, CF.INSERT, CF.INSERTNX

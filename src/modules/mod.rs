@@ -62,4 +62,7 @@ pub mod bloom;
 
 // Re-export module types for convenience
 #[cfg(feature = "bloom")]
-pub use bloom::{BfAdd, BfExists, BfInfo, BfInfoResult, BfMadd, BfMexists, BfReserve};
+pub use bloom::{
+    BfAdd, BfCard, BfDebug, BfExists, BfInfo, BfInfoResult, BfInsert, BfLoadChunk, BfMadd,
+    BfMexists, BfReserve, BfScanDump, BfScanDumpResult,
+};
