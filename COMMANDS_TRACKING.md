@@ -1,0 +1,388 @@
+# Redis Commands Implementation Tracking
+
+**Last Updated:** 2025-10-24  
+**Total Redis Commands:** ~565 (from COMMAND LIST)  
+**Implemented:** 120  
+**Coverage:** ~21%
+
+---
+
+## Implementation Status by Category
+
+### ✅ Fully Implemented Categories
+
+#### Strings (23 commands)
+- [x] GET, SET, DEL, MGET, MSET
+- [x] INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT
+- [x] APPEND, STRLEN, GETRANGE, SETRANGE
+- [x] GETEX, GETDEL
+- [x] PING, ECHO
+- [x] EXISTS, EXPIRE, TTL
+
+#### Hashes (12 commands)
+- [x] HGET, HSET, HDEL, HGETALL, HMGET
+- [x] HEXISTS, HLEN, HKEYS, HVALS
+- [x] HINCRBY, HINCRBYFLOAT, HSTRLEN
+
+#### Lists (16 commands)
+- [x] LPUSH, RPUSH, LPOP, RPOP, LRANGE
+- [x] LLEN, LINDEX, LSET, LINSERT
+- [x] LREM, LTRIM, LPOS
+- [x] BLPOP, BRPOP (blocking)
+
+#### Sets (17 commands)
+- [x] SADD, SREM, SMEMBERS, SISMEMBER, SCARD
+- [x] SINTER, SUNION, SDIFF
+- [x] SINTERSTORE, SUNIONSTORE, SDIFFSTORE
+- [x] SPOP, SRANDMEMBER, SMOVE
+- [x] SMISMEMBER, SINTERCARD
+- [x] SSCAN
+
+#### Sorted Sets (10 commands)
+- [x] ZADD, ZREM, ZCARD, ZSCORE
+- [x] ZRANGE, ZREVRANGE, ZRANK, ZREVRANK
+- [x] ZINCRBY
+- [x] ZSCAN
+
+#### Streams (8 commands)
+- [x] XADD, XREAD (with blocking), XLEN, XDEL
+- [x] XTRIM, XRANGE, XREVRANGE
+
+#### Pub/Sub (3 commands)
+- [x] PUBLISH, PUBSUB NUMSUB, PUBSUB NUMPAT
+
+#### Scripting (5 commands)
+- [x] EVAL, EVALSHA
+- [x] SCRIPT LOAD, SCRIPT EXISTS, SCRIPT FLUSH
+
+#### Scan (2 commands)
+- [x] SCAN, HSCAN
+- Note: SSCAN, ZSCAN in respective modules
+
+#### Connection (6 commands)
+- [x] AUTH, AUTH (ACL)
+- [x] READONLY, READWRITE
+- [x] SELECT, QUIT
+
+#### Sentinel (4 commands)
+- [x] SENTINEL GET-MASTER-ADDR-BY-NAME
+- [x] SENTINEL REPLICAS, SENTINEL SENTINELS
+- [x] ROLE
+
+#### HyperLogLog (3 commands) ✅ NEW
+- [x] PFADD, PFCOUNT, PFMERGE
+
+#### Bitmap (5 commands) ✅ NEW
+- [x] SETBIT, GETBIT, BITCOUNT
+- [x] BITOP, BITPOS
+
+#### Keys (9 commands) ✅ NEW (just committed)
+- [x] PERSIST, PEXPIRE, PTTL
+- [x] EXPIREAT, PEXPIREAT
+- [x] RENAME, RENAMENX
+- [x] TYPE, KEYS
+
+---
+
+## 🚧 In Progress
+
+### Geospatial (7 commands) - NEXT
+- [ ] GEOADD
+- [ ] GEODIST
+- [ ] GEOHASH
+- [ ] GEOPOS
+- [ ] GEORADIUS (deprecated but still used)
+- [ ] GEORADIUSBYMEMBER (deprecated but still used)
+- [ ] GEOSEARCH (modern replacement)
+- [ ] GEOSEARCHSTORE
+
+---
+
+## ⏳ High Priority (Production Use)
+
+### Transactions (5 commands)
+- [x] WATCH, UNWATCH (implemented)
+- [ ] MULTI, EXEC, DISCARD
+- Note: Need connection state management
+
+### Advanced Sorted Sets (8 commands)
+- [ ] ZPOPMIN, ZPOPMAX
+- [ ] BZPOPMIN, BZPOPMAX (blocking)
+- [ ] ZRANGEBYSCORE, ZREVRANGEBYSCORE
+- [ ] ZRANGEBYLEX, ZREVRANGEBYLEX
+- [ ] ZREMRANGEBYSCORE, ZREMRANGEBYLEX, ZREMRANGEBYRANK
+- [ ] ZCOUNT, ZLEXCOUNT
+- [ ] ZMSCORE, ZRANDMEMBER
+- [ ] ZUNION, ZINTER, ZDIFF (with stores)
+
+### Server/Admin (15+ commands)
+- [ ] INFO
+- [ ] CONFIG GET, CONFIG SET
+- [ ] CLIENT LIST, CLIENT KILL, CLIENT SETNAME
+- [ ] DBSIZE
+- [ ] FLUSHDB, FLUSHALL
+- [ ] SAVE, BGSAVE, LASTSAVE
+- [ ] SLOWLOG GET, SLOWLOG LEN, SLOWLOG RESET
+- [ ] MEMORY STATS, MEMORY USAGE
+
+### Key Management (Additional - 10 commands)
+- [ ] RANDOMKEY
+- [ ] DUMP, RESTORE
+- [ ] MIGRATE
+- [ ] COPY
+- [ ] MOVE
+- [ ] TOUCH
+- [ ] UNLINK (async DEL)
+- [ ] WAIT, WAITAOF
+- [ ] EXPIRETIME, PEXPIRETIME
+
+---
+
+## 🔮 Medium Priority
+
+### Advanced Strings (10 commands)
+- [ ] SETEX, PSETEX (can use SET with EX/PX)
+- [ ] SETNX (can use SET with NX)
+- [ ] MSETNX
+- [ ] GETSET (deprecated, use SET with GET)
+- [ ] LCS (longest common subsequence)
+- [ ] SUBSTR (deprecated, use GETRANGE)
+
+### Advanced Lists (6 commands)
+- [ ] LMPOP, BLMPOP (Redis 7.0+)
+- [ ] LMOVE, BLMOVE
+- [ ] RPOPLPUSH, BRPOPLPUSH (deprecated)
+- [ ] LPUSHX, RPUSHX
+
+### Advanced Hashes (8 commands - Redis 7.4+)
+- [ ] HEXPIRE, HPEXPIRE
+- [ ] HEXPIREAT, HPEXPIREAT
+- [ ] HEXPIRETIME, HPEXPIRETIME
+- [ ] HTTL, HPTTL
+- [ ] HPERSIST
+- [ ] HSETNX
+- [ ] HRANDFIELD
+
+### Pub/Sub Extended (8 commands)
+- [ ] SUBSCRIBE, UNSUBSCRIBE
+- [ ] PSUBSCRIBE, PUNSUBSCRIBE
+- [ ] SSUBSCRIBE, SUNSUBSCRIBE (sharded)
+- [ ] SPUBLISH (sharded)
+- [ ] PUBSUB CHANNELS, PUBSUB SHARDCHANNELS, PUBSUB SHARDNUMSUB
+
+### Streams Extended (12 commands)
+- [ ] XACK
+- [ ] XGROUP CREATE, XGROUP DESTROY, XGROUP SETID
+- [ ] XGROUP CREATECONSUMER, XGROUP DELCONSUMER
+- [ ] XCLAIM, XAUTOCLAIM
+- [ ] XPENDING
+- [ ] XINFO STREAM, XINFO GROUPS, XINFO CONSUMERS
+- [ ] XSETID
+
+### Cluster (20+ commands)
+- [ ] CLUSTER NODES, CLUSTER INFO
+- [ ] CLUSTER SLOTS (partially implemented)
+- [ ] CLUSTER MEET, CLUSTER FORGET
+- [ ] CLUSTER ADDSLOTS, CLUSTER DELSLOTS
+- [ ] CLUSTER SETSLOT
+- [ ] CLUSTER REPLICATE, CLUSTER FAILOVER
+- [ ] CLUSTER RESET
+- [ ] Many more cluster management commands
+
+### Scan Family (2 remaining)
+- [ ] ZSCAN (in sorted_sets module, check if implemented)
+- [ ] SSCAN (in sets module, check if implemented)
+
+---
+
+## 🔬 Low Priority (Specialized)
+
+### Bitfields (2 commands)
+- [ ] BITFIELD
+- [ ] BITFIELD_RO
+
+### ACL (11 commands)
+- [ ] ACL LIST, ACL USERS, ACL GETUSER
+- [ ] ACL SETUSER, ACL DELUSER
+- [ ] ACL CAT, ACL WHOAMI
+- [ ] ACL GENPASS
+- [ ] ACL LOG
+- [ ] ACL SAVE, ACL LOAD
+- [ ] ACL DRYRUN
+
+### Functions (9 commands - Redis 7.0+)
+- [ ] FUNCTION LOAD, FUNCTION DELETE
+- [ ] FUNCTION LIST, FUNCTION DUMP, FUNCTION RESTORE
+- [ ] FUNCTION FLUSH, FUNCTION KILL
+- [ ] FUNCTION STATS
+- [ ] FCALL, FCALL_RO
+- [ ] TFCALL, TFCALLASYNC (triggers)
+
+### Generic Utilities (10 commands)
+- [ ] TIME
+- [ ] HELLO
+- [ ] COMMAND (and subcommands)
+- [ ] LATENCY (and subcommands)
+- [ ] MEMORY (and subcommands)
+- [ ] MODULE (and subcommands)
+- [ ] OBJECT (and subcommands)
+- [ ] DEBUG (and subcommands)
+- [ ] MONITOR
+- [ ] RESET
+
+### Replication (6 commands)
+- [ ] REPLICAOF, SLAVEOF
+- [ ] ROLE (already implemented for Sentinel)
+- [ ] PSYNC, SYNC
+- [ ] REPLCONF
+- [ ] FAILOVER
+
+### Persistence (5 commands)
+- [ ] SAVE, BGSAVE, LASTSAVE
+- [ ] BGREWRITEAOF
+- [ ] SHUTDOWN
+
+### Other (5 commands)
+- [ ] ASKING (cluster redirects)
+- [ ] READONLY, READWRITE (already implemented)
+- [ ] RESTORE-ASKING
+- [ ] SWAPDB
+- [ ] LOLWUT
+
+---
+
+## 🚫 Not Implementing (Modules)
+
+### RedisJSON (30+ commands)
+- JSON.SET, JSON.GET, JSON.DEL, JSON.MGET, JSON.MSET
+- JSON.TYPE, JSON.NUMINCRBY, JSON.NUMMULTBY
+- JSON.ARRAPPEND, JSON.ARRINDEX, JSON.ARRINSERT
+- JSON.ARRLEN, JSON.ARRPOP, JSON.ARRTRIM
+- JSON.OBJKEYS, JSON.OBJLEN
+- JSON.STRAPPEND, JSON.STRLEN
+- JSON.TOGGLE, JSON.CLEAR, JSON.DEBUG
+- JSON.FORGET, JSON.RESP, JSON.MERGE, JSON.NUMPOWBY
+- **Status:** Feature-gated module (issue #11)
+
+### RediSearch (40+ commands)
+- FT.CREATE, FT.SEARCH, FT.AGGREGATE
+- FT.INFO, FT.EXPLAIN, FT.PROFILE
+- FT.ALTER, FT.DROPINDEX, FT.DROP
+- FT.ALIASADD, FT.ALIASUPDATE, FT.ALIASDEL
+- FT.SUGADD, FT.SUGGET, FT.SUGDEL, FT.SUGLEN
+- FT.SYNUPDATE, FT.SYNDUMP, FT.SYNADD
+- FT.DICTADD, FT.DICTDEL, FT.DICTDUMP
+- FT.CONFIG, FT.SPELLCHECK, FT.TAGVALS
+- Many FT.DEBUG subcommands
+- **Status:** Feature-gated module (issue #12)
+
+### RedisTimeSeries (15+ commands)
+- TS.CREATE, TS.ADD, TS.MADD, TS.INCRBY, TS.DECRBY
+- TS.RANGE, TS.REVRANGE, TS.MRANGE, TS.MREVRANGE
+- TS.GET, TS.MGET, TS.INFO
+- TS.QUERYINDEX, TS.DEL, TS.ALTER
+- TS.CREATERULE, TS.DELETERULE
+- TIMESERIES.* cluster commands
+- **Status:** Feature-gated module (issue #14)
+
+### RedisBloom (25+ commands)
+- BF.RESERVE, BF.ADD, BF.MADD, BF.INSERT
+- BF.EXISTS, BF.MEXISTS, BF.CARD, BF.INFO
+- BF.SCANDUMP, BF.LOADCHUNK, BF.DEBUG
+- CF.RESERVE, CF.ADD, CF.ADDNX, CF.INSERT, CF.INSERTNX
+- CF.EXISTS, CF.MEXISTS, CF.DEL, CF.COUNT, CF.INFO
+- CF.SCANDUMP, CF.LOADCHUNK, CF.DEBUG, CF.COMPACT
+- CMS.INITBYDIM, CMS.INITBYPROB, CMS.INCRBY
+- CMS.QUERY, CMS.MERGE, CMS.INFO
+- TOPK.RESERVE, TOPK.ADD, TOPK.INCRBY
+- TOPK.QUERY, TOPK.COUNT, TOPK.LIST, TOPK.INFO
+- TDIGEST.* commands (many)
+- **Status:** Feature-gated module (issue #13)
+
+### RedisGears (10+ commands)
+- REDISGEARS_2.* commands
+- _RG_INTERNALS.* commands
+- **Status:** Not planning to implement
+
+---
+
+## 📊 Statistics
+
+### By Implementation Status
+- ✅ Implemented: 120 commands
+- 🚧 In Progress: 7 commands (geospatial)
+- ⏳ High Priority: ~68 commands
+- 🔮 Medium Priority: ~80 commands
+- 🔬 Low Priority: ~60 commands
+- 🚫 Modules: ~150+ commands (separate feature gates)
+- **Total Core Redis:** ~400 commands (excluding modules)
+- **Coverage:** 120/400 = **30% of core commands**
+
+### By Complexity Level
+- **Level 1** (Simple): 14 implemented / ~30 total
+- **Level 2** (Multi-value): 17 implemented / ~50 total
+- **Level 3** (Complex structures): 4 implemented / ~20 total
+- **Level 4** (Stateful/blocking): 6 implemented / ~30 total
+- **Level 5** (Cluster/scripts): 7 implemented / ~40 total
+
+---
+
+## 🎯 Next Steps
+
+### Immediate (Today)
+1. ✅ Complete key management commands (9 commands) - DONE
+2. 🚧 Implement geospatial commands (7-8 commands) - IN PROGRESS
+3. Target: 127 commands by end of today
+
+### This Week
+1. Advanced sorted sets (8-10 most common commands)
+2. Transaction support (MULTI/EXEC/DISCARD)
+3. Server commands (INFO, DBSIZE, CONFIG basics)
+4. Target: 150+ commands
+
+### Next Week
+1. Remaining sorted set commands
+2. Extended streams support (XGROUP, XACK)
+3. Advanced list commands
+4. Target: 180+ commands
+
+### Goal: v0.1.0 Release
+- **Target:** 200+ core commands (50% coverage)
+- **Must have:**
+  - All basic data types complete
+  - Transaction support
+  - Basic server/admin commands
+  - Production-ready features (INFO, CONFIG, CLIENT)
+- **Nice to have:**
+  - Extended pub/sub
+  - Advanced streams
+  - Cluster commands beyond basics
+
+---
+
+## 📝 Notes
+
+### Command Naming Conventions
+- Command structs use PascalCase: `Get`, `HSet`, `PfAdd`
+- Redis commands use uppercase: `GET`, `HSET`, `PFADD`
+- Module re-exports use command names directly
+
+### Testing Standards
+- Every command must have frame generation test
+- Every command must have response parsing test
+- Complex commands need multiple test cases
+- Current test count: 122 tests
+
+### Documentation Standards
+- Every command struct has doc comment
+- Examples in doc comments where helpful
+- Return value semantics documented
+- Deprecation warnings where applicable
+
+### GitHub Issue Tracking
+- Issue #2: Commands Coverage (umbrella)
+- Issue #4: Key Commands - COMPLETED
+- Issue #5: Server Commands
+- Issue #6: HyperLogLog Commands - COMPLETED
+- Issue #7: Geospatial Commands - IN PROGRESS
+- Issue #11-14: Module commands (future)
