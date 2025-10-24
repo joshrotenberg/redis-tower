@@ -2,9 +2,9 @@
 
 use crate::client::RedisConnection;
 use crate::cluster::commands::ClusterSlots;
-use crate::cluster::pool::ConnectionPool;
 use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
+use crate::pool::{ConnectionPool, PoolConfig};
 use crate::types::RedisError;
 use std::collections::HashMap;
 use std::future::Future;
@@ -49,27 +49,42 @@ pub struct ClusterClient {
     slot_map: Arc<RwLock<SlotMap>>,
     /// Initial seed nodes for bootstrapping
     seed_nodes: Vec<String>,
-    /// Maximum connections per node
-    max_connections_per_node: usize,
+    /// Pool configuration for each node
+    pool_config: Arc<PoolConfig>,
 }
 
 impl ClusterClient {
     /// Create a new cluster client with default settings.
     ///
     /// Connects to seed nodes and discovers the full cluster topology.
-    /// Uses a default of 3 connections per node.
+    /// Uses default pool configuration (10 connections per node, health checks enabled).
     pub async fn new(seed_nodes: Vec<impl Into<String>>) -> Result<Self, RedisError> {
-        Self::with_config(seed_nodes, 3).await
+        Self::with_pool_config(seed_nodes, PoolConfig::default()).await
     }
 
-    /// Create a new cluster client with custom configuration.
+    /// Create a new cluster client with legacy config (simple max_size).
     ///
     /// # Arguments
     /// * `seed_nodes` - Initial cluster nodes to connect to
     /// * `max_connections_per_node` - Maximum connections to maintain per node
+    ///
+    /// # Deprecated
+    /// Use `with_pool_config()` for more control over pool behavior.
     pub async fn with_config(
         seed_nodes: Vec<impl Into<String>>,
         max_connections_per_node: usize,
+    ) -> Result<Self, RedisError> {
+        Self::with_pool_config(seed_nodes, PoolConfig::new(max_connections_per_node)).await
+    }
+
+    /// Create a new cluster client with custom pool configuration.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `pool_config` - Connection pool configuration (max size, health checks, timeouts, etc.)
+    pub async fn with_pool_config(
+        seed_nodes: Vec<impl Into<String>>,
+        pool_config: PoolConfig,
     ) -> Result<Self, RedisError> {
         let seed_nodes: Vec<String> = seed_nodes.into_iter().map(Into::into).collect();
 
@@ -79,9 +94,9 @@ impl ClusterClient {
             ));
         }
 
-        if max_connections_per_node == 0 {
+        if pool_config.max_size == 0 {
             return Err(RedisError::Protocol(
-                "max_connections_per_node must be at least 1".to_string(),
+                "pool_config.max_size must be at least 1".to_string(),
             ));
         }
 
@@ -89,7 +104,7 @@ impl ClusterClient {
             pools: Arc::new(RwLock::new(HashMap::new())),
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             seed_nodes,
-            max_connections_per_node,
+            pool_config: Arc::new(pool_config),
         };
 
         // Discover cluster topology
@@ -263,8 +278,8 @@ impl ClusterClient {
             }
         }
 
-        // Create new pool
-        let pool = ConnectionPool::new(addr.to_string(), self.max_connections_per_node);
+        // Create new pool with the cluster's pool configuration
+        let pool = ConnectionPool::with_config(addr.to_string(), (*self.pool_config).clone());
         let conn = pool.get().await?;
 
         // Store the pool
@@ -293,7 +308,12 @@ impl ClusterClient {
 
     /// Get the maximum connections per node setting.
     pub fn max_connections_per_node(&self) -> usize {
-        self.max_connections_per_node
+        self.pool_config.max_size
+    }
+
+    /// Get the pool configuration.
+    pub fn pool_config(&self) -> &PoolConfig {
+        &self.pool_config
     }
 }
 

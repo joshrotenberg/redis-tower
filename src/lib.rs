@@ -9,6 +9,7 @@ pub mod client;
 pub mod cluster;
 pub mod codec;
 pub mod commands;
+pub mod pool;
 pub mod pubsub;
 pub mod transaction;
 pub mod types;
