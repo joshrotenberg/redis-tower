@@ -175,6 +175,85 @@ impl Command for Quit {
     }
 }
 
+/// CLIENT GETNAME command - Get the current connection name
+///
+/// Returns the name of the current connection as set by CLIENT SETNAME,
+/// or None if no name is set.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientGetName;
+///
+/// let cmd = ClientGetName;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientGetName;
+
+impl Command for ClientGetName {
+    type Response = Option<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("GETNAME"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(String::from_utf8_lossy(&data).into_owned())),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT SETNAME command - Set the current connection name
+///
+/// Assigns a name to the current connection. The name can be displayed
+/// in CLIENT LIST output and is useful for debugging and monitoring.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientSetName;
+///
+/// let cmd = ClientSetName::new("my-app-connection");
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientSetName {
+    name: String,
+}
+
+impl ClientSetName {
+    /// Create a new CLIENT SETNAME command
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Command for ClientSetName {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("SETNAME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.name.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

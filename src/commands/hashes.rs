@@ -84,6 +84,148 @@ impl Command for HSet {
     }
 }
 
+/// HSETNX command - Set hash field only if it doesn't exist
+///
+/// Sets field in the hash to value, only if field does not yet exist.
+/// Returns true if field was set, false if it already existed.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HSetNx;
+///
+/// let cmd = HSetNx::new("myhash", "field1", b"value1");
+/// ```
+#[derive(Debug, Clone)]
+pub struct HSetNx {
+    key: String,
+    field: String,
+    value: Bytes,
+}
+
+impl HSetNx {
+    /// Create a new HSETNX command
+    pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for HSetNx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("HSETNX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.field.as_bytes()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HRANDFIELD command - Get random field(s) from a hash
+///
+/// Returns one or more random fields from the hash.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HRandField;
+///
+/// // Get one random field
+/// let cmd = HRandField::new("myhash");
+///
+/// // Get 3 random fields
+/// let cmd = HRandField::new("myhash").count(3);
+///
+/// // Get 3 random fields with values
+/// let cmd = HRandField::new("myhash").count(3).with_values();
+/// ```
+#[derive(Debug, Clone)]
+pub struct HRandField {
+    key: String,
+    count: Option<i64>,
+    with_values: bool,
+}
+
+impl HRandField {
+    /// Create a new HRANDFIELD command (returns single field)
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+            with_values: false,
+        }
+    }
+
+    /// Specify number of fields to return
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Return fields with their values
+    pub fn with_values(mut self) -> Self {
+        self.with_values = true;
+        self
+    }
+}
+
+impl Command for HRandField {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HRANDFIELD"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        if self.with_values {
+            frames.push(Frame::BulkString(Some(Bytes::from("WITHVALUES"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => {
+                // Single field without count
+                Ok(vec![String::from_utf8_lossy(&data).into_owned()])
+            }
+            Frame::Array(items) => {
+                let mut fields = Vec::new();
+                for item in items {
+                    if let Frame::BulkString(Some(data)) = item {
+                        fields.push(String::from_utf8_lossy(&data).into_owned());
+                    }
+                }
+                Ok(fields)
+            }
+            Frame::Null => Ok(vec![]),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::read_preference::ReadOnly;
 
@@ -135,11 +277,18 @@ impl ReadOnly for HGetAll {
     }
 }
 
+impl ReadOnly for HRandField {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
 // Write commands - explicitly implement with default (false) for clarity
 impl ReadOnly for HSet {}
 impl ReadOnly for HDel {}
 impl ReadOnly for HIncrBy {}
 impl ReadOnly for HIncrByFloat {}
+impl ReadOnly for HSetNx {}
 
 /// HEXISTS command - check if field exists
 #[derive(Debug, Clone)]

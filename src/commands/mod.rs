@@ -32,10 +32,13 @@ pub mod streams;
 pub mod strings;
 
 pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
-pub use connection::{Auth, AuthAcl, Quit, ReadOnly, ReadWrite, Select};
+pub use connection::{
+    Auth, AuthAcl, ClientGetName, ClientSetName, Quit, ReadOnly, ReadWrite, Select,
+};
 pub use geo::{GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoUnit};
 pub use hashes::{
-    HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
+    HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HRandField, HSet,
+    HSetNx, HStrLen, HVals,
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{
@@ -48,7 +51,7 @@ pub use lists::{
 };
 pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
 pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
-pub use server::{DbSize, FlushAll, FlushDb, LastSave, RandomKey, Time};
+pub use server::{BgSave, DbSize, FlushAll, FlushDb, Info, LastSave, RandomKey, Save, Time};
 pub use sets::{
     SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore, Sadd,
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,

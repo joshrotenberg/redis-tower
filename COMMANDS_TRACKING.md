@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 178 (167 core + 11 module)  
-**Coverage:** ~44% (167/400 core commands, 11 module commands behind feature flags)
+**Implemented:** 185 (174 core + 11 module)  
+**Coverage:** ~46% (174/400 core commands, 11 module commands behind feature flags)
 **Deprecated Commands:** 3 (available with `deprecated` feature)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
@@ -26,10 +26,12 @@
 - [x] PING, ECHO
 - [x] EXISTS, EXPIRE, TTL
 
-#### Hashes (12 commands)
+#### Hashes (14 commands) ✅ EXPANDED
 - [x] HGET, HSET, HDEL, HGETALL, HMGET
 - [x] HEXISTS, HLEN, HKEYS, HVALS
 - [x] HINCRBY, HINCRBYFLOAT, HSTRLEN
+- [x] HSETNX (set if not exists)
+- [x] HRANDFIELD (get random field)
 
 #### Lists (22 commands) ✅ EXPANDED
 - [x] LPUSH, RPUSH, LPOP, RPOP, LRANGE
@@ -76,10 +78,11 @@
 - [x] SCAN, HSCAN
 - Note: SSCAN, ZSCAN in respective modules
 
-#### Connection (6 commands)
+#### Connection (8 commands) ✅ EXPANDED
 - [x] AUTH, AUTH (ACL)
 - [x] READONLY, READWRITE
 - [x] SELECT, QUIT
+- [x] CLIENT GETNAME, CLIENT SETNAME
 
 #### Sentinel (4 commands)
 - [x] SENTINEL GET-MASTER-ADDR-BY-NAME
@@ -111,12 +114,14 @@
 - [x] GEOPOS (get coordinates)
 - [x] GEOSEARCH (modern radius/box queries with options)
 
-#### Server/Admin (6 commands) ✅ COMPLETED
+#### Server/Admin (9 commands) ✅ EXPANDED
 - [x] DBSIZE (count keys in database)
 - [x] FLUSHDB, FLUSHALL (delete all keys - with ASYNC option)
 - [x] RANDOMKEY (get random key)
 - [x] TIME (server time as seconds + microseconds)
 - [x] LASTSAVE (timestamp of last save)
+- [x] SAVE, BGSAVE (persistence)
+- [x] INFO (server information)
 
 ---
 
@@ -146,7 +151,7 @@
 - Can be enabled with `features = ["bloom"]`
 - All 11 bloom filter commands implemented (100%)
 
-**Total coverage:** 135 → 178 commands (34% → 44%)
+**Total coverage:** 135 → 185 commands (34% → 46%)
 
 #### Deprecated Commands (3 commands) - Feature-Gated 🔒
 - [x] GETSET (use SET with GET option)

@@ -312,6 +312,157 @@ impl Command for LastSave {
     }
 }
 
+/// SAVE command - Synchronously save the dataset to disk
+///
+/// Performs a synchronous save of the dataset, creating a snapshot.
+/// This blocks the server until the save is complete.
+///
+/// **Warning**: SAVE is a blocking operation. Use BGSAVE in production
+/// to perform saves in the background.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Save;
+///
+/// let cmd = Save;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Save;
+
+impl Command for Save {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("SAVE")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BGSAVE command - Asynchronously save the dataset to disk
+///
+/// Creates a background save operation. Redis forks a child process
+/// that writes the dataset to disk while the parent continues serving requests.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::BgSave;
+///
+/// let cmd = BgSave;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct BgSave;
+
+impl Command for BgSave {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("BGSAVE")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// INFO command - Get information and statistics about the server
+///
+/// Returns information and statistics about the Redis server in a
+/// format that is both human-readable and easily parsable by computers.
+///
+/// You can optionally specify a section to limit the output:
+/// - server, clients, memory, persistence, stats, replication,
+///   cpu, commandstats, cluster, keyspace, modules, errorstats
+/// - all: Return all sections
+/// - default: Return default sections
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Info;
+///
+/// // Get all info
+/// let cmd = Info::all();
+///
+/// // Get specific section
+/// let cmd = Info::section("memory");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Info {
+    section: Option<String>,
+}
+
+impl Info {
+    /// Get all server information
+    pub fn all() -> Self {
+        Self {
+            section: Some("all".to_string()),
+        }
+    }
+
+    /// Get default server information
+    pub fn default_info() -> Self {
+        Self {
+            section: Some("default".to_string()),
+        }
+    }
+
+    /// Get specific section of server information
+    pub fn section(section: impl Into<String>) -> Self {
+        Self {
+            section: Some(section.into()),
+        }
+    }
+
+    /// Get all information with no section filter
+    pub fn new() -> Self {
+        Self { section: None }
+    }
+}
+
+impl Default for Info {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Info {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![Frame::BulkString(Some(Bytes::from("INFO")))];
+
+        if let Some(section) = &self.section {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                section.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            Frame::SimpleString(data) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations
 use crate::read_preference::ReadOnly;
 
