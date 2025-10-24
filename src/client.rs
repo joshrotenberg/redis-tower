@@ -124,14 +124,13 @@ impl RedisClient {
 /// ```no_run
 /// use redis_tower::client::RedisConnection;
 /// use redis_tower::commands::Get;
-/// use tower::{Service, ServiceExt};
-/// use std::time::Duration;
+/// use tower::Service;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 ///
 /// // Use as a Tower service
-/// let response = conn.ready().await?.call(Get::new("mykey")).await?;
+/// let response = Service::call(&mut conn, Get::new("mykey")).await?;
 /// # Ok(())
 /// # }
 /// ```
