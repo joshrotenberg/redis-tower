@@ -12,6 +12,7 @@ pub mod commands;
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
+pub mod sentinel;
 pub mod transaction;
 pub mod types;
 
