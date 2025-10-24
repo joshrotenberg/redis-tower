@@ -44,8 +44,9 @@ pub use hashes::{
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{
-    Copy, Dump, ExpireAt, ExpireTime, Keys, Move, PExpire, PExpireAt, PExpireTime, PTtl, Persist,
-    Rename, RenameNx, Restore, Touch, Type, Unlink,
+    Copy, Dump, ExpireAt, ExpireTime, Keys, Move, ObjectEncoding, ObjectFreq, ObjectIdleTime,
+    ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename, RenameNx, Restore,
+    Touch, Type, Unlink,
 };
 pub use lists::{
     BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,

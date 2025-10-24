@@ -1357,4 +1357,164 @@ mod tests {
         let timestamp = PExpireTime::parse_response(frame).unwrap();
         assert_eq!(timestamp, 1735689600000);
     }
+
+    #[test]
+    fn test_object_refcount_frame() {
+        let cmd = ObjectRefCount::new("mykey");
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3); // OBJECT REFCOUNT key
+            }
+            _ => panic!("Expected array frame"),
+        }
+    }
+
+    #[test]
+    fn test_object_encoding_frame() {
+        let cmd = ObjectEncoding::new("mykey");
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3); // OBJECT ENCODING key
+            }
+            _ => panic!("Expected array frame"),
+        }
+    }
+}
+
+/// OBJECT REFCOUNT - get object reference count
+#[derive(Debug, Clone)]
+pub struct ObjectRefCount {
+    pub(crate) key: String,
+}
+
+impl ObjectRefCount {
+    /// Create a new OBJECT REFCOUNT command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectRefCount {
+    type Response = Option<i64>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("OBJECT"))),
+            Frame::BulkString(Some(Bytes::from("REFCOUNT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(Some(n)),
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// OBJECT ENCODING - get object encoding
+#[derive(Debug, Clone)]
+pub struct ObjectEncoding {
+    pub(crate) key: String,
+}
+
+impl ObjectEncoding {
+    /// Create a new OBJECT ENCODING command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectEncoding {
+    type Response = Option<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("OBJECT"))),
+            Frame::BulkString(Some(Bytes::from("ENCODING"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(String::from_utf8_lossy(&data).to_string())),
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// OBJECT IDLETIME - get object idle time in seconds
+#[derive(Debug, Clone)]
+pub struct ObjectIdleTime {
+    pub(crate) key: String,
+}
+
+impl ObjectIdleTime {
+    /// Create a new OBJECT IDLETIME command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectIdleTime {
+    type Response = Option<i64>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("OBJECT"))),
+            Frame::BulkString(Some(Bytes::from("IDLETIME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(Some(n)),
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// OBJECT FREQ - get object access frequency
+#[derive(Debug, Clone)]
+pub struct ObjectFreq {
+    pub(crate) key: String,
+}
+
+impl ObjectFreq {
+    /// Create a new OBJECT FREQ command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectFreq {
+    type Response = Option<i64>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("OBJECT"))),
+            Frame::BulkString(Some(Bytes::from("FREQ"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(Some(n)),
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
 }

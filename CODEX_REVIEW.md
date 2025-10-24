@@ -1,0 +1,13 @@
+# redis-tower Review
+
+## Critical Findings
+1. Build configuration targets a non-existent toolchain. `Cargo.toml:4-14` pins `edition = "2024"` and `rust-version = "1.87"`, but Rust 1.87/edition 2024 are not available yet. Cargo will refuse to compile this crate on current stable toolchains, and features like `usize::is_multiple_of` (used in the pool) are also still unstable. Align the edition/MSRV with a released compiler (e.g., 2021/1.81 today) and gate newer APIs behind appropriate feature flags.
+2. RESP3 codec fabricates data for unsupported frames. `src/codec.rs:112` maps every unhandled RESP3 variant (BigNumber, Verbatim String, Attribute, etc.) to a hard-coded `SimpleString("OK")`. Any command that returns those types will appear to succeed with incorrect data, leading to hard-to-debug corruption. Either implement the missing variants or return a descriptive error so callers can react.
+3. LCS IDX responses are discarded. `src/commands/strings.rs:1282-1289` returns the literal bytes `"IDX_RESULT"` whenever Redis sends the structured IDX array. Consumers calling `.idx()`/`.withmatchlen()` lose the actual match data. Parse the nested structure into a dedicated response type (or at least bubble the raw frames) instead of dropping it.
+4. Cluster client rejects keyless commands. `src/cluster/client.rs:165-168` treats `extract_key()` returning `None` as an error. Commands like `PING`, `TIME`, `SCRIPT FLUSH`, etc. therefore fail with `Protocol("Command has no key for routing")`, even though Redis Cluster allows them (usually routed to an arbitrary node). Provide a fallback node selection for keyless commands.
+5. RESP3 map decoding can panic on valid payloads. `src/types/value.rs:175-204` stores map keys in a `HashMap<RedisValue, _>` but the `Hash` impl panics for arrays, sets, doubles, or nested maps—the very types RESP3 allows as keys. Receiving such payloads will bring down the process. Either avoid using them as `HashMap` keys (e.g., keep maps as ordered slices) or give those variants a safe hash/ordering implementation.
+
+## Additional Observations
+- `src/types/response.rs:5` defines an empty `RedisResponse`; callers currently have no abstraction beyond raw frames. Either flesh this out or drop the type to avoid API confusion.
+- The RESP decoder clones the full `BytesMut` buffer on every frame (`src/codec.rs:197-209`), which is costly under load. Consider using `BytesMut::freeze()`/`split_to()` to avoid O(n) cloning per decode.
+- `resp-parser` is referenced via a relative path dependency in `Cargo.toml:46`. Publishing to crates.io will fail unless the parser is uploaded separately or switched to a versioned dependency.
