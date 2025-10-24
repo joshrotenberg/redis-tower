@@ -335,6 +335,45 @@ impl Command for BLPop {
     }
 }
 
+// Read-only trait implementations for cluster read-from-replica support
+use crate::cluster::read_preference::ReadOnly;
+
+impl ReadOnly for LRange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for LLen {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for LIndex {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for LPos {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - explicitly implement with default (false) for clarity
+impl ReadOnly for LPush {}
+impl ReadOnly for RPush {}
+impl ReadOnly for LPop {}
+impl ReadOnly for RPop {}
+impl ReadOnly for BLPop {}
+impl ReadOnly for BRPop {}
+impl ReadOnly for LSet {}
+impl ReadOnly for LInsert {}
+impl ReadOnly for LRem {}
+impl ReadOnly for LTrim {}
+
 /// LLEN command - get list length
 #[derive(Debug, Clone)]
 pub struct LLen {

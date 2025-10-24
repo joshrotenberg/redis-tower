@@ -734,6 +734,56 @@ impl Command for Zscan {
     }
 }
 
+// Read-only trait implementations for cluster read-from-replica support
+use crate::cluster::read_preference::ReadOnly;
+
+impl ReadOnly for Zcard {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zscore {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zrange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zrevrange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zrank {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zrevrank {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Zscan {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - explicitly implement with default (false) for clarity
+impl ReadOnly for Zadd {}
+impl ReadOnly for Zrem {}
+impl ReadOnly for Zincrby {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

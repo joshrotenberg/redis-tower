@@ -951,3 +951,74 @@ impl Command for MGet {
         }
     }
 }
+
+// Read-only trait implementations for cluster read-from-replica support
+use crate::cluster::read_preference::ReadOnly;
+
+impl ReadOnly for Get {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for MGet {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for GetRange {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for GetEx {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for StrLen {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Exists {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Ttl {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Ping {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+impl ReadOnly for Echo {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+// Write commands - explicitly implement with default (false) for clarity
+impl ReadOnly for Set {}
+impl ReadOnly for Del {}
+impl ReadOnly for Incr {}
+impl ReadOnly for Decr {}
+impl ReadOnly for IncrBy {}
+impl ReadOnly for DecrBy {}
+impl ReadOnly for IncrByFloat {}
+impl ReadOnly for Append {}
+impl ReadOnly for SetRange {}
+impl ReadOnly for GetDel {}
+impl ReadOnly for Mset {}
+impl ReadOnly for Expire {}

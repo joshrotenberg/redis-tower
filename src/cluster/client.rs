@@ -2,6 +2,7 @@
 
 use crate::client::RedisConnection;
 use crate::cluster::commands::ClusterSlots;
+use crate::cluster::read_preference::ReadPreference;
 use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
 use crate::pool::{ConnectionPool, PoolConfig};
@@ -51,6 +52,8 @@ pub struct ClusterClient {
     seed_nodes: Vec<String>,
     /// Pool configuration for each node
     pool_config: Arc<PoolConfig>,
+    /// Read preference for routing
+    read_preference: ReadPreference,
 }
 
 impl ClusterClient {
@@ -86,6 +89,20 @@ impl ClusterClient {
         seed_nodes: Vec<impl Into<String>>,
         pool_config: PoolConfig,
     ) -> Result<Self, RedisError> {
+        Self::with_full_config(seed_nodes, pool_config, ReadPreference::default()).await
+    }
+
+    /// Create a new cluster client with full configuration including read preference.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `pool_config` - Connection pool configuration
+    /// * `read_preference` - Read preference (Master, Replica, PreferReplica)
+    pub async fn with_full_config(
+        seed_nodes: Vec<impl Into<String>>,
+        pool_config: PoolConfig,
+        read_preference: ReadPreference,
+    ) -> Result<Self, RedisError> {
         let seed_nodes: Vec<String> = seed_nodes.into_iter().map(Into::into).collect();
 
         if seed_nodes.is_empty() {
@@ -105,6 +122,7 @@ impl ClusterClient {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             seed_nodes,
             pool_config: Arc::new(pool_config),
+            read_preference,
         };
 
         // Discover cluster topology
@@ -137,9 +155,10 @@ impl ClusterClient {
     ///
     /// Automatically routes to the correct node based on the key's hash slot.
     /// Handles MOVED and ASK redirects transparently.
+    /// Routes read-only commands to replicas based on read preference.
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
-        Cmd: Command + Clone + KeyExtractor,
+        Cmd: Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly,
     {
         const MAX_REDIRECTS: usize = 16;
 
@@ -150,16 +169,19 @@ impl ClusterClient {
         let slot = slot_for_key(key.as_bytes());
         let mut current_slot = slot;
         let mut redirects = 0;
+        let is_read_only = command.is_read_only();
 
         loop {
             if redirects >= MAX_REDIRECTS {
                 return Err(RedisError::Protocol("Too many redirects".to_string()));
             }
 
-            // Get the node for this slot
+            // Get the node for this slot based on read preference
             let node_addr = {
                 let slot_map = self.slot_map.read().await;
-                slot_map.get_node(current_slot).map(|s| s.to_string())
+                slot_map
+                    .get_assignment(current_slot)
+                    .map(|assignment| self.select_node(assignment, is_read_only))
             };
 
             if let Some(addr) = node_addr {
@@ -319,6 +341,48 @@ impl ClusterClient {
     pub fn pool_config(&self) -> &PoolConfig {
         &self.pool_config
     }
+
+    /// Get the read preference.
+    pub fn read_preference(&self) -> ReadPreference {
+        self.read_preference
+    }
+
+    /// Select a node address based on slot assignment and read preference
+    ///
+    /// Returns the appropriate node address based on:
+    /// - Whether the command is read-only
+    /// - The configured read preference
+    /// - Availability of replicas
+    fn select_node(
+        &self,
+        assignment: &crate::cluster::slots::SlotAssignment,
+        is_read_only: bool,
+    ) -> String {
+        // Always use master for write commands
+        if !is_read_only {
+            return assignment.master.clone();
+        }
+
+        match self.read_preference {
+            ReadPreference::Master => assignment.master.clone(),
+            ReadPreference::Replica => {
+                // Use replica if available, otherwise master
+                assignment
+                    .replicas
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| assignment.master.clone())
+            }
+            ReadPreference::PreferReplica => {
+                // Prefer replica, fall back to master
+                assignment
+                    .replicas
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| assignment.master.clone())
+            }
+        }
+    }
 }
 
 /// Trait for extracting the routing key from a command.
@@ -355,7 +419,8 @@ pub trait KeyExtractor {
 /// ```
 impl<Cmd> Service<Cmd> for ClusterClient
 where
-    Cmd: Command + Clone + KeyExtractor + Send + 'static,
+    Cmd:
+        Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly + Send + 'static,
     Cmd::Response: Send + 'static,
 {
     type Response = Cmd::Response;
