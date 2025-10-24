@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 145  
-**Coverage:** ~36% (145/400 core commands, excluding modules)
+**Implemented:** 151 (145 core + 6 module)  
+**Coverage:** ~38% (151/400 core commands, 6 module commands behind feature flags)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -106,12 +106,22 @@
 
 ## ✅ Recently Completed
 
-### Today's Session (2025-10-24) - 10 Commands Added! 🎉
+### Today's Session (2025-10-24) - 16 Commands Added! 🎉
+
+#### Core Commands (10 commands)
 - [x] **Advanced Strings (4):** SETEX, PSETEX, SETNX, MSETNX
 - [x] **Advanced Lists (6):** LPUSHX, RPUSHX, LMOVE, BLMOVE, LMPOP, BLMPOP
 - Brought string commands from 23 to 27
 - Brought list commands from 16 to 22
-- Total coverage: 135 → 145 commands (34% → 36%)
+
+#### Module Support - RedisBloom (6 commands) 🌸
+- [x] **Feature-gated module pattern established**
+- [x] BF.RESERVE, BF.ADD, BF.MADD
+- [x] BF.EXISTS, BF.MEXISTS, BF.INFO
+- First module implementation with proper feature flags
+- Can be enabled with `features = ["bloom"]`
+
+**Total coverage:** 135 → 151 commands (34% → 38%)
 
 ### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
@@ -303,18 +313,38 @@
 - **Status:** Feature-gated module (issue #14)
 
 ### RedisBloom (25+ commands)
-- BF.RESERVE, BF.ADD, BF.MADD, BF.INSERT
-- BF.EXISTS, BF.MEXISTS, BF.CARD, BF.INFO
-- BF.SCANDUMP, BF.LOADCHUNK, BF.DEBUG
-- CF.RESERVE, CF.ADD, CF.ADDNX, CF.INSERT, CF.INSERTNX
-- CF.EXISTS, CF.MEXISTS, CF.DEL, CF.COUNT, CF.INFO
-- CF.SCANDUMP, CF.LOADCHUNK, CF.DEBUG, CF.COMPACT
-- CMS.INITBYDIM, CMS.INITBYPROB, CMS.INCRBY
-- CMS.QUERY, CMS.MERGE, CMS.INFO
-- TOPK.RESERVE, TOPK.ADD, TOPK.INCRBY
-- TOPK.QUERY, TOPK.COUNT, TOPK.LIST, TOPK.INFO
-- TDIGEST.* commands (many)
-- **Status:** Feature-gated module (issue #13)
+**Feature:** `bloom` - Enable with `features = ["bloom"]`
+
+#### Bloom Filter (6/11 commands) ✅ STARTED
+- [x] BF.RESERVE - Create filter with custom parameters
+- [x] BF.ADD - Add single item
+- [x] BF.MADD - Add multiple items
+- [x] BF.EXISTS - Check single item
+- [x] BF.MEXISTS - Check multiple items
+- [x] BF.INFO - Get filter information
+- [ ] BF.INSERT - Add with options (NX, CAPACITY, ERROR)
+- [ ] BF.CARD - Get cardinality (number of items)
+- [ ] BF.SCANDUMP - Dump filter for migration
+- [ ] BF.LOADCHUNK - Load dumped data
+- [ ] BF.DEBUG - Debug information
+
+#### Cuckoo Filter (0/14 commands)
+- [ ] CF.RESERVE, CF.ADD, CF.ADDNX, CF.INSERT, CF.INSERTNX
+- [ ] CF.EXISTS, CF.MEXISTS, CF.DEL, CF.COUNT, CF.INFO
+- [ ] CF.SCANDUMP, CF.LOADCHUNK, CF.DEBUG, CF.COMPACT
+
+#### Count-Min Sketch (0/6 commands)
+- [ ] CMS.INITBYDIM, CMS.INITBYPROB, CMS.INCRBY
+- [ ] CMS.QUERY, CMS.MERGE, CMS.INFO
+
+#### Top-K (0/7 commands)
+- [ ] TOPK.RESERVE, TOPK.ADD, TOPK.INCRBY
+- [ ] TOPK.QUERY, TOPK.COUNT, TOPK.LIST, TOPK.INFO
+
+#### T-Digest (0/~10 commands)
+- [ ] TDIGEST.* commands (quantile estimation)
+
+**Status:** 6 commands implemented, feature-gated behind `bloom` feature
 
 ### RedisGears (10+ commands)
 - REDISGEARS_2.* commands

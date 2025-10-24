@@ -16,6 +16,10 @@ pub mod sentinel;
 pub mod transaction;
 pub mod types;
 
+// Redis Stack modules (feature-gated)
+#[cfg(feature = "modules")]
+pub mod modules;
+
 // Re-exports for convenience
 pub use client::RedisClient;
 pub use commands::Command;

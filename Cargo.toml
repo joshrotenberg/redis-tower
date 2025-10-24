@@ -53,3 +53,13 @@ codegen-units = 1
 
 [profile.bench]
 inherits = "release"
+
+[features]
+default = []
+# Redis module support (feature-gated)
+modules = []
+bloom = ["modules"]
+json = ["modules"]
+search = ["modules"]
+timeseries = ["modules"]
+graph = ["modules"]
