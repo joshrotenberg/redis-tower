@@ -681,6 +681,41 @@ mod tests {
             _ => panic!("Expected array frame"),
         }
     }
+
+    #[test]
+    fn test_spop_frame() {
+        let cmd = Spop::new("myset");
+        let frame = cmd.to_frame();
+        assert!(matches!(frame, Frame::Array(_)));
+    }
+
+    #[test]
+    fn test_spop_with_count_frame() {
+        let cmd = Spop::new("myset").count(3);
+        let frame = cmd.to_frame();
+        assert!(matches!(frame, Frame::Array(_)));
+    }
+
+    #[test]
+    fn test_srandmember_frame() {
+        let cmd = Srandmember::new("myset");
+        let frame = cmd.to_frame();
+        assert!(matches!(frame, Frame::Array(_)));
+    }
+
+    #[test]
+    fn test_srandmember_with_count_frame() {
+        let cmd = Srandmember::new("myset").count(5);
+        let frame = cmd.to_frame();
+        assert!(matches!(frame, Frame::Array(_)));
+    }
+
+    #[test]
+    fn test_smove_frame() {
+        let cmd = Smove::new("src", "dest", &b"member"[..]);
+        let frame = cmd.to_frame();
+        assert!(matches!(frame, Frame::Array(_)));
+    }
 }
 
 /// SPOP command - remove and return random member(s)
@@ -1143,6 +1178,219 @@ impl Command for SInterCard {
     fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SPOP command - remove and return random member(s) from a set
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Spop;
+///
+/// // Pop single random member
+/// let cmd = Spop::new("myset");
+/// // Response: Some(member) or None if set is empty
+///
+/// // Pop multiple random members
+/// let cmd = Spop::new("myset").count(3);
+/// // Response: Vec<Bytes> of popped members
+/// ```
+#[derive(Debug, Clone)]
+pub struct Spop {
+    pub(crate) key: String,
+    pub(crate) count: Option<i64>,
+}
+
+impl Spop {
+    /// Create a new SPOP command for a single member
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+        }
+    }
+
+    /// Set count of members to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for Spop {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("SPOP"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // Single member (when count not specified)
+            Frame::BulkString(Some(data)) => Ok(vec![data]),
+            Frame::BulkString(None) | Frame::Null => Ok(Vec::new()),
+            // Multiple members (when count specified)
+            Frame::Array(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => members.push(data),
+                        Frame::BulkString(None) | Frame::Null => {}
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(members)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SRANDMEMBER command - get random member(s) from a set without removing
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Srandmember;
+///
+/// // Get single random member
+/// let cmd = Srandmember::new("myset");
+/// // Response: Some(member) or None if set is empty
+///
+/// // Get multiple random members (unique)
+/// let cmd = Srandmember::new("myset").count(3);
+/// // Response: Vec<Bytes> with up to 3 unique members
+///
+/// // Get multiple with repetition (negative count)
+/// let cmd = Srandmember::new("myset").count(-5);
+/// // Response: Vec<Bytes> with exactly 5 members (may repeat)
+/// ```
+#[derive(Debug, Clone)]
+pub struct Srandmember {
+    pub(crate) key: String,
+    pub(crate) count: Option<i64>,
+}
+
+impl Srandmember {
+    /// Create a new SRANDMEMBER command for a single member
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+        }
+    }
+
+    /// Set count of members to return
+    ///
+    /// - Positive count: return up to count unique members
+    /// - Negative count: return exactly |count| members, possibly with repetition
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for Srandmember {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("SRANDMEMBER"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // Single member (when count not specified)
+            Frame::BulkString(Some(data)) => Ok(vec![data]),
+            Frame::BulkString(None) | Frame::Null => Ok(Vec::new()),
+            // Multiple members (when count specified)
+            Frame::Array(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => members.push(data),
+                        Frame::BulkString(None) | Frame::Null => {}
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(members)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SMOVE command - move a member from one set to another
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Smove;
+///
+/// let cmd = Smove::new("source_set", "dest_set", b"member");
+/// // Response: true if member was moved, false if member didn't exist in source
+/// ```
+#[derive(Debug, Clone)]
+pub struct Smove {
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    pub(crate) member: Bytes,
+}
+
+impl Smove {
+    /// Create a new SMOVE command
+    pub fn new(
+        source: impl Into<String>,
+        destination: impl Into<String>,
+        member: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            member: member.into(),
+        }
+    }
+}
+
+impl Command for Smove {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SMOVE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(self.member.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
             Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
             _ => Err(RedisError::UnexpectedResponse),
         }

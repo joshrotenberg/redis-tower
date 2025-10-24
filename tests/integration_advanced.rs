@@ -101,7 +101,7 @@ async fn test_bitmap_operations() {
 
     // SETBIT - set bits
     let old_value1: bool = client.call(SetBit::new("bitmap", 0, true)).await.unwrap();
-    assert_eq!(old_value1, false); // Was not set before
+    assert!(!old_value1); // Was not set before
 
     client.call(SetBit::new("bitmap", 2, true)).await.unwrap();
     client.call(SetBit::new("bitmap", 5, true)).await.unwrap();
@@ -109,10 +109,10 @@ async fn test_bitmap_operations() {
 
     // GETBIT - get individual bits
     let bit0: bool = client.call(GetBit::new("bitmap", 0)).await.unwrap();
-    assert_eq!(bit0, true);
+    assert!(bit0);
 
     let bit1: bool = client.call(GetBit::new("bitmap", 1)).await.unwrap();
-    assert_eq!(bit1, false);
+    assert!(!bit1);
 
     // BITCOUNT - count set bits
     let count: i64 = client.call(BitCount::new("bitmap")).await.unwrap();
@@ -139,9 +139,9 @@ async fn test_bitmap_bitop() {
 
     // Check result - only bit 2 should be set (in both bm1 and bm2)
     let bit0: bool = client.call(GetBit::new("result_and", 0)).await.unwrap();
-    assert_eq!(bit0, false);
+    assert!(!bit0);
     let bit2: bool = client.call(GetBit::new("result_and", 2)).await.unwrap();
-    assert_eq!(bit2, true);
+    assert!(bit2);
 
     // BITOP OR
     client
