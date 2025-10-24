@@ -335,6 +335,482 @@ impl Command for BLPop {
     }
 }
 
+/// LPUSHX command - push to head only if list exists
+///
+/// Similar to LPUSH but only pushes if the key already exists and holds a list.
+/// Returns the length of the list after push, or 0 if key doesn't exist.
+#[derive(Debug, Clone)]
+pub struct LPushX {
+    pub(crate) key: String,
+    pub(crate) values: Vec<Bytes>,
+}
+
+impl LPushX {
+    /// Create a new LPUSHX command
+    pub fn new(key: impl Into<String>, values: Vec<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            values,
+        }
+    }
+
+    /// Convenience method for pushing a single value
+    pub fn single(key: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            values: vec![value.into()],
+        }
+    }
+}
+
+impl Command for LPushX {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("LPUSHX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+        for value in &self.values {
+            frames.push(Frame::BulkString(Some(value.clone())));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// RPUSHX command - push to tail only if list exists
+///
+/// Similar to RPUSH but only pushes if the key already exists and holds a list.
+/// Returns the length of the list after push, or 0 if key doesn't exist.
+#[derive(Debug, Clone)]
+pub struct RPushX {
+    pub(crate) key: String,
+    pub(crate) values: Vec<Bytes>,
+}
+
+impl RPushX {
+    /// Create a new RPUSHX command
+    pub fn new(key: impl Into<String>, values: Vec<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            values,
+        }
+    }
+
+    /// Convenience method for pushing a single value
+    pub fn single(key: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            values: vec![value.into()],
+        }
+    }
+}
+
+impl Command for RPushX {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("RPUSHX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+        for value in &self.values {
+            frames.push(Frame::BulkString(Some(value.clone())));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Direction for LMOVE/BLMOVE
+#[derive(Debug, Clone, Copy)]
+pub enum MoveDirection {
+    /// Pop from/push to left (head)
+    Left,
+    /// Pop from/push to right (tail)
+    Right,
+}
+
+impl MoveDirection {
+    fn as_str(&self) -> &'static str {
+        match self {
+            MoveDirection::Left => "LEFT",
+            MoveDirection::Right => "RIGHT",
+        }
+    }
+}
+
+/// LMOVE command - atomically move element between lists
+///
+/// Atomically pops an element from source list and pushes to destination list.
+/// Returns the element that was moved, or None if source list is empty.
+///
+/// # Redis 6.2.0+
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::lists::{LMove, MoveDirection};
+///
+/// // Move from tail of source to head of destination
+/// let cmd = LMove::new("source", "dest", MoveDirection::Right, MoveDirection::Left);
+/// ```
+#[derive(Debug, Clone)]
+pub struct LMove {
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    pub(crate) from: MoveDirection,
+    pub(crate) to: MoveDirection,
+}
+
+impl LMove {
+    /// Create a new LMOVE command
+    pub fn new(
+        source: impl Into<String>,
+        destination: impl Into<String>,
+        from: MoveDirection,
+        to: MoveDirection,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            from,
+            to,
+        }
+    }
+}
+
+impl Command for LMove {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("LMOVE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.from.as_str()))),
+            Frame::BulkString(Some(Bytes::from(self.to.as_str()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BLMOVE command - blocking version of LMOVE
+///
+/// Like LMOVE but blocks if source list is empty.
+/// Returns the element that was moved, or None if timeout occurred.
+///
+/// # Redis 6.2.0+
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::lists::{BLMove, MoveDirection};
+///
+/// // Block for up to 5 seconds
+/// let cmd = BLMove::new("source", "dest", MoveDirection::Left, MoveDirection::Right, 5.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BLMove {
+    pub(crate) source: String,
+    pub(crate) destination: String,
+    pub(crate) from: MoveDirection,
+    pub(crate) to: MoveDirection,
+    pub(crate) timeout: f64, // seconds (0 = block forever)
+}
+
+impl BLMove {
+    /// Create a new BLMOVE command
+    ///
+    /// # Arguments
+    /// * `source` - Source list key
+    /// * `destination` - Destination list key
+    /// * `from` - Direction to pop from source (Left or Right)
+    /// * `to` - Direction to push to destination (Left or Right)
+    /// * `timeout` - Timeout in seconds (0.0 to block indefinitely)
+    pub fn new(
+        source: impl Into<String>,
+        destination: impl Into<String>,
+        from: MoveDirection,
+        to: MoveDirection,
+        timeout: f64,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            from,
+            to,
+            timeout,
+        }
+    }
+}
+
+impl Command for BLMove {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("BLMOVE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.source.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.destination.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.from.as_str()))),
+            Frame::BulkString(Some(Bytes::from(self.to.as_str()))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// LMPOP command - pop elements from multiple lists
+///
+/// Pops one or more elements from the first non-empty list.
+/// Returns the key and popped elements, or None if all lists are empty.
+///
+/// # Redis 7.0.0+
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::lists::{LMPop, MoveDirection};
+///
+/// // Pop one element from left of first non-empty list
+/// let cmd = LMPop::new(vec!["list1".to_string(), "list2".to_string()], MoveDirection::Left);
+///
+/// // Pop up to 3 elements
+/// let cmd = LMPop::new(vec!["list1".to_string()], MoveDirection::Right).count(3);
+/// ```
+#[derive(Debug, Clone)]
+pub struct LMPop {
+    pub(crate) keys: Vec<String>,
+    pub(crate) direction: MoveDirection,
+    pub(crate) count: Option<i64>,
+}
+
+impl LMPop {
+    /// Create a new LMPOP command
+    pub fn new(keys: Vec<String>, direction: MoveDirection) -> Self {
+        Self {
+            keys,
+            direction,
+            count: None,
+        }
+    }
+
+    /// Set the number of elements to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+/// Result from LMPOP - contains key and popped elements
+pub type LMPopResult = Option<(String, Vec<Bytes>)>;
+
+impl Command for LMPop {
+    type Response = LMPopResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("LMPOP"))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from(
+            self.direction.as_str(),
+        ))));
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+
+            Frame::Array(mut outer) if outer.len() == 2 => {
+                let elements = outer.pop().unwrap();
+                let key = outer.pop().unwrap();
+
+                match (key, elements) {
+                    (Frame::BulkString(Some(k)), Frame::Array(items)) => {
+                        let key_str = String::from_utf8_lossy(&k).to_string();
+                        let mut values = Vec::with_capacity(items.len());
+
+                        for item in items {
+                            match item {
+                                Frame::BulkString(Some(v)) => values.push(v),
+                                _ => {
+                                    return Err(RedisError::Protocol(
+                                        "LMPOP elements must be bulk strings".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        Ok(Some((key_str, values)))
+                    }
+                    _ => Err(RedisError::Protocol(
+                        "LMPOP response format incorrect".to_string(),
+                    )),
+                }
+            }
+
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BLMPOP command - blocking version of LMPOP
+///
+/// Like LMPOP but blocks if all lists are empty.
+///
+/// # Redis 7.0.0+
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::lists::{BLMPop, MoveDirection};
+///
+/// // Block for up to 5 seconds
+/// let cmd = BLMPop::new(vec!["list1".to_string()], MoveDirection::Left, 5.0);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BLMPop {
+    pub(crate) keys: Vec<String>,
+    pub(crate) direction: MoveDirection,
+    pub(crate) timeout: f64,
+    pub(crate) count: Option<i64>,
+}
+
+impl BLMPop {
+    /// Create a new BLMPOP command
+    ///
+    /// # Arguments
+    /// * `keys` - List keys to check (in order)
+    /// * `direction` - Direction to pop from (Left or Right)
+    /// * `timeout` - Timeout in seconds (0.0 to block indefinitely)
+    pub fn new(keys: Vec<String>, direction: MoveDirection, timeout: f64) -> Self {
+        Self {
+            keys,
+            direction,
+            timeout,
+            count: None,
+        }
+    }
+
+    /// Set the number of elements to pop
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for BLMPop {
+    type Response = LMPopResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("BLMPOP"))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                key.as_bytes(),
+            ))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from(
+            self.direction.as_str(),
+        ))));
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+
+            Frame::Array(mut outer) if outer.len() == 2 => {
+                let elements = outer.pop().unwrap();
+                let key = outer.pop().unwrap();
+
+                match (key, elements) {
+                    (Frame::BulkString(Some(k)), Frame::Array(items)) => {
+                        let key_str = String::from_utf8_lossy(&k).to_string();
+                        let mut values = Vec::with_capacity(items.len());
+
+                        for item in items {
+                            match item {
+                                Frame::BulkString(Some(v)) => values.push(v),
+                                _ => {
+                                    return Err(RedisError::Protocol(
+                                        "BLMPOP elements must be bulk strings".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+
+                        Ok(Some((key_str, values)))
+                    }
+                    _ => Err(RedisError::Protocol(
+                        "BLMPOP response format incorrect".to_string(),
+                    )),
+                }
+            }
+
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 // Read-only trait implementations for cluster read-from-replica support
 use crate::cluster::read_preference::ReadOnly;
 
@@ -365,10 +841,16 @@ impl ReadOnly for LPos {
 // Write commands - explicitly implement with default (false) for clarity
 impl ReadOnly for LPush {}
 impl ReadOnly for RPush {}
+impl ReadOnly for LPushX {}
+impl ReadOnly for RPushX {}
 impl ReadOnly for LPop {}
 impl ReadOnly for RPop {}
 impl ReadOnly for BLPop {}
 impl ReadOnly for BRPop {}
+impl ReadOnly for LMove {}
+impl ReadOnly for BLMove {}
+impl ReadOnly for LMPop {}
+impl ReadOnly for BLMPop {}
 impl ReadOnly for LSet {}
 impl ReadOnly for LInsert {}
 impl ReadOnly for LRem {}

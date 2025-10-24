@@ -2,8 +2,8 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 135  
-**Coverage:** ~34% (135/400 core commands, excluding modules)
+**Implemented:** 145  
+**Coverage:** ~36% (145/400 core commands, excluding modules)
 
 > **Note:** This is the single source of truth for command tracking. Historical analysis available in:
 > - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
@@ -15,11 +15,13 @@
 
 ### ✅ Fully Implemented Categories
 
-#### Strings (23 commands)
+#### Strings (27 commands) ✅ EXPANDED
 - [x] GET, SET, DEL, MGET, MSET
 - [x] INCR, DECR, INCRBY, DECRBY, INCRBYFLOAT
 - [x] APPEND, STRLEN, GETRANGE, SETRANGE
 - [x] GETEX, GETDEL
+- [x] SETEX, PSETEX (set with expiration)
+- [x] SETNX, MSETNX (set if not exists)
 - [x] PING, ECHO
 - [x] EXISTS, EXPIRE, TTL
 
@@ -28,11 +30,14 @@
 - [x] HEXISTS, HLEN, HKEYS, HVALS
 - [x] HINCRBY, HINCRBYFLOAT, HSTRLEN
 
-#### Lists (16 commands)
+#### Lists (22 commands) ✅ EXPANDED
 - [x] LPUSH, RPUSH, LPOP, RPOP, LRANGE
+- [x] LPUSHX, RPUSHX (push only if exists)
 - [x] LLEN, LINDEX, LSET, LINSERT
 - [x] LREM, LTRIM, LPOS
-- [x] BLPOP, BRPOP (blocking)
+- [x] BLPOP, BRPOP (blocking pop)
+- [x] LMOVE, BLMOVE (atomic move between lists - Redis 6.2+)
+- [x] LMPOP, BLMPOP (pop from multiple lists - Redis 7.0+)
 
 #### Sets (17 commands)
 - [x] SADD, SREM, SMEMBERS, SISMEMBER, SCARD
@@ -84,31 +89,31 @@
 - [x] SETBIT, GETBIT, BITCOUNT
 - [x] BITOP, BITPOS
 
-#### Keys (9 commands) ✅ NEW (just committed)
+#### Keys (9 commands) ✅ COMPLETED
 - [x] PERSIST, PEXPIRE, PTTL
 - [x] EXPIREAT, PEXPIREAT
 - [x] RENAME, RENAMENX
 - [x] TYPE, KEYS
 
----
-
-## 🚧 In Progress
-
-### Geospatial (7 commands) - NEXT
-- [ ] GEOADD
-- [ ] GEODIST
-- [ ] GEOHASH
-- [ ] GEOPOS
-- [ ] GEORADIUS (deprecated but still used)
-- [ ] GEORADIUSBYMEMBER (deprecated but still used)
-- [ ] GEOSEARCH (modern replacement)
-- [ ] GEOSEARCHSTORE
+#### Geospatial (5 commands) ✅ COMPLETED
+- [x] GEOADD (add coordinates)
+- [x] GEODIST (distance between members)
+- [x] GEOHASH (geohash representation)
+- [x] GEOPOS (get coordinates)
+- [x] GEOSEARCH (modern radius/box queries with options)
 
 ---
 
 ## ✅ Recently Completed
 
-### Transactions (5 commands) - COMPLETED ✅
+### Today's Session (2025-10-24) - 10 Commands Added! 🎉
+- [x] **Advanced Strings (4):** SETEX, PSETEX, SETNX, MSETNX
+- [x] **Advanced Lists (6):** LPUSHX, RPUSHX, LMOVE, BLMOVE, LMPOP, BLMPOP
+- Brought string commands from 23 to 27
+- Brought list commands from 16 to 22
+- Total coverage: 135 → 145 commands (34% → 36%)
+
+### Transactions (5 commands) - Previous Session
 - [x] MULTI - Start transaction block
 - [x] EXEC - Execute queued commands (returns Option<Vec<RedisValue>>)
 - [x] DISCARD - Abort transaction
@@ -119,9 +124,6 @@
 ---
 
 ## ⏳ High Priority (Production Use)
-
-### Advanced Sorted Sets (8 commands)
-- [ ] ZPOPMIN, ZPOPMAX
 - [ ] BZPOPMIN, BZPOPMAX (blocking)
 - [ ] ZRANGEBYSCORE, ZREVRANGEBYSCORE
 - [ ] ZRANGEBYLEX, ZREVRANGEBYLEX

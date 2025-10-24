@@ -29,7 +29,7 @@ impl Default for RespCodec {
 ///
 /// Wraps resp-parser's Frame type with additional utility methods.
 /// Supports both RESP2 and RESP3 protocol features.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Frame {
     /// Simple string
     SimpleString(Bytes),

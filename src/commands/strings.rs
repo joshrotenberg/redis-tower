@@ -767,6 +767,230 @@ impl Command for Mset {
     }
 }
 
+/// MSETNX command - set multiple key-value pairs only if none exist
+///
+/// Sets multiple keys to multiple values atomically, only if none of the keys exist.
+/// Returns true if all keys were set, false if no keys were set.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::Msetnx;
+///
+/// let cmd = Msetnx::new()
+///     .pair("key1", b"value1".to_vec())
+///     .pair("key2", b"value2".to_vec());
+/// // Response: true if all keys were set, false if any existed
+/// ```
+#[derive(Debug, Clone)]
+pub struct Msetnx {
+    pub(crate) pairs: Vec<(String, Bytes)>,
+}
+
+impl Msetnx {
+    /// Create a new MSETNX command
+    pub fn new() -> Self {
+        Self { pairs: Vec::new() }
+    }
+
+    /// Add a key-value pair
+    pub fn pair(mut self, key: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        self.pairs.push((key.into(), value.into()));
+        self
+    }
+
+    /// Add multiple key-value pairs
+    pub fn pairs<I, K, V>(mut self, pairs: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<Bytes>,
+    {
+        self.pairs
+            .extend(pairs.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+}
+
+impl Default for Msetnx {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Msetnx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut parts = vec![Frame::BulkString(Some(Bytes::from("MSETNX")))];
+
+        for (key, value) in &self.pairs {
+            parts.push(Frame::BulkString(Some(Bytes::from(key.clone()))));
+            parts.push(Frame::BulkString(Some(value.clone())));
+        }
+
+        Frame::Array(parts)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n != 0),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SETEX command - set with expiration in seconds
+///
+/// Sets a key to a value with an expiration time in seconds.
+/// Equivalent to `SET key value EX seconds`.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::Setex;
+///
+/// let cmd = Setex::new("mykey", 60, b"myvalue".to_vec());
+/// // Sets key to expire in 60 seconds
+/// ```
+#[derive(Debug, Clone)]
+pub struct Setex {
+    pub(crate) key: String,
+    pub(crate) seconds: u64,
+    pub(crate) value: Bytes,
+}
+
+impl Setex {
+    /// Create a new SETEX command
+    pub fn new(key: impl Into<String>, seconds: u64, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            seconds,
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for Setex {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SETEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.seconds.to_string()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if s == b"OK"[..] => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// PSETEX command - set with expiration in milliseconds
+///
+/// Sets a key to a value with an expiration time in milliseconds.
+/// Equivalent to `SET key value PX milliseconds`.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::Psetex;
+///
+/// let cmd = Psetex::new("mykey", 60000, b"myvalue".to_vec());
+/// // Sets key to expire in 60000 milliseconds (60 seconds)
+/// ```
+#[derive(Debug, Clone)]
+pub struct Psetex {
+    pub(crate) key: String,
+    pub(crate) milliseconds: u64,
+    pub(crate) value: Bytes,
+}
+
+impl Psetex {
+    /// Create a new PSETEX command
+    pub fn new(key: impl Into<String>, milliseconds: u64, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            milliseconds,
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for Psetex {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("PSETEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.milliseconds.to_string()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if s == b"OK"[..] => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SETNX command - set if not exists
+///
+/// Sets a key to a value only if the key does not already exist.
+/// Equivalent to `SET key value NX`.
+/// Returns true if the key was set, false if the key already existed.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::Setnx;
+///
+/// let cmd = Setnx::new("mykey", b"myvalue".to_vec());
+/// // Response: true if set, false if key already existed
+/// ```
+#[derive(Debug, Clone)]
+pub struct Setnx {
+    pub(crate) key: String,
+    pub(crate) value: Bytes,
+}
+
+impl Setnx {
+    /// Create a new SETNX command
+    pub fn new(key: impl Into<String>, value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for Setnx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SETNX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n != 0),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// SET command - set a value
 #[derive(Debug, Clone)]
 pub struct Set {
@@ -1021,4 +1245,130 @@ impl ReadOnly for Append {}
 impl ReadOnly for SetRange {}
 impl ReadOnly for GetDel {}
 impl ReadOnly for Mset {}
+impl ReadOnly for Msetnx {}
+impl ReadOnly for Setex {}
+impl ReadOnly for Psetex {}
+impl ReadOnly for Setnx {}
 impl ReadOnly for Expire {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_setex_frame() {
+        let cmd = Setex::new("mykey", 60, b"myvalue".to_vec());
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("SETEX"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("60"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("myvalue"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_setex_response() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        Setex::parse_response(frame).unwrap();
+    }
+
+    #[test]
+    fn test_psetex_frame() {
+        let cmd = Psetex::new("mykey", 60000, b"myvalue".to_vec());
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("PSETEX"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("60000"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("myvalue"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_psetex_response() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        Psetex::parse_response(frame).unwrap();
+    }
+
+    #[test]
+    fn test_setnx_frame() {
+        let cmd = Setnx::new("mykey", b"myvalue".to_vec());
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("SETNX"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("myvalue"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_setnx_response_set() {
+        let frame = Frame::Integer(1);
+        let result = Setnx::parse_response(frame).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_setnx_response_not_set() {
+        let frame = Frame::Integer(0);
+        let result = Setnx::parse_response(frame).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_msetnx_frame() {
+        let cmd = Msetnx::new()
+            .pair("key1", b"value1".to_vec())
+            .pair("key2", b"value2".to_vec());
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5); // MSETNX + 2 key-value pairs
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("MSETNX"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("key1"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("value1"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("key2"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("value2"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_msetnx_response_all_set() {
+        let frame = Frame::Integer(1);
+        let result = Msetnx::parse_response(frame).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_msetnx_response_none_set() {
+        let frame = Frame::Integer(0);
+        let result = Msetnx::parse_response(frame).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_msetnx_builder_pairs() {
+        let pairs = vec![("key1", b"value1".to_vec()), ("key2", b"value2".to_vec())];
+        let cmd = Msetnx::new().pairs(pairs);
+        assert_eq!(cmd.pairs.len(), 2);
+    }
+}

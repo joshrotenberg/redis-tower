@@ -39,8 +39,8 @@ pub use hashes::{
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{ExpireAt, Keys, PExpire, PExpireAt, PTtl, Persist, Rename, RenameNx, Type};
 pub use lists::{
-    BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LPop, LPos, LPush, LRange, LRem, LSet,
-    LTrim, RPop, RPush,
+    BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,
+    LPop, LPos, LPush, LPushX, LRange, LRem, LSet, LTrim, MoveDirection, RPop, RPush, RPushX,
 };
 pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
 pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
@@ -58,5 +58,6 @@ pub use streams::{
 };
 pub use strings::{
     Append, Decr, DecrBy, Del, Echo, Exists, Expire, Get, GetDel, GetEx, GetExExpiration, GetRange,
-    Incr, IncrBy, IncrByFloat, MGet, Mset, Ping, Set, SetRange, StrLen, Ttl,
+    Incr, IncrBy, IncrByFloat, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
+    StrLen, Ttl,
 };

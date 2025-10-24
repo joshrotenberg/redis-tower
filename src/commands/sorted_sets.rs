@@ -1385,11 +1385,8 @@ impl Command for ZRangeByScore {
             Frame::Array(items) => {
                 let mut result = Vec::new();
                 for item in items {
-                    match item {
-                        Frame::BulkString(Some(data)) => {
-                            result.push(String::from_utf8_lossy(&data).into_owned());
-                        }
-                        _ => {}
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).into_owned());
                     }
                 }
                 Ok(result)
