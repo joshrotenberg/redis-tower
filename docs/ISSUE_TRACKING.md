@@ -21,29 +21,35 @@ We've established a comprehensive issue tracking system on GitHub to manage the 
 These are meta-issues that track categories of work with sub-issues:
 
 #### #2 - 📋 Commands: Complete Redis Command Coverage
-**Status**: ~107 commands implemented, targeting 90%+ coverage  
+**Status**: 208 commands implemented (52% coverage), targeting 300+ for v0.2.0 (75% coverage)  
 **Priority**: High  
 **Sub-issues**: #4, #5, #6, #7, and more to be created
 
-Currently implemented:
-- ✅ Strings (~15 commands)
-- ✅ Hashes (~11 commands)
-- ✅ Lists (~14 commands)
-- ✅ Sets (~15 commands)
-- ✅ Sorted Sets (~12 commands)
-- ✅ Streams (~8 commands)
-- ✅ Pub/Sub (3 commands)
-- ✅ Scripting (5 commands)
-- ✅ Scan (4 commands)
-- ✅ Connection (6 commands)
-- ✅ Sentinel (4 commands)
+**✅ Categories Complete or Near-Complete:**
+- ✅ **Strings**: 27 commands (GET, SET, INCR, APPEND, GETEX, GETDEL, LCS, etc.)
+- ✅ **Hashes**: 14 commands (HGET, HSET, HINCRBY, HRANDFIELD, etc.)
+- ✅ **Lists**: 22 commands (LPUSH, RPOP, LMOVE, BLMPOP, etc.)
+- ✅ **Sets**: 21 commands (SADD, SINTER, SUNION, SDIFF, SINTERCARD, etc.)
+- ✅ **Sorted Sets**: 36 commands (comprehensive coverage including ZUNION, ZDIFF, ZMPOP)
+- ✅ **Streams**: 15 commands (XADD, XREAD, XREADGROUP, XCLAIM, etc.)
+- ✅ **Transactions**: 5 commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH)
+- ✅ **Scripting**: 5 commands (EVAL, EVALSHA, SCRIPT *)
+- ✅ **Scan**: 4 commands (SCAN, HSCAN, SSCAN, ZSCAN)
+- ✅ **Connection**: 8 commands (AUTH, SELECT, QUIT, CLIENT *)
+- ✅ **HyperLogLog**: 3 commands (PFADD, PFCOUNT, PFMERGE)
+- ✅ **Geo**: 8 commands (GEOADD, GEODIST, GEOSEARCH, etc.)
+- ✅ **Bitmap**: 5 commands (SETBIT, GETBIT, BITCOUNT, BITOP, BITPOS)
+- ✅ **Keys**: 22 commands (DEL, EXISTS, EXPIRE, SORT, DUMP, RESTORE, OBJECT *)
+- ✅ **Server**: 10 commands (DBSIZE, FLUSHDB, INFO, WAIT, SAVE, BGSAVE, etc.)
+- ✅ **Pub/Sub**: 3 commands (PUBLISH, PUBSUB NUMSUB/NUMPAT)
 
-Still needed:
-- HyperLogLog commands
-- Geospatial commands
-- Bitmap commands
-- Additional key/server commands
-- Additional cluster commands
+**⚠️ Categories Needing Work:**
+- ⚠️ **Pub/Sub**: Missing SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PUBSUB CHANNELS
+- ⚠️ **Server/Admin**: Missing CONFIG GET/SET/REWRITE, SLOWLOG, MONITOR, CLIENT LIST/KILL
+- ⚠️ **Cluster**: Missing CLUSTER INFO, CLUSTER NODES, CLUSTER SLOTS, and most cluster commands
+- ⚠️ **Streams**: Missing XINFO *, XSETID, XAUTOCLAIM
+- ⚠️ **Keys**: Missing MIGRATE, WAITAOF
+- ⚠️ **Sorted Sets**: Missing ZRANGESTORE
 
 #### #3 - 💾 Client-Side Caching: RESP3 Server-Assisted Caching
 **Status**: Research complete, implementation not started  
@@ -111,7 +117,7 @@ Location-based queries:
 - GEOSEARCH (Redis 6.2+), GEOSEARCHSTORE
 
 #### #8 - 📊 Testing: Comprehensive Test Coverage & Integration Tests
-**Status**: 87 tests passing, need comprehensive coverage  
+**Status**: 265 unit tests + 13 integration tests passing, need comprehensive coverage  
 **Priority**: High
 
 Test categories needed:
@@ -242,7 +248,13 @@ When creating a sub-issue:
 - Cluster support with read-from-replica
 - Sentinel support with automatic failover
 - Type-safe pipelining and transactions
-- ~107 commands implemented
+- **208 commands implemented** across 16 categories
+- Transaction primitives: Multi, Exec, Discard, Watch, Unwatch
+- Sort command with full options (BY, LIMIT, GET, order, ALPHA, STORE)
+- Wait command for replication synchronization
+- OBJECT commands (RefCount, Encoding, IdleTime, Freq)
+- 265 unit tests passing
+- 13 integration tests (testcontainers-based)
 - Benchmarks showing 12-35% performance advantage over fred
 
 ### 🚧 In Progress

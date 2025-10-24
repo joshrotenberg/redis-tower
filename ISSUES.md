@@ -8,10 +8,31 @@ This document tracks current issues, planned features, and project priorities fo
 ## Current Status
 
 ✅ **Ready for v0.1.0 Release**
-- 200 commands implemented (50% coverage)
-- 211 tests passing
+- **208 commands implemented** (~52% coverage of Redis 7.x)
+- **265 unit tests passing**
+- **Transaction support**: Multi, Exec, Discard, Watch, Unwatch
+- **Sort command**: Full support with BY, LIMIT, GET, ordering, ALPHA, STORE
+- **Wait command**: Replication synchronization support
 - Comprehensive documentation
 - CI/CD infrastructure in place
+
+### Commands by Category (208 total)
+- ✅ **Strings**: 27 commands (GET, SET, INCR, APPEND, GETEX, GETDEL, LCS, etc.)
+- ✅ **Hashes**: 14 commands (HGET, HSET, HINCRBY, HRANDFIELD, etc.)
+- ✅ **Lists**: 22 commands (LPUSH, RPOP, LMOVE, BLMPOP, etc.)
+- ✅ **Sets**: 21 commands (SADD, SINTER, SUNION, SDIFF, SINTERCARD, etc.)
+- ✅ **Sorted Sets**: 36 commands (ZADD, ZRANGE, ZUNION, ZDIFF, ZMPOP, BZMPOP, etc.)
+- ✅ **Streams**: 15 commands (XADD, XREAD, XREADGROUP, XCLAIM, etc.)
+- ✅ **Transactions**: 5 commands (MULTI, EXEC, DISCARD, WATCH, UNWATCH)
+- ✅ **Pub/Sub**: 3 commands (PUBLISH, PUBSUB NUMSUB, PUBSUB NUMPAT)
+- ✅ **Scripting**: 5 commands (EVAL, EVALSHA, SCRIPT LOAD/EXISTS/FLUSH)
+- ✅ **Keys**: 22 commands (DEL, EXISTS, EXPIRE, TTL, TYPE, SORT, DUMP, RESTORE, OBJECT commands, etc.)
+- ✅ **Server**: 10 commands (DBSIZE, FLUSHDB, FLUSHALL, INFO, TIME, SAVE, BGSAVE, LASTSAVE, WAIT, etc.)
+- ✅ **Scan**: 4 commands (SCAN, HSCAN, SSCAN, ZSCAN)
+- ✅ **Connection**: 8 commands (AUTH, SELECT, QUIT, READONLY, READWRITE, CLIENT GETNAME/SETNAME)
+- ✅ **HyperLogLog**: 3 commands (PFADD, PFCOUNT, PFMERGE)
+- ✅ **Geo**: 8 commands (GEOADD, GEODIST, GEOHASH, GEOPOS, GEOSEARCH, etc.)
+- ✅ **Bitmap**: 5 commands (SETBIT, GETBIT, BITCOUNT, BITOP, BITPOS)
 
 ---
 
@@ -33,11 +54,21 @@ This document tracks current issues, planned features, and project priorities fo
 
 ### Medium Priority (v0.2.0)
 
-#### Commands
-- [ ] **Add remaining sorted set commands** - ZDIFF, ZUNION, ZINTER, ZRANGESTORE (68 more commands to reach 75% coverage)
-- [ ] **Add missing list commands** - LMOVE variants, BLMPOP improvements
-- [ ] **Add server commands** - CONFIG GET/SET, SLOWLOG, MONITOR (with caution)
-- [ ] **Add missing geo commands** - GEORADIUSBYMEMBER alternatives
+#### Commands (~192 commands remaining to reach 400 total / 95% coverage)
+
+**High-Value Missing Commands:**
+- [ ] **Server/Admin**: CONFIG GET/SET/REWRITE, SLOWLOG, MONITOR, CLIENT LIST/KILL, MEMORY commands
+- [ ] **Pub/Sub**: SUBSCRIBE, UNSUBSCRIBE, PSUBSCRIBE, PUNSUBSCRIBE, PUBSUB CHANNELS/SHARDCHANNELS/SHARDNUMSUB
+- [ ] **Cluster**: CLUSTER INFO, CLUSTER NODES, CLUSTER SLOTS, CLUSTER KEYSLOT, CLUSTER ADDSLOTS, etc.
+- [ ] **Streams**: XINFO STREAM/GROUPS/CONSUMERS, XSETID, XAUTOCLAIM
+- [ ] **Geo**: GEORADIUS* (deprecated but still used), GEOSEARCHSTORE improvements
+- [ ] **Keys**: SCAN variants (SSCAN, ZSCAN), MIGRATE, WAITAOF
+- [ ] **Strings**: GETEX variants, LCS improvements
+- [ ] **Lists**: Additional LPOS options
+- [ ] **Sets**: Missing set operations
+- [ ] **Sorted Sets**: ZRANGESTORE, additional ZRANGE variants
+
+**Note**: We have ZDIFF, ZUNION, ZINTER, BLMPOP, LMOVE already implemented ✅
 
 #### Features
 - [ ] **Client-side caching** - Implement tracking and invalidation
@@ -138,14 +169,21 @@ Track issues filed by community here once repository is public.
 ## Tracking Metrics
 
 ### Command Coverage
-- Current: 200/400 (50%)
+- Current: **208/400 (52%)**
 - Target v0.2.0: 300/400 (75%)
 - Target v1.0.0: 380/400 (95%)
 
+### Recent Progress
+- **+8 commands** since last update (201 → 208)
+  - Transaction primitives: Multi, Exec, Discard, Watch, Unwatch
+  - Sort command with full options
+  - Wait command for replication
+  - OBJECT commands (RefCount, Encoding, IdleTime, Freq)
+
 ### Test Coverage
-- Current: 211 unit tests
+- Current: **265 unit tests** (+54 since last update)
 - Target: 70%+ code coverage
-- Integration tests: 0 (need to add)
+- Integration tests: **13 tests** for Sort/Wait (testcontainers-based)
 
 ### Performance
 - Benchmarks: Not yet measured
