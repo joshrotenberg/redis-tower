@@ -15,8 +15,10 @@ pub trait Command {
     fn parse_response(frame: Frame) -> Result<Self::Response, RedisError>;
 }
 
+pub mod bitmap;
 pub mod connection;
 pub mod hashes;
+pub mod hyperloglog;
 pub mod lists;
 pub mod pubsub;
 pub mod scan;
@@ -26,10 +28,12 @@ pub mod sorted_sets;
 pub mod streams;
 pub mod strings;
 
+pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
 pub use connection::{Auth, AuthAcl, Quit, ReadOnly, ReadWrite, Select};
 pub use hashes::{
     HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HSet, HStrLen, HVals,
 };
+pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use lists::{
     BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LPop, LPos, LPush, LRange, LRem, LSet,
     LTrim, RPop, RPush,
