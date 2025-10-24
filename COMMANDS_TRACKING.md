@@ -2,8 +2,12 @@
 
 **Last Updated:** 2025-10-24  
 **Total Redis Commands:** ~565 (from COMMAND LIST)  
-**Implemented:** 120  
-**Coverage:** ~21%
+**Implemented:** 125  
+**Coverage:** ~31% (125/400 core commands, excluding modules)
+
+> **Note:** This is the single source of truth for command tracking. Historical analysis available in:
+> - [docs/COMMAND_COVERAGE_REPORT.md](docs/COMMAND_COVERAGE_REPORT.md) - Comprehensive analysis vs fred/redis-rs
+> - [docs/COMMANDS_LEGACY.md](docs/COMMANDS_LEGACY.md) - Original command list
 
 ---
 
