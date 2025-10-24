@@ -266,7 +266,8 @@ impl<Cmd: RedisCommand> Service<Cmd> for RedisConnection {
 - [x] Add retry middleware (tower-resilience RetryLayer)
 - [x] Add circuit breaker (tower-resilience CircuitBreakerLayer)
 - [x] Working resilient example demonstrating all three patterns
-- [ ] Connection pooling with Tower Balance
+- [x] Tower Service trait for ClusterClient
+- [x] Connection pooling per cluster node (round-robin)
 - [ ] Request coalescing middleware (custom)
 
 ### Phase 3: Advanced Types (Day 5-6)
@@ -277,7 +278,14 @@ impl<Cmd: RedisCommand> Service<Cmd> for RedisConnection {
 - [ ] Pub/Sub with typed messages
 
 ### Phase 4: Production Features (Day 7-8)
-- [ ] Cluster support with automatic routing
+- [x] Cluster support with automatic routing
+- [x] Cluster MOVED/ASK redirect handling
+- [x] Cluster slot map management
+- [x] Connection pooling per cluster node
+- [x] Tower Service trait for cluster client
+- [ ] Connection health checking and recovery
+- [ ] Read-from-replica support for clusters
+- [ ] Cluster failover testing
 - [ ] Redis Sentinel support
 - [ ] TLS support
 - [ ] Unix socket support
@@ -369,7 +377,7 @@ Follow the same high standards as the redis-proxy project:
 
 **Project Created**: 2025-10-23
 
-**Latest Update**: 2025-10-23 (Phase 2 Started)
+**Latest Update**: 2025-10-24 (Cluster + Tower Integration Complete)
 
 **Command Implementation Tracking**: See [COMMANDS.md](COMMANDS.md) for detailed status of all Redis commands.
 
@@ -396,6 +404,12 @@ client.call(Set::new("key", "value")).await?;
 // Strongly typed GET with Option<Bytes> response
 let value: Option<Bytes> = client.call(Get::new("key")).await?;
 ```
+
+**Recent Cluster Progress** (2025-10-24):
+1. ✅ Tower Service trait implementation for ClusterClient
+2. ✅ Connection pooling per cluster node (configurable, default 3 per node)
+3. ✅ cluster_with_tower.rs example demonstrating resilience patterns
+4. ✅ Round-robin load balancing across connections in each pool
 
 **Key Achievements**:
 1. **Zero-copy parsing** via resp-parser integration

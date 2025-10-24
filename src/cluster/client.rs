@@ -2,6 +2,7 @@
 
 use crate::client::RedisConnection;
 use crate::cluster::commands::ClusterSlots;
+use crate::cluster::pool::ConnectionPool;
 use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
 use crate::types::RedisError;
@@ -19,7 +20,7 @@ use tower::Service;
 /// - Automatic slot-based routing to the correct node
 /// - MOVED redirect handling with slot map updates
 /// - ASK redirect handling with ASKING command
-/// - Connection pooling to all cluster nodes
+/// - Connection pooling to all cluster nodes (configurable pool size)
 /// - Automatic topology refresh
 ///
 /// # Example
@@ -42,19 +43,34 @@ use tower::Service;
 /// ```
 #[derive(Clone)]
 pub struct ClusterClient {
-    /// Connections to cluster nodes (by address)
-    connections: Arc<RwLock<HashMap<String, RedisConnection>>>,
+    /// Connection pools to cluster nodes (by address)
+    pools: Arc<RwLock<HashMap<String, ConnectionPool>>>,
     /// Slot to node address mapping
     slot_map: Arc<RwLock<SlotMap>>,
     /// Initial seed nodes for bootstrapping
     seed_nodes: Vec<String>,
+    /// Maximum connections per node
+    max_connections_per_node: usize,
 }
 
 impl ClusterClient {
-    /// Create a new cluster client.
+    /// Create a new cluster client with default settings.
     ///
     /// Connects to seed nodes and discovers the full cluster topology.
+    /// Uses a default of 3 connections per node.
     pub async fn new(seed_nodes: Vec<impl Into<String>>) -> Result<Self, RedisError> {
+        Self::with_config(seed_nodes, 3).await
+    }
+
+    /// Create a new cluster client with custom configuration.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `max_connections_per_node` - Maximum connections to maintain per node
+    pub async fn with_config(
+        seed_nodes: Vec<impl Into<String>>,
+        max_connections_per_node: usize,
+    ) -> Result<Self, RedisError> {
         let seed_nodes: Vec<String> = seed_nodes.into_iter().map(Into::into).collect();
 
         if seed_nodes.is_empty() {
@@ -63,10 +79,17 @@ impl ClusterClient {
             ));
         }
 
+        if max_connections_per_node == 0 {
+            return Err(RedisError::Protocol(
+                "max_connections_per_node must be at least 1".to_string(),
+            ));
+        }
+
         let client = Self {
-            connections: Arc::new(RwLock::new(HashMap::new())),
+            pools: Arc::new(RwLock::new(HashMap::new())),
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             seed_nodes,
+            max_connections_per_node,
         };
 
         // Discover cluster topology
@@ -232,29 +255,45 @@ impl ClusterClient {
     }
 
     async fn get_or_create_connection(&self, addr: &str) -> Result<RedisConnection, RedisError> {
-        // Check if connection exists
+        // Check if pool exists
         {
-            let connections = self.connections.read().await;
-            if let Some(conn) = connections.get(addr) {
-                return Ok(conn.clone());
+            let pools = self.pools.read().await;
+            if let Some(pool) = pools.get(addr) {
+                return pool.get().await;
             }
         }
 
-        // Create new connection
-        let conn = RedisConnection::connect(addr).await?;
+        // Create new pool
+        let pool = ConnectionPool::new(addr.to_string(), self.max_connections_per_node);
+        let conn = pool.get().await?;
 
-        // Store it
+        // Store the pool
         {
-            let mut connections = self.connections.write().await;
-            connections.insert(addr.to_string(), conn.clone());
+            let mut pools = self.pools.write().await;
+            pools.insert(addr.to_string(), pool);
         }
 
         Ok(conn)
     }
 
-    /// Get the number of connected nodes.
+    /// Get the number of connected nodes (nodes with connection pools).
     pub async fn connection_count(&self) -> usize {
-        self.connections.read().await.len()
+        self.pools.read().await.len()
+    }
+
+    /// Get the total number of connections across all pools.
+    pub async fn total_connections(&self) -> usize {
+        let pools = self.pools.read().await;
+        let mut total = 0;
+        for pool in pools.values() {
+            total += pool.size().await;
+        }
+        total
+    }
+
+    /// Get the maximum connections per node setting.
+    pub fn max_connections_per_node(&self) -> usize {
+        self.max_connections_per_node
     }
 }
 
