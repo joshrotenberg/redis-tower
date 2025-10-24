@@ -21,5 +21,5 @@ pub use client::RedisClient;
 pub use commands::Command;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{PubSubConnection, PubSubMessage};
-pub use transaction::{Transaction, Unwatch, Watch};
+pub use transaction::{Discard, Exec, Multi, Transaction, Unwatch, Watch};
 pub use types::{RedisError, RedisValue};

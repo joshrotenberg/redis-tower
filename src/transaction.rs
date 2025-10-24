@@ -347,6 +347,133 @@ impl Command for Unwatch {
     }
 }
 
+/// MULTI command - Mark the start of a transaction block
+///
+/// Subsequent commands will be queued and executed atomically with EXEC.
+/// Typically you'll use the Transaction builder instead of calling MULTI directly.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::Multi;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = redis_tower::client::RedisConnection::connect("127.0.0.1:6379").await?;
+/// // Start transaction
+/// client.execute(Multi).await?;
+/// // Queue commands...
+/// // Execute with EXEC
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Multi;
+
+impl Command for Multi {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("MULTI")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// EXEC command - Execute all commands issued after MULTI
+///
+/// Returns an array of responses for each queued command, or None if the
+/// transaction was aborted (e.g., due to WATCH key modification).
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::{Multi, Exec, Set, Get};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = redis_tower::client::RedisConnection::connect("127.0.0.1:6379").await?;
+/// client.execute(Multi).await?;
+/// client.execute(Set::new("key", "value")).await?; // Returns "QUEUED"
+/// client.execute(Get::new("key")).await?; // Returns "QUEUED"
+///
+/// let results = client.execute(Exec).await?;
+/// if let Some(values) = results {
+///     println!("Transaction succeeded with {} results", values.len());
+/// } else {
+///     println!("Transaction aborted (WATCH key was modified)");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Exec;
+
+impl Command for Exec {
+    type Response = Option<Vec<RedisValue>>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("EXEC")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // Transaction aborted (WATCH key was modified)
+            Frame::Null => Ok(None),
+            // Transaction executed - array of results
+            Frame::Array(items) => {
+                let mut results = Vec::with_capacity(items.len());
+                for item in items {
+                    results.push(RedisValue::from_frame(item)?);
+                }
+                Ok(Some(results))
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// DISCARD command - Discard all commands issued after MULTI
+///
+/// Flushes the transaction queue and exits transaction mode.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::commands::{Multi, Discard, Set};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = redis_tower::client::RedisConnection::connect("127.0.0.1:6379").await?;
+/// client.execute(Multi).await?;
+/// client.execute(Set::new("key", "value")).await?; // Queued
+///
+/// // Changed our mind, discard the transaction
+/// client.execute(Discard).await?;
+/// // Connection is now out of transaction mode, commands queued were never executed
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Discard;
+
+impl Command for Discard {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("DISCARD")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +500,75 @@ mod tests {
             }
             _ => panic!("Expected array frame"),
         }
+    }
+
+    #[test]
+    fn test_multi_frame() {
+        let cmd = Multi;
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 1); // MULTI
+                assert!(matches!(
+                    &parts[0],
+                    Frame::BulkString(Some(s)) if s == &Bytes::from("MULTI")
+                ));
+            }
+            _ => panic!("Expected array frame"),
+        }
+    }
+
+    #[test]
+    fn test_multi_response() {
+        Multi::parse_response(Frame::SimpleString(Bytes::from("OK"))).unwrap();
+    }
+
+    #[test]
+    fn test_exec_frame() {
+        let cmd = Exec;
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 1); // EXEC
+            }
+            _ => panic!("Expected array frame"),
+        }
+    }
+
+    #[test]
+    fn test_exec_response_null() {
+        // Transaction aborted
+        let response = Exec::parse_response(Frame::Null).unwrap();
+        assert!(response.is_none());
+    }
+
+    #[test]
+    fn test_exec_response_success() {
+        // Transaction succeeded with 2 results
+        let frame = Frame::Array(vec![
+            Frame::SimpleString(Bytes::from("OK")),
+            Frame::Integer(42),
+        ]);
+        let response = Exec::parse_response(frame).unwrap();
+        assert!(response.is_some());
+        let results = response.unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_discard_frame() {
+        let cmd = Discard;
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 1); // DISCARD
+            }
+            _ => panic!("Expected array frame"),
+        }
+    }
+
+    #[test]
+    fn test_discard_response() {
+        Discard::parse_response(Frame::SimpleString(Bytes::from("OK"))).unwrap();
     }
 }
