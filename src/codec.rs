@@ -1,7 +1,7 @@
 //! RESP protocol codec for Tokio
 
+use crate::parser::resp3::{Frame as Resp3Frame, parse_frame};
 use bytes::{BufMut, Bytes, BytesMut};
-use resp_parser::resp3::{Frame as Resp3Frame, parse_frame};
 use tokio_util::codec::{Decoder, Encoder};
 
 /// RESP protocol codec
@@ -279,7 +279,7 @@ impl Decoder for RespCodec {
                 // Convert resp3 Frame to our Frame type
                 Ok(Some(Frame::from_resp3(frame)))
             }
-            Err(resp_parser::resp3::ParseError::Incomplete) => {
+            Err(crate::parser::ParseError::Incomplete) => {
                 // Not enough data yet, restore the buffer and wait for more
                 src.unsplit(bytes.into());
                 Ok(None)
@@ -308,7 +308,7 @@ impl Encoder<Frame> for RespCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use resp_parser::resp3::Frame as Resp3Frame;
+    use crate::parser::resp3::Frame as Resp3Frame;
 
     #[test]
     fn test_big_number_conversion() {

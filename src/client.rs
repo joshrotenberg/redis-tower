@@ -3,16 +3,86 @@
 use crate::codec::RespCodec;
 use crate::commands::Command;
 use crate::pipeline::{Pipeline, PipelineExecutor, PipelineResults};
+use crate::tls::TlsConfig;
 use crate::types::RedisError;
+use crate::url::RedisUrl;
 use futures::{SinkExt, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
 use tower::Service;
+
+/// Stream type that can be either plain TCP or TLS
+pub(crate) enum RedisStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls-native-tls")]
+    NativeTls(Box<tokio_native_tls::TlsStream<TcpStream>>),
+    #[cfg(feature = "tls-rustls")]
+    Rustls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl AsyncRead for RedisStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match &mut *self {
+            RedisStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            #[cfg(feature = "tls-native-tls")]
+            RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+            #[cfg(feature = "tls-rustls")]
+            RedisStream::Rustls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for RedisStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize, std::io::Error>> {
+        match &mut *self {
+            RedisStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            #[cfg(feature = "tls-native-tls")]
+            RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+            #[cfg(feature = "tls-rustls")]
+            RedisStream::Rustls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            RedisStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            #[cfg(feature = "tls-native-tls")]
+            RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+            #[cfg(feature = "tls-rustls")]
+            RedisStream::Rustls(s) => Pin::new(s.as_mut()).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), std::io::Error>> {
+        match &mut *self {
+            RedisStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            #[cfg(feature = "tls-native-tls")]
+            RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+            #[cfg(feature = "tls-rustls")]
+            RedisStream::Rustls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
+        }
+    }
+}
 
 /// Redis connection - implements Tower's Service trait
 ///
@@ -20,11 +90,11 @@ use tower::Service;
 /// It wraps the connection in an Arc<Mutex<>> to allow sharing across async boundaries.
 #[derive(Clone)]
 pub struct RedisConnection {
-    pub(crate) framed: Arc<Mutex<Framed<TcpStream, RespCodec>>>,
+    pub(crate) framed: Arc<Mutex<Framed<RedisStream, RespCodec>>>,
 }
 
 impl RedisConnection {
-    /// Connect to a Redis server
+    /// Connect to a Redis server without TLS
     ///
     /// # Example
     /// ```no_run
@@ -36,13 +106,76 @@ impl RedisConnection {
     /// # }
     /// ```
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
-        let stream = TcpStream::connect(addr).await?;
+        Self::connect_with_config(addr, TlsConfig::None).await
+    }
+
+    /// Connect to a Redis server with TLS configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::RedisConnection;
+    /// use redis_tower::tls::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tls = TlsConfig::rustls()
+    ///     .with_native_roots()
+    ///     .build()?;
+    /// let conn = RedisConnection::connect_with_config("127.0.0.1:6379", tls).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_with_config(addr: &str, tls: TlsConfig) -> Result<Self, RedisError> {
+        let tcp_stream = TcpStream::connect(addr).await?;
+
+        let stream = match tls {
+            TlsConfig::None => RedisStream::Plain(tcp_stream),
+
+            #[cfg(feature = "tls-native-tls")]
+            TlsConfig::NativeTls(config) => {
+                // Extract domain from address for SNI
+                let domain = addr.split(':').next().unwrap_or(addr);
+                let tls_stream = config.connect(domain, tcp_stream).await?;
+                RedisStream::NativeTls(Box::new(tls_stream))
+            }
+
+            #[cfg(feature = "tls-rustls")]
+            TlsConfig::Rustls(config) => {
+                // Extract domain from address for SNI
+                let domain = addr.split(':').next().unwrap_or(addr);
+                let tls_stream = config.connect(domain, tcp_stream).await?;
+                RedisStream::Rustls(Box::new(tls_stream))
+            }
+        };
+
         let codec = RespCodec::new();
         let framed = Framed::new(stream, codec);
 
         Ok(Self {
             framed: Arc::new(Mutex::new(framed)),
         })
+    }
+
+    /// Connect to a Redis server using a URL
+    ///
+    /// Supports `redis://` and `rediss://` schemes. The `rediss://` scheme
+    /// automatically enables TLS.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::RedisConnection;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Plain connection
+    /// let conn = RedisConnection::connect_url("redis://localhost:6379").await?;
+    ///
+    /// // TLS connection (requires tls feature)
+    /// let secure_conn = RedisConnection::connect_url("rediss://localhost:6380").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let parsed = RedisUrl::parse(url)?;
+        Self::connect_with_config(&parsed.addr(), parsed.tls).await
     }
 
     /// Execute a command
@@ -80,7 +213,7 @@ pub struct RedisClient {
 }
 
 impl RedisClient {
-    /// Connect to a Redis server
+    /// Connect to a Redis server without TLS
     ///
     /// # Example
     /// ```no_run
@@ -92,7 +225,49 @@ impl RedisClient {
     /// # }
     /// ```
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
-        let connection = RedisConnection::connect(addr).await?;
+        Self::connect_with_config(addr, TlsConfig::None).await
+    }
+
+    /// Connect to a Redis server with TLS configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::RedisClient;
+    /// use redis_tower::tls::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tls = TlsConfig::rustls()
+    ///     .with_native_roots()
+    ///     .build()?;
+    /// let client = RedisClient::connect_with_config("redis.example.com:6380", tls).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_with_config(addr: &str, tls: TlsConfig) -> Result<Self, RedisError> {
+        let connection = RedisConnection::connect_with_config(addr, tls).await?;
+        Ok(Self { connection })
+    }
+
+    /// Connect to a Redis server using a URL
+    ///
+    /// Supports `redis://` and `rediss://` schemes. The `rediss://` scheme
+    /// automatically enables TLS.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::RedisClient;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Plain connection
+    /// let client = RedisClient::connect_url("redis://localhost:6379").await?;
+    ///
+    /// // TLS connection (requires tls feature)
+    /// let secure_client = RedisClient::connect_url("rediss://redis.example.com:6380").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let connection = RedisConnection::connect_url(url).await?;
         Ok(Self { connection })
     }
 

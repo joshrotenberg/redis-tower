@@ -6,6 +6,7 @@ use crate::cluster::read_preference::ReadPreference;
 use crate::cluster::slots::{SlotMap, slot_for_key};
 use crate::commands::Command;
 use crate::pool::{ConnectionPool, PoolConfig};
+use crate::tls::TlsConfig;
 use crate::types::RedisError;
 use std::collections::HashMap;
 use std::future::Future;
@@ -52,6 +53,8 @@ pub struct ClusterClient {
     seed_nodes: Vec<String>,
     /// Pool configuration for each node
     pool_config: Arc<PoolConfig>,
+    /// TLS configuration
+    tls: TlsConfig,
     /// Read preference for routing
     read_preference: ReadPreference,
 }
@@ -63,6 +66,29 @@ impl ClusterClient {
     /// Uses default pool configuration (10 connections per node, health checks enabled).
     pub async fn new(seed_nodes: Vec<impl Into<String>>) -> Result<Self, RedisError> {
         Self::with_pool_config(seed_nodes, PoolConfig::default()).await
+    }
+
+    /// Create a new cluster client with TLS
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::cluster::ClusterClient;
+    /// use redis_tower::tls::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tls = TlsConfig::rustls().with_native_roots().build()?;
+    /// let client = ClusterClient::with_tls(
+    ///     vec!["redis.example.com:7000", "redis.example.com:7001"],
+    ///     tls
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_tls(
+        seed_nodes: Vec<impl Into<String>>,
+        tls: TlsConfig,
+    ) -> Result<Self, RedisError> {
+        Self::with_tls_and_pool_config(seed_nodes, PoolConfig::default(), tls).await
     }
 
     /// Create a new cluster client with legacy config (simple max_size).
@@ -89,7 +115,21 @@ impl ClusterClient {
         seed_nodes: Vec<impl Into<String>>,
         pool_config: PoolConfig,
     ) -> Result<Self, RedisError> {
-        Self::with_full_config(seed_nodes, pool_config, ReadPreference::default()).await
+        Self::with_tls_and_pool_config(seed_nodes, pool_config, TlsConfig::None).await
+    }
+
+    /// Create a new cluster client with TLS and custom pool configuration.
+    ///
+    /// # Arguments
+    /// * `seed_nodes` - Initial cluster nodes to connect to
+    /// * `pool_config` - Connection pool configuration (max size, health checks, timeouts, etc.)
+    /// * `tls` - TLS configuration
+    pub async fn with_tls_and_pool_config(
+        seed_nodes: Vec<impl Into<String>>,
+        pool_config: PoolConfig,
+        tls: TlsConfig,
+    ) -> Result<Self, RedisError> {
+        Self::with_full_config(seed_nodes, pool_config, tls, ReadPreference::default()).await
     }
 
     /// Create a new cluster client with full configuration including read preference.
@@ -97,10 +137,12 @@ impl ClusterClient {
     /// # Arguments
     /// * `seed_nodes` - Initial cluster nodes to connect to
     /// * `pool_config` - Connection pool configuration
+    /// * `tls` - TLS configuration
     /// * `read_preference` - Read preference (Master, Replica, PreferReplica)
     pub async fn with_full_config(
         seed_nodes: Vec<impl Into<String>>,
         pool_config: PoolConfig,
+        tls: TlsConfig,
         read_preference: ReadPreference,
     ) -> Result<Self, RedisError> {
         let seed_nodes: Vec<String> = seed_nodes.into_iter().map(Into::into).collect();
@@ -122,6 +164,7 @@ impl ClusterClient {
             slot_map: Arc::new(RwLock::new(SlotMap::new())),
             seed_nodes,
             pool_config: Arc::new(pool_config),
+            tls,
             read_preference,
         };
 
@@ -304,8 +347,12 @@ impl ClusterClient {
             }
         }
 
-        // Create new pool with the cluster's pool configuration
-        let pool = ConnectionPool::with_config(addr.to_string(), (*self.pool_config).clone());
+        // Create new pool with the cluster's pool configuration and TLS
+        let pool = ConnectionPool::with_tls(
+            addr.to_string(),
+            (*self.pool_config).clone(),
+            self.tls.clone(),
+        );
         let conn = pool.get().await?;
 
         // Store the pool

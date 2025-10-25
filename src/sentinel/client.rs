@@ -139,7 +139,7 @@ impl SentinelClient {
     /// ```
     pub async fn replica(&self, host: &str, port: u16) -> Result<RedisConnection, RedisError> {
         let addr = format!("{}:{}", host, port);
-        let conn = RedisConnection::connect(&addr).await?;
+        let conn = RedisConnection::connect_with_config(&addr, self.config.tls.clone()).await?;
 
         // Authenticate if credentials provided
         if let Some(username) = &self.config.redis_username {

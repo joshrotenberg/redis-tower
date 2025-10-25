@@ -303,7 +303,108 @@ impl Command for SetRange {
     }
 }
 
+/// GETBIT command - returns the bit value at offset in the string value stored at key
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::strings::GetBit;
+/// let cmd = GetBit::new("mykey", 7);
+/// ```
+#[derive(Debug, Clone)]
+pub struct GetBit {
+    pub(crate) key: String,
+    pub(crate) offset: i64,
+}
+
+impl GetBit {
+    /// Create a new GETBIT command
+    pub fn new(key: impl Into<String>, offset: i64) -> Self {
+        Self {
+            key: key.into(),
+            offset,
+        }
+    }
+}
+
+impl Command for GetBit {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("GETBIT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.offset.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SETBIT command - sets or clears the bit at offset in the string value stored at key
+///
+/// Returns the original bit value stored at offset.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::strings::SetBit;
+/// // Set bit at offset 7 to 1
+/// let cmd = SetBit::new("mykey", 7, 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct SetBit {
+    pub(crate) key: String,
+    pub(crate) offset: i64,
+    pub(crate) value: i64,
+}
+
+impl SetBit {
+    /// Create a new SETBIT command
+    ///
+    /// # Arguments
+    /// * `key` - The key name
+    /// * `offset` - The bit offset
+    /// * `value` - The bit value (0 or 1)
+    pub fn new(key: impl Into<String>, offset: i64, value: i64) -> Self {
+        Self {
+            key: key.into(),
+            offset,
+            value,
+        }
+    }
+}
+
+impl Command for SetBit {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SETBIT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.offset.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.value.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// GETEX command - get with expiration options
+///
+/// Available since Redis 6.2.0
 #[derive(Debug, Clone)]
 pub struct GetEx {
     pub(crate) key: String,
@@ -412,6 +513,8 @@ impl Command for GetEx {
 }
 
 /// GETDEL command - get and delete
+///
+/// Available since Redis 6.2.0
 #[derive(Debug, Clone)]
 pub struct GetDel {
     pub(crate) key: String,
@@ -1559,5 +1662,78 @@ mod tests {
         let pairs = vec![("key1", b"value1".to_vec()), ("key2", b"value2".to_vec())];
         let cmd = Msetnx::new().pairs(pairs);
         assert_eq!(cmd.pairs.len(), 2);
+    }
+
+    #[test]
+    fn test_getbit_frame() {
+        let cmd = GetBit::new("mykey", 7);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("GETBIT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("7"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_getbit_response_zero() {
+        let frame = Frame::Integer(0);
+        let result = GetBit::parse_response(frame).unwrap();
+        assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn test_getbit_response_one() {
+        let frame = Frame::Integer(1);
+        let result = GetBit::parse_response(frame).unwrap();
+        assert_eq!(result, 1);
+    }
+
+    #[test]
+    fn test_setbit_frame() {
+        let cmd = SetBit::new("mykey", 7, 1);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("SETBIT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("7"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_setbit_frame_clear() {
+        let cmd = SetBit::new("mykey", 100, 0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_setbit_response() {
+        // Returns the original bit value
+        let frame = Frame::Integer(0);
+        let result = SetBit::parse_response(frame).unwrap();
+        assert_eq!(result, 0);
+
+        let frame = Frame::Integer(1);
+        let result = SetBit::parse_response(frame).unwrap();
+        assert_eq!(result, 1);
     }
 }

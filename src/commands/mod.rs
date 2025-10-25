@@ -15,13 +15,18 @@ pub trait Command {
     fn parse_response(frame: Frame) -> Result<Self::Response, RedisError>;
 }
 
+pub mod acl;
 pub mod bitmap;
+pub mod cluster;
 pub mod connection;
+pub mod functions;
 pub mod geo;
 pub mod hashes;
 pub mod hyperloglog;
 pub mod keys;
+pub mod latency;
 pub mod lists;
+pub mod module;
 pub mod pubsub;
 pub mod scan;
 pub mod scripting;
@@ -32,9 +37,27 @@ pub mod streams;
 pub mod strings;
 pub mod transactions;
 
-pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, GetBit, SetBit};
+pub use acl::{
+    AclCat, AclDelUser, AclGenPass, AclGetUser, AclList, AclLoad, AclLog, AclSave, AclSetUser,
+    AclUsers, AclWhoAmI,
+};
+pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, Bitfield, BitfieldRo, GetBit, SetBit};
+pub use cluster::{
+    ClusterAddSlots, ClusterAddSlotsRange, ClusterBumpEpoch, ClusterCountFailureReports,
+    ClusterCountKeysInSlot, ClusterDelSlots, ClusterDelSlotsRange, ClusterFailover,
+    ClusterFailoverOption, ClusterFlushSlots, ClusterForget, ClusterGetKeysInSlot, ClusterInfo,
+    ClusterKeySlot, ClusterLinks, ClusterMeet, ClusterMyId, ClusterMyShardId, ClusterNodes,
+    ClusterReplicas, ClusterReplicate, ClusterReset, ClusterSaveConfig, ClusterSetConfigEpoch,
+    ClusterSetSlot, ClusterSetSlotState, ClusterShards, ClusterSlotStats, ClusterSlots,
+};
 pub use connection::{
-    Auth, AuthAcl, ClientGetName, ClientSetName, Quit, ReadOnly, ReadWrite, Select,
+    Asking, Auth, AuthAcl, ClientGetName, ClientId, ClientInfo, ClientKill, ClientKillFilter,
+    ClientList, ClientNoEvict, ClientPause, ClientReply, ClientSetInfo, ClientSetName,
+    ClientUnblock, ClientUnpause, Hello, Quit, ReadOnly, ReadWrite, Reset, Select,
+};
+pub use functions::{
+    FCall, FCallReadOnly, FunctionDelete, FunctionDump, FunctionFlush, FunctionKill, FunctionList,
+    FunctionLoad, FunctionRestore, FunctionStats,
 };
 pub use geo::{
     GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoSearchStore, GeoUnit,
@@ -45,17 +68,28 @@ pub use hashes::{
 };
 pub use hyperloglog::{PfAdd, PfCount, PfMerge};
 pub use keys::{
-    Copy, Dump, ExpireAt, ExpireTime, Keys, Move, ObjectEncoding, ObjectFreq, ObjectIdleTime,
-    ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename, RenameNx, Restore,
-    Sort, SortOrder, SortResult, Touch, Type, Unlink,
+    Copy, Dump, ExpireAt, ExpireTime, Keys, Migrate, Move, ObjectEncoding, ObjectFreq,
+    ObjectIdleTime, ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename,
+    RenameNx, Restore, RestoreAsking, Scan, Sort, SortOrder, SortResult, SortRo, Touch, Type,
+    Unlink, WaitAof,
+};
+pub use latency::{
+    LatencyDoctor, LatencyGraph, LatencyHelp, LatencyHistogram, LatencyHistory, LatencyLatest,
+    LatencyReset,
 };
 pub use lists::{
     BLMPop, BLMove, BLPop, BRPop, InsertPosition, LIndex, LInsert, LLen, LMPop, LMPopResult, LMove,
     LPop, LPos, LPush, LPushX, LRange, LRem, LSet, LTrim, MoveDirection, RPop, RPush, RPushX,
 };
+pub use module::{ModuleInfo, ModuleList, ModuleLoad, ModuleLoadEx, ModuleUnload};
 pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
 pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
-pub use server::{BgSave, DbSize, FlushAll, FlushDb, Info, LastSave, RandomKey, Save, Time, Wait};
+pub use server::{
+    BgRewriteAof, BgSave, CommandCmd, CommandCount, CommandInfo, ConfigGet, ConfigResetStat,
+    ConfigRewrite, ConfigSet, DbSize, Debug, DebugSubcommand, Failover, FlushAll, FlushDb, Info,
+    LastSave, MemoryStats, MemoryUsage, RandomKey, ReplicaOf, Role, Save, Shutdown, SlowlogEntry,
+    SlowlogGet, SlowlogLen, SlowlogReset, Time, Wait,
+};
 pub use sets::{
     SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore, Sadd,
     Scard, Sdiff, Sinter, Sismember, Smembers, Srem, Sscan, SscanResult, Sunion,
@@ -68,8 +102,8 @@ pub use sorted_sets::{
     Zunion,
 };
 pub use streams::{
-    StreamEntry, StreamId, TrimStrategy, XAck, XAdd, XClaim, XDel, XGroupCreate, XGroupDestroy,
-    XLen, XPending, XRange, XRead, XReadGroup, XReadResult, XRevRange, XTrim,
+    StreamEntries, StreamEntry, XAck, XAdd, XClaim, XDel, XGroupCreate, XGroupDestroy, XLen,
+    XPending, XRange, XRead, XReadGroup, XRevRange, XTrim,
 };
 pub use strings::{
     Append, Decr, DecrBy, Del, Echo, Exists, Expire, Get, GetDel, GetEx, GetExExpiration, GetRange,

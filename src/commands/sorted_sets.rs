@@ -1331,6 +1331,192 @@ impl ReadOnly for Zadd {}
 impl ReadOnly for Zrem {}
 impl ReadOnly for Zincrby {}
 
+/// Returns the cardinality of the intersection of multiple sorted sets.
+///
+/// Returns the number of members in the intersection, optionally limited by a count.
+/// Available in Redis 7.0+.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::sorted_sets::ZInterCard;
+/// // Get intersection cardinality of two sets
+/// let cmd = ZInterCard::new(2, vec!["zset1", "zset2"]);
+///
+/// // With limit
+/// let cmd = ZInterCard::new(2, vec!["zset1", "zset2"]).limit(100);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZInterCard {
+    pub(crate) numkeys: usize,
+    pub(crate) keys: Vec<String>,
+    pub(crate) limit: Option<i64>,
+}
+
+impl ZInterCard {
+    /// Create a new ZINTERCARD command.
+    pub fn new(numkeys: usize, keys: Vec<impl Into<String>>) -> Self {
+        Self {
+            numkeys,
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            limit: None,
+        }
+    }
+
+    /// Set the limit for the cardinality count.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+impl Command for ZInterCard {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from_static(b"ZINTERCARD"))),
+            Frame::BulkString(Some(Bytes::from(self.numkeys.to_string()))),
+        ];
+
+        for key in &self.keys {
+            args.push(Frame::BulkString(Some(Bytes::from(key.clone()))));
+        }
+
+        if let Some(limit) = self.limit {
+            args.push(Frame::BulkString(Some(Bytes::from_static(b"LIMIT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(limit.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Stores a range of members from a sorted set in a destination key.
+///
+/// Similar to ZRANGE but stores the result in a destination key instead of returning it.
+/// Available in Redis 6.2+.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::sorted_sets::ZRangeStore;
+/// // Store first 10 members by index
+/// let cmd = ZRangeStore::new("dest", "source", 0, 9);
+///
+/// // Store by score range
+/// let cmd = ZRangeStore::new("dest", "source", 0.0, 100.0).by_score();
+///
+/// // Reverse order
+/// let cmd = ZRangeStore::new("dest", "source", 0, -1).rev();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ZRangeStore {
+    pub(crate) dst: String,
+    pub(crate) src: String,
+    pub(crate) min: String,
+    pub(crate) max: String,
+    pub(crate) by_score: bool,
+    pub(crate) by_lex: bool,
+    pub(crate) rev: bool,
+    pub(crate) limit: Option<(i64, i64)>,
+}
+
+impl ZRangeStore {
+    /// Create a new ZRANGESTORE command with index range.
+    pub fn new<T: ToString>(
+        dst: impl Into<String>,
+        src: impl Into<String>,
+        min: T,
+        max: T,
+    ) -> Self {
+        Self {
+            dst: dst.into(),
+            src: src.into(),
+            min: min.to_string(),
+            max: max.to_string(),
+            by_score: false,
+            by_lex: false,
+            rev: false,
+            limit: None,
+        }
+    }
+
+    /// Interpret min/max as score range.
+    pub fn by_score(mut self) -> Self {
+        self.by_score = true;
+        self
+    }
+
+    /// Interpret min/max as lexicographical range.
+    pub fn by_lex(mut self) -> Self {
+        self.by_lex = true;
+        self
+    }
+
+    /// Return results in reverse order.
+    pub fn rev(mut self) -> Self {
+        self.rev = true;
+        self
+    }
+
+    /// Limit the number of results (offset, count).
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRangeStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from_static(b"ZRANGESTORE"))),
+            Frame::BulkString(Some(Bytes::from(self.dst.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.src.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.min.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.max.clone()))),
+        ];
+
+        if self.by_score {
+            args.push(Frame::BulkString(Some(Bytes::from_static(b"BYSCORE"))));
+        }
+
+        if self.by_lex {
+            args.push(Frame::BulkString(Some(Bytes::from_static(b"BYLEX"))));
+        }
+
+        if self.rev {
+            args.push(Frame::BulkString(Some(Bytes::from_static(b"REV"))));
+        }
+
+        if let Some((offset, count)) = self.limit {
+            args.push(Frame::BulkString(Some(Bytes::from_static(b"LIMIT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1473,6 +1659,135 @@ mod tests {
         assert_eq!(result.members.len(), 2);
         assert_eq!(result.members[0].1, 1.0);
         assert_eq!(result.members[1].1, 2.0);
+    }
+
+    #[test]
+    fn test_zintercard_frame() {
+        let cmd = ZInterCard::new(2, vec!["zset1", "zset2"]);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 4); // ZINTERCARD numkeys key1 key2
+            assert_eq!(
+                items[0],
+                Frame::BulkString(Some(Bytes::from_static(b"ZINTERCARD")))
+            );
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("2"))));
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zintercard_with_limit_frame() {
+        let cmd = ZInterCard::new(3, vec!["zset1", "zset2", "zset3"]).limit(100);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 7); // ZINTERCARD numkeys key1 key2 key3 LIMIT 100
+            assert_eq!(
+                items[5],
+                Frame::BulkString(Some(Bytes::from_static(b"LIMIT")))
+            );
+            assert_eq!(items[6], Frame::BulkString(Some(Bytes::from("100"))));
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zintercard_response() {
+        let frame = Frame::Integer(42);
+        let result = ZInterCard::parse_response(frame).unwrap();
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_zrangestore_frame() {
+        let cmd = ZRangeStore::new("dest", "source", 0, 10);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 5); // ZRANGESTORE dst src min max
+            assert_eq!(
+                items[0],
+                Frame::BulkString(Some(Bytes::from_static(b"ZRANGESTORE")))
+            );
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("dest"))));
+            assert_eq!(items[2], Frame::BulkString(Some(Bytes::from("source"))));
+            assert_eq!(items[3], Frame::BulkString(Some(Bytes::from("0"))));
+            assert_eq!(items[4], Frame::BulkString(Some(Bytes::from("10"))));
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zrangestore_by_score_frame() {
+        let cmd = ZRangeStore::new("dest", "source", 0.0, 100.0).by_score();
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 6); // ZRANGESTORE dst src min max BYSCORE
+            assert_eq!(
+                items[5],
+                Frame::BulkString(Some(Bytes::from_static(b"BYSCORE")))
+            );
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zrangestore_with_limit_frame() {
+        let cmd = ZRangeStore::new("dest", "source", 0, -1).limit(10, 20);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 8); // ZRANGESTORE dst src min max LIMIT offset count
+            assert_eq!(
+                items[5],
+                Frame::BulkString(Some(Bytes::from_static(b"LIMIT")))
+            );
+            assert_eq!(items[6], Frame::BulkString(Some(Bytes::from("10"))));
+            assert_eq!(items[7], Frame::BulkString(Some(Bytes::from("20"))));
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zrangestore_rev_by_lex_frame() {
+        let cmd = ZRangeStore::new("dest", "source", "[a", "[z")
+            .by_lex()
+            .rev();
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            // ZRANGESTORE dst src min max BYLEX REV
+            assert!(items.len() >= 7);
+            // Check for BYLEX flag
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from_static(b"BYLEX"))))
+            );
+            // Check for REV flag
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from_static(b"REV"))))
+            );
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_zrangestore_response() {
+        let frame = Frame::Integer(15);
+        let result = ZRangeStore::parse_response(frame).unwrap();
+        assert_eq!(result, 15); // Returns number of elements stored
     }
 }
 

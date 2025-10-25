@@ -48,6 +48,261 @@ impl Command for Persist {
     }
 }
 
+#[cfg(test)]
+mod new_keys_tests {
+    use super::*;
+
+    #[test]
+    fn test_scan_basic_frame() {
+        let cmd = Scan::new(0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("SCAN"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_pattern_frame() {
+        let cmd = Scan::new(10).pattern("user:*");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("MATCH"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("user:*"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_count_frame() {
+        let cmd = Scan::new(0).count(100);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("COUNT"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("100"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_scan_with_type_frame() {
+        let cmd = Scan::new(0).key_type("string");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("TYPE"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("string"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_scan_parse_response() {
+        let frame = Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("10"))),
+            Frame::Array(vec![
+                Frame::BulkString(Some(Bytes::from("key1"))),
+                Frame::BulkString(Some(Bytes::from("key2"))),
+            ]),
+        ]);
+
+        let (cursor, keys) = Scan::parse_response(frame).unwrap();
+        assert_eq!(cursor, 10);
+        assert_eq!(keys, vec!["key1", "key2"]);
+    }
+
+    #[test]
+    fn test_migrate_single_key_frame() {
+        let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("MIGRATE"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("127.0.0.1"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("6380"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("0"))));
+                assert_eq!(parts[5], Frame::BulkString(Some(Bytes::from("5000"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_migrate_multiple_keys_frame() {
+        let cmd = Migrate::multiple("127.0.0.1", 6380, 0, 5000, vec!["key1", "key2"]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from(""))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("KEYS")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("key1")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("key2")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_migrate_with_copy_frame() {
+        let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000).copy();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("COPY")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_migrate_with_auth_frame() {
+        let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000).auth("password");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("AUTH")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("password")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_waitaof_frame() {
+        let cmd = WaitAof::new(1, 2, 1000);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("WAITAOF"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("1"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("2"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("1000"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_waitaof_parse_response() {
+        let frame = Frame::Array(vec![Frame::Integer(1), Frame::Integer(2)]);
+        let (local, replica) = WaitAof::parse_response(frame).unwrap();
+        assert_eq!(local, 1);
+        assert_eq!(replica, 2);
+    }
+
+    #[test]
+    fn test_sort_ro_basic_frame() {
+        let cmd = SortRo::new("mylist");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("SORT_RO"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_ro_with_by_frame() {
+        let cmd = SortRo::new("mylist").by("weight_*");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("BY")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("weight_*")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_ro_with_limit_frame() {
+        let cmd = SortRo::new("mylist").limit(0, 10);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("LIMIT")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("0")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("10")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_sort_ro_alpha_frame() {
+        let cmd = SortRo::new("mylist").alpha();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("ALPHA")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_restore_asking_frame() {
+        let cmd = RestoreAsking::new("mykey", 0, Bytes::from(vec![1, 2, 3]));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("RESTORE-ASKING")))
+                );
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_restore_asking_with_replace_frame() {
+        let cmd = RestoreAsking::new("mykey", 0, Bytes::from(vec![1, 2, 3])).replace();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("REPLACE")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+}
+
 /// PEXPIRE command - Set key expiration in milliseconds
 ///
 /// # Examples
@@ -1802,5 +2057,580 @@ mod sort_tests {
     fn test_sort_parse_error() {
         let frame = Frame::Error(Bytes::from("ERR syntax error"));
         assert!(Sort::parse_response(frame).is_err());
+    }
+}
+
+/// SCAN command - Incrementally iterate the key space
+///
+/// SCAN is a cursor based iterator that allows incrementally iterating
+/// over the entire key space without blocking the server.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Scan;
+///
+/// // Basic scan with cursor 0 (start)
+/// let cmd = Scan::new(0);
+///
+/// // Scan with pattern matching
+/// let cmd = Scan::new(0).pattern("user:*");
+///
+/// // Scan with count hint
+/// let cmd = Scan::new(10).count(100);
+///
+/// // Scan with type filter (Redis 6.0+)
+/// let cmd = Scan::new(0).key_type("string");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Scan {
+    cursor: u64,
+    pattern: Option<String>,
+    count: Option<i64>,
+    key_type: Option<String>,
+}
+
+impl Scan {
+    /// Create a new SCAN command with cursor position
+    pub fn new(cursor: u64) -> Self {
+        Self {
+            cursor,
+            pattern: None,
+            count: None,
+            key_type: None,
+        }
+    }
+
+    /// Set pattern to match keys against
+    pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pattern = Some(pattern.into());
+        self
+    }
+
+    /// Set count hint for number of elements to return per iteration
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Filter by key type (Redis 6.0+)
+    pub fn key_type(mut self, key_type: impl Into<String>) -> Self {
+        self.key_type = Some(key_type.into());
+        self
+    }
+}
+
+impl Command for Scan {
+    type Response = (u64, Vec<String>); // (next_cursor, keys)
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("SCAN"))),
+            Frame::BulkString(Some(Bytes::from(self.cursor.to_string()))),
+        ];
+
+        if let Some(pattern) = &self.pattern {
+            frames.push(Frame::BulkString(Some(Bytes::from("MATCH"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(pattern.clone()))));
+        }
+
+        if let Some(count) = self.count {
+            frames.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        if let Some(key_type) = &self.key_type {
+            frames.push(Frame::BulkString(Some(Bytes::from("TYPE"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(key_type.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(mut parts) if parts.len() == 2 => {
+                let keys_frame = parts.pop().unwrap();
+                let cursor_frame = parts.pop().unwrap();
+
+                let cursor = match cursor_frame {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(&data)
+                        .parse::<u64>()
+                        .map_err(|_| RedisError::UnexpectedResponse)?,
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                let keys = match keys_frame {
+                    Frame::Array(key_frames) => {
+                        let mut keys = Vec::new();
+                        for key_frame in key_frames {
+                            match key_frame {
+                                Frame::BulkString(Some(data)) => {
+                                    keys.push(String::from_utf8_lossy(&data).into_owned());
+                                }
+                                _ => return Err(RedisError::UnexpectedResponse),
+                            }
+                        }
+                        keys
+                    }
+                    _ => return Err(RedisError::UnexpectedResponse),
+                };
+
+                Ok((cursor, keys))
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MIGRATE command - Atomically transfer key(s) to another Redis instance
+///
+/// Transfers one or more keys from the source instance to the destination
+/// instance. On success, keys are deleted from the source.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Migrate;
+///
+/// // Migrate single key
+/// let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000);
+///
+/// // Migrate with COPY (don't delete from source)
+/// let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000).copy();
+///
+/// // Migrate with REPLACE (replace existing key)
+/// let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000).replace();
+///
+/// // Migrate multiple keys (Redis 3.0.6+)
+/// let cmd = Migrate::multiple("127.0.0.1", 6380, 0, 5000, vec!["key1", "key2"]);
+///
+/// // Migrate with authentication
+/// let cmd = Migrate::new("127.0.0.1", 6380, "mykey", 0, 5000).auth("password");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Migrate {
+    host: String,
+    port: u16,
+    key: Option<String>,
+    keys: Vec<String>,
+    destination_db: i64,
+    timeout: i64,
+    copy: bool,
+    replace: bool,
+    auth: Option<String>,
+    auth2: Option<(String, String)>,
+}
+
+impl Migrate {
+    /// Create a new MIGRATE command for a single key
+    pub fn new(
+        host: impl Into<String>,
+        port: u16,
+        key: impl Into<String>,
+        destination_db: i64,
+        timeout: i64,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            key: Some(key.into()),
+            keys: Vec::new(),
+            destination_db,
+            timeout,
+            copy: false,
+            replace: false,
+            auth: None,
+            auth2: None,
+        }
+    }
+
+    /// Create a MIGRATE command for multiple keys (Redis 3.0.6+)
+    pub fn multiple(
+        host: impl Into<String>,
+        port: u16,
+        destination_db: i64,
+        timeout: i64,
+        keys: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            host: host.into(),
+            port,
+            key: None,
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            destination_db,
+            timeout,
+            copy: false,
+            replace: false,
+            auth: None,
+            auth2: None,
+        }
+    }
+
+    /// Don't remove the key from the source instance (COPY option)
+    pub fn copy(mut self) -> Self {
+        self.copy = true;
+        self
+    }
+
+    /// Replace existing key on destination (REPLACE option)
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+
+    /// Authenticate with password
+    pub fn auth(mut self, password: impl Into<String>) -> Self {
+        self.auth = Some(password.into());
+        self
+    }
+
+    /// Authenticate with username and password (Redis 6.0+)
+    pub fn auth2(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth2 = Some((username.into(), password.into()));
+        self
+    }
+}
+
+impl Command for Migrate {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("MIGRATE"))),
+            Frame::BulkString(Some(Bytes::from(self.host.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.port.to_string()))),
+        ];
+
+        // Add key or empty string for multi-key mode
+        if let Some(key) = &self.key {
+            frames.push(Frame::BulkString(Some(Bytes::from(key.clone()))));
+        } else {
+            frames.push(Frame::BulkString(Some(Bytes::from(""))));
+        }
+
+        frames.push(Frame::BulkString(Some(Bytes::from(
+            self.destination_db.to_string(),
+        ))));
+        frames.push(Frame::BulkString(Some(Bytes::from(
+            self.timeout.to_string(),
+        ))));
+
+        if self.copy {
+            frames.push(Frame::BulkString(Some(Bytes::from("COPY"))));
+        }
+
+        if self.replace {
+            frames.push(Frame::BulkString(Some(Bytes::from("REPLACE"))));
+        }
+
+        if let Some(password) = &self.auth {
+            frames.push(Frame::BulkString(Some(Bytes::from("AUTH"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(password.clone()))));
+        }
+
+        if let Some((username, password)) = &self.auth2 {
+            frames.push(Frame::BulkString(Some(Bytes::from("AUTH2"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(username.clone()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(password.clone()))));
+        }
+
+        if !self.keys.is_empty() {
+            frames.push(Frame::BulkString(Some(Bytes::from("KEYS"))));
+            for key in &self.keys {
+                frames.push(Frame::BulkString(Some(Bytes::from(key.clone()))));
+            }
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// WAITAOF command - Wait for AOF fsync acknowledgment
+///
+/// Blocks until all previous write commands are fsynced to the AOF
+/// of the local Redis and/or at least the specified number of replicas.
+///
+/// Available since Redis 7.2.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::WaitAof;
+///
+/// // Wait for local fsync only
+/// let cmd = WaitAof::new(1, 0, 1000);
+///
+/// // Wait for 2 replicas, no local fsync required
+/// let cmd = WaitAof::new(0, 2, 1000);
+///
+/// // Wait for both local and 1 replica
+/// let cmd = WaitAof::new(1, 1, 5000);
+/// ```
+#[derive(Debug, Clone)]
+pub struct WaitAof {
+    numlocal: i64,
+    numreplicas: i64,
+    timeout: i64,
+}
+
+impl WaitAof {
+    /// Create a new WAITAOF command
+    ///
+    /// # Arguments
+    /// * `numlocal` - Number of local fsyncs (0 or 1)
+    /// * `numreplicas` - Minimum number of replicas to reach
+    /// * `timeout` - Timeout in milliseconds
+    pub fn new(numlocal: i64, numreplicas: i64, timeout: i64) -> Self {
+        Self {
+            numlocal,
+            numreplicas,
+            timeout,
+        }
+    }
+}
+
+impl Command for WaitAof {
+    type Response = (i64, i64); // (local_acks, replica_acks)
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("WAITAOF"))),
+            Frame::BulkString(Some(Bytes::from(self.numlocal.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.numreplicas.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.timeout.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(mut parts) if parts.len() == 2 => {
+                let replica_acks = parts.pop().unwrap();
+                let local_acks = parts.pop().unwrap();
+
+                match (local_acks, replica_acks) {
+                    (Frame::Integer(l), Frame::Integer(r)) => Ok((l, r)),
+                    _ => Err(RedisError::UnexpectedResponse),
+                }
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SORT_RO command - Read-only variant of SORT
+///
+/// Returns sorted elements from a list, set, or sorted set.
+/// This is exactly like SORT but refuses the STORE option and can
+/// safely be used in read-only replicas.
+///
+/// Available since Redis 7.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{SortRo, SortOrder};
+///
+/// // Basic sort
+/// let cmd = SortRo::new("mylist");
+///
+/// // Sort with pattern
+/// let cmd = SortRo::new("mylist").by("weight_*");
+///
+/// // Sort with limit
+/// let cmd = SortRo::new("mylist").limit(0, 10);
+///
+/// // Sort with GET pattern
+/// let cmd = SortRo::new("mylist").get("object_*");
+///
+/// // Sort descending
+/// let cmd = SortRo::new("mylist").order(SortOrder::Desc);
+///
+/// // Sort alphabetically
+/// let cmd = SortRo::new("mylist").alpha();
+/// ```
+#[derive(Debug, Clone)]
+pub struct SortRo {
+    key: String,
+    by_pattern: Option<String>,
+    limit: Option<(i64, i64)>,
+    get_patterns: Vec<String>,
+    order: Option<SortOrder>,
+    alpha: bool,
+}
+
+impl SortRo {
+    /// Create a new SORT_RO command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            by_pattern: None,
+            limit: None,
+            get_patterns: Vec::new(),
+            order: None,
+            alpha: false,
+        }
+    }
+
+    /// Sort by external key pattern
+    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+        self.by_pattern = Some(pattern.into());
+        self
+    }
+
+    /// Limit results with offset and count
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+
+    /// Get external keys using pattern
+    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+        self.get_patterns.push(pattern.into());
+        self
+    }
+
+    /// Set sort order
+    pub fn order(mut self, order: SortOrder) -> Self {
+        self.order = Some(order);
+        self
+    }
+
+    /// Sort lexicographically instead of numerically
+    pub fn alpha(mut self) -> Self {
+        self.alpha = true;
+        self
+    }
+}
+
+impl Command for SortRo {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("SORT_RO"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        if let Some(by_pattern) = &self.by_pattern {
+            frames.push(Frame::BulkString(Some(Bytes::from("BY"))));
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                by_pattern.as_bytes(),
+            ))));
+        }
+
+        if let Some((offset, count)) = self.limit {
+            frames.push(Frame::BulkString(Some(Bytes::from("LIMIT"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        for pattern in &self.get_patterns {
+            frames.push(Frame::BulkString(Some(Bytes::from("GET"))));
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                pattern.as_bytes(),
+            ))));
+        }
+
+        if let Some(order) = &self.order {
+            let order_str = match order {
+                SortOrder::Asc => "ASC",
+                SortOrder::Desc => "DESC",
+            };
+            frames.push(Frame::BulkString(Some(Bytes::from(order_str))));
+        }
+
+        if self.alpha {
+            frames.push(Frame::BulkString(Some(Bytes::from("ALPHA"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(elements) => {
+                let mut result = Vec::new();
+                for element in elements {
+                    match element {
+                        Frame::BulkString(Some(data)) => result.push(data),
+                        Frame::BulkString(None) => result.push(Bytes::new()),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// RESTORE-ASKING command - Internal command for cluster key migration
+///
+/// Like RESTORE but used during cluster resharding. This is an internal
+/// command used by Redis Cluster and should not be used directly by clients.
+///
+/// Available since Redis 3.0.0
+#[derive(Debug, Clone)]
+pub struct RestoreAsking {
+    key: String,
+    ttl: i64,
+    serialized_value: Bytes,
+    replace: bool,
+}
+
+impl RestoreAsking {
+    /// Create a new RESTORE-ASKING command
+    pub fn new(key: impl Into<String>, ttl: i64, serialized_value: Bytes) -> Self {
+        Self {
+            key: key.into(),
+            ttl,
+            serialized_value,
+            replace: false,
+        }
+    }
+
+    /// Replace existing key if it exists
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+}
+
+impl Command for RestoreAsking {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("RESTORE-ASKING"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.ttl.to_string()))),
+            Frame::BulkString(Some(self.serialized_value.clone())),
+        ];
+
+        if self.replace {
+            frames.push(Frame::BulkString(Some(Bytes::from("REPLACE"))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
     }
 }

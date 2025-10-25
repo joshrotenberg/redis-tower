@@ -175,12 +175,15 @@
 pub mod client;
 pub mod codec;
 pub mod commands;
+pub mod parser;
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
 pub mod read_preference;
+pub mod tls;
 pub mod transaction;
 pub mod types;
+pub mod url;
 
 // Deployment topology support (feature-gated)
 #[cfg(feature = "cluster")]

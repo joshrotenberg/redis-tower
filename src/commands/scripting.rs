@@ -501,3 +501,121 @@ mod tests {
         }
     }
 }
+
+/// SCRIPT DEBUG command - Set script debugging mode
+///
+/// Sets the debugging mode for subsequent EVAL/EVALSHA commands.
+///
+/// Available since Redis 3.2.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{ScriptDebug, ScriptDebugMode};
+///
+/// // Enable synchronous debugging
+/// let cmd = ScriptDebug::new(ScriptDebugMode::Yes);
+///
+/// // Enable asynchronous debugging
+/// let cmd = ScriptDebug::new(ScriptDebugMode::Sync);
+///
+/// // Disable debugging
+/// let cmd = ScriptDebug::new(ScriptDebugMode::No);
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptDebug {
+    mode: ScriptDebugMode,
+}
+
+/// Script debugging modes
+#[derive(Debug, Clone, Copy)]
+pub enum ScriptDebugMode {
+    /// Enable synchronous debugging
+    Yes,
+    /// Enable asynchronous debugging
+    Sync,
+    /// Disable debugging
+    No,
+}
+
+impl ScriptDebug {
+    /// Create a new SCRIPT DEBUG command
+    pub fn new(mode: ScriptDebugMode) -> Self {
+        Self { mode }
+    }
+}
+
+impl Command for ScriptDebug {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mode_str = match self.mode {
+            ScriptDebugMode::Yes => "YES",
+            ScriptDebugMode::Sync => "SYNC",
+            ScriptDebugMode::No => "NO",
+        };
+
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SCRIPT"))),
+            Frame::BulkString(Some(Bytes::from("DEBUG"))),
+            Frame::BulkString(Some(Bytes::from(mode_str))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SCRIPT KILL command - Kill currently executing script
+///
+/// Kills the currently executing Lua script, assuming no write operations
+/// were performed by the script.
+///
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ScriptKill;
+///
+/// let cmd = ScriptKill::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptKill;
+
+impl ScriptKill {
+    /// Create a new SCRIPT KILL command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ScriptKill {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ScriptKill {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SCRIPT"))),
+            Frame::BulkString(Some(Bytes::from("KILL"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

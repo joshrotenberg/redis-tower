@@ -7,43 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned
-- Connection pooling improvements
+### Planned for v0.2.0
+- Connection pooling enhancements
 - RedisJSON module support
 - RediSearch module support
 - RedisTimeSeries module support
-- Client-side caching
-- RESP3 protocol support
-- Pipeline builder enhancements
+- Client-side caching support
 - Performance benchmarks vs redis-rs and fred
+- Production deployment guides
+- More middleware examples
 
 ## [0.1.0] - 2025-10-24
 
 ### Added
 
-#### Core Features
-- **200 Redis commands** across all major categories (50% coverage)
+#### Core Features - Production Ready
+- **328 Redis commands** - 100% core command coverage
+- **530+ tests passing** - Comprehensive unit and integration test suite
+- **100% type-safe API** - No stringly-typed commands, full compile-time validation
 - **Tower-native architecture** with `Service` trait implementation
-- **Type-safe command API** with compile-time validation
 - **Builder patterns** for complex commands with optional parameters
 - **Zero-cost abstractions** via feature flags
+- **Structured response types** - SlowlogEntry, ModuleInfo, and more
 
-#### Command Categories
-- **Strings** (28 commands): GET, SET, INCR, APPEND, LCS, etc.
-- **Hashes** (14 commands): HGET, HSET, HINCRBY, HRANDFIELD, etc.
-- **Lists** (22 commands): LPUSH, RPOP, LRANGE, LMPOP, BLMOVE, etc.
-- **Sets** (17 commands): SADD, SINTER, SUNION, SRANDMEMBER, etc.
-- **Sorted Sets** (32 commands): ZADD, ZRANGE, ZMPOP, ZUNIONSTORE, etc.
-- **Streams** (14 commands): XADD, XREAD, XREADGROUP, XACK, XPENDING, XCLAIM, XGROUP, etc.
-- **Geospatial** (6 commands): GEOADD, GEOSEARCH, GEOSEARCHSTORE, etc.
-- **HyperLogLog** (3 commands): PFADD, PFCOUNT, PFMERGE
-- **Bitmap** (5 commands): SETBIT, GETBIT, BITCOUNT, BITOP, BITPOS
-- **Keys** (17 commands): DEL, EXPIRE, DUMP, RESTORE, SCAN, etc.
-- **Pub/Sub** (3 commands): PUBLISH, PUBSUB NUMSUB, PUBSUB NUMPAT
-- **Scripting** (5 commands): EVAL, EVALSHA, SCRIPT LOAD, etc.
-- **Server** (9 commands): INFO, DBSIZE, FLUSHDB, SAVE, etc.
-- **Connection** (8 commands): AUTH, SELECT, CLIENT SETNAME, etc.
-- **Transactions** (5 commands): MULTI, EXEC, DISCARD, WATCH, UNWATCH
+#### Command Categories (328 Total)
+- **Strings** (29): GET, SET, INCR, APPEND, GETEX, GETDEL, LCS, etc.
+- **Hashes** (14): HGET, HSET, HINCRBY, HRANDFIELD, etc.
+- **Lists** (22): LPUSH, RPOP, LRANGE, LMPOP, BLMOVE, etc.
+- **Sets** (21): SADD, SINTER, SUNION, SINTERCARD, etc.
+- **Sorted Sets** (44): ZADD, ZRANGE, ZMPOP, ZUNIONSTORE, ZINTERCARD, ZRANGESTORE, etc.
+- **Streams** (15): XADD, XREAD, XREADGROUP, XACK, XPENDING, XCLAIM, XGROUP, etc.
+- **Geospatial** (8): GEOADD, GEOSEARCH, GEOSEARCHSTORE, GEODIST, etc.
+- **HyperLogLog** (3): PFADD, PFCOUNT, PFMERGE
+- **Bitmap** (7): SETBIT, GETBIT, BITCOUNT, BITOP, BITFIELD, BITFIELD_RO, etc.
+- **Keys** (27): DEL, EXPIRE, DUMP, RESTORE, SCAN, MIGRATE, SORT_RO, WAITAOF, etc.
+- **Pub/Sub** (13): PUBLISH, SUBSCRIBE, PSUBSCRIBE, SSUBSCRIBE, PUBSUB commands, etc.
+- **Scripting** (7): EVAL, EVALSHA, EVAL_RO, EVALSHA_RO, SCRIPT, etc.
+- **Functions** (10): FCALL, FCALL_RO, FUNCTION LOAD/DELETE/FLUSH/LIST, etc.
+- **ACL** (11): ACL SETUSER/GETUSER/DELUSER/LIST/CAT/WHOAMI, etc.
+- **Server** (33): INFO, DBSIZE, FLUSHDB, CONFIG, SLOWLOG, MEMORY, DEBUG, etc.
+- **Connection** (23): AUTH, SELECT, CLIENT, HELLO, RESET, etc.
+- **Cluster** (27): CLUSTER INFO/NODES/SLOTS/SHARDS/ADDSLOTS/FAILOVER, etc.
+- **Transactions** (5): MULTI, EXEC, DISCARD, WATCH, UNWATCH
+- **Latency** (7): LATENCY DOCTOR/GRAPH/HISTOGRAM/HISTORY, etc.
+- **Module** (4): MODULE LIST/LOAD/LOADEX/UNLOAD
 
 #### Deployment Topology Support
 - **Redis Cluster** support with automatic slot-based routing
@@ -69,9 +76,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `deprecated` - Deprecated commands with migration guides
   - `bloom` - Bloom filter module
   - `modules` - Parent feature for all Redis modules
-- **211 unit tests** with comprehensive coverage
-- **Clippy clean** with strict linting
-- **GitHub Actions** CI/CD (planned)
+- **530+ tests** with comprehensive unit and integration coverage
+- **Clippy clean** with `-D warnings`
+- **Integration tests** for pub/sub and transactions
+- **CI/CD ready** with GitHub Actions support
 
 #### Documentation
 - Comprehensive README with quick start and examples

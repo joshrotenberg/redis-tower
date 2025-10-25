@@ -364,6 +364,180 @@ impl Command for BitPos {
     }
 }
 
+/// BITFIELD command - Perform arbitrary bitfield integer operations
+///
+/// BITFIELD treats a Redis string as an array of bits and can perform atomic
+/// read, write, and increment operations on variable bit widths and arbitrary
+/// non-aligned offsets.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Bitfield;
+///
+/// let cmd = Bitfield::new("mykey")
+///     .set("i8", 0, 100)
+///     .get("u4", 0)
+///     .incrby("u2", 100, 1);
+/// ```
+#[derive(Debug, Clone)]
+pub struct Bitfield {
+    key: String,
+    operations: Vec<String>,
+}
+
+impl Bitfield {
+    /// Create a new BITFIELD command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            operations: Vec::new(),
+        }
+    }
+
+    /// GET operation - Get the bits at the given offset
+    pub fn get(mut self, encoding: impl Into<String>, offset: i64) -> Self {
+        self.operations.push("GET".to_string());
+        self.operations.push(encoding.into());
+        self.operations.push(offset.to_string());
+        self
+    }
+
+    /// SET operation - Set the bits at the given offset to value
+    pub fn set(mut self, encoding: impl Into<String>, offset: i64, value: i64) -> Self {
+        self.operations.push("SET".to_string());
+        self.operations.push(encoding.into());
+        self.operations.push(offset.to_string());
+        self.operations.push(value.to_string());
+        self
+    }
+
+    /// INCRBY operation - Increment the value at offset by increment
+    pub fn incrby(mut self, encoding: impl Into<String>, offset: i64, increment: i64) -> Self {
+        self.operations.push("INCRBY".to_string());
+        self.operations.push(encoding.into());
+        self.operations.push(offset.to_string());
+        self.operations.push(increment.to_string());
+        self
+    }
+
+    /// OVERFLOW operation - Set overflow behavior (WRAP, SAT, FAIL)
+    pub fn overflow(mut self, behavior: impl Into<String>) -> Self {
+        self.operations.push("OVERFLOW".to_string());
+        self.operations.push(behavior.into());
+        self
+    }
+}
+
+impl Command for Bitfield {
+    type Response = Vec<Option<i64>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("BITFIELD"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        for op in &self.operations {
+            frames.push(Frame::BulkString(Some(Bytes::from(op.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(Some(n)),
+                        Frame::Null | Frame::BulkString(None) => result.push(None),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// BITFIELD_RO command - Read-only variant of BITFIELD
+///
+/// Like BITFIELD but only supports GET operations. Safe to use on read-only replicas.
+///
+/// Available since Redis 6.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::BitfieldRo;
+///
+/// let cmd = BitfieldRo::new("mykey")
+///     .get("i8", 0)
+///     .get("u4", 100);
+/// ```
+#[derive(Debug, Clone)]
+pub struct BitfieldRo {
+    key: String,
+    gets: Vec<(String, i64)>, // (encoding, offset)
+}
+
+impl BitfieldRo {
+    /// Create a new BITFIELD_RO command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            gets: Vec::new(),
+        }
+    }
+
+    /// GET operation - Get the bits at the given offset
+    pub fn get(mut self, encoding: impl Into<String>, offset: i64) -> Self {
+        self.gets.push((encoding.into(), offset));
+        self
+    }
+}
+
+impl Command for BitfieldRo {
+    type Response = Vec<Option<i64>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("BITFIELD_RO"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+
+        for (encoding, offset) in &self.gets {
+            frames.push(Frame::BulkString(Some(Bytes::from("GET"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(encoding.clone()))));
+            frames.push(Frame::BulkString(Some(Bytes::from(offset.to_string()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(Some(n)),
+                        Frame::Null | Frame::BulkString(None) => result.push(None),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,5 +681,100 @@ mod tests {
     fn test_bitpos_response() {
         let response = BitPos::parse_response(Frame::Integer(42)).unwrap();
         assert_eq!(response, 42);
+    }
+
+    #[test]
+    fn test_bitfield_get_frame() {
+        let cmd = Bitfield::new("mykey").get("u4", 0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BITFIELD"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("GET"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("u4"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("0"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bitfield_set_frame() {
+        let cmd = Bitfield::new("mykey").set("i8", 100, 42);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("SET")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("i8")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("100")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("42")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bitfield_incrby_frame() {
+        let cmd = Bitfield::new("mykey").incrby("u2", 100, 1);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("INCRBY")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("u2")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("1")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bitfield_overflow_frame() {
+        let cmd = Bitfield::new("mykey").overflow("WRAP").set("i8", 0, 100);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("OVERFLOW")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("WRAP")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bitfield_response() {
+        let frame = Frame::Array(vec![Frame::Integer(10), Frame::Integer(20)]);
+        let result = Bitfield::parse_response(frame).unwrap();
+        assert_eq!(result, vec![Some(10), Some(20)]);
+    }
+
+    #[test]
+    fn test_bitfield_ro_frame() {
+        let cmd = BitfieldRo::new("mykey").get("u4", 0).get("i8", 100);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("BITFIELD_RO")))
+                );
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mykey"))));
+                // Should have 2 GET operations (each with GET + encoding + offset = 3 parts)
+                assert_eq!(parts.len(), 2 + 6); // BITFIELD_RO + key + 2*(GET + encoding + offset)
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_bitfield_ro_response() {
+        let frame = Frame::Array(vec![Frame::Integer(5), Frame::Null]);
+        let result = BitfieldRo::parse_response(frame).unwrap();
+        assert_eq!(result, vec![Some(5), None]);
     }
 }

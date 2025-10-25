@@ -52,7 +52,7 @@ impl Service<()> for SentinelMakeService {
 
             // Step 2: Connect to the discovered master
             let addr = format!("{}:{}", host, port);
-            let conn = RedisConnection::connect(&addr).await?;
+            let conn = RedisConnection::connect_with_config(&addr, config.tls.clone()).await?;
 
             // Step 3: Authenticate if credentials provided
             if let Some(username) = &config.redis_username {

@@ -1,9 +1,10 @@
 //! Sentinel configuration types
 
+use crate::tls::TlsConfig;
 use std::time::Duration;
 
 /// Configuration for connecting to Redis via Sentinel
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SentinelConfig {
     /// List of Sentinel nodes (host, port)
     pub(crate) sentinels: Vec<(String, u16)>,
@@ -28,6 +29,31 @@ pub struct SentinelConfig {
 
     /// Whether to enable read-from-replica support
     pub(crate) read_from_replicas: bool,
+
+    /// TLS configuration for Redis connections
+    pub(crate) tls: TlsConfig,
+}
+
+impl std::fmt::Debug for SentinelConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SentinelConfig")
+            .field("sentinels", &self.sentinels)
+            .field("master_name", &self.master_name)
+            .field(
+                "sentinel_password",
+                &self.sentinel_password.as_ref().map(|_| "***"),
+            )
+            .field(
+                "redis_password",
+                &self.redis_password.as_ref().map(|_| "***"),
+            )
+            .field("redis_username", &self.redis_username)
+            .field("sentinel_timeout", &self.sentinel_timeout)
+            .field("connection_timeout", &self.connection_timeout)
+            .field("read_from_replicas", &self.read_from_replicas)
+            .field("tls", &self.tls)
+            .finish()
+    }
 }
 
 impl SentinelConfig {
@@ -48,6 +74,7 @@ pub struct SentinelConfigBuilder {
     sentinel_timeout: Option<Duration>,
     connection_timeout: Option<Duration>,
     read_from_replicas: bool,
+    tls: Option<TlsConfig>,
 }
 
 impl SentinelConfigBuilder {
@@ -110,6 +137,12 @@ impl SentinelConfigBuilder {
         self
     }
 
+    /// Set TLS configuration
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
     /// Build the SentinelConfig
     pub fn build(self) -> Result<SentinelConfig, SentinelConfigError> {
         if self.sentinels.is_empty() {
@@ -127,6 +160,7 @@ impl SentinelConfigBuilder {
             sentinel_timeout: self.sentinel_timeout.unwrap_or(Duration::from_secs(5)),
             connection_timeout: self.connection_timeout.unwrap_or(Duration::from_secs(5)),
             read_from_replicas: self.read_from_replicas,
+            tls: self.tls.unwrap_or(TlsConfig::None),
         })
     }
 }

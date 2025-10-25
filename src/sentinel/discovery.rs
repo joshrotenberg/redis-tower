@@ -3,6 +3,7 @@
 use super::commands::{ReplicaInfo, Role, RoleInfo, SentinelGetMasterAddrByName, SentinelReplicas};
 use super::config::SentinelConfig;
 use crate::client::RedisConnection;
+use crate::tls::TlsConfig;
 use crate::types::RedisError;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -132,11 +133,12 @@ async fn query_sentinel_for_master(
     debug!("Querying sentinel {} for master '{}'", addr, master_name);
 
     // Connect to sentinel with timeout
-    let conn = timeout(sentinel_timeout, RedisConnection::connect(&addr))
-        .await
-        .map_err(|_| {
-            RedisError::Connection(format!("Timeout connecting to sentinel {}", addr))
-        })??;
+    let conn = timeout(
+        sentinel_timeout,
+        RedisConnection::connect_with_config(&addr, TlsConfig::None),
+    )
+    .await
+    .map_err(|_| RedisError::Connection(format!("Timeout connecting to sentinel {}", addr)))??;
 
     // Authenticate if password provided
     if let Some(pass) = password {
@@ -167,12 +169,13 @@ async fn query_sentinel_for_replicas(
         addr, master_name
     );
 
-    // Connect to sentinel with timeout
-    let conn = timeout(sentinel_timeout, RedisConnection::connect(&addr))
-        .await
-        .map_err(|_| {
-            RedisError::Connection(format!("Timeout connecting to sentinel {}", addr))
-        })??;
+    // Connect to sentinel with timeout (sentinels don't use TLS typically)
+    let conn = timeout(
+        sentinel_timeout,
+        RedisConnection::connect_with_config(&addr, TlsConfig::None),
+    )
+    .await
+    .map_err(|_| RedisError::Connection(format!("Timeout connecting to sentinel {}", addr)))??;
 
     // Authenticate if password provided
     if let Some(pass) = password {
@@ -195,9 +198,12 @@ async fn verify_master(host: &str, port: u16, config: &SentinelConfig) -> Result
     debug!("Verifying {} is a master", addr);
 
     // Connect with timeout
-    let conn = timeout(config.connection_timeout, RedisConnection::connect(&addr))
-        .await
-        .map_err(|_| RedisError::Connection(format!("Timeout connecting to {}", addr)))??;
+    let conn = timeout(
+        config.connection_timeout,
+        RedisConnection::connect_with_config(&addr, config.tls.clone()),
+    )
+    .await
+    .map_err(|_| RedisError::Connection(format!("Timeout connecting to {}", addr)))??;
 
     // Authenticate if password provided
     if let Some(username) = &config.redis_username {

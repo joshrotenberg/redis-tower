@@ -254,6 +254,757 @@ impl Command for ClientSetName {
     }
 }
 
+/// CLIENT ID command - Get the current connection ID
+///
+/// Returns the unique client ID for this connection.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientId;
+///
+/// let cmd = ClientId;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientId;
+
+impl Command for ClientId {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("ID"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(id) => Ok(id),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT LIST command - Get list of client connections
+///
+/// Returns information about all connected clients.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientList;
+///
+/// let cmd = ClientList::new();
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct ClientList {
+    pub(crate) type_filter: Option<String>,
+    pub(crate) ids: Vec<i64>,
+}
+
+impl ClientList {
+    /// Create a new CLIENT LIST command
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Filter by client type (normal, master, replica, pubsub)
+    pub fn client_type(mut self, client_type: impl Into<String>) -> Self {
+        self.type_filter = Some(client_type.into());
+        self
+    }
+
+    /// Filter by specific client IDs
+    pub fn id(mut self, id: i64) -> Self {
+        self.ids.push(id);
+        self
+    }
+}
+
+impl Command for ClientList {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("LIST"))),
+        ];
+
+        if let Some(ref t) = self.type_filter {
+            args.push(Frame::BulkString(Some(Bytes::from("TYPE"))));
+            args.push(Frame::BulkString(Some(Bytes::from(t.clone()))));
+        }
+
+        if !self.ids.is_empty() {
+            args.push(Frame::BulkString(Some(Bytes::from("ID"))));
+            let ids_str = self
+                .ids
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            args.push(Frame::BulkString(Some(Bytes::from(ids_str))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT INFO command - Get information about the current client connection
+#[derive(Debug, Clone, Copy)]
+pub struct ClientInfo;
+
+impl Command for ClientInfo {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("INFO"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).into_owned()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT KILL command - Close client connections
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientKill;
+///
+/// // Kill by address
+/// let cmd = ClientKill::addr("127.0.0.1:6379");
+///
+/// // Kill by ID
+/// let cmd = ClientKill::id(12345);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientKill {
+    pub(crate) filter: ClientKillFilter,
+}
+
+/// Filter for CLIENT KILL
+#[derive(Debug, Clone)]
+pub enum ClientKillFilter {
+    /// Kill by IP:port address
+    Addr(String),
+    /// Kill by client ID
+    Id(i64),
+    /// Kill by client type
+    Type(String),
+    /// Kill by username
+    User(String),
+    /// Skip current connection
+    Skipme(bool),
+}
+
+impl ClientKill {
+    /// Kill client by address
+    pub fn addr(addr: impl Into<String>) -> Self {
+        Self {
+            filter: ClientKillFilter::Addr(addr.into()),
+        }
+    }
+
+    /// Kill client by ID
+    pub fn id(id: i64) -> Self {
+        Self {
+            filter: ClientKillFilter::Id(id),
+        }
+    }
+
+    /// Kill by client type
+    pub fn client_type(client_type: impl Into<String>) -> Self {
+        Self {
+            filter: ClientKillFilter::Type(client_type.into()),
+        }
+    }
+
+    /// Kill by username
+    pub fn user(username: impl Into<String>) -> Self {
+        Self {
+            filter: ClientKillFilter::User(username.into()),
+        }
+    }
+
+    /// Skip killing the current connection
+    pub fn skipme(skip: bool) -> Self {
+        Self {
+            filter: ClientKillFilter::Skipme(skip),
+        }
+    }
+}
+
+impl Command for ClientKill {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("KILL"))),
+        ];
+
+        match &self.filter {
+            ClientKillFilter::Addr(addr) => {
+                args.push(Frame::BulkString(Some(Bytes::from("ADDR"))));
+                args.push(Frame::BulkString(Some(Bytes::from(addr.clone()))));
+            }
+            ClientKillFilter::Id(id) => {
+                args.push(Frame::BulkString(Some(Bytes::from("ID"))));
+                args.push(Frame::BulkString(Some(Bytes::from(id.to_string()))));
+            }
+            ClientKillFilter::Type(t) => {
+                args.push(Frame::BulkString(Some(Bytes::from("TYPE"))));
+                args.push(Frame::BulkString(Some(Bytes::from(t.clone()))));
+            }
+            ClientKillFilter::User(user) => {
+                args.push(Frame::BulkString(Some(Bytes::from("USER"))));
+                args.push(Frame::BulkString(Some(Bytes::from(user.clone()))));
+            }
+            ClientKillFilter::Skipme(skip) => {
+                args.push(Frame::BulkString(Some(Bytes::from("SKIPME"))));
+                args.push(Frame::BulkString(Some(Bytes::from(if *skip {
+                    "YES"
+                } else {
+                    "NO"
+                }))));
+            }
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::SimpleString(_) => Ok(1), // Old format returns OK
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT PAUSE command - Suspend client execution
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientPause;
+///
+/// // Pause for 5 seconds
+/// let cmd = ClientPause::new(5000);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientPause {
+    pub(crate) timeout_ms: i64,
+    pub(crate) mode: Option<String>,
+}
+
+impl ClientPause {
+    /// Create a new CLIENT PAUSE command
+    pub fn new(timeout_ms: i64) -> Self {
+        Self {
+            timeout_ms,
+            mode: None,
+        }
+    }
+
+    /// Set pause mode (WRITE or ALL)
+    pub fn mode(mut self, mode: impl Into<String>) -> Self {
+        self.mode = Some(mode.into());
+        self
+    }
+}
+
+impl Command for ClientPause {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("PAUSE"))),
+            Frame::BulkString(Some(Bytes::from(self.timeout_ms.to_string()))),
+        ];
+
+        if let Some(ref mode) = self.mode {
+            args.push(Frame::BulkString(Some(Bytes::from(mode.clone()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT UNPAUSE command - Resume client execution
+#[derive(Debug, Clone, Copy)]
+pub struct ClientUnpause;
+
+impl Command for ClientUnpause {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("UNPAUSE"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT REPLY command - Control server replies to the current connection
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientReply;
+///
+/// // Turn off replies
+/// let cmd = ClientReply::off();
+///
+/// // Skip next reply
+/// let cmd = ClientReply::skip();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientReply {
+    pub(crate) mode: String,
+}
+
+impl ClientReply {
+    /// Don't send replies
+    pub fn off() -> Self {
+        Self {
+            mode: "OFF".to_string(),
+        }
+    }
+
+    /// Send replies (default)
+    pub fn on() -> Self {
+        Self {
+            mode: "ON".to_string(),
+        }
+    }
+
+    /// Skip the next reply
+    pub fn skip() -> Self {
+        Self {
+            mode: "SKIP".to_string(),
+        }
+    }
+}
+
+impl Command for ClientReply {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("REPLY"))),
+            Frame::BulkString(Some(Bytes::from(self.mode.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT SETINFO command - Set client connection metadata
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientSetInfo;
+///
+/// let cmd = ClientSetInfo::lib_name("my-redis-client");
+/// let cmd = ClientSetInfo::lib_ver("1.0.0");
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientSetInfo {
+    pub(crate) attr: String,
+    pub(crate) value: String,
+}
+
+impl ClientSetInfo {
+    /// Set library name
+    pub fn lib_name(name: impl Into<String>) -> Self {
+        Self {
+            attr: "LIB-NAME".to_string(),
+            value: name.into(),
+        }
+    }
+
+    /// Set library version
+    pub fn lib_ver(version: impl Into<String>) -> Self {
+        Self {
+            attr: "LIB-VER".to_string(),
+            value: version.into(),
+        }
+    }
+}
+
+impl Command for ClientSetInfo {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("SETINFO"))),
+            Frame::BulkString(Some(Bytes::from(self.attr.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.value.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT UNBLOCK command - Unblock a blocked client
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientUnblock;
+///
+/// let cmd = ClientUnblock::new(12345);
+/// let cmd = ClientUnblock::new(12345).timeout();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientUnblock {
+    pub(crate) client_id: i64,
+    pub(crate) unblock_type: Option<String>,
+}
+
+impl ClientUnblock {
+    /// Create a new CLIENT UNBLOCK command
+    pub fn new(client_id: i64) -> Self {
+        Self {
+            client_id,
+            unblock_type: None,
+        }
+    }
+
+    /// Unblock with TIMEOUT error
+    pub fn timeout(mut self) -> Self {
+        self.unblock_type = Some("TIMEOUT".to_string());
+        self
+    }
+
+    /// Unblock with ERROR
+    pub fn error(mut self) -> Self {
+        self.unblock_type = Some("ERROR".to_string());
+        self
+    }
+}
+
+impl Command for ClientUnblock {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("UNBLOCK"))),
+            Frame::BulkString(Some(Bytes::from(self.client_id.to_string()))),
+        ];
+
+        if let Some(ref t) = self.unblock_type {
+            args.push(Frame::BulkString(Some(Bytes::from(t.clone()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT NO-EVICT command - Set connection to not be evicted
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientNoEvict;
+///
+/// let cmd = ClientNoEvict::on();
+/// let cmd = ClientNoEvict::off();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientNoEvict {
+    pub(crate) enabled: bool,
+}
+
+impl ClientNoEvict {
+    /// Enable no-evict mode
+    pub fn on() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Disable no-evict mode
+    pub fn off() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Command for ClientNoEvict {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("NO-EVICT"))),
+            Frame::BulkString(Some(Bytes::from(if self.enabled { "ON" } else { "OFF" }))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HELLO command - Handshake with Redis (Redis 6.0+)
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Hello;
+///
+/// // Simple RESP3 handshake
+/// let cmd = Hello::new(3);
+///
+/// // With AUTH
+/// let cmd = Hello::new(3)
+///     .auth("default", "password");
+/// ```
+#[derive(Debug, Clone)]
+pub struct Hello {
+    pub(crate) protocol_version: i32,
+    pub(crate) auth: Option<(String, String)>,
+    pub(crate) setname: Option<String>,
+}
+
+impl Hello {
+    /// Create a new HELLO command
+    pub fn new(protocol_version: i32) -> Self {
+        Self {
+            protocol_version,
+            auth: None,
+            setname: None,
+        }
+    }
+
+    /// Authenticate with username and password
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth = Some((username.into(), password.into()));
+        self
+    }
+
+    /// Set connection name
+    pub fn setname(mut self, name: impl Into<String>) -> Self {
+        self.setname = Some(name.into());
+        self
+    }
+}
+
+impl Command for Hello {
+    type Response = String; // Simplified - returns server info
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("HELLO"))),
+            Frame::BulkString(Some(Bytes::from(self.protocol_version.to_string()))),
+        ];
+
+        if let Some((ref user, ref pass)) = self.auth {
+            args.push(Frame::BulkString(Some(Bytes::from("AUTH"))));
+            args.push(Frame::BulkString(Some(Bytes::from(user.clone()))));
+            args.push(Frame::BulkString(Some(Bytes::from(pass.clone()))));
+        }
+
+        if let Some(ref name) = self.setname {
+            args.push(Frame::BulkString(Some(Bytes::from("SETNAME"))));
+            args.push(Frame::BulkString(Some(Bytes::from(name.clone()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        // HELLO returns a map/array - simplified to string for now
+        Ok(format!("{:?}", frame))
+    }
+}
+
+/// ASKING command - Signal cluster ASK redirect handling
+///
+/// When a cluster client receives an -ASK redirect, the ASKING command is sent
+/// to the target node followed by the redirected command. This is a low-level
+/// cluster command used internally by cluster clients.
+///
+/// Available since Redis 3.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Asking;
+///
+/// let cmd = Asking::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Asking;
+
+impl Asking {
+    /// Create a new ASKING command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Asking {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Asking {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("ASKING")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// RESET command - Reset connection state (Redis 6.2+)
+///
+/// Resets connection state including:
+/// - Authentication
+/// - Database selection
+/// - WATCH
+/// - Client tracking
+/// - etc.
+#[derive(Debug, Clone, Copy)]
+pub struct Reset;
+
+impl Command for Reset {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("RESET")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MONITOR command - Monitor all commands received by the server
+///
+/// Streams back every command processed by the Redis server in real-time.
+/// **Warning**: This command is for debugging and has significant performance impact.
+/// It should not be used in production environments.
+///
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::Monitor;
+///
+/// let cmd = Monitor::new();
+/// // Server will stream commands until connection is closed
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct Monitor;
+
+impl Monitor {
+    /// Create a new MONITOR command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Monitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Monitor {
+    type Response = (); // Streams responses, not a single response
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("MONITOR")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -303,6 +1054,200 @@ mod tests {
             assert_eq!(elements.len(), 2);
         } else {
             panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_id_frame() {
+        let cmd = ClientId;
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_list_frame() {
+        let cmd = ClientList::new();
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_list_with_type_frame() {
+        let cmd = ClientList::new().client_type("normal");
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert!(elements.len() >= 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_info_frame() {
+        let cmd = ClientInfo;
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_kill_by_addr() {
+        let cmd = ClientKill::addr("127.0.0.1:6379");
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 4); // CLIENT KILL ADDR value
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_kill_by_id() {
+        let cmd = ClientKill::id(12345);
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 4);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_pause_frame() {
+        let cmd = ClientPause::new(5000);
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 3);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_unpause_frame() {
+        let cmd = ClientUnpause;
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_reply_off() {
+        let cmd = ClientReply::off();
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 3);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_setinfo_frame() {
+        let cmd = ClientSetInfo::lib_name("redis-tower");
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 4);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_unblock_frame() {
+        let cmd = ClientUnblock::new(12345);
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 3);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_client_no_evict_on() {
+        let cmd = ClientNoEvict::on();
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 3);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_hello_frame() {
+        let cmd = Hello::new(3);
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_hello_with_auth() {
+        let cmd = Hello::new(3).auth("default", "password");
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert!(elements.len() >= 2);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_reset_frame() {
+        let cmd = Reset;
+        let frame = cmd.to_frame();
+
+        if let Frame::Array(elements) = frame {
+            assert_eq!(elements.len(), 1);
+        } else {
+            panic!("Expected array frame");
+        }
+    }
+
+    #[test]
+    fn test_asking_frame() {
+        let cmd = Asking::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 1);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("ASKING"))));
+            }
+            _ => panic!("Expected Array frame"),
         }
     }
 }

@@ -10,6 +10,7 @@
 
 use crate::client::RedisConnection;
 use crate::commands::Ping;
+use crate::tls::TlsConfig;
 use crate::types::RedisError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -143,6 +144,8 @@ pub struct ConnectionPool {
     config: Arc<PoolConfig>,
     /// Node address
     addr: String,
+    /// TLS configuration
+    tls: TlsConfig,
     /// Pool statistics
     stats: Arc<PoolStats>,
 }
@@ -168,11 +171,17 @@ impl ConnectionPool {
 
     /// Create a new connection pool with custom configuration
     pub fn with_config(addr: String, config: PoolConfig) -> Self {
+        Self::with_tls(addr, config, TlsConfig::None)
+    }
+
+    /// Create a new connection pool with TLS configuration
+    pub fn with_tls(addr: String, config: PoolConfig, tls: TlsConfig) -> Self {
         Self {
             connections: Arc::new(RwLock::new(Vec::new())),
             next_index: Arc::new(AtomicUsize::new(0)),
             config: Arc::new(config),
             addr,
+            tls,
             stats: Arc::new(PoolStats::default()),
         }
     }
@@ -271,7 +280,7 @@ impl ConnectionPool {
         }
 
         // Create new connection
-        let conn = RedisConnection::connect(&self.addr).await?;
+        let conn = RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
         self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
         // Add to pool
@@ -342,7 +351,8 @@ impl ConnectionPool {
                 if self.size().await >= self.config.max_size {
                     break;
                 }
-                let conn = RedisConnection::connect(&self.addr).await?;
+                let conn =
+                    RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
                 self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
                 let pooled = PooledConnection::new(conn);
@@ -363,7 +373,7 @@ impl ConnectionPool {
         let target = target_size.min(self.config.max_size);
 
         while self.size().await < target {
-            let conn = RedisConnection::connect(&self.addr).await?;
+            let conn = RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
             self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
             let pooled = PooledConnection::new(conn);
