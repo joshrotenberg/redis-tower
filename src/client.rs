@@ -360,8 +360,13 @@ impl ResilientRedisClient {
         addr: &str,
         config: ClientConfig,
     ) -> Result<Self, RedisError> {
-        let connection =
-            ResilientConnection::new(addr.to_string(), config.tls, config.reconnect).await?;
+        let connection = ResilientConnection::new(
+            addr.to_string(),
+            config.tls,
+            config.reconnect,
+            config.metrics,
+        )
+        .await?;
 
         Ok(Self { connection })
     }
