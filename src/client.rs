@@ -107,7 +107,9 @@ impl RedisConnection {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(fields(addr))]
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
+        tracing::info!("connecting to Redis");
         Self::connect_with_config(addr, TlsConfig::None).await
     }
 
@@ -126,25 +128,32 @@ impl RedisConnection {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(fields(addr, tls = ?tls))]
     pub async fn connect_with_config(addr: &str, tls: TlsConfig) -> Result<Self, RedisError> {
+        tracing::info!("establishing connection");
         let tcp_stream = TcpStream::connect(addr).await?;
+        tracing::debug!("TCP connection established");
 
         let stream = match tls {
             TlsConfig::None => RedisStream::Plain(tcp_stream),
 
             #[cfg(feature = "tls-native-tls")]
             TlsConfig::NativeTls(config) => {
+                tracing::debug!("establishing TLS connection (native-tls)");
                 // Extract domain from address for SNI
                 let domain = addr.split(':').next().unwrap_or(addr);
                 let tls_stream = config.connect(domain, tcp_stream).await?;
+                tracing::debug!("TLS handshake complete");
                 RedisStream::NativeTls(Box::new(tls_stream))
             }
 
             #[cfg(feature = "tls-rustls")]
             TlsConfig::Rustls(config) => {
+                tracing::debug!("establishing TLS connection (rustls)");
                 // Extract domain from address for SNI
                 let domain = addr.split(':').next().unwrap_or(addr);
                 let tls_stream = config.connect(domain, tcp_stream).await?;
+                tracing::debug!("TLS handshake complete");
                 RedisStream::Rustls(Box::new(tls_stream))
             }
         };
@@ -152,6 +161,7 @@ impl RedisConnection {
         let codec = RespCodec::new();
         let framed = Framed::new(stream, codec);
 
+        tracing::info!("connection established successfully");
         Ok(Self {
             framed: Arc::new(Mutex::new(framed)),
         })
@@ -181,20 +191,25 @@ impl RedisConnection {
     }
 
     /// Execute a command
+    #[tracing::instrument(skip(self, command))]
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command,
     {
+        tracing::debug!("executing command");
+
         let frame = command.to_frame();
         let mut framed = self.framed.lock().await;
 
         // Send the command frame
+        tracing::trace!("sending command frame");
         framed
             .send(frame)
             .await
             .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Receive the response frame
+        tracing::trace!("waiting for response");
         let response_frame = framed
             .next()
             .await
@@ -202,7 +217,16 @@ impl RedisConnection {
             .map_err(|e| RedisError::Connection(e.to_string()))?;
 
         // Parse the response using the command's type-safe parser
-        Cmd::parse_response(response_frame)
+        tracing::trace!("parsing response");
+        let result = Cmd::parse_response(response_frame);
+
+        if result.is_ok() {
+            tracing::debug!("command executed successfully");
+        } else {
+            tracing::warn!("command execution failed");
+        }
+
+        result
     }
 }
 

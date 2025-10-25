@@ -64,8 +64,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     match client.call(Get::new("tls_test")).await {
                         Ok(value) => {
-                            let value: Option<String> = value.into();
-                            println!("GET tls_test = {:?}", value);
+                            let value_str = value.map(|b| String::from_utf8_lossy(&b).to_string());
+                            println!("GET tls_test = {:?}", value_str);
                         }
                         Err(e) => println!("GET failed: {}", e),
                     }
@@ -87,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match RedisClient::connect_with_config("localhost:6380", tls).await {
             Ok(client) => {
                 println!("Connected with Rustls (webpki)!");
-                if let Ok(_) = client.call(Ping::new()).await {
+                if client.call(Ping::new()).await.is_ok() {
                     println!("PING successful");
                 }
             }
@@ -115,8 +115,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     match client.call(Get::new("tls_test")).await {
                         Ok(value) => {
-                            let value: Option<String> = value.into();
-                            println!("GET tls_test = {:?}", value);
+                            let value_str = value.map(|b| String::from_utf8_lossy(&b).to_string());
+                            println!("GET tls_test = {:?}", value_str);
                         }
                         Err(e) => println!("GET failed: {}", e),
                     }
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match RedisClient::connect_with_config("localhost:6380", tls).await {
                 Ok(client) => {
                     println!("Connected (ignoring certificate validation)");
-                    if let Ok(_) = client.call(Ping::new()).await {
+                    if client.call(Ping::new()).await.is_ok() {
                         println!("PING successful");
                     }
                 }

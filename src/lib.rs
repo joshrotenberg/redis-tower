@@ -183,6 +183,7 @@ pub mod pool;
 pub mod pubsub;
 pub mod read_preference;
 pub mod tls;
+pub mod tracing;
 pub mod transaction;
 pub mod types;
 pub mod url;

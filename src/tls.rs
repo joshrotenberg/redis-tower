@@ -33,8 +33,11 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+#[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 use crate::types::RedisError;
+#[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 use std::sync::Arc;
+#[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 use tokio::net::TcpStream;
 
 /// TLS configuration for Redis connections

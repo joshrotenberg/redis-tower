@@ -10,6 +10,25 @@
 
 ## Recent Changes
 
+### Tracing/Observability Implementation (2025-10-25)
+- **Implemented comprehensive structured tracing**:
+  - Created `TracingConfig` module with granular control over tracing aspects
+  - Added tracing to connection lifecycle (connect, TLS handshake, ready)
+  - Added tracing to command execution (send, receive, parse, success/failure)
+  - Configurable tracing levels for commands, connections, and network operations
+- **Features**:
+  - Default: commands (DEBUG) and connections (INFO) traced, network (TRACE) disabled
+  - Tracing helpers: `TracingConfig::all()`, `TracingConfig::none()`
+  - Builder pattern for custom configurations
+  - Integrated with `ClientConfig` builder
+  - Uses `#[tracing::instrument]` for automatic span creation
+- **Integration**:
+  - Works with tracing-subscriber and standard RUST_LOG environment variable
+  - Compatible with all tracing backends (console, file, OpenTelemetry, etc.)
+  - Minimal overhead when network tracing disabled
+- **Quality**: All 555 tests passing, cargo fmt and clippy clean
+- **Location**: `/src/tracing.rs`, `/src/config.rs`, `/src/client.rs`, `/examples/tracing_example.rs`
+
 ### Auto-Reconnection Implementation (2025-10-25)
 - **Implemented automatic reconnection with ResilientRedisClient**:
   - Created `ClientConfig` module for connection configuration

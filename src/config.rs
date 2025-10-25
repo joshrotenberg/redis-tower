@@ -4,6 +4,7 @@ use std::time::Duration;
 use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
 
 use crate::tls::TlsConfig;
+use crate::tracing::TracingConfig;
 
 /// Configuration for Redis client connections
 #[derive(Clone, Debug)]
@@ -13,6 +14,9 @@ pub struct ClientConfig {
 
     /// Reconnection configuration
     pub reconnect: ReconnectConfig,
+
+    /// Tracing configuration
+    pub tracing: TracingConfig,
 }
 
 impl ClientConfig {
@@ -34,6 +38,7 @@ impl Default for ClientConfig {
                 .unlimited_attempts()
                 .retry_on_reconnect(true)
                 .build(),
+            tracing: TracingConfig::default(),
         }
     }
 }
@@ -43,6 +48,7 @@ impl Default for ClientConfig {
 pub struct ClientConfigBuilder {
     tls: TlsConfig,
     reconnect: Option<ReconnectConfig>,
+    tracing: Option<TracingConfig>,
 }
 
 impl ClientConfigBuilder {
@@ -120,6 +126,37 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// Set tracing configuration
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    /// use redis_tower::tracing::TracingConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .tracing(TracingConfig::all())
+    ///     .build();
+    /// ```
+    pub fn tracing(mut self, tracing: TracingConfig) -> Self {
+        self.tracing = Some(tracing);
+        self
+    }
+
+    /// Disable all tracing
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .no_tracing()
+    ///     .build();
+    /// ```
+    pub fn no_tracing(mut self) -> Self {
+        self.tracing = Some(TracingConfig::none());
+        self
+    }
+
     /// Build the client configuration
     pub fn build(self) -> ClientConfig {
         ClientConfig {
@@ -134,6 +171,7 @@ impl ClientConfigBuilder {
                     .retry_on_reconnect(true)
                     .build()
             }),
+            tracing: self.tracing.unwrap_or_default(),
         }
     }
 }
@@ -143,6 +181,7 @@ impl Default for ClientConfigBuilder {
         Self {
             tls: TlsConfig::None,
             reconnect: None,
+            tracing: None,
         }
     }
 }
