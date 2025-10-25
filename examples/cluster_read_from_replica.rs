@@ -16,6 +16,7 @@
 use redis_tower::cluster::{ClusterClient, ReadPreference};
 use redis_tower::commands::{Get, Set};
 use redis_tower::pool::PoolConfig;
+use redis_tower::tls::TlsConfig;
 use std::time::Duration;
 
 #[tokio::main]
@@ -60,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client_replica = ClusterClient::with_full_config(
         seed_nodes.clone(),
         pool_config.clone(),
+        TlsConfig::None,
         ReadPreference::PreferReplica,
     )
     .await?;
@@ -83,9 +85,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Example 3: Read from replicas only (Replica)");
     println!("---------------------------------------------");
-    let client_replica_only =
-        ClusterClient::with_full_config(seed_nodes.clone(), pool_config, ReadPreference::Replica)
-            .await?;
+    let client_replica_only = ClusterClient::with_full_config(
+        seed_nodes.clone(),
+        pool_config,
+        TlsConfig::None,
+        ReadPreference::Replica,
+    )
+    .await?;
 
     // Write a value (goes to master)
     println!("Writing key 'user:789' with value 'Charlie'...");

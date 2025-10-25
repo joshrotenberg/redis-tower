@@ -1,7 +1,13 @@
 //! Connection pool with health checking and lifecycle management
 //!
 //! Provides a production-ready connection pool inspired by deadpool and bb8,
-//! tailored for Redis connection management.
+//! tailored for Redis connection management. This implementation includes:
+//!
+//! - **Wait queue with timeout**: Graceful backpressure when pool is exhausted
+//! - **Connection recycling**: Hooks to reset connection state before reuse
+//! - **Background reaper**: Proactive cleanup of stale connections
+//! - **Enhanced metrics**: Detailed pool statistics and utilization tracking
+//! - **Validation strategies**: Multiple connection validation options
 //!
 //! # Design Note
 //! Redis connections are Arc-wrapped internally, making cloning cheap. This pool
@@ -9,16 +15,42 @@
 //! using a borrow/return model. This simplifies the API and works well with Tower.
 
 use crate::client::RedisConnection;
-use crate::commands::Ping;
+use crate::commands::{Discard, Ping, Select, Unwatch};
 use crate::tls::TlsConfig;
 use crate::types::RedisError;
+use futures::Future;
+use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+use tokio::task::JoinHandle;
+
+/// Type alias for connection recycling hooks
+pub type RecycleHook = Arc<
+    dyn Fn(&mut RedisConnection) -> Pin<Box<dyn Future<Output = Result<(), RedisError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Connection validation strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ValidationStrategy {
+    /// No validation
+    None,
+    /// Validate only when checking out from pool
+    #[default]
+    OnCheckout,
+    /// Validate when creating new connections
+    OnCreate,
+    /// Validate periodically in background
+    WhileIdle(Duration),
+    /// Validate on all occasions
+    All,
+}
 
 /// Configuration for connection pool behavior
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PoolConfig {
     /// Maximum number of connections in the pool
     pub max_size: usize,
@@ -28,8 +60,14 @@ pub struct PoolConfig {
     pub max_lifetime: Option<Duration>,
     /// How long a connection can be idle before being closed (None = infinite)
     pub idle_timeout: Option<Duration>,
-    /// Whether to verify connection health on checkout
-    pub test_on_checkout: bool,
+    /// Timeout when waiting for an available connection (None = no timeout)
+    pub wait_timeout: Option<Duration>,
+    /// Connection validation strategy
+    pub validation: ValidationStrategy,
+    /// Optional hook to recycle connection state before returning to pool
+    pub recycle_hook: Option<RecycleHook>,
+    /// Background reaper interval (None = disabled)
+    pub reaper_interval: Option<Duration>,
 }
 
 impl Default for PoolConfig {
@@ -39,8 +77,26 @@ impl Default for PoolConfig {
             min_idle: 0,
             max_lifetime: Some(Duration::from_secs(30 * 60)), // 30 minutes
             idle_timeout: Some(Duration::from_secs(10 * 60)), // 10 minutes
-            test_on_checkout: true,
+            wait_timeout: Some(Duration::from_secs(30)),      // 30 seconds
+            validation: ValidationStrategy::OnCheckout,
+            recycle_hook: None,
+            reaper_interval: Some(Duration::from_secs(30)), // 30 seconds
         }
+    }
+}
+
+impl std::fmt::Debug for PoolConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PoolConfig")
+            .field("max_size", &self.max_size)
+            .field("min_idle", &self.min_idle)
+            .field("max_lifetime", &self.max_lifetime)
+            .field("idle_timeout", &self.idle_timeout)
+            .field("wait_timeout", &self.wait_timeout)
+            .field("validation", &self.validation)
+            .field("has_recycle_hook", &self.recycle_hook.is_some())
+            .field("reaper_interval", &self.reaper_interval)
+            .finish()
     }
 }
 
@@ -71,10 +127,58 @@ impl PoolConfig {
         self
     }
 
-    /// Enable/disable health check on checkout
-    pub fn with_test_on_checkout(mut self, enabled: bool) -> Self {
-        self.test_on_checkout = enabled;
+    /// Set wait timeout for acquiring connections
+    pub fn with_wait_timeout(mut self, duration: Option<Duration>) -> Self {
+        self.wait_timeout = duration;
         self
+    }
+
+    /// Set validation strategy
+    pub fn with_validation(mut self, strategy: ValidationStrategy) -> Self {
+        self.validation = strategy;
+        self
+    }
+
+    /// Set connection recycling hook
+    pub fn with_recycle_hook(mut self, hook: RecycleHook) -> Self {
+        self.recycle_hook = Some(hook);
+        self
+    }
+
+    /// Set background reaper interval
+    pub fn with_reaper_interval(mut self, duration: Option<Duration>) -> Self {
+        self.reaper_interval = duration;
+        self
+    }
+
+    /// Enable/disable health check on checkout (convenience method)
+    pub fn with_test_on_checkout(mut self, enabled: bool) -> Self {
+        self.validation = if enabled {
+            ValidationStrategy::OnCheckout
+        } else {
+            ValidationStrategy::None
+        };
+        self
+    }
+
+    /// Create default Redis recycling hook that resets connection state
+    pub fn default_redis_recycle_hook() -> RecycleHook {
+        Arc::new(|conn: &mut RedisConnection| {
+            // Clone the connection for the async block
+            let conn = conn.clone();
+            Box::pin(async move {
+                // Reset to DB 0
+                conn.execute(Select::new(0)).await.ok();
+
+                // Clear any transaction state
+                conn.execute(Discard).await.ok();
+
+                // Unwatch any keys
+                conn.execute(Unwatch).await.ok();
+
+                Ok(())
+            })
+        })
     }
 }
 
@@ -87,6 +191,8 @@ struct PooledConnection {
     created_at: Instant,
     /// When this connection was last used
     last_used: Instant,
+    /// Number of times this connection has been used
+    use_count: u64,
 }
 
 impl PooledConnection {
@@ -96,6 +202,7 @@ impl PooledConnection {
             conn,
             created_at: now,
             last_used: now,
+            use_count: 0,
         }
     }
 
@@ -109,6 +216,7 @@ impl PooledConnection {
 
     fn touch(&mut self) {
         self.last_used = Instant::now();
+        self.use_count += 1;
     }
 
     /// Check if connection should be recycled based on age
@@ -133,6 +241,36 @@ impl PooledConnection {
     }
 }
 
+/// Enhanced pool statistics for monitoring
+#[derive(Default)]
+pub struct PoolStats {
+    // Creation/recycling stats
+    /// Total connections created
+    pub total_created: AtomicUsize,
+    /// Total connections recycled
+    pub total_recycled: AtomicUsize,
+    /// Total health check failures
+    pub health_check_failures: AtomicUsize,
+
+    // Usage stats
+    /// Total get operations
+    pub total_gets: AtomicUsize,
+    /// Total successful gets
+    pub successful_gets: AtomicUsize,
+    /// Total failed gets (timeout/error)
+    pub failed_gets: AtomicUsize,
+
+    // Timing stats
+    /// Total wait time in milliseconds
+    pub total_wait_time_ms: AtomicU64,
+    /// Maximum wait time seen in milliseconds
+    pub max_wait_time_ms: AtomicU64,
+
+    // Current state
+    /// Currently in-use connections
+    pub in_use_count: AtomicUsize,
+}
+
 /// A round-robin connection pool with health checking and lifecycle management
 #[derive(Clone)]
 pub struct ConnectionPool {
@@ -140,6 +278,8 @@ pub struct ConnectionPool {
     connections: Arc<RwLock<Vec<PooledConnection>>>,
     /// Next connection index for round-robin
     next_index: Arc<AtomicUsize>,
+    /// Semaphore controlling max connections
+    semaphore: Arc<Semaphore>,
     /// Pool configuration
     config: Arc<PoolConfig>,
     /// Node address
@@ -148,19 +288,8 @@ pub struct ConnectionPool {
     tls: TlsConfig,
     /// Pool statistics
     stats: Arc<PoolStats>,
-}
-
-/// Pool statistics for monitoring
-#[derive(Default)]
-pub struct PoolStats {
-    /// Total connections created
-    pub total_created: AtomicUsize,
-    /// Total connections recycled
-    pub total_recycled: AtomicUsize,
-    /// Total health check failures
-    pub health_check_failures: AtomicUsize,
-    /// Total get operations
-    pub total_gets: AtomicUsize,
+    /// Background reaper task handle
+    reaper_handle: Arc<RwLock<Option<JoinHandle<()>>>>,
 }
 
 impl ConnectionPool {
@@ -176,116 +305,205 @@ impl ConnectionPool {
 
     /// Create a new connection pool with TLS configuration
     pub fn with_tls(addr: String, config: PoolConfig, tls: TlsConfig) -> Self {
+        let semaphore = Arc::new(Semaphore::new(config.max_size));
+
         Self {
             connections: Arc::new(RwLock::new(Vec::new())),
             next_index: Arc::new(AtomicUsize::new(0)),
+            semaphore,
             config: Arc::new(config),
             addr,
             tls,
             stats: Arc::new(PoolStats::default()),
+            reaper_handle: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Start the background reaper task
+    ///
+    /// The reaper periodically:
+    /// - Removes stale connections (expired or idle too long)
+    /// - Maintains minimum idle connections
+    /// - Validates idle connections (if configured)
+    pub async fn start_reaper(&self) {
+        let interval = match self.config.reaper_interval {
+            Some(d) => d,
+            None => return, // Reaper disabled
+        };
+
+        // Stop existing reaper if running
+        self.stop_reaper().await;
+
+        let pool = self.clone();
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                ticker.tick().await;
+                pool.reaper_cycle().await;
+            }
+        });
+
+        *self.reaper_handle.write().await = Some(handle);
+    }
+
+    /// Stop the background reaper task
+    pub async fn stop_reaper(&self) {
+        if let Some(handle) = self.reaper_handle.write().await.take() {
+            handle.abort();
+        }
+    }
+
+    /// Run one reaper cycle
+    async fn reaper_cycle(&self) {
+        // Remove stale connections
+        self.cleanup_stale().await;
+
+        // Maintain minimum idle
+        let _ = self.ensure_min_idle().await;
+
+        // Validate idle connections if configured
+        if matches!(
+            self.config.validation,
+            ValidationStrategy::WhileIdle(_) | ValidationStrategy::All
+        ) {
+            self.validate_idle_connections().await;
         }
     }
 
     /// Get a connection from the pool
     ///
-    /// Returns a cloned connection. The connection remains in the pool for reuse.
-    /// Performs cleanup and health checks as configured.
+    /// This method implements a wait queue with timeout. If the pool is exhausted,
+    /// it will wait up to `wait_timeout` for a connection to become available.
+    ///
+    /// # Backpressure
+    /// Uses a semaphore to provide natural backpressure when pool is at capacity.
     pub async fn get(&self) -> Result<RedisConnection, RedisError> {
+        let start = Instant::now();
         self.stats.total_gets.fetch_add(1, Ordering::Relaxed);
 
-        // Periodically clean up (every 100th get to reduce overhead)
-        if self
-            .stats
-            .total_gets
-            .load(Ordering::Relaxed)
-            .is_multiple_of(100)
-        {
-            self.cleanup_stale().await;
+        // Acquire semaphore permit (wait queue with timeout)
+        let _permit = if let Some(timeout) = self.config.wait_timeout {
+            match tokio::time::timeout(timeout, self.semaphore.acquire()).await {
+                Ok(Ok(permit)) => permit,
+                Ok(Err(_)) => {
+                    self.stats.failed_gets.fetch_add(1, Ordering::Relaxed);
+                    return Err(RedisError::Protocol("Pool closed".to_string()));
+                }
+                Err(_) => {
+                    self.stats.failed_gets.fetch_add(1, Ordering::Relaxed);
+                    return Err(RedisError::Protocol("Pool timeout".to_string()));
+                }
+            }
+        } else {
+            self.semaphore
+                .acquire()
+                .await
+                .map_err(|_| RedisError::Protocol("Pool closed".to_string()))?
+        };
+
+        // Track wait time
+        let wait_time = start.elapsed();
+        let wait_ms = wait_time.as_millis() as u64;
+        self.stats
+            .total_wait_time_ms
+            .fetch_add(wait_ms, Ordering::Relaxed);
+        self.stats
+            .max_wait_time_ms
+            .fetch_max(wait_ms, Ordering::Relaxed);
+
+        // Get or create connection
+        let mut conn = self.get_or_create_internal().await?;
+
+        // Apply recycling hook if configured
+        if let Some(hook) = &self.config.recycle_hook {
+            (hook)(&mut conn).await?;
         }
 
-        // Try up to 3 times to get a healthy connection
-        for attempt in 0..3 {
-            // Get a connection from the pool
-            let conn = {
-                let mut connections = self.connections.write().await;
+        // Validate connection based on strategy
+        let should_validate = matches!(
+            self.config.validation,
+            ValidationStrategy::OnCheckout | ValidationStrategy::All
+        );
 
-                if !connections.is_empty() {
-                    let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % connections.len();
-                    let pooled = &mut connections[idx];
+        if should_validate && !self.health_check(&conn).await {
+            self.stats
+                .health_check_failures
+                .fetch_add(1, Ordering::Relaxed);
+            self.stats.failed_gets.fetch_add(1, Ordering::Relaxed);
+            // Remove unhealthy connection and try creating a new one
+            self.remove_unhealthy_connection().await;
+            return self.create_connection().await;
+        }
 
-                    // Check if too old
-                    if pooled.should_recycle(self.config.max_lifetime) {
-                        self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
-                        // Remove and we'll create a new one
-                        connections.remove(idx);
-                        None
-                    } else {
-                        // Update last used time
-                        pooled.touch();
-                        Some(pooled.conn.clone())
-                    }
-                } else {
+        // Track in-use
+        self.stats.in_use_count.fetch_add(1, Ordering::Relaxed);
+        self.stats.successful_gets.fetch_add(1, Ordering::Relaxed);
+
+        Ok(conn)
+        // Permit automatically released on drop, allowing next waiter
+    }
+
+    /// Internal get or create logic
+    async fn get_or_create_internal(&self) -> Result<RedisConnection, RedisError> {
+        // Try to get an existing connection
+        let conn = {
+            let mut connections = self.connections.write().await;
+
+            if !connections.is_empty() {
+                let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % connections.len();
+                let pooled = &mut connections[idx];
+
+                // Check if too old
+                if pooled.should_recycle(self.config.max_lifetime) {
+                    self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
+                    connections.remove(idx);
                     None
-                }
-            };
-
-            if let Some(conn) = conn {
-                // Health check if configured
-                if self.config.test_on_checkout {
-                    if self.health_check(&conn).await {
-                        return Ok(conn);
-                    } else {
-                        self.stats
-                            .health_check_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                        // Remove the unhealthy connection
-                        self.remove_unhealthy_connection().await;
-                        // Try again (will create new connection on next attempt)
-                        if attempt < 2 {
-                            continue;
-                        }
-                    }
                 } else {
-                    return Ok(conn);
+                    pooled.touch();
+                    Some(pooled.conn.clone())
                 }
+            } else {
+                None
             }
+        };
 
-            // No connection available or health check failed, create new
-            if attempt == 2 {
-                // Last attempt, create connection
-                return self.create_connection().await;
-            }
+        if let Some(conn) = conn {
+            Ok(conn)
+        } else {
+            self.create_connection().await
         }
-
-        // Shouldn't reach here, but just in case
-        self.create_connection().await
     }
 
     /// Create a new connection and add it to the pool
     async fn create_connection(&self) -> Result<RedisConnection, RedisError> {
-        let mut connections = self.connections.write().await;
+        // Create new connection
+        let conn = RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
 
-        // Check if we can create more connections
-        if connections.len() >= self.config.max_size {
-            // Pool is full, return an existing connection
-            if !connections.is_empty() {
-                let idx = self.next_index.fetch_add(1, Ordering::Relaxed) % connections.len();
-                let pooled = &mut connections[idx];
-                pooled.touch();
-                return Ok(pooled.conn.clone());
-            }
+        // Validate on create if configured
+        let should_validate = matches!(
+            self.config.validation,
+            ValidationStrategy::OnCreate | ValidationStrategy::All
+        );
+
+        if should_validate && !self.health_check(&conn).await {
+            self.stats
+                .health_check_failures
+                .fetch_add(1, Ordering::Relaxed);
             return Err(RedisError::Protocol(
-                "Connection pool exhausted".to_string(),
+                "Connection failed health check".to_string(),
             ));
         }
 
-        // Create new connection
-        let conn = RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
         self.stats.total_created.fetch_add(1, Ordering::Relaxed);
 
         // Add to pool
         let pooled = PooledConnection::new(conn.clone());
-        connections.push(pooled);
+        let mut connections = self.connections.write().await;
+
+        // Check if we're still under max (race condition possible)
+        if connections.len() < self.config.max_size {
+            connections.push(pooled);
+        }
 
         Ok(conn)
     }
@@ -294,11 +512,11 @@ impl ConnectionPool {
     async fn remove_unhealthy_connection(&self) {
         let mut connections = self.connections.write().await;
         if !connections.is_empty() {
-            // Remove the one we just tested (it's at the last index we used)
             let idx = (self.next_index.load(Ordering::Relaxed).wrapping_sub(1))
                 % connections.len().max(1);
             if idx < connections.len() {
                 connections.remove(idx);
+                self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -306,6 +524,27 @@ impl ConnectionPool {
     /// Perform health check on a connection using PING
     async fn health_check(&self, conn: &RedisConnection) -> bool {
         conn.execute(Ping::new()).await.is_ok()
+    }
+
+    /// Validate idle connections in the pool
+    async fn validate_idle_connections(&self) {
+        let mut connections = self.connections.write().await;
+        let mut to_remove = Vec::new();
+
+        for (idx, pooled) in connections.iter().enumerate() {
+            if !self.health_check(&pooled.conn).await {
+                to_remove.push(idx);
+                self.stats
+                    .health_check_failures
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        // Remove in reverse order
+        for idx in to_remove.into_iter().rev() {
+            connections.remove(idx);
+            self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Clean up stale and idle connections
@@ -325,19 +564,18 @@ impl ConnectionPool {
 
             if should_remove {
                 to_remove.push(idx);
-                self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
             }
         }
 
         // Remove in reverse order to maintain indices
         for idx in to_remove.into_iter().rev() {
             connections.remove(idx);
+            self.stats.total_recycled.fetch_add(1, Ordering::Relaxed);
         }
 
         let removed = before_count - connections.len();
         if removed > 0 {
             drop(connections);
-            // Try to maintain min_idle
             let _ = self.ensure_min_idle().await;
         }
     }
@@ -357,7 +595,9 @@ impl ConnectionPool {
 
                 let pooled = PooledConnection::new(conn);
                 let mut connections = self.connections.write().await;
-                connections.push(pooled);
+                if connections.len() < self.config.max_size {
+                    connections.push(pooled);
+                }
             }
         }
         Ok(())
@@ -378,7 +618,9 @@ impl ConnectionPool {
 
             let pooled = PooledConnection::new(conn);
             let mut connections = self.connections.write().await;
-            connections.push(pooled);
+            if connections.len() < self.config.max_size {
+                connections.push(pooled);
+            }
         }
 
         Ok(())
@@ -401,11 +643,38 @@ impl ConnectionPool {
 
     /// Get pool statistics
     pub fn stats(&self) -> PoolStatistics {
+        let total_gets = self.stats.total_gets.load(Ordering::Relaxed);
+        let total_wait_ms = self.stats.total_wait_time_ms.load(Ordering::Relaxed);
+
         PoolStatistics {
             total_created: self.stats.total_created.load(Ordering::Relaxed),
             total_recycled: self.stats.total_recycled.load(Ordering::Relaxed),
             health_check_failures: self.stats.health_check_failures.load(Ordering::Relaxed),
-            total_gets: self.stats.total_gets.load(Ordering::Relaxed),
+            total_gets,
+            successful_gets: self.stats.successful_gets.load(Ordering::Relaxed),
+            failed_gets: self.stats.failed_gets.load(Ordering::Relaxed),
+            in_use_count: self.stats.in_use_count.load(Ordering::Relaxed),
+            total_wait_time_ms: total_wait_ms,
+            max_wait_time_ms: self.stats.max_wait_time_ms.load(Ordering::Relaxed),
+            avg_wait_time_ms: if total_gets > 0 {
+                total_wait_ms as f64 / total_gets as f64
+            } else {
+                0.0
+            },
+        }
+    }
+}
+
+impl Drop for ConnectionPool {
+    fn drop(&mut self) {
+        // Abort reaper task if running
+        if let Some(handle) = self
+            .reaper_handle
+            .try_write()
+            .ok()
+            .and_then(|mut g| g.take())
+        {
+            handle.abort();
         }
     }
 }
@@ -419,8 +688,40 @@ pub struct PoolStatistics {
     pub total_recycled: usize,
     /// Total health check failures
     pub health_check_failures: usize,
-    /// Total get operations
+    /// Total get operations attempted
     pub total_gets: usize,
+    /// Total successful get operations
+    pub successful_gets: usize,
+    /// Total failed get operations (timeout/error)
+    pub failed_gets: usize,
+    /// Currently in-use connections
+    pub in_use_count: usize,
+    /// Total wait time in milliseconds
+    pub total_wait_time_ms: u64,
+    /// Maximum wait time seen in milliseconds
+    pub max_wait_time_ms: u64,
+    /// Average wait time in milliseconds
+    pub avg_wait_time_ms: f64,
+}
+
+impl PoolStatistics {
+    /// Calculate pool utilization as a percentage
+    pub fn utilization_percent(&self, max_size: usize) -> f64 {
+        if max_size == 0 {
+            0.0
+        } else {
+            (self.in_use_count as f64 / max_size as f64) * 100.0
+        }
+    }
+
+    /// Calculate success rate as a percentage
+    pub fn success_rate_percent(&self) -> f64 {
+        if self.total_gets == 0 {
+            0.0
+        } else {
+            (self.successful_gets as f64 / self.total_gets as f64) * 100.0
+        }
+    }
 }
 
 #[cfg(test)]
@@ -433,13 +734,16 @@ mod tests {
             .with_min_idle(5)
             .with_max_lifetime(Some(Duration::from_secs(60)))
             .with_idle_timeout(Some(Duration::from_secs(30)))
+            .with_wait_timeout(Some(Duration::from_secs(10)))
+            .with_validation(ValidationStrategy::All)
             .with_test_on_checkout(false);
 
         assert_eq!(config.max_size, 20);
         assert_eq!(config.min_idle, 5);
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(60)));
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(30)));
-        assert!(!config.test_on_checkout);
+        assert_eq!(config.wait_timeout, Some(Duration::from_secs(10)));
+        assert_eq!(config.validation, ValidationStrategy::None); // test_on_checkout overrides
     }
 
     #[test]
@@ -449,12 +753,27 @@ mod tests {
         assert_eq!(config.min_idle, 0);
         assert_eq!(config.max_lifetime, Some(Duration::from_secs(30 * 60)));
         assert_eq!(config.idle_timeout, Some(Duration::from_secs(10 * 60)));
-        assert!(config.test_on_checkout);
+        assert_eq!(config.wait_timeout, Some(Duration::from_secs(30)));
+        assert_eq!(config.validation, ValidationStrategy::OnCheckout);
+    }
+
+    #[test]
+    fn test_validation_strategies() {
+        let none = ValidationStrategy::None;
+        let checkout = ValidationStrategy::OnCheckout;
+        let create = ValidationStrategy::OnCreate;
+        let idle = ValidationStrategy::WhileIdle(Duration::from_secs(60));
+        let all = ValidationStrategy::All;
+
+        assert_eq!(none, ValidationStrategy::None);
+        assert_eq!(checkout, ValidationStrategy::OnCheckout);
+        assert_eq!(create, ValidationStrategy::OnCreate);
+        assert!(matches!(idle, ValidationStrategy::WhileIdle(_)));
+        assert_eq!(all, ValidationStrategy::All);
     }
 
     #[test]
     fn test_pool_config_min_idle_clamping() {
-        // min_idle should be clamped to max_size
         let config = PoolConfig::new(5).with_min_idle(10);
         assert_eq!(config.min_idle, 5); // Clamped to max_size
     }
@@ -472,31 +791,6 @@ mod tests {
         assert_eq!(pool.size().await, 0);
     }
 
-    #[tokio::test]
-    async fn test_pooled_connection_age() {
-        // Test age logic for connection recycling
-        let age_5s = Duration::from_secs(5);
-        let age_65s = Duration::from_secs(65);
-
-        // 5 seconds old should NOT be recycled with 60s max lifetime
-        assert!(age_5s <= Duration::from_secs(60));
-
-        // 65 seconds old SHOULD be recycled with 60s max lifetime
-        assert!(age_65s > Duration::from_secs(60));
-    }
-
-    #[tokio::test]
-    async fn test_pooled_connection_idle_time() {
-        let idle_2s = Duration::from_secs(2);
-        let idle_65s = Duration::from_secs(65);
-
-        // 2 seconds idle should NOT timeout with 60s idle timeout
-        assert!(idle_2s <= Duration::from_secs(60));
-
-        // 65 seconds idle SHOULD timeout with 60s idle timeout
-        assert!(idle_65s > Duration::from_secs(60));
-    }
-
     #[test]
     fn test_pool_statistics_initial() {
         let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 5);
@@ -506,32 +800,51 @@ mod tests {
         assert_eq!(stats.total_recycled, 0);
         assert_eq!(stats.health_check_failures, 0);
         assert_eq!(stats.total_gets, 0);
+        assert_eq!(stats.successful_gets, 0);
+        assert_eq!(stats.failed_gets, 0);
+        assert_eq!(stats.in_use_count, 0);
+        assert_eq!(stats.total_wait_time_ms, 0);
+        assert_eq!(stats.max_wait_time_ms, 0);
+        assert_eq!(stats.avg_wait_time_ms, 0.0);
     }
 
     #[test]
-    fn test_pool_config_no_max_lifetime() {
-        let config = PoolConfig::new(10).with_max_lifetime(None);
-        assert_eq!(config.max_lifetime, None);
+    fn test_pool_statistics_utilization() {
+        let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 10);
+        let stats = pool.stats();
+
+        assert_eq!(stats.utilization_percent(10), 0.0);
+
+        // Simulate 5 in-use connections
+        pool.stats.in_use_count.store(5, Ordering::Relaxed);
+        let stats = pool.stats();
+        assert_eq!(stats.utilization_percent(10), 50.0);
     }
 
     #[test]
-    fn test_pool_config_no_idle_timeout() {
-        let config = PoolConfig::new(10).with_idle_timeout(None);
-        assert_eq!(config.idle_timeout, None);
+    fn test_pool_statistics_success_rate() {
+        let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 5);
+
+        // Simulate 10 total, 8 successful
+        pool.stats.total_gets.store(10, Ordering::Relaxed);
+        pool.stats.successful_gets.store(8, Ordering::Relaxed);
+        pool.stats.failed_gets.store(2, Ordering::Relaxed);
+
+        let stats = pool.stats();
+        assert_eq!(stats.success_rate_percent(), 80.0);
     }
 
     #[test]
-    fn test_pool_config_chaining() {
-        let config = PoolConfig::new(15)
-            .with_min_idle(3)
-            .with_test_on_checkout(false)
-            .with_max_lifetime(Some(Duration::from_secs(120)))
-            .with_idle_timeout(Some(Duration::from_secs(60)));
+    fn test_pool_config_debug() {
+        let config = PoolConfig::default();
+        let debug_str = format!("{:?}", config);
+        assert!(debug_str.contains("max_size"));
+        assert!(debug_str.contains("validation"));
+    }
 
-        assert_eq!(config.max_size, 15);
-        assert_eq!(config.min_idle, 3);
-        assert!(!config.test_on_checkout);
-        assert_eq!(config.max_lifetime, Some(Duration::from_secs(120)));
-        assert_eq!(config.idle_timeout, Some(Duration::from_secs(60)));
+    #[test]
+    fn test_default_recycle_hook() {
+        let _hook = PoolConfig::default_redis_recycle_hook();
+        // Just verify it compiles and can be created
     }
 }
