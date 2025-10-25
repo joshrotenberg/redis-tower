@@ -2,6 +2,8 @@
 
 use crate::codec::RespCodec;
 use crate::commands::Command;
+use crate::config::ClientConfig;
+use crate::connection_pool::ResilientConnection;
 use crate::pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 use crate::tls::TlsConfig;
 use crate::types::RedisError;
@@ -212,6 +214,15 @@ pub struct RedisClient {
     connection: RedisConnection,
 }
 
+/// Redis client with automatic reconnection
+///
+/// This variant uses ResilientConnection to automatically handle connection
+/// failures with configurable retry logic.
+#[derive(Clone)]
+pub struct ResilientRedisClient {
+    connection: ResilientConnection,
+}
+
 impl RedisClient {
     /// Connect to a Redis server without TLS
     ///
@@ -286,6 +297,102 @@ impl RedisClient {
     pub async fn call<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command,
+    {
+        self.connection.execute(command).await
+    }
+}
+
+impl ResilientRedisClient {
+    /// Connect to a Redis server with full configuration including auto-reconnect
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    /// use redis_tower::config::ClientConfig;
+    /// use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = ClientConfig::builder()
+    ///     .reconnect(
+    ///         ReconnectConfig::builder()
+    ///             .policy(ReconnectPolicy::exponential(
+    ///                 Duration::from_millis(100),
+    ///                 Duration::from_secs(5),
+    ///             ))
+    ///             .max_attempts(10)
+    ///             .build()
+    ///     )
+    ///     .build();
+    ///
+    /// let client = ResilientRedisClient::connect_with_full_config(
+    ///     "127.0.0.1:6379",
+    ///     config
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_with_full_config(
+        addr: &str,
+        config: ClientConfig,
+    ) -> Result<Self, RedisError> {
+        let connection =
+            ResilientConnection::new(addr.to_string(), config.tls, config.reconnect).await?;
+
+        Ok(Self { connection })
+    }
+
+    /// Connect to a Redis server with default reconnection settings
+    ///
+    /// Uses exponential backoff from 100ms to 5s with unlimited retry attempts.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect(addr: &str) -> Result<Self, RedisError> {
+        Self::connect_with_full_config(addr, ClientConfig::default()).await
+    }
+
+    /// Connect using a URL with default reconnection settings
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ResilientRedisClient::connect_url("redis://localhost:6379").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let parsed = RedisUrl::parse(url)?;
+        let addr = parsed.addr();
+        let config = ClientConfig::builder().tls(parsed.tls).build();
+        Self::connect_with_full_config(&addr, config).await
+    }
+
+    /// Execute a command with automatic reconnection on failure
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    /// use redis_tower::commands::Get;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    /// let value: Option<String> = client.call(Get::new("mykey")).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn call<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command + Clone,
     {
         self.connection.execute(command).await
     }

@@ -175,6 +175,8 @@
 pub mod client;
 pub mod codec;
 pub mod commands;
+pub mod config;
+pub mod connection_pool;
 pub mod parser;
 pub mod pipeline;
 pub mod pool;
@@ -197,7 +199,7 @@ pub mod sentinel;
 pub mod modules;
 
 // Re-exports for convenience
-pub use client::RedisClient;
+pub use client::{RedisClient, ResilientRedisClient};
 pub use commands::Command;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{PubSubConnection, PubSubMessage};
