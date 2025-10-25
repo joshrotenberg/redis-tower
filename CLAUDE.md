@@ -10,6 +10,25 @@
 
 ## Recent Changes
 
+### Auto-Reconnection Implementation (2025-10-25)
+- **Implemented automatic reconnection with ResilientRedisClient**:
+  - Created `ClientConfig` module for connection configuration
+  - Built `ResilientConnection` with self-healing logic
+  - Added `ResilientRedisClient` with automatic reconnection on failures
+  - Integrated tower-resilience reconnect policies (exponential, fixed, custom)
+- **Features**:
+  - Default exponential backoff: 100ms → 5s
+  - Configurable max retry attempts or unlimited
+  - Automatic connection recreation on network failures
+  - Full example demonstrating reconnection patterns
+- **tower-resilience enhancement**:
+  - Made `delay_for_attempt()` public in ReconnectPolicy
+  - Enables external users to calculate backoff delays
+- **Quality**: All 493 tests passing, cargo fmt and clippy clean
+- **Location**: `/src/config.rs`, `/src/connection_pool.rs`, `/examples/resilient_client.rs`
+
+### Previous Changes
+
 ### Final Core Commands Added (2025-10-24)
 - **Added remaining essential core commands** (4 new commands):
   - **ASKING** - Signal cluster ASK redirect handling (Redis 3.0+)
