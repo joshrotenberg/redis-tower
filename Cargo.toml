@@ -68,6 +68,7 @@ tokio-test = "0.4"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 fred = { version = "9.3", features = ["i-all"] }
 proptest = "1.6"
+docker-wrapper = { path = "/tmp/docker-wrapper", features = ["template-redis-cluster", "template-redis-sentinel"] }
 
 [[bench]]
 name = "comparison"
