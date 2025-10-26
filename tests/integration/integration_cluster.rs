@@ -2,18 +2,23 @@
 //!
 //! **Prerequisites**: These tests require a running Redis Cluster on ports 7100-7105.
 //!
-//! Due to Docker networking complexities, you need to manually set up a local cluster.
-//! The easiest way is to use redis-cli to create a local cluster:
+//! ## Quick Start
 //!
+//! Use the provided setup script:
+//! ```bash
+//! ./scripts/setup-test-cluster.sh start
+//! ```
+//!
+//! ## Manual Setup
+//!
+//! If you prefer manual setup:
 //! ```bash
 //! # Start 6 Redis instances
 //! for port in 7100 7101 7102 7103 7104 7105; do
 //!   redis-server --port $port --cluster-enabled yes \
 //!     --cluster-config-file nodes-${port}.conf \
 //!     --cluster-node-timeout 5000 --appendonly yes \
-//!     --appendfilename appendonly-${port}.aof \
-//!     --dbfilename dump-${port}.rdb \
-//!     --logfile ${port}.log --daemonize yes
+//!     --daemonize yes
 //! done
 //!
 //! # Create cluster
@@ -63,15 +68,10 @@ async fn test_cluster_key_routing() {
     let key2 = "user:2000";
     let key3 = "user:3000";
 
-    // Clean up
-    let _: i64 = client
-        .call(Del::new(vec![
-            key1.to_string(),
-            key2.to_string(),
-            key3.to_string(),
-        ]))
-        .await
-        .unwrap();
+    // Clean up - keys are in different slots, so delete individually
+    let _: i64 = client.call(Del::new(vec![key1.to_string()])).await.unwrap();
+    let _: i64 = client.call(Del::new(vec![key2.to_string()])).await.unwrap();
+    let _: i64 = client.call(Del::new(vec![key3.to_string()])).await.unwrap();
 
     // Set values - each routes to appropriate node
     let _: () = client.call(Set::new(key1, "value1")).await.unwrap();
@@ -87,15 +87,10 @@ async fn test_cluster_key_routing() {
     assert_eq!(v2.unwrap().as_ref(), b"value2");
     assert_eq!(v3.unwrap().as_ref(), b"value3");
 
-    // Clean up
-    let _: i64 = client
-        .call(Del::new(vec![
-            key1.to_string(),
-            key2.to_string(),
-            key3.to_string(),
-        ]))
-        .await
-        .unwrap();
+    // Clean up - keys are in different slots, so delete individually
+    let _: i64 = client.call(Del::new(vec![key1.to_string()])).await.unwrap();
+    let _: i64 = client.call(Del::new(vec![key2.to_string()])).await.unwrap();
+    let _: i64 = client.call(Del::new(vec![key3.to_string()])).await.unwrap();
 }
 
 #[tokio::test]
