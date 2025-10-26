@@ -177,6 +177,7 @@ pub mod codec;
 pub mod commands;
 pub mod config;
 pub mod connection_pool;
+pub mod health;
 pub mod metrics;
 pub mod parser;
 pub mod pipeline;

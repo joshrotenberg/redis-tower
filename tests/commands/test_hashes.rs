@@ -15,7 +15,7 @@ async fn test_hset_hget() {
     let key = test_key("hash_set_get");
 
     // HSET a field
-    let result = client
+    let result: i64 = client
         .execute(HSet::new(&key, "field1", "value1"))
         .await
         .unwrap();
@@ -26,7 +26,7 @@ async fn test_hset_hget() {
     assert_eq!(value, Some(Bytes::from_static(b"value1")));
 
     // HSET existing field
-    let result = client
+    let result: i64 = client
         .execute(HSet::new(&key, "field1", "value2"))
         .await
         .unwrap();
@@ -37,7 +37,7 @@ async fn test_hset_hget() {
     assert_eq!(value, Some(Bytes::from_static(b"value2")));
 
     // Clean up
-    client.execute(Del::new(vec![key])).await.unwrap();
+    let _: i64 = client.execute(Del::new(vec![key])).await.unwrap();
 }
 
 #[tokio::test]
@@ -46,25 +46,25 @@ async fn test_hexists() {
     let key = test_key("hash_exists");
 
     // Field doesn't exist yet
-    let exists = client.execute(HExists::new(&key, "field1")).await.unwrap();
+    let exists: bool = client.execute(HExists::new(&key, "field1")).await.unwrap();
     assert!(!exists);
 
     // Set field
-    client
+    let _: i64 = client
         .execute(HSet::new(&key, "field1", "value1"))
         .await
         .unwrap();
 
     // Field exists now
-    let exists = client.execute(HExists::new(&key, "field1")).await.unwrap();
+    let exists: bool = client.execute(HExists::new(&key, "field1")).await.unwrap();
     assert!(exists);
 
     // Different field doesn't exist
-    let exists = client.execute(HExists::new(&key, "field2")).await.unwrap();
+    let exists: bool = client.execute(HExists::new(&key, "field2")).await.unwrap();
     assert!(!exists);
 
     // Clean up
-    client.execute(Del::new(vec![key])).await.unwrap();
+    let _: i64 = client.execute(Del::new(vec![key])).await.unwrap();
 }
 
 #[tokio::test]

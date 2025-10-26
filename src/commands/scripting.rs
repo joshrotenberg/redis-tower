@@ -5,6 +5,7 @@
 
 use crate::codec::Frame;
 use crate::commands::Command;
+use crate::read_preference::ReadOnly;
 use crate::types::value::FromFrame;
 use crate::types::{RedisError, RedisValue};
 use bytes::Bytes;
@@ -617,5 +618,182 @@ impl Command for ScriptKill {
             Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
             _ => Err(RedisError::UnexpectedResponse),
         }
+    }
+}
+
+/// SCRIPT HELP command - Get help text for SCRIPT subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ScriptHelp;
+
+impl ScriptHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ScriptHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for ScriptHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("SCRIPT"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// EVAL_RO command - Execute a read-only Lua script (Redis 7.0+)
+///
+/// Identical to EVAL but marked as read-only for cluster replica routing.
+///
+/// Available since Redis 7.0.0.
+#[derive(Debug, Clone)]
+pub struct EvalReadOnly {
+    script: String,
+    keys: Vec<String>,
+    args: Vec<String>,
+}
+
+impl EvalReadOnly {
+    pub fn new(
+        script: impl Into<String>,
+        keys: Vec<impl Into<String>>,
+        args: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            script: script.into(),
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            args: args.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+}
+
+impl crate::commands::Command for EvalReadOnly {
+    type Response = crate::types::RedisValue;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut frames = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("EVAL_RO"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.script.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                key.clone(),
+            ))));
+        }
+
+        for arg in &self.args {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                arg.clone(),
+            ))));
+        }
+
+        crate::codec::Frame::Array(frames)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        crate::types::RedisValue::from_frame(frame)
+    }
+}
+
+impl ReadOnly for EvalReadOnly {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+/// EVALSHA_RO command - Execute a read-only cached Lua script (Redis 7.0+)
+///
+/// Identical to EVALSHA but marked as read-only for cluster replica routing.
+///
+/// Available since Redis 7.0.0.
+#[derive(Debug, Clone)]
+pub struct EvalShaReadOnly {
+    sha1: String,
+    keys: Vec<String>,
+    args: Vec<String>,
+}
+
+impl EvalShaReadOnly {
+    pub fn new(
+        sha1: impl Into<String>,
+        keys: Vec<impl Into<String>>,
+        args: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            sha1: sha1.into(),
+            keys: keys.into_iter().map(|k| k.into()).collect(),
+            args: args.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+}
+
+impl crate::commands::Command for EvalShaReadOnly {
+    type Response = crate::types::RedisValue;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut frames = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("EVALSHA_RO"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.sha1.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.keys.len().to_string()))),
+        ];
+
+        for key in &self.keys {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                key.clone(),
+            ))));
+        }
+
+        for arg in &self.args {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                arg.clone(),
+            ))));
+        }
+
+        crate::codec::Frame::Array(frames)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        crate::types::RedisValue::from_frame(frame)
+    }
+}
+
+impl ReadOnly for EvalShaReadOnly {
+    fn is_read_only(&self) -> bool {
+        true
     }
 }

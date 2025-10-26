@@ -364,6 +364,7 @@ impl ResilientRedisClient {
             addr.to_string(),
             config.tls,
             config.reconnect,
+            config.health_check,
             config.metrics,
         )
         .await?;
@@ -424,6 +425,40 @@ impl ResilientRedisClient {
         Cmd: Command + Clone,
     {
         self.connection.execute(command).await
+    }
+
+    /// Get the current health status of the connection
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    /// let status = client.health_status().await;
+    /// println!("Health status: {:?}", status);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn health_status(&self) -> crate::health::HealthStatus {
+        self.connection.health_checker().status().await
+    }
+
+    /// Get health check statistics
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::ResilientRedisClient;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    /// let stats = client.health_stats();
+    /// println!("Success rate: {:.2}%", stats.success_rate());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn health_stats(&self) -> crate::health::HealthStats {
+        self.connection.health_checker().stats()
     }
 }
 

@@ -957,6 +957,404 @@ impl Command for Reset {
     }
 }
 
+/// CLIENT CACHING command - Control key tracking for next command
+///
+/// Instructs the server whether to track the keys in the next request,
+/// when tracking is enabled in OPTIN or OPTOUT mode.
+///
+/// Available since Redis 6.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientCaching;
+///
+/// // Enable tracking for next command
+/// let cmd = ClientCaching::yes();
+///
+/// // Disable tracking for next command
+/// let cmd = ClientCaching::no();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientCaching {
+    enabled: bool,
+}
+
+impl ClientCaching {
+    /// Enable key tracking for the next command
+    pub fn yes() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Disable key tracking for the next command
+    pub fn no() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Command for ClientCaching {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("CACHING"))),
+            Frame::BulkString(Some(Bytes::from(if self.enabled { "YES" } else { "NO" }))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT GETREDIR command - Get tracking redirection client ID
+///
+/// Returns the client ID to which the connection's tracking notifications
+/// are redirected.
+///
+/// Available since Redis 6.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientGetRedir;
+///
+/// let cmd = ClientGetRedir::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientGetRedir;
+
+impl ClientGetRedir {
+    /// Create a new CLIENT GETREDIR command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientGetRedir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientGetRedir {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("GETREDIR"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT NO-TOUCH command - Control LRU/LFU updates
+///
+/// Controls whether commands sent by the client affect the LRU/LFU of accessed keys.
+///
+/// Available since Redis 7.2.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientNoTouch;
+///
+/// // Enable no-touch mode (don't update LRU/LFU)
+/// let cmd = ClientNoTouch::on();
+///
+/// // Disable no-touch mode
+/// let cmd = ClientNoTouch::off();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientNoTouch {
+    enabled: bool,
+}
+
+impl ClientNoTouch {
+    /// Enable no-touch mode
+    pub fn on() -> Self {
+        Self { enabled: true }
+    }
+
+    /// Disable no-touch mode
+    pub fn off() -> Self {
+        Self { enabled: false }
+    }
+}
+
+impl Command for ClientNoTouch {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("NO-TOUCH"))),
+            Frame::BulkString(Some(Bytes::from(if self.enabled { "ON" } else { "OFF" }))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT TRACKING command - Control server-assisted client-side caching
+///
+/// Enables or disables tracking for server-assisted client-side caching.
+///
+/// Available since Redis 6.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientTracking;
+///
+/// // Enable basic tracking
+/// let cmd = ClientTracking::on();
+///
+/// // Disable tracking
+/// let cmd = ClientTracking::off();
+///
+/// // Enable with options
+/// let cmd = ClientTracking::on()
+///     .redirect(123)
+///     .prefix("user:")
+///     .bcast()
+///     .noloop();
+/// ```
+#[derive(Debug, Clone)]
+pub struct ClientTracking {
+    enabled: bool,
+    redirect: Option<i64>,
+    prefixes: Vec<String>,
+    bcast: bool,
+    optin: bool,
+    optout: bool,
+    noloop: bool,
+}
+
+impl ClientTracking {
+    /// Enable tracking
+    pub fn on() -> Self {
+        Self {
+            enabled: true,
+            redirect: None,
+            prefixes: Vec::new(),
+            bcast: false,
+            optin: false,
+            optout: false,
+            noloop: false,
+        }
+    }
+
+    /// Disable tracking
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            redirect: None,
+            prefixes: Vec::new(),
+            bcast: false,
+            optin: false,
+            optout: false,
+            noloop: false,
+        }
+    }
+
+    /// Redirect invalidation messages to another client
+    pub fn redirect(mut self, client_id: i64) -> Self {
+        self.redirect = Some(client_id);
+        self
+    }
+
+    /// Add a key prefix to track
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefixes.push(prefix.into());
+        self
+    }
+
+    /// Enable broadcasting mode
+    pub fn bcast(mut self) -> Self {
+        self.bcast = true;
+        self
+    }
+
+    /// Enable opt-in mode (only track keys when CLIENT CACHING YES is used)
+    pub fn optin(mut self) -> Self {
+        self.optin = true;
+        self
+    }
+
+    /// Enable opt-out mode (track all keys except when CLIENT CACHING NO is used)
+    pub fn optout(mut self) -> Self {
+        self.optout = true;
+        self
+    }
+
+    /// Don't send invalidation messages for keys modified by this connection
+    pub fn noloop(mut self) -> Self {
+        self.noloop = true;
+        self
+    }
+}
+
+impl Command for ClientTracking {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("TRACKING"))),
+            Frame::BulkString(Some(Bytes::from(if self.enabled { "ON" } else { "OFF" }))),
+        ];
+
+        if let Some(client_id) = self.redirect {
+            args.push(Frame::BulkString(Some(Bytes::from("REDIRECT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(client_id.to_string()))));
+        }
+
+        for prefix in &self.prefixes {
+            args.push(Frame::BulkString(Some(Bytes::from("PREFIX"))));
+            args.push(Frame::BulkString(Some(Bytes::from(prefix.clone()))));
+        }
+
+        if self.bcast {
+            args.push(Frame::BulkString(Some(Bytes::from("BCAST"))));
+        }
+
+        if self.optin {
+            args.push(Frame::BulkString(Some(Bytes::from("OPTIN"))));
+        }
+
+        if self.optout {
+            args.push(Frame::BulkString(Some(Bytes::from("OPTOUT"))));
+        }
+
+        if self.noloop {
+            args.push(Frame::BulkString(Some(Bytes::from("NOLOOP"))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLIENT TRACKINGINFO command - Get tracking information
+///
+/// Returns information about the current client connection's use of
+/// server-assisted client-side caching.
+///
+/// Available since Redis 6.2.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::ClientTrackingInfo;
+///
+/// let cmd = ClientTrackingInfo::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct ClientTrackingInfo;
+
+impl ClientTrackingInfo {
+    /// Create a new CLIENT TRACKINGINFO command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientTrackingInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientTrackingInfo {
+    type Response = String; // Simplified - returns complex nested structure
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("TRACKINGINFO"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Ok(format!("{:?}", frame)),
+        }
+    }
+}
+
+/// CLIENT HELP command - Get help text for CLIENT subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ClientHelp;
+
+impl ClientHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLIENT"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// MONITOR command - Monitor all commands received by the server
 ///
 /// Streams back every command processed by the Redis server in real-time.
@@ -1246,6 +1644,160 @@ mod tests {
             Frame::Array(parts) => {
                 assert_eq!(parts.len(), 1);
                 assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("ASKING"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_caching_yes() {
+        let cmd = ClientCaching::yes();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("CLIENT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("CACHING"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("YES"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_caching_no() {
+        let cmd = ClientCaching::no();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("NO"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_getredir_frame() {
+        let cmd = ClientGetRedir::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("CLIENT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("GETREDIR"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_getredir_parse() {
+        let frame = Frame::Integer(123);
+        let result = ClientGetRedir::parse_response(frame).unwrap();
+        assert_eq!(result, 123);
+    }
+
+    #[test]
+    fn test_client_no_touch_on() {
+        let cmd = ClientNoTouch::on();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("CLIENT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("NO-TOUCH"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("ON"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_no_touch_off() {
+        let cmd = ClientNoTouch::off();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("OFF"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_tracking_on() {
+        let cmd = ClientTracking::on();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("CLIENT"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("TRACKING"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("ON"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_tracking_off() {
+        let cmd = ClientTracking::off();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("OFF"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_tracking_with_options() {
+        let cmd = ClientTracking::on()
+            .redirect(456)
+            .prefix("user:")
+            .prefix("session:")
+            .bcast()
+            .optin()
+            .noloop();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("REDIRECT")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("456")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("PREFIX")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("user:")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("session:")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("BCAST")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("OPTIN")))));
+                assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("NOLOOP")))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_client_trackinginfo_frame() {
+        let cmd = ClientTrackingInfo::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("CLIENT"))));
+                assert_eq!(
+                    parts[1],
+                    Frame::BulkString(Some(Bytes::from("TRACKINGINFO")))
+                );
             }
             _ => panic!("Expected Array frame"),
         }

@@ -1783,3 +1783,93 @@ impl Command for ClusterSlotStats {
         Ok(format!("{:?}", frame))
     }
 }
+
+/// CLUSTER HELP command - Get help text for CLUSTER subcommands
+///
+/// Available since Redis 3.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ClusterHelp;
+
+impl ClusterHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClusterHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for ClusterHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("CLUSTER"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CLUSTER SLAVES command - List replicas of a node (deprecated, use CLUSTER REPLICAS)
+///
+/// This command is deprecated. Use CLUSTER REPLICAS instead.
+///
+/// Available since Redis 3.0.0. Deprecated in Redis 5.0.0.
+#[derive(Debug, Clone)]
+pub struct ClusterSlaves {
+    node_id: String,
+}
+
+impl ClusterSlaves {
+    /// Create a new CLUSTER SLAVES command
+    pub fn new(node_id: impl Into<String>) -> Self {
+        Self {
+            node_id: node_id.into(),
+        }
+    }
+}
+
+impl Command for ClusterSlaves {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CLUSTER"))),
+            Frame::BulkString(Some(Bytes::from("SLAVES"))),
+            Frame::BulkString(Some(Bytes::from(self.node_id.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::Array(_) => Ok("OK".to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

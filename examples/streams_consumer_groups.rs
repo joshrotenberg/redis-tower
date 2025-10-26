@@ -4,9 +4,7 @@
 //! Shows how multiple consumers can process messages from a stream with load balancing
 //! and fault tolerance.
 
-use bytes::Bytes;
-use redis_tower::commands::{StreamId, XAck, XAdd, XClaim, XGroupCreate, XPending, XReadGroup};
-use std::collections::HashMap;
+use redis_tower::commands::{XAck, XAdd, XClaim, XGroupCreate, XPending, XReadGroup};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,12 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Simulate adding messages to the stream
     println!("2. Adding messages to stream");
     for i in 1..=5 {
-        let mut fields = HashMap::new();
-        fields.insert("order_id".to_string(), Bytes::from(format!("ORD-{:03}", i)));
-        fields.insert("amount".to_string(), Bytes::from(format!("{}.00", i * 10)));
-        fields.insert("status".to_string(), Bytes::from("pending"));
+        let _add_cmd = XAdd::new(stream)
+            .field("order_id", format!("ORD-{:03}", i))
+            .field("amount", format!("{}.00", i * 10))
+            .field("status", "pending");
 
-        let _add_cmd = XAdd::new(stream, StreamId::new("*"), fields);
         println!(
             "   XADD {} * order_id ORD-{:03} amount {}.00 status pending",
             stream,
@@ -72,7 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Acknowledge processed messages
     println!("5. Consumer 1 acknowledging processed messages");
-    let ack_cmd = XAck::new(stream, group, vec!["1234567890123-0", "1234567890124-0"]);
+    let ack_cmd = XAck::new(stream, group)
+        .id("1234567890123-0")
+        .id("1234567890124-0");
     println!(
         "   XACK {} {} 1234567890123-0 1234567890124-0",
         stream, group
@@ -106,8 +105,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         group,
         "consumer3",
         3600000, // Messages idle for more than 1 hour
-        vec!["1234567890125-0"],
-    );
+    )
+    .id("1234567890125-0");
 
     println!(
         "   XCLAIM {} {} consumer3 3600000 1234567890125-0",

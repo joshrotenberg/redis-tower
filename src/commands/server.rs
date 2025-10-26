@@ -1049,6 +1049,260 @@ mod tests {
             _ => panic!("Expected Array frame"),
         }
     }
+
+    #[test]
+    fn test_command_docs_all() {
+        let cmd = CommandDocs::all();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("COMMAND"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("DOCS"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_docs_specific() {
+        let cmd = CommandDocs::new(vec!["GET", "SET"]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("COMMAND"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("DOCS"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("GET"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("SET"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_getkeys_frame() {
+        let cmd = CommandGetKeys::new("MSET", vec!["a", "b", "c", "d"]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 7);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("COMMAND"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("GETKEYS"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("MSET"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("a"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("b"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_getkeys_parse() {
+        let frame = Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("c"))),
+        ]);
+
+        let result = CommandGetKeys::parse_response(frame).unwrap();
+        assert_eq!(result, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn test_command_getkeysandflags_frame() {
+        let cmd = CommandGetKeysAndFlags::new("LMOVE", vec!["mylist1", "mylist2", "left", "left"]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 7);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("COMMAND"))));
+                assert_eq!(
+                    parts[1],
+                    Frame::BulkString(Some(Bytes::from("GETKEYSANDFLAGS")))
+                );
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("LMOVE"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_getkeysandflags_parse() {
+        let frame = Frame::Array(vec![
+            Frame::Array(vec![
+                Frame::BulkString(Some(Bytes::from("mylist1"))),
+                Frame::Array(vec![
+                    Frame::BulkString(Some(Bytes::from("RW"))),
+                    Frame::BulkString(Some(Bytes::from("access"))),
+                ]),
+            ]),
+            Frame::Array(vec![
+                Frame::BulkString(Some(Bytes::from("mylist2"))),
+                Frame::Array(vec![
+                    Frame::BulkString(Some(Bytes::from("RW"))),
+                    Frame::BulkString(Some(Bytes::from("insert"))),
+                ]),
+            ]),
+        ]);
+
+        let result = CommandGetKeysAndFlags::parse_response(frame).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].key, "mylist1");
+        assert_eq!(result[0].flags, vec!["RW", "access"]);
+        assert_eq!(result[1].key, "mylist2");
+        assert_eq!(result[1].flags, vec!["RW", "insert"]);
+    }
+
+    #[test]
+    fn test_command_list_all() {
+        let cmd = CommandList::all();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("COMMAND"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("LIST"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_list_filter_module() {
+        let cmd = CommandList::new(CommandListFilter::Module("mymodule".to_string()));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("FILTERBY"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("MODULE"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("mymodule"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_list_filter_aclcat() {
+        let cmd = CommandList::new(CommandListFilter::AclCategory("dangerous".to_string()));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("ACLCAT"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("dangerous"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_list_filter_pattern() {
+        let cmd = CommandList::new(CommandListFilter::Pattern("z*".to_string()));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("PATTERN"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("z*"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_command_list_parse() {
+        let frame = Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("get"))),
+            Frame::BulkString(Some(Bytes::from("set"))),
+            Frame::BulkString(Some(Bytes::from("del"))),
+        ]);
+
+        let result = CommandList::parse_response(frame).unwrap();
+        assert_eq!(result, vec!["get", "set", "del"]);
+    }
+
+    #[test]
+    fn test_memory_doctor_frame() {
+        let cmd = MemoryDoctor::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("MEMORY"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("DOCTOR"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_memory_doctor_parse() {
+        let frame = Frame::BulkString(Some(Bytes::from(
+            "Sam, I have a few observations about your memory...",
+        )));
+        let result = MemoryDoctor::parse_response(frame).unwrap();
+        assert_eq!(
+            result,
+            "Sam, I have a few observations about your memory..."
+        );
+    }
+
+    #[test]
+    fn test_memory_malloc_stats_frame() {
+        let cmd = MemoryMallocStats::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("MEMORY"))));
+                assert_eq!(
+                    parts[1],
+                    Frame::BulkString(Some(Bytes::from("MALLOC-STATS")))
+                );
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_memory_malloc_stats_parse() {
+        let frame = Frame::BulkString(Some(Bytes::from("___ Begin jemalloc statistics ___\n...")));
+        let result = MemoryMallocStats::parse_response(frame).unwrap();
+        assert!(result.starts_with("___ Begin jemalloc"));
+    }
+
+    #[test]
+    fn test_memory_purge_frame() {
+        let cmd = MemoryPurge::new();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("MEMORY"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("PURGE"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_memory_purge_parse() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        let result = MemoryPurge::parse_response(frame);
+        assert!(result.is_ok());
+    }
 }
 
 /// BGREWRITEAOF command - Asynchronously rewrite the append-only file
@@ -1413,6 +1667,389 @@ impl Command for CommandInfo {
     }
 }
 
+/// COMMAND DOCS command - Get command documentation
+///
+/// Returns documentary information about one, multiple or all commands.
+///
+/// Available since Redis 7.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::CommandDocs;
+///
+/// // Get all command documentation
+/// let cmd = CommandDocs::all();
+///
+/// // Get documentation for specific commands
+/// let cmd = CommandDocs::new(vec!["GET", "SET"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CommandDocs {
+    commands: Vec<String>,
+}
+
+impl CommandDocs {
+    /// Create a new COMMAND DOCS command for specific commands
+    pub fn new(commands: Vec<impl Into<String>>) -> Self {
+        Self {
+            commands: commands.into_iter().map(|c| c.into()).collect(),
+        }
+    }
+
+    /// Get documentation for all commands
+    pub fn all() -> Self {
+        Self {
+            commands: Vec::new(),
+        }
+    }
+}
+
+impl Command for CommandDocs {
+    type Response = String; // Simplified - returns complex nested map
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("COMMAND"))),
+            Frame::BulkString(Some(Bytes::from("DOCS"))),
+        ];
+
+        for cmd in &self.commands {
+            args.push(Frame::BulkString(Some(Bytes::from(cmd.clone()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Ok(format!("{:?}", frame)),
+        }
+    }
+}
+
+/// COMMAND GETKEYS command - Extract key names from a command
+///
+/// Returns the key names from a full Redis command.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::CommandGetKeys;
+///
+/// // Extract keys from MSET command
+/// let cmd = CommandGetKeys::new("MSET", vec!["a", "b", "c", "d"]);
+///
+/// // Extract keys from EVAL command
+/// let cmd = CommandGetKeys::new("EVAL", vec!["script", "3", "key1", "key2", "key3", "arg1"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CommandGetKeys {
+    command: String,
+    args: Vec<String>,
+}
+
+impl CommandGetKeys {
+    /// Create a new COMMAND GETKEYS command
+    pub fn new(command: impl Into<String>, args: Vec<impl Into<String>>) -> Self {
+        Self {
+            command: command.into(),
+            args: args.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+}
+
+impl Command for CommandGetKeys {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("COMMAND"))),
+            Frame::BulkString(Some(Bytes::from("GETKEYS"))),
+            Frame::BulkString(Some(Bytes::from(self.command.clone()))),
+        ];
+
+        for arg in &self.args {
+            frames.push(Frame::BulkString(Some(Bytes::from(arg.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut keys = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            keys.push(String::from_utf8_lossy(&data).to_string());
+                        }
+                        Frame::BulkString(None) => {}
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(keys)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Key with access flags from COMMAND GETKEYSANDFLAGS
+#[derive(Debug, Clone)]
+pub struct KeyWithFlags {
+    /// The key name
+    pub key: String,
+    /// Access flags for this key (e.g., "RW", "RO", "OW", "RM", etc.)
+    pub flags: Vec<String>,
+}
+
+/// COMMAND GETKEYSANDFLAGS command - Extract key names and access flags
+///
+/// Returns the key names and their access flags from a full Redis command.
+///
+/// Available since Redis 7.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::CommandGetKeysAndFlags;
+///
+/// // Extract keys and flags from LMOVE command
+/// let cmd = CommandGetKeysAndFlags::new("LMOVE", vec!["mylist1", "mylist2", "left", "left"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct CommandGetKeysAndFlags {
+    command: String,
+    args: Vec<String>,
+}
+
+impl CommandGetKeysAndFlags {
+    /// Create a new COMMAND GETKEYSANDFLAGS command
+    pub fn new(command: impl Into<String>, args: Vec<impl Into<String>>) -> Self {
+        Self {
+            command: command.into(),
+            args: args.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+}
+
+impl Command for CommandGetKeysAndFlags {
+    type Response = Vec<KeyWithFlags>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("COMMAND"))),
+            Frame::BulkString(Some(Bytes::from("GETKEYSANDFLAGS"))),
+            Frame::BulkString(Some(Bytes::from(self.command.clone()))),
+        ];
+
+        for arg in &self.args {
+            frames.push(Frame::BulkString(Some(Bytes::from(arg.clone()))));
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Array(pair) if pair.len() == 2 => {
+                            // Each item is [key, [flags]]
+                            let key = match &pair[0] {
+                                Frame::BulkString(Some(data)) => {
+                                    String::from_utf8_lossy(data).to_string()
+                                }
+                                _ => return Err(RedisError::UnexpectedResponse),
+                            };
+
+                            let flags = match &pair[1] {
+                                Frame::Array(flag_items) => {
+                                    let mut f = Vec::new();
+                                    for flag in flag_items {
+                                        match flag {
+                                            Frame::BulkString(Some(data)) => {
+                                                f.push(String::from_utf8_lossy(data).to_string());
+                                            }
+                                            _ => return Err(RedisError::UnexpectedResponse),
+                                        }
+                                    }
+                                    f
+                                }
+                                _ => return Err(RedisError::UnexpectedResponse),
+                            };
+
+                            result.push(KeyWithFlags { key, flags });
+                        }
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Filter for COMMAND LIST command
+#[derive(Debug, Clone)]
+pub enum CommandListFilter {
+    /// Filter by module name
+    Module(String),
+    /// Filter by ACL category
+    AclCategory(String),
+    /// Filter by pattern (glob-like)
+    Pattern(String),
+}
+
+/// COMMAND LIST command - Get list of command names
+///
+/// Returns an array of the server's command names.
+///
+/// Available since Redis 7.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{CommandList, CommandListFilter};
+///
+/// // Get all command names
+/// let cmd = CommandList::all();
+///
+/// // Filter by ACL category
+/// let cmd = CommandList::new(CommandListFilter::AclCategory("dangerous".to_string()));
+///
+/// // Filter by pattern
+/// let cmd = CommandList::new(CommandListFilter::Pattern("z*".to_string()));
+/// ```
+#[derive(Debug, Clone)]
+pub struct CommandList {
+    filter: Option<CommandListFilter>,
+}
+
+impl CommandList {
+    /// Create a new COMMAND LIST command with a filter
+    pub fn new(filter: CommandListFilter) -> Self {
+        Self {
+            filter: Some(filter),
+        }
+    }
+
+    /// Get all command names (no filter)
+    pub fn all() -> Self {
+        Self { filter: None }
+    }
+}
+
+impl Command for CommandList {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("COMMAND"))),
+            Frame::BulkString(Some(Bytes::from("LIST"))),
+        ];
+
+        if let Some(filter) = &self.filter {
+            frames.push(Frame::BulkString(Some(Bytes::from("FILTERBY"))));
+            match filter {
+                CommandListFilter::Module(name) => {
+                    frames.push(Frame::BulkString(Some(Bytes::from("MODULE"))));
+                    frames.push(Frame::BulkString(Some(Bytes::from(name.clone()))));
+                }
+                CommandListFilter::AclCategory(cat) => {
+                    frames.push(Frame::BulkString(Some(Bytes::from("ACLCAT"))));
+                    frames.push(Frame::BulkString(Some(Bytes::from(cat.clone()))));
+                }
+                CommandListFilter::Pattern(pat) => {
+                    frames.push(Frame::BulkString(Some(Bytes::from("PATTERN"))));
+                    frames.push(Frame::BulkString(Some(Bytes::from(pat.clone()))));
+                }
+            }
+        }
+
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut commands = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            commands.push(String::from_utf8_lossy(&data).to_string());
+                        }
+                        Frame::BulkString(None) => {}
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(commands)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// COMMAND HELP command - Get help text for COMMAND subcommands
+///
+/// Returns helpful text describing the different COMMAND subcommands.
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandHelp;
+
+impl CommandHelp {
+    /// Create a new COMMAND HELP command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CommandHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for CommandHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("COMMAND"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut help = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            help.push(String::from_utf8_lossy(&data).to_string());
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(help)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// Slowlog entry - represents a single slow query log entry
 ///
 /// Each entry contains information about a slow command execution.
@@ -1767,6 +2404,382 @@ impl Command for MemoryStats {
 
     fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
         Ok(format!("{:?}", frame))
+    }
+}
+
+/// MEMORY DOCTOR command - Get memory problems report
+///
+/// Reports about different memory-related issues that the Redis server
+/// experiences, and advises about possible remedies.
+///
+/// Available since Redis 4.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::MemoryDoctor;
+///
+/// let cmd = MemoryDoctor::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryDoctor;
+
+impl MemoryDoctor {
+    /// Create a new MEMORY DOCTOR command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryDoctor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryDoctor {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MEMORY"))),
+            Frame::BulkString(Some(Bytes::from("DOCTOR"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MEMORY MALLOC-STATS command - Get allocator statistics
+///
+/// Provides an internal statistics report from the memory allocator.
+///
+/// This command is currently implemented only when using jemalloc as an
+/// allocator, and evaluates to a benign NOOP for all others.
+///
+/// Available since Redis 4.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::MemoryMallocStats;
+///
+/// let cmd = MemoryMallocStats::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryMallocStats;
+
+impl MemoryMallocStats {
+    /// Create a new MEMORY MALLOC-STATS command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryMallocStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryMallocStats {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MEMORY"))),
+            Frame::BulkString(Some(Bytes::from("MALLOC-STATS"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MEMORY PURGE command - Ask allocator to release memory
+///
+/// Attempts to purge dirty pages so these can be reclaimed by the allocator.
+///
+/// This command is currently implemented only when using jemalloc as an
+/// allocator, and evaluates to a benign NOOP for all others.
+///
+/// Available since Redis 4.0.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::MemoryPurge;
+///
+/// let cmd = MemoryPurge::new();
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryPurge;
+
+impl MemoryPurge {
+    /// Create a new MEMORY PURGE command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryPurge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryPurge {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MEMORY"))),
+            Frame::BulkString(Some(Bytes::from("PURGE"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if s == "OK" => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MEMORY HELP command - Get help text for MEMORY subcommands
+///
+/// Available since Redis 4.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryHelp;
+
+impl MemoryHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MEMORY"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// CONFIG HELP command - Get help text for CONFIG subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigHelp;
+
+impl ConfigHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ConfigHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ConfigHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("CONFIG"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SLOWLOG HELP command - Get help text for SLOWLOG subcommands
+///
+/// Available since Redis 6.2.0.
+#[derive(Debug, Clone, Copy)]
+pub struct SlowlogHelp;
+
+impl SlowlogHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SlowlogHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for SlowlogHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SLOWLOG"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// MODULE HELP command - Get help text for MODULE subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ModuleHelp;
+
+impl ModuleHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ModuleHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ModuleHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("MODULE"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// OBJECT HELP command - Get help text for OBJECT subcommands
+///
+/// Available since Redis 6.2.0.
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectHelp;
+
+impl ObjectHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ObjectHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ObjectHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("OBJECT"))),
+            Frame::BulkString(Some(Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
     }
 }
 
@@ -2473,6 +3486,303 @@ mod wait_tests {
                 assert!(parts.contains(&Frame::BulkString(Some(Bytes::from("10000")))));
             }
             _ => panic!("Expected Array frame"),
+        }
+    }
+}
+
+/// SWAPDB command - Swap two Redis databases (Redis 4.0+)
+///
+/// Atomically swaps two databases so that clients connected to a given database
+/// will see the data of the other database.
+///
+/// Available since Redis 4.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct SwapDb {
+    index1: i64,
+    index2: i64,
+}
+
+impl SwapDb {
+    /// Create a new SWAPDB command
+    pub fn new(index1: i64, index2: i64) -> Self {
+        Self { index1, index2 }
+    }
+}
+
+impl Command for SwapDb {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SWAPDB"))),
+            Frame::BulkString(Some(Bytes::from(self.index1.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.index2.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SYNC command - Internal command for replication
+///
+/// Used by Redis replicas for replicating data from master.
+/// This is an internal command that should not be used by clients.
+#[derive(Debug, Clone, Copy)]
+pub struct Sync;
+
+impl Sync {
+    /// Create a new SYNC command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Sync {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Sync {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("SYNC")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// PSYNC command - Partial resynchronization for replication (Redis 2.8+)
+///
+/// Used by Redis replicas to request partial resynchronization from master.
+///
+/// Available since Redis 2.8.0.
+#[derive(Debug, Clone)]
+pub struct PSync {
+    replication_id: String,
+    offset: i64,
+}
+
+impl PSync {
+    /// Create a new PSYNC command
+    pub fn new(replication_id: impl Into<String>, offset: i64) -> Self {
+        Self {
+            replication_id: replication_id.into(),
+            offset,
+        }
+    }
+
+    /// PSYNC with ? ? for full sync
+    pub fn full_sync() -> Self {
+        Self {
+            replication_id: "?".to_string(),
+            offset: -1,
+        }
+    }
+}
+
+impl Command for PSync {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("PSYNC"))),
+            Frame::BulkString(Some(Bytes::from(self.replication_id.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.offset.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// REPLCONF command - Configure replication connection
+///
+/// Used by replicas to configure the replication stream.
+///
+/// Available since Redis 2.8.0.
+#[derive(Debug, Clone)]
+pub struct ReplConf {
+    args: Vec<String>,
+}
+
+impl ReplConf {
+    /// Create a new REPLCONF command with custom arguments
+    pub fn new(args: Vec<impl Into<String>>) -> Self {
+        Self {
+            args: args.into_iter().map(|a| a.into()).collect(),
+        }
+    }
+
+    /// REPLCONF listening-port
+    pub fn listening_port(port: u16) -> Self {
+        Self {
+            args: vec!["listening-port".to_string(), port.to_string()],
+        }
+    }
+
+    /// REPLCONF capa (capabilities)
+    pub fn capa(capability: impl Into<String>) -> Self {
+        Self {
+            args: vec!["capa".to_string(), capability.into()],
+        }
+    }
+
+    /// REPLCONF getack
+    pub fn getack() -> Self {
+        Self {
+            args: vec!["GETACK".to_string(), "*".to_string()],
+        }
+    }
+}
+
+impl Command for ReplConf {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![Frame::BulkString(Some(Bytes::from("REPLCONF")))];
+        for arg in &self.args {
+            frames.push(Frame::BulkString(Some(Bytes::from(arg.clone()))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Array(_) => Ok("OK".to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// SLAVEOF command - Make server a replica (deprecated, use REPLICAOF)
+///
+/// Configure a server to become a replica of another instance.
+/// This command is deprecated, use REPLICAOF instead.
+///
+/// Available since Redis 1.0.0.
+#[derive(Debug, Clone)]
+pub struct SlaveOf {
+    host: String,
+    port: u16,
+}
+
+impl SlaveOf {
+    /// Create a new SLAVEOF command
+    pub fn new(host: impl Into<String>, port: u16) -> Self {
+        Self {
+            host: host.into(),
+            port,
+        }
+    }
+
+    /// SLAVEOF NO ONE - stop replication
+    pub fn no_one() -> Self {
+        Self {
+            host: "NO".to_string(),
+            port: 0, // Will be replaced with "ONE"
+        }
+    }
+}
+
+impl Command for SlaveOf {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        if self.host == "NO" {
+            Frame::Array(vec![
+                Frame::BulkString(Some(Bytes::from("SLAVEOF"))),
+                Frame::BulkString(Some(Bytes::from("NO"))),
+                Frame::BulkString(Some(Bytes::from("ONE"))),
+            ])
+        } else {
+            Frame::Array(vec![
+                Frame::BulkString(Some(Bytes::from("SLAVEOF"))),
+                Frame::BulkString(Some(Bytes::from(self.host.clone()))),
+                Frame::BulkString(Some(Bytes::from(self.port.to_string()))),
+            ])
+        }
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// LOLWUT command - Display Redis version-specific artwork
+///
+/// A fun command that displays computer art and the Redis version.
+/// The output changes with each Redis version.
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct Lolwut {
+    version: Option<i64>,
+}
+
+impl Lolwut {
+    /// Create a new LOLWUT command
+    pub fn new() -> Self {
+        Self { version: None }
+    }
+
+    /// Specify version to display
+    pub fn version(mut self, version: i64) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+impl Default for Lolwut {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Lolwut {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![Frame::BulkString(Some(Bytes::from("LOLWUT")))];
+        if let Some(v) = self.version {
+            frames.push(Frame::BulkString(Some(Bytes::from("VERSION"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(v.to_string()))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
         }
     }
 }

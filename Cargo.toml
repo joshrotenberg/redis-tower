@@ -93,6 +93,52 @@ required-features = ["cluster"]
 name = "sentinel_basic"
 required-features = ["sentinel"]
 
+# Integration tests in tests/commands/
+[[test]]
+name = "test_hashes"
+path = "tests/commands/test_hashes.rs"
+
+[[test]]
+name = "test_lists"
+path = "tests/commands/test_lists.rs"
+
+[[test]]
+name = "test_sets"
+path = "tests/commands/test_sets.rs"
+
+[[test]]
+name = "test_sorted_sets"
+path = "tests/commands/test_sorted_sets.rs"
+
+[[test]]
+name = "test_strings"
+path = "tests/commands/test_strings.rs"
+
+[[test]]
+name = "test_pubsub"
+path = "tests/commands/test_pubsub.rs"
+
+[[test]]
+name = "test_transactions"
+path = "tests/commands/test_transactions.rs"
+
+# TODO: test_streams.rs needs updating to match current stream API
+# [[test]]
+# name = "test_streams"
+# path = "tests/commands/test_streams.rs"
+
+[[test]]
+name = "test_pool"
+path = "tests/commands/test_pool.rs"
+
+[[test]]
+name = "test_object_commands"
+path = "tests/commands/test_object_commands.rs"
+
+[[test]]
+name = "test_sort_wait"
+path = "tests/commands/test_sort_wait.rs"
+
 # Cluster-specific tests
 [[test]]
 name = "test_cluster"
@@ -103,6 +149,33 @@ required-features = ["cluster"]
 name = "test_cluster_simple"
 path = "tests/commands/test_cluster_simple.rs"
 required-features = ["cluster"]
+
+# New integration tests (Priority 2)
+[[test]]
+name = "integration_pubsub"
+path = "tests/integration/integration_pubsub.rs"
+
+[[test]]
+name = "integration_transactions"
+path = "tests/integration/integration_transactions.rs"
+
+[[test]]
+name = "integration_streams"
+path = "tests/integration/integration_streams.rs"
+
+[[test]]
+name = "integration_scripting"
+path = "tests/integration/integration_scripting.rs"
+
+[[test]]
+name = "integration_blocking"
+path = "tests/integration/integration_blocking.rs"
+
+# Redis Stack module tests (Priority 4)
+[[test]]
+name = "integration_bloom"
+path = "tests/integration/integration_bloom.rs"
+required-features = ["bloom"]
 
 [profile.release]
 opt-level = 3

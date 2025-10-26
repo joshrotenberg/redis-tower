@@ -120,84 +120,76 @@ async fn main() -> anyhow::Result<()> {
     // XADD - Write to stream
     println!("1. XADD - Writing events to stream:");
 
-    let mut event1 = HashMap::new();
-    event1.insert("type".to_string(), "temperature".into());
-    event1.insert("sensor".to_string(), "living_room".into());
-    event1.insert("value".to_string(), "22.5".into());
-
     let id1 = client
-        .call(streams::XAdd::new(
-            "sensor_events",
-            streams::StreamId::auto(),
-            event1,
-        ))
+        .call(
+            streams::XAdd::new("sensor_events")
+                .field("type", "temperature")
+                .field("sensor", "living_room")
+                .field("value", "22.5"),
+        )
         .await?;
     println!("   Added event with ID: {}", id1);
 
-    let mut event2 = HashMap::new();
-    event2.insert("type".to_string(), "temperature".into());
-    event2.insert("sensor".to_string(), "bedroom".into());
-    event2.insert("value".to_string(), "21.0".into());
-
     let id2 = client
-        .call(streams::XAdd::new(
-            "sensor_events",
-            streams::StreamId::auto(),
-            event2,
-        ))
+        .call(
+            streams::XAdd::new("sensor_events")
+                .field("type", "temperature")
+                .field("sensor", "bedroom")
+                .field("value", "21.0"),
+        )
         .await?;
     println!("   Added event with ID: {}", id2);
 
-    let mut event3 = HashMap::new();
-    event3.insert("type".to_string(), "motion".into());
-    event3.insert("sensor".to_string(), "front_door".into());
-    event3.insert("detected".to_string(), "true".into());
-
     let id3 = client
-        .call(streams::XAdd::new(
-            "sensor_events",
-            streams::StreamId::auto(),
-            event3,
-        ))
+        .call(
+            streams::XAdd::new("sensor_events")
+                .field("type", "motion")
+                .field("sensor", "front_door")
+                .field("detected", "true"),
+        )
         .await?;
     println!("   Added event with ID: {}\n", id3);
 
     // XREAD - Read from stream (non-blocking)
     println!("2. XREAD - Reading from stream (non-blocking):");
 
-    let streams_to_read = vec![("sensor_events".to_string(), streams::StreamId::beginning())];
+    let results = client
+        .call(streams::XRead::new().stream("sensor_events", "0-0"))
+        .await?;
 
-    let results = client.call(streams::XRead::new(streams_to_read)).await?;
-
-    for (stream_name, entries) in &results {
-        println!("   Stream '{}': {} entries", stream_name, entries.len());
-        for entry in entries {
+    for stream_result in &results {
+        println!(
+            "   Stream '{}': {} entries",
+            stream_result.key,
+            stream_result.entries.len()
+        );
+        for entry in &stream_result.entries {
             println!("     ID: {}", entry.id);
             for (field, value) in &entry.fields {
-                println!("       {}: {}", field, String::from_utf8_lossy(value));
+                println!("       {}: {}", field, value);
             }
         }
     }
 
     // XREAD with COUNT
     println!("\n3. XREAD with COUNT (limit results):");
-    let streams_limited = vec![("sensor_events".to_string(), streams::StreamId::beginning())];
 
     let limited_results = client
-        .call(streams::XRead::new(streams_limited).count(2))
+        .call(
+            streams::XRead::new()
+                .stream("sensor_events", "0-0")
+                .count(2),
+        )
         .await?;
 
-    for (stream_name, entries) in &limited_results {
+    for stream_result in &limited_results {
         println!(
             "   Stream '{}': {} entries (limited)",
-            stream_name,
-            entries.len()
+            stream_result.key,
+            stream_result.entries.len()
         );
-        for entry in entries {
-            let sensor = entry
-                .fields
-                .get("sensor")
-                .map(|v| String::from_utf8_lossy(v));
+        for entry in &stream_result.entries {
+            let sensor = entry.fields.get("sensor");
             println!("     ID: {}, sensor: {:?}", entry.id, sensor);
         }
     }
@@ -206,46 +198,43 @@ async fn main() -> anyhow::Result<()> {
     println!("\n4. XREAD with BLOCK (blocking read):");
     println!("   Blocking for 3 seconds, waiting for new events...");
 
-    // Start from latest (only new events)
-    let latest_streams = vec![("sensor_events".to_string(), streams::StreamId::latest())];
-
     // Spawn producer to add event after delay
     let client_clone2 = client.clone();
     let stream_producer = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(2)).await;
 
-        let mut new_event = HashMap::new();
-        new_event.insert("type".to_string(), "alert".into());
-        new_event.insert("message".to_string(), "Battery low".into());
-
         let id = client_clone2
-            .call(streams::XAdd::new(
-                "sensor_events",
-                streams::StreamId::auto(),
-                new_event,
-            ))
+            .call(
+                streams::XAdd::new("sensor_events")
+                    .field("type", "alert")
+                    .field("message", "Battery low"),
+            )
             .await
             .unwrap();
         println!("   [Producer] Added new event: {}", id);
     });
 
     let blocking_results = client
-        .call(streams::XRead::new(latest_streams).block(3000))
+        .call(
+            streams::XRead::new()
+                .stream("sensor_events", "$")
+                .block(3000),
+        )
         .await?;
 
     if blocking_results.is_empty() {
         println!("   No new events (timeout)");
     } else {
-        for (stream_name, entries) in &blocking_results {
+        for stream_result in &blocking_results {
             println!(
                 "   Received {} new entries from '{}':",
-                entries.len(),
-                stream_name
+                stream_result.entries.len(),
+                stream_result.key
             );
-            for entry in entries {
+            for entry in &stream_result.entries {
                 println!("     ID: {}", entry.id);
                 for (field, value) in &entry.fields {
-                    println!("       {}: {}", field, String::from_utf8_lossy(value));
+                    println!("       {}: {}", field, value);
                 }
             }
         }
