@@ -171,6 +171,12 @@ path = "tests/integration/integration_scripting.rs"
 name = "integration_blocking"
 path = "tests/integration/integration_blocking.rs"
 
+# Redis Stack module tests (Priority 4)
+[[test]]
+name = "integration_bloom"
+path = "tests/integration/integration_bloom.rs"
+required-features = ["bloom"]
+
 [profile.release]
 opt-level = 3
 lto = true
