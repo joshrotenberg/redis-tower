@@ -24,6 +24,7 @@
 
 use redis_tower::commands::{Del, Get, Ping, Set};
 use redis_tower::sentinel::{SentinelClient, SentinelConfig};
+use tower::ServiceExt;
 
 /// Setup sentinel client
 /// Connects to sentinels to discover master
@@ -43,13 +44,11 @@ fn setup_sentinel() -> SentinelClient {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_ping() {
     let client = setup_sentinel();
-
-    // Get master service - need to import Service trait for .call()
-    use tower::Service;
-    let mut master = client.master();
+    let master = client.master();
 
     // PING should work via sentinel-discovered master
-    let pong: String = master.call(Ping::new()).await.unwrap();
+    // Use oneshot() which handles readiness automatically
+    let pong: String = master.oneshot(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
 
@@ -57,22 +56,32 @@ async fn test_sentinel_ping() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_basic_operations() {
     let client = setup_sentinel();
-    use tower::Service;
-    let mut master = client.master();
     let key = "sentinel_test_key";
 
     // Clean up first
-    let _: i64 = master.call(Del::new(vec![key.to_string()])).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(vec![key.to_string()]))
+        .await
+        .unwrap();
 
     // SET should go to master
-    let _: () = master.call(Set::new(key, "sentinel_value")).await.unwrap();
+    let _: () = client
+        .master()
+        .oneshot(Set::new(key, "sentinel_value"))
+        .await
+        .unwrap();
 
     // GET should work (from master or replica)
-    let value: Option<bytes::Bytes> = master.call(Get::new(key)).await.unwrap();
+    let value: Option<bytes::Bytes> = client.master().oneshot(Get::new(key)).await.unwrap();
     assert_eq!(value.unwrap().as_ref(), b"sentinel_value");
 
     // Clean up
-    let _: i64 = master.call(Del::new(vec![key.to_string()])).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(vec![key.to_string()]))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -86,11 +95,10 @@ async fn test_sentinel_master_discovery() {
         .unwrap();
 
     let client = SentinelClient::new(config);
-    use tower::Service;
-    let mut master = client.master();
+    // Get fresh master for each operation
 
     // Should be able to communicate with discovered master
-    let pong: String = master.call(Ping::new()).await.unwrap();
+    let pong: String = client.master().oneshot(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
 
@@ -98,36 +106,45 @@ async fn test_sentinel_master_discovery() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_multiple_operations() {
     let client = setup_sentinel();
-    use tower::Service;
-    let mut master = client.master();
+    // Get fresh master for each operation
 
     let keys = vec!["sentinel_key1", "sentinel_key2", "sentinel_key3"];
 
     // Clean up
     let key_strings: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
-    let _: i64 = master.call(Del::new(key_strings.clone())).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(key_strings.clone()))
+        .await
+        .unwrap();
 
     // Set multiple values
     for (i, &key) in keys.iter().enumerate() {
         let value = format!("value{}", i);
-        let _: () = master.call(Set::new(key, value.clone())).await.unwrap();
+        let _: () = client
+            .master()
+            .oneshot(Set::new(key, value.clone()))
+            .await
+            .unwrap();
     }
 
     // Get and verify values
     for (i, &key) in keys.iter().enumerate() {
-        let value: Option<bytes::Bytes> = master.call(Get::new(key)).await.unwrap();
+        let value: Option<bytes::Bytes> = client.master().oneshot(Get::new(key)).await.unwrap();
         assert_eq!(value.unwrap().as_ref(), format!("value{}", i).as_bytes());
     }
 
     // Clean up
-    let _: i64 = master.call(Del::new(key_strings)).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(key_strings))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_connection_to_different_sentinels() {
-    use tower::Service;
-
     // Test connecting through different sentinel nodes
     let sentinel_configs = vec![
         vec![("localhost", 26379)],
@@ -149,10 +166,10 @@ async fn test_sentinel_connection_to_different_sentinels() {
         let config = builder.master_name("mymaster").build().unwrap();
 
         let client = SentinelClient::new(config);
-        let mut master = client.master();
+        // Get fresh master for each operation
 
         // Verify connection works
-        let pong: String = master.call(Ping::new()).await.unwrap();
+        let pong: String = client.master().oneshot(Ping::new()).await.unwrap();
         assert_eq!(pong, "PONG");
     }
 }
@@ -161,7 +178,6 @@ async fn test_sentinel_connection_to_different_sentinels() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_concurrent_operations() {
     use tokio::task::JoinSet;
-    use tower::Service;
 
     let client = setup_sentinel();
     let mut tasks = JoinSet::new();
@@ -170,21 +186,33 @@ async fn test_sentinel_concurrent_operations() {
     for i in 0..10 {
         let client_clone = client.clone();
         tasks.spawn(async move {
-            let mut master = client_clone.master();
             let key = format!("sentinel_concurrent_key_{}", i);
             let value = format!("value_{}", i);
 
             // Clean up
-            let _: i64 = master.call(Del::new(vec![key.clone()])).await.unwrap();
+            let _: i64 = client_clone
+                .master()
+                .oneshot(Del::new(vec![key.clone()]))
+                .await
+                .unwrap();
 
             // Set value
-            let _: () = master.call(Set::new(&key, value.clone())).await.unwrap();
+            let _: () = client_clone
+                .master()
+                .oneshot(Set::new(&key, value.clone()))
+                .await
+                .unwrap();
 
             // Get value
-            let result: Option<bytes::Bytes> = master.call(Get::new(&key)).await.unwrap();
+            let result: Option<bytes::Bytes> =
+                client_clone.master().oneshot(Get::new(&key)).await.unwrap();
 
             // Clean up
-            let _: i64 = master.call(Del::new(vec![key])).await.unwrap();
+            let _: i64 = client_clone
+                .master()
+                .oneshot(Del::new(vec![key]))
+                .await
+                .unwrap();
 
             result.unwrap()
         });
@@ -204,21 +232,27 @@ async fn test_sentinel_concurrent_operations() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_failover_awareness() {
-    use tower::Service;
-
     // This test verifies that the sentinel client is aware of the master
     // In a real failover scenario, sentinels would promote a replica to master
     // and the client should discover the new master
 
     let client = setup_sentinel();
-    let mut master = client.master();
+    // Get fresh master for each operation
 
     // Normal operation
     let key = "failover_test_key";
-    let _: i64 = master.call(Del::new(vec![key.to_string()])).await.unwrap();
-    let _: () = master.call(Set::new(key, "before")).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(vec![key.to_string()]))
+        .await
+        .unwrap();
+    let _: () = client
+        .master()
+        .oneshot(Set::new(key, "before"))
+        .await
+        .unwrap();
 
-    let value: Option<bytes::Bytes> = master.call(Get::new(key)).await.unwrap();
+    let value: Option<bytes::Bytes> = client.master().oneshot(Get::new(key)).await.unwrap();
     assert_eq!(value.unwrap().as_ref(), b"before");
 
     // Note: Actually triggering a failover would require:
@@ -230,5 +264,9 @@ async fn test_sentinel_failover_awareness() {
     // This is tested manually or in chaos engineering scenarios
 
     // Clean up
-    let _: i64 = master.call(Del::new(vec![key.to_string()])).await.unwrap();
+    let _: i64 = client
+        .master()
+        .oneshot(Del::new(vec![key.to_string()]))
+        .await
+        .unwrap();
 }
