@@ -24,7 +24,6 @@
 
 use redis_tower::commands::{Del, Get, Ping, Set};
 use redis_tower::sentinel::{SentinelClient, SentinelConfig};
-use tower::Service;
 
 /// Setup sentinel client
 /// Connects to sentinels to discover master
@@ -44,6 +43,9 @@ fn setup_sentinel() -> SentinelClient {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_ping() {
     let client = setup_sentinel();
+
+    // Get master service - need to import Service trait for .call()
+    use tower::Service;
     let mut master = client.master();
 
     // PING should work via sentinel-discovered master
@@ -55,6 +57,7 @@ async fn test_sentinel_ping() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_basic_operations() {
     let client = setup_sentinel();
+    use tower::Service;
     let mut master = client.master();
     let key = "sentinel_test_key";
 
@@ -83,6 +86,7 @@ async fn test_sentinel_master_discovery() {
         .unwrap();
 
     let client = SentinelClient::new(config);
+    use tower::Service;
     let mut master = client.master();
 
     // Should be able to communicate with discovered master
@@ -94,6 +98,7 @@ async fn test_sentinel_master_discovery() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_multiple_operations() {
     let client = setup_sentinel();
+    use tower::Service;
     let mut master = client.master();
 
     let keys = vec!["sentinel_key1", "sentinel_key2", "sentinel_key3"];
@@ -121,6 +126,8 @@ async fn test_sentinel_multiple_operations() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_connection_to_different_sentinels() {
+    use tower::Service;
+
     // Test connecting through different sentinel nodes
     let sentinel_configs = vec![
         vec![("localhost", 26379)],
@@ -154,6 +161,7 @@ async fn test_sentinel_connection_to_different_sentinels() {
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_concurrent_operations() {
     use tokio::task::JoinSet;
+    use tower::Service;
 
     let client = setup_sentinel();
     let mut tasks = JoinSet::new();
@@ -196,6 +204,8 @@ async fn test_sentinel_concurrent_operations() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_failover_awareness() {
+    use tower::Service;
+
     // This test verifies that the sentinel client is aware of the master
     // In a real failover scenario, sentinels would promote a replica to master
     // and the client should discover the new master
