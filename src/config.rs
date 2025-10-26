@@ -3,6 +3,7 @@
 use std::time::Duration;
 use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
 
+use crate::health::HealthCheckConfig;
 use crate::metrics::{MetricsCollector, MetricsConfig};
 use crate::tls::TlsConfig;
 use crate::tracing::TracingConfig;
@@ -15,6 +16,9 @@ pub struct ClientConfig {
 
     /// Reconnection configuration
     pub reconnect: ReconnectConfig,
+
+    /// Health check configuration
+    pub health_check: HealthCheckConfig,
 
     /// Tracing configuration
     pub tracing: TracingConfig,
@@ -42,6 +46,7 @@ impl Default for ClientConfig {
                 .unlimited_attempts()
                 .retry_on_reconnect(true)
                 .build(),
+            health_check: HealthCheckConfig::default(),
             tracing: TracingConfig::default(),
             metrics: MetricsCollector::new(),
         }
@@ -53,6 +58,7 @@ impl Default for ClientConfig {
 pub struct ClientConfigBuilder {
     tls: TlsConfig,
     reconnect: Option<ReconnectConfig>,
+    health_check: Option<HealthCheckConfig>,
     tracing: Option<TracingConfig>,
     metrics: Option<MetricsCollector>,
 }
@@ -129,6 +135,44 @@ impl ClientConfigBuilder {
                 .policy(ReconnectPolicy::None)
                 .build(),
         );
+        self
+    }
+
+    /// Set health check configuration
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    /// use redis_tower::health::HealthCheckConfig;
+    /// use std::time::Duration;
+    ///
+    /// let health_check = HealthCheckConfig::builder()
+    ///     .interval(Duration::from_secs(60))
+    ///     .timeout(Duration::from_secs(10))
+    ///     .failure_threshold(5)
+    ///     .build();
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .health_check(health_check)
+    ///     .build();
+    /// ```
+    pub fn health_check(mut self, health_check: HealthCheckConfig) -> Self {
+        self.health_check = Some(health_check);
+        self
+    }
+
+    /// Disable health checks
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .no_health_check()
+    ///     .build();
+    /// ```
+    pub fn no_health_check(mut self) -> Self {
+        self.health_check = Some(HealthCheckConfig::disabled());
         self
     }
 
@@ -210,6 +254,7 @@ impl ClientConfigBuilder {
                     .retry_on_reconnect(true)
                     .build()
             }),
+            health_check: self.health_check.unwrap_or_default(),
             tracing: self.tracing.unwrap_or_default(),
             metrics: self.metrics.unwrap_or_default(),
         }
@@ -221,6 +266,7 @@ impl Default for ClientConfigBuilder {
         Self {
             tls: TlsConfig::None,
             reconnect: None,
+            health_check: None,
             tracing: None,
             metrics: None,
         }

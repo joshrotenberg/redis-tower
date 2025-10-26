@@ -734,3 +734,778 @@ impl Command for HDel {
         }
     }
 }
+
+/// HEXPIRE command - Set expiration for hash fields (Redis 7.4+)
+///
+/// Sets expiration time in seconds for one or more hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HExpire;
+///
+/// let cmd = HExpire::new("myhash", 60, vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HExpire {
+    key: String,
+    seconds: i64,
+    fields: Vec<String>,
+}
+
+impl HExpire {
+    /// Create a new HEXPIRE command
+    pub fn new(key: impl Into<String>, seconds: i64, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            seconds,
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HExpire {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HEXPIRE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.seconds.to_string()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HEXPIREAT command - Set expiration timestamp for hash fields (Redis 7.4+)
+///
+/// Sets expiration time as Unix timestamp in seconds for one or more hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HExpireAt;
+///
+/// let cmd = HExpireAt::new("myhash", 1735689600, vec!["field1"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HExpireAt {
+    key: String,
+    timestamp: i64,
+    fields: Vec<String>,
+}
+
+impl HExpireAt {
+    /// Create a new HEXPIREAT command
+    pub fn new(key: impl Into<String>, timestamp: i64, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            timestamp,
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HExpireAt {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HEXPIREAT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.timestamp.to_string()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HEXPIRETIME command - Get expiration timestamp for hash fields (Redis 7.4+)
+///
+/// Returns the absolute Unix timestamp in seconds at which the given field will expire.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HExpireTime;
+///
+/// let cmd = HExpireTime::new("myhash", vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HExpireTime {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HExpireTime {
+    /// Create a new HEXPIRETIME command
+    pub fn new(key: impl Into<String>, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HExpireTime {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HEXPIRETIME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HPEXPIRE command - Set expiration for hash fields in milliseconds (Redis 7.4+)
+///
+/// Sets expiration time in milliseconds for one or more hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HPExpire;
+///
+/// let cmd = HPExpire::new("myhash", 60000, vec!["field1"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HPExpire {
+    key: String,
+    milliseconds: i64,
+    fields: Vec<String>,
+}
+
+impl HPExpire {
+    /// Create a new HPEXPIRE command
+    pub fn new(key: impl Into<String>, milliseconds: i64, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            milliseconds,
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HPExpire {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HPEXPIRE"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.milliseconds.to_string()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HPEXPIREAT command - Set expiration timestamp in milliseconds for hash fields (Redis 7.4+)
+///
+/// Sets expiration time as Unix timestamp in milliseconds for one or more hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HPExpireAt;
+///
+/// let cmd = HPExpireAt::new("myhash", 1735689600000, vec!["field1"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HPExpireAt {
+    key: String,
+    timestamp: i64,
+    fields: Vec<String>,
+}
+
+impl HPExpireAt {
+    /// Create a new HPEXPIREAT command
+    pub fn new(key: impl Into<String>, timestamp: i64, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            timestamp,
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HPExpireAt {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HPEXPIREAT"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.timestamp.to_string()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HPEXPIRETIME command - Get expiration timestamp in milliseconds for hash fields (Redis 7.4+)
+///
+/// Returns the absolute Unix timestamp in milliseconds at which the given field will expire.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HPExpireTime;
+///
+/// let cmd = HPExpireTime::new("myhash", vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HPExpireTime {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPExpireTime {
+    /// Create a new HPEXPIRETIME command
+    pub fn new(key: impl Into<String>, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HPExpireTime {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HPEXPIRETIME"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HPERSIST command - Remove expiration from hash fields (Redis 7.4+)
+///
+/// Removes the expiration from one or more hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HPersist;
+///
+/// let cmd = HPersist::new("myhash", vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HPersist {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPersist {
+    /// Create a new HPERSIST command
+    pub fn new(key: impl Into<String>, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HPersist {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HPERSIST"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HPTTL command - Get TTL in milliseconds for hash fields (Redis 7.4+)
+///
+/// Returns the remaining time to live in milliseconds for hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HPTtl;
+///
+/// let cmd = HPTtl::new("myhash", vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HPTtl {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPTtl {
+    /// Create a new HPTTL command
+    pub fn new(key: impl Into<String>, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HPTtl {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HPTTL"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HTTL command - Get TTL in seconds for hash fields (Redis 7.4+)
+///
+/// Returns the remaining time to live in seconds for hash fields.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::HTtl;
+///
+/// let cmd = HTtl::new("myhash", vec!["field1", "field2"]);
+/// ```
+#[derive(Debug, Clone)]
+pub struct HTtl {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HTtl {
+    /// Create a new HTTL command
+    pub fn new(key: impl Into<String>, fields: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(|f| f.into()).collect(),
+        }
+    }
+}
+
+impl Command for HTtl {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HTTL"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from("FIELDS"))),
+            Frame::BulkString(Some(Bytes::from(self.fields.len().to_string()))),
+        ];
+        for field in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut result = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::Integer(n) => result.push(n),
+                        _ => return Err(RedisError::UnexpectedResponse),
+                    }
+                }
+                Ok(result)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HMSET command - Set multiple hash fields (deprecated, use HSET)
+///
+/// This command is deprecated. Use HSET with multiple field-value pairs instead.
+///
+/// Available since Redis 2.0.0. Deprecated in Redis 4.0.0.
+#[derive(Debug, Clone)]
+pub struct HMSet {
+    key: String,
+    fields: Vec<(String, Bytes)>,
+}
+
+impl HMSet {
+    /// Create a new HMSET command
+    pub fn new(key: impl Into<String>, fields: Vec<(impl Into<String>, impl Into<Bytes>)>) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+}
+
+impl Command for HMSet {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HMSET"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ];
+        for (field, value) in &self.fields {
+            frames.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                field.as_bytes(),
+            ))));
+            frames.push(Frame::BulkString(Some(value.clone())));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(_) => Ok(()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HSETEX command - Set hash field with expiration (Redis 7.4+, not yet released)
+///
+/// Sets a hash field with an expiration time.
+/// Note: This command may not be available in all Redis versions.
+#[derive(Debug, Clone)]
+pub struct HSetEx {
+    key: String,
+    seconds: i64,
+    field: String,
+    value: Bytes,
+}
+
+impl HSetEx {
+    /// Create a new HSETEX command
+    pub fn new(
+        key: impl Into<String>,
+        seconds: i64,
+        field: impl Into<String>,
+        value: impl Into<Bytes>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            seconds,
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for HSetEx {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("HSETEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.seconds.to_string()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.field.as_bytes()))),
+            Frame::BulkString(Some(self.value.clone())),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HGETDEL command - Get and delete a hash field (Redis 7.4+, not yet released)
+///
+/// Gets the value of a hash field and deletes it atomically.
+/// Note: This command may not be available in all Redis versions.
+#[derive(Debug, Clone)]
+pub struct HGetDel {
+    key: String,
+    field: String,
+}
+
+impl HGetDel {
+    /// Create a new HGETDEL command
+    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+        }
+    }
+}
+
+impl Command for HGetDel {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("HGETDEL"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.field.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// HGETEX command - Get hash field with expiration update (Redis 7.4+, not yet released)
+///
+/// Gets the value of a hash field and optionally updates its expiration.
+/// Note: This command may not be available in all Redis versions.
+#[derive(Debug, Clone)]
+pub struct HGetEx {
+    key: String,
+    field: String,
+    expiration: Option<i64>,
+}
+
+impl HGetEx {
+    /// Create a new HGETEX command
+    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+            expiration: None,
+        }
+    }
+
+    /// Set expiration in seconds
+    pub fn ex(mut self, seconds: i64) -> Self {
+        self.expiration = Some(seconds);
+        self
+    }
+}
+
+impl Command for HGetEx {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("HGETEX"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.field.as_bytes()))),
+        ];
+        if let Some(exp) = self.expiration {
+            frames.push(Frame::BulkString(Some(Bytes::from("EX"))));
+            frames.push(Frame::BulkString(Some(Bytes::from(exp.to_string()))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

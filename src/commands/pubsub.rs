@@ -1014,3 +1014,52 @@ impl Command for Sunsubscribe {
         Ok(())
     }
 }
+
+/// PUBSUB HELP command - Get help text for PUBSUB subcommands
+///
+/// Available since Redis 6.2.0.
+#[derive(Debug, Clone, Copy)]
+pub struct PubsubHelp;
+
+impl PubsubHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for PubsubHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for PubsubHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("PUBSUB"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}

@@ -824,3 +824,593 @@ mod tests {
         }
     }
 }
+
+/// GEORADIUS_RO command - Query by radius (read-only, Redis 6.2+)
+///
+/// Read-only variant of GEORADIUS for replica routing in cluster mode.
+/// This is a deprecated command - use GEOSEARCH instead for new applications.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{GeoRadiusReadOnly, GeoUnit};
+///
+/// let cmd = GeoRadiusReadOnly::new("locations", 15.0, 37.0, 100.0, GeoUnit::Kilometers);
+/// ```
+#[derive(Debug, Clone)]
+pub struct GeoRadiusReadOnly {
+    key: String,
+    longitude: f64,
+    latitude: f64,
+    radius: f64,
+    unit: GeoUnit,
+    with_coord: bool,
+    with_dist: bool,
+    with_hash: bool,
+    count: Option<i64>,
+}
+
+impl GeoRadiusReadOnly {
+    /// Create a new GEORADIUS_RO command
+    pub fn new(
+        key: impl Into<String>,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: GeoUnit,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            longitude,
+            latitude,
+            radius,
+            unit,
+            with_coord: false,
+            with_dist: false,
+            with_hash: false,
+            count: None,
+        }
+    }
+
+    /// Include coordinates in results
+    pub fn with_coord(mut self) -> Self {
+        self.with_coord = true;
+        self
+    }
+
+    /// Include distance in results
+    pub fn with_dist(mut self) -> Self {
+        self.with_dist = true;
+        self
+    }
+
+    /// Include geohash in results
+    pub fn with_hash(mut self) -> Self {
+        self.with_hash = true;
+        self
+    }
+
+    /// Limit result count
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl crate::commands::Command for GeoRadiusReadOnly {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut args = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("GEORADIUS_RO"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::copy_from_slice(
+                self.key.as_bytes(),
+            ))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.longitude.to_string()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.latitude.to_string()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.radius.to_string()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.unit.as_str()))),
+        ];
+
+        if self.with_coord {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHCOORD",
+            ))));
+        }
+        if self.with_dist {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHDIST",
+            ))));
+        }
+        if self.with_hash {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHHASH",
+            ))));
+        }
+        if let Some(count) = self.count {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "COUNT",
+            ))));
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                count.to_string(),
+            ))));
+        }
+
+        crate::codec::Frame::Array(args)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => {
+                let mut members = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        crate::codec::Frame::BulkString(Some(data)) => {
+                            members.push(String::from_utf8_lossy(&data).into_owned());
+                        }
+                        crate::codec::Frame::Array(nested) if !nested.is_empty() => {
+                            if let crate::codec::Frame::BulkString(Some(data)) = &nested[0] {
+                                members.push(String::from_utf8_lossy(data).into_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(members)
+            }
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+impl ReadOnly for GeoRadiusReadOnly {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+/// GEORADIUSBYMEMBER_RO command - Query by member radius (read-only, Redis 6.2+)
+///
+/// Read-only variant of GEORADIUSBYMEMBER for replica routing in cluster mode.
+/// This is a deprecated command - use GEOSEARCH instead for new applications.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::{GeoRadiusByMemberReadOnly, GeoUnit};
+///
+/// let cmd = GeoRadiusByMemberReadOnly::new("locations", "Palermo", 100.0, GeoUnit::Kilometers);
+/// ```
+#[derive(Debug, Clone)]
+pub struct GeoRadiusByMemberReadOnly {
+    key: String,
+    member: String,
+    radius: f64,
+    unit: GeoUnit,
+    with_coord: bool,
+    with_dist: bool,
+    with_hash: bool,
+    count: Option<i64>,
+}
+
+impl GeoRadiusByMemberReadOnly {
+    /// Create a new GEORADIUSBYMEMBER_RO command
+    pub fn new(
+        key: impl Into<String>,
+        member: impl Into<String>,
+        radius: f64,
+        unit: GeoUnit,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            member: member.into(),
+            radius,
+            unit,
+            with_coord: false,
+            with_dist: false,
+            with_hash: false,
+            count: None,
+        }
+    }
+
+    /// Include coordinates in results
+    pub fn with_coord(mut self) -> Self {
+        self.with_coord = true;
+        self
+    }
+
+    /// Include distance in results
+    pub fn with_dist(mut self) -> Self {
+        self.with_dist = true;
+        self
+    }
+
+    /// Include geohash in results
+    pub fn with_hash(mut self) -> Self {
+        self.with_hash = true;
+        self
+    }
+
+    /// Limit result count
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl crate::commands::Command for GeoRadiusByMemberReadOnly {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut args = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("GEORADIUSBYMEMBER_RO"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::copy_from_slice(
+                self.key.as_bytes(),
+            ))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::copy_from_slice(
+                self.member.as_bytes(),
+            ))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.radius.to_string()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.unit.as_str()))),
+        ];
+
+        if self.with_coord {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHCOORD",
+            ))));
+        }
+        if self.with_dist {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHDIST",
+            ))));
+        }
+        if self.with_hash {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "WITHHASH",
+            ))));
+        }
+        if let Some(count) = self.count {
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "COUNT",
+            ))));
+            args.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                count.to_string(),
+            ))));
+        }
+
+        crate::codec::Frame::Array(args)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => {
+                let mut members = Vec::with_capacity(items.len());
+                for item in items {
+                    match item {
+                        crate::codec::Frame::BulkString(Some(data)) => {
+                            members.push(String::from_utf8_lossy(&data).into_owned());
+                        }
+                        crate::codec::Frame::Array(nested) if !nested.is_empty() => {
+                            if let crate::codec::Frame::BulkString(Some(data)) = &nested[0] {
+                                members.push(String::from_utf8_lossy(data).into_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(members)
+            }
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+impl ReadOnly for GeoRadiusByMemberReadOnly {
+    fn is_read_only(&self) -> bool {
+        true
+    }
+}
+
+/// GEORADIUS command - Query by radius (deprecated, use GEOSEARCH)
+///
+/// This command is deprecated. Use GEOSEARCH with BYRADIUS and FROMLONLAT instead.
+///
+/// Available since Redis 3.2.0. Deprecated in Redis 6.2.0.
+#[derive(Debug, Clone)]
+pub struct GeoRadius {
+    key: String,
+    longitude: f64,
+    latitude: f64,
+    radius: f64,
+    unit: GeoUnit,
+    with_coord: bool,
+    with_dist: bool,
+    with_hash: bool,
+    count: Option<i64>,
+    store: Option<String>,
+    storedist: Option<String>,
+}
+
+impl GeoRadius {
+    /// Create a new GEORADIUS command
+    pub fn new(
+        key: impl Into<String>,
+        longitude: f64,
+        latitude: f64,
+        radius: f64,
+        unit: GeoUnit,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            longitude,
+            latitude,
+            radius,
+            unit,
+            with_coord: false,
+            with_dist: false,
+            with_hash: false,
+            count: None,
+            store: None,
+            storedist: None,
+        }
+    }
+
+    /// Include coordinates in results
+    pub fn with_coord(mut self) -> Self {
+        self.with_coord = true;
+        self
+    }
+
+    /// Include distance in results
+    pub fn with_dist(mut self) -> Self {
+        self.with_dist = true;
+        self
+    }
+
+    /// Include geohash in results
+    pub fn with_hash(mut self) -> Self {
+        self.with_hash = true;
+        self
+    }
+
+    /// Limit result count
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Store results in destination key
+    pub fn store(mut self, destination: impl Into<String>) -> Self {
+        self.store = Some(destination.into());
+        self
+    }
+
+    /// Store distances in destination key
+    pub fn storedist(mut self, destination: impl Into<String>) -> Self {
+        self.storedist = Some(destination.into());
+        self
+    }
+}
+
+impl Command for GeoRadius {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("GEORADIUS"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.longitude.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.latitude.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.radius.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.unit.as_str()))),
+        ];
+
+        if self.with_coord {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHCOORD"))));
+        }
+        if self.with_dist {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHDIST"))));
+        }
+        if self.with_hash {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHHASH"))));
+        }
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+        if let Some(ref dest) = self.store {
+            args.push(Frame::BulkString(Some(Bytes::from("STORE"))));
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                dest.as_bytes(),
+            ))));
+        }
+        if let Some(ref dest) = self.storedist {
+            args.push(Frame::BulkString(Some(Bytes::from("STOREDIST"))));
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                dest.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            members.push(String::from_utf8_lossy(&data).into_owned());
+                        }
+                        Frame::Array(nested) if !nested.is_empty() => {
+                            if let Frame::BulkString(Some(data)) = &nested[0] {
+                                members.push(String::from_utf8_lossy(data).into_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(members)
+            }
+            Frame::Integer(n) => Ok(vec![n.to_string()]), // For STORE/STOREDIST
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// GEORADIUSBYMEMBER command - Query by member radius (deprecated, use GEOSEARCH)
+///
+/// This command is deprecated. Use GEOSEARCH with BYRADIUS and FROMMEMBER instead.
+///
+/// Available since Redis 3.2.0. Deprecated in Redis 6.2.0.
+#[derive(Debug, Clone)]
+pub struct GeoRadiusByMember {
+    key: String,
+    member: String,
+    radius: f64,
+    unit: GeoUnit,
+    with_coord: bool,
+    with_dist: bool,
+    with_hash: bool,
+    count: Option<i64>,
+    store: Option<String>,
+    storedist: Option<String>,
+}
+
+impl GeoRadiusByMember {
+    /// Create a new GEORADIUSBYMEMBER command
+    pub fn new(
+        key: impl Into<String>,
+        member: impl Into<String>,
+        radius: f64,
+        unit: GeoUnit,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            member: member.into(),
+            radius,
+            unit,
+            with_coord: false,
+            with_dist: false,
+            with_hash: false,
+            count: None,
+            store: None,
+            storedist: None,
+        }
+    }
+
+    /// Include coordinates in results
+    pub fn with_coord(mut self) -> Self {
+        self.with_coord = true;
+        self
+    }
+
+    /// Include distance in results
+    pub fn with_dist(mut self) -> Self {
+        self.with_dist = true;
+        self
+    }
+
+    /// Include geohash in results
+    pub fn with_hash(mut self) -> Self {
+        self.with_hash = true;
+        self
+    }
+
+    /// Limit result count
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Store results in destination key
+    pub fn store(mut self, destination: impl Into<String>) -> Self {
+        self.store = Some(destination.into());
+        self
+    }
+
+    /// Store distances in destination key
+    pub fn storedist(mut self, destination: impl Into<String>) -> Self {
+        self.storedist = Some(destination.into());
+        self
+    }
+}
+
+impl Command for GeoRadiusByMember {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("GEORADIUSBYMEMBER"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.member.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.radius.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.unit.as_str()))),
+        ];
+
+        if self.with_coord {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHCOORD"))));
+        }
+        if self.with_dist {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHDIST"))));
+        }
+        if self.with_hash {
+            args.push(Frame::BulkString(Some(Bytes::from("WITHHASH"))));
+        }
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+        if let Some(ref dest) = self.store {
+            args.push(Frame::BulkString(Some(Bytes::from("STORE"))));
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                dest.as_bytes(),
+            ))));
+        }
+        if let Some(ref dest) = self.storedist {
+            args.push(Frame::BulkString(Some(Bytes::from("STOREDIST"))));
+            args.push(Frame::BulkString(Some(Bytes::copy_from_slice(
+                dest.as_bytes(),
+            ))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut members = Vec::new();
+                for item in items {
+                    match item {
+                        Frame::BulkString(Some(data)) => {
+                            members.push(String::from_utf8_lossy(&data).into_owned());
+                        }
+                        Frame::Array(nested) if !nested.is_empty() => {
+                            if let Frame::BulkString(Some(data)) = &nested[0] {
+                                members.push(String::from_utf8_lossy(data).into_owned());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(members)
+            }
+            Frame::Integer(n) => Ok(vec![n.to_string()]), // For STORE/STOREDIST
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

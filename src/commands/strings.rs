@@ -1737,3 +1737,48 @@ mod tests {
         assert_eq!(result, 1);
     }
 }
+
+/// SUBSTR command - Get substring (deprecated, use GETRANGE)
+///
+/// This command is deprecated. Use GETRANGE instead.
+///
+/// Available since Redis 1.0.0. Deprecated in Redis 2.0.0.
+#[derive(Debug, Clone)]
+pub struct Substr {
+    key: String,
+    start: i64,
+    end: i64,
+}
+
+impl Substr {
+    /// Create a new SUBSTR command
+    pub fn new(key: impl Into<String>, start: i64, end: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            end,
+        }
+    }
+}
+
+impl Command for Substr {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("SUBSTR"))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+            Frame::BulkString(Some(Bytes::from(self.start.to_string()))),
+            Frame::BulkString(Some(Bytes::from(self.end.to_string()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            Frame::BulkString(None) | Frame::Null => Ok(Bytes::new()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

@@ -16,8 +16,7 @@
 //! cargo run --example tls_connection --features tls-native-tls
 //! ```
 
-use redis_tower::RedisClient;
-use redis_tower::commands::{Get, Ping, Set};
+use redis_tower::commands::Ping;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -280,3 +280,92 @@ mod tests {
         PfMerge::parse_response(Frame::SimpleString(Bytes::from("OK"))).unwrap();
     }
 }
+
+/// PFDEBUG command - Internal debugging command for HyperLogLog
+///
+/// This is an internal command used for debugging HyperLogLog implementation.
+/// Not recommended for production use.
+#[derive(Debug, Clone)]
+pub struct PfDebug {
+    subcommand: String,
+    key: String,
+}
+
+impl PfDebug {
+    /// Create a new PFDEBUG command
+    pub fn new(subcommand: impl Into<String>, key: impl Into<String>) -> Self {
+        Self {
+            subcommand: subcommand.into(),
+            key: key.into(),
+        }
+    }
+
+    /// PFDEBUG ENCODING - get encoding details
+    pub fn encoding(key: impl Into<String>) -> Self {
+        Self::new("ENCODING", key)
+    }
+
+    /// PFDEBUG GETREG - get register value
+    pub fn getreg(key: impl Into<String>) -> Self {
+        Self::new("GETREG", key)
+    }
+}
+
+impl Command for PfDebug {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("PFDEBUG"))),
+            Frame::BulkString(Some(Bytes::from(self.subcommand.clone()))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(self.key.as_bytes()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Integer(n) => Ok(n.to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// PFSELFTEST command - Run HyperLogLog self-test
+///
+/// This is an internal command that runs self-tests on the HyperLogLog implementation.
+/// Not recommended for production use.
+#[derive(Debug, Clone, Copy)]
+pub struct PfSelfTest;
+
+impl PfSelfTest {
+    /// Create a new PFSELFTEST command
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for PfSelfTest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for PfSelfTest {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![Frame::BulkString(Some(Bytes::from("PFSELFTEST")))])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

@@ -38,35 +38,39 @@ pub mod strings;
 pub mod transactions;
 
 pub use acl::{
-    AclCat, AclDelUser, AclGenPass, AclGetUser, AclList, AclLoad, AclLog, AclSave, AclSetUser,
-    AclUsers, AclWhoAmI,
+    AclCat, AclDelUser, AclDryRun, AclGenPass, AclGetUser, AclHelp, AclList, AclLoad, AclLog,
+    AclSave, AclSetUser, AclUsers, AclWhoAmI,
 };
 pub use bitmap::{BitCount, BitOp, BitOpCmd, BitPos, Bitfield, BitfieldRo, GetBit, SetBit};
 pub use cluster::{
     ClusterAddSlots, ClusterAddSlotsRange, ClusterBumpEpoch, ClusterCountFailureReports,
     ClusterCountKeysInSlot, ClusterDelSlots, ClusterDelSlotsRange, ClusterFailover,
-    ClusterFailoverOption, ClusterFlushSlots, ClusterForget, ClusterGetKeysInSlot, ClusterInfo,
-    ClusterKeySlot, ClusterLinks, ClusterMeet, ClusterMyId, ClusterMyShardId, ClusterNodes,
-    ClusterReplicas, ClusterReplicate, ClusterReset, ClusterSaveConfig, ClusterSetConfigEpoch,
-    ClusterSetSlot, ClusterSetSlotState, ClusterShards, ClusterSlotStats, ClusterSlots,
+    ClusterFailoverOption, ClusterFlushSlots, ClusterForget, ClusterGetKeysInSlot, ClusterHelp,
+    ClusterInfo, ClusterKeySlot, ClusterLinks, ClusterMeet, ClusterMyId, ClusterMyShardId,
+    ClusterNodes, ClusterReplicas, ClusterReplicate, ClusterReset, ClusterSaveConfig,
+    ClusterSetConfigEpoch, ClusterSetSlot, ClusterSetSlotState, ClusterShards, ClusterSlaves,
+    ClusterSlotStats, ClusterSlots,
 };
 pub use connection::{
-    Asking, Auth, AuthAcl, ClientGetName, ClientId, ClientInfo, ClientKill, ClientKillFilter,
-    ClientList, ClientNoEvict, ClientPause, ClientReply, ClientSetInfo, ClientSetName,
+    Asking, Auth, AuthAcl, ClientCaching, ClientGetName, ClientGetRedir, ClientHelp, ClientId,
+    ClientInfo, ClientKill, ClientKillFilter, ClientList, ClientNoEvict, ClientNoTouch,
+    ClientPause, ClientReply, ClientSetInfo, ClientSetName, ClientTracking, ClientTrackingInfo,
     ClientUnblock, ClientUnpause, Hello, Quit, ReadOnly, ReadWrite, Reset, Select,
 };
 pub use functions::{
-    FCall, FCallReadOnly, FunctionDelete, FunctionDump, FunctionFlush, FunctionKill, FunctionList,
-    FunctionLoad, FunctionRestore, FunctionStats,
+    FCall, FCallReadOnly, FunctionDelete, FunctionDump, FunctionFlush, FunctionHelp, FunctionKill,
+    FunctionList, FunctionLoad, FunctionRestore, FunctionStats,
 };
 pub use geo::{
-    GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoSearch, GeoSearchStore, GeoUnit,
+    GeoAdd, GeoCoordinate, GeoDist, GeoHash, GeoItem, GeoPos, GeoRadius, GeoRadiusByMember,
+    GeoRadiusByMemberReadOnly, GeoRadiusReadOnly, GeoSearch, GeoSearchStore, GeoUnit,
 };
 pub use hashes::{
-    HDel, HExists, HGet, HGetAll, HIncrBy, HIncrByFloat, HKeys, HLen, HMGet, HRandField, HSet,
-    HSetNx, HStrLen, HVals,
+    HDel, HExists, HExpire, HExpireAt, HExpireTime, HGet, HGetAll, HGetDel, HGetEx, HIncrBy,
+    HIncrByFloat, HKeys, HLen, HMGet, HMSet, HPExpire, HPExpireAt, HPExpireTime, HPTtl, HPersist,
+    HRandField, HSet, HSetEx, HSetNx, HStrLen, HTtl, HVals,
 };
-pub use hyperloglog::{PfAdd, PfCount, PfMerge};
+pub use hyperloglog::{PfAdd, PfCount, PfDebug, PfMerge, PfSelfTest};
 pub use keys::{
     Copy, Dump, ExpireAt, ExpireTime, Keys, Migrate, Move, ObjectEncoding, ObjectFreq,
     ObjectIdleTime, ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename,
@@ -82,13 +86,18 @@ pub use lists::{
     LPop, LPos, LPush, LPushX, LRange, LRem, LSet, LTrim, MoveDirection, RPop, RPush, RPushX,
 };
 pub use module::{ModuleInfo, ModuleList, ModuleLoad, ModuleLoadEx, ModuleUnload};
-pub use pubsub::{Publish, PubsubNumpat, PubsubNumsub};
-pub use scripting::{Eval, EvalSha, ScriptExists, ScriptFlush, ScriptLoad};
+pub use pubsub::{Publish, PubsubHelp, PubsubNumpat, PubsubNumsub};
+pub use scripting::{
+    Eval, EvalReadOnly, EvalSha, EvalShaReadOnly, ScriptExists, ScriptFlush, ScriptHelp, ScriptLoad,
+};
 pub use server::{
-    BgRewriteAof, BgSave, CommandCmd, CommandCount, CommandInfo, ConfigGet, ConfigResetStat,
-    ConfigRewrite, ConfigSet, DbSize, Debug, DebugSubcommand, Failover, FlushAll, FlushDb, Info,
-    LastSave, MemoryStats, MemoryUsage, RandomKey, ReplicaOf, Role, Save, Shutdown, SlowlogEntry,
-    SlowlogGet, SlowlogLen, SlowlogReset, Time, Wait,
+    BgRewriteAof, BgSave, CommandCmd, CommandCount, CommandDocs, CommandGetKeys,
+    CommandGetKeysAndFlags, CommandHelp, CommandInfo, CommandList, CommandListFilter, ConfigGet,
+    ConfigHelp, ConfigResetStat, ConfigRewrite, ConfigSet, DbSize, Debug, DebugSubcommand,
+    Failover, FlushAll, FlushDb, Info, KeyWithFlags, LastSave, Lolwut, MemoryDoctor, MemoryHelp,
+    MemoryMallocStats, MemoryPurge, MemoryStats, MemoryUsage, ModuleHelp, ObjectHelp, PSync,
+    RandomKey, ReplConf, ReplicaOf, Role, Save, Shutdown, SlaveOf, SlowlogEntry, SlowlogGet,
+    SlowlogHelp, SlowlogLen, SlowlogReset, SwapDb, Sync, Time, Wait,
 };
 pub use sets::{
     SDiffStore, SInterCard, SInterStore, SMIsMember, SMove, SPop, SRandMember, SUnionStore, Sadd,
@@ -102,13 +111,15 @@ pub use sorted_sets::{
     Zunion,
 };
 pub use streams::{
-    StreamEntries, StreamEntry, XAck, XAdd, XClaim, XDel, XGroupCreate, XGroupDestroy, XLen,
-    XPending, XRange, XRead, XReadGroup, XRevRange, XTrim,
+    ConsumerInfo, GroupInfo, StreamEntries, StreamEntry, StreamInfo, XAck, XAckDel, XAdd,
+    XAutoClaim, XClaim, XDel, XDelEx, XGroupCreate, XGroupCreateConsumer, XGroupDelConsumer,
+    XGroupDestroy, XGroupHelp, XGroupSetId, XInfoConsumers, XInfoGroups, XInfoHelp, XInfoStream,
+    XLen, XPending, XRange, XRead, XReadGroup, XRevRange, XSetId, XTrim,
 };
 pub use strings::{
     Append, Decr, DecrBy, Del, Echo, Exists, Expire, Get, GetDel, GetEx, GetExExpiration, GetRange,
     Incr, IncrBy, IncrByFloat, Lcs, MGet, Mset, Msetnx, Ping, Psetex, Set, SetRange, Setex, Setnx,
-    StrLen, Ttl,
+    StrLen, Substr, Ttl,
 };
 pub use transactions::{Discard, Exec, Multi, Unwatch, Watch};
 

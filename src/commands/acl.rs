@@ -782,3 +782,98 @@ mod tests {
         }
     }
 }
+
+/// ACL HELP command - Get help text for ACL subcommands
+///
+/// Available since Redis 6.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct AclHelp;
+
+impl AclHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AclHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for AclHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("ACL"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ACL DRYRUN command - Test command permissions without execution (Redis 7.0+)
+///
+/// Simulates command execution to test if a user has permission to run it.
+///
+/// Available since Redis 7.0.0.
+#[derive(Debug, Clone)]
+pub struct AclDryRun {
+    username: String,
+    command: Vec<String>,
+}
+
+impl AclDryRun {
+    /// Create a new ACL DRYRUN command
+    pub fn new(username: impl Into<String>, command: Vec<impl Into<String>>) -> Self {
+        Self {
+            username: username.into(),
+            command: command.into_iter().map(|c| c.into()).collect(),
+        }
+    }
+}
+
+impl Command for AclDryRun {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut frames = vec![
+            Frame::BulkString(Some(Bytes::from("ACL"))),
+            Frame::BulkString(Some(Bytes::from("DRYRUN"))),
+            Frame::BulkString(Some(Bytes::from(self.username.clone()))),
+        ];
+        for arg in &self.command {
+            frames.push(Frame::BulkString(Some(Bytes::from(arg.clone()))));
+        }
+        Frame::Array(frames)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::BulkString(Some(data)) => Ok(String::from_utf8_lossy(&data).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}

@@ -610,7 +610,7 @@ async fn test_publish_to_multiple_subscribers() {
                 payload,
             }))) => {
                 assert_eq!(ch, channel);
-                assert_eq!(payload, b"broadcast message");
+                assert_eq!(payload.as_ref(), b"broadcast message");
                 println!("✓ Subscriber {} received message", i + 1);
             }
             _ => panic!("Subscriber {} did not receive message", i + 1),

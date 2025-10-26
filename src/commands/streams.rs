@@ -657,6 +657,184 @@ impl Command for XGroupDestroy {
     }
 }
 
+/// XGROUP CREATECONSUMER command - Create a consumer in a consumer group (Redis 6.2+)
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XGroupCreateConsumer;
+/// let cmd = XGroupCreateConsumer::new("mystream", "mygroup", "consumer1");
+/// ```
+#[derive(Debug, Clone)]
+pub struct XGroupCreateConsumer {
+    pub(crate) key: String,
+    pub(crate) group: String,
+    pub(crate) consumer: String,
+}
+
+impl XGroupCreateConsumer {
+    /// Create a new XGROUP CREATECONSUMER command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        consumer: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            consumer: consumer.into(),
+        }
+    }
+}
+
+impl Command for XGroupCreateConsumer {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("XGROUP"))),
+            Frame::BulkString(Some(Bytes::from("CREATECONSUMER"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.group.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.consumer.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XGROUP DELCONSUMER command - Delete a consumer from a consumer group
+///
+/// Warning: Any pending messages for this consumer will become unclaimable.
+/// It's recommended to claim or acknowledge all pending messages before deletion.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XGroupDelConsumer;
+/// let cmd = XGroupDelConsumer::new("mystream", "mygroup", "consumer1");
+/// ```
+#[derive(Debug, Clone)]
+pub struct XGroupDelConsumer {
+    pub(crate) key: String,
+    pub(crate) group: String,
+    pub(crate) consumer: String,
+}
+
+impl XGroupDelConsumer {
+    /// Create a new XGROUP DELCONSUMER command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        consumer: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            consumer: consumer.into(),
+        }
+    }
+}
+
+impl Command for XGroupDelConsumer {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("XGROUP"))),
+            Frame::BulkString(Some(Bytes::from("DELCONSUMER"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.group.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.consumer.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XGROUP SETID command - Set the last delivered ID for a consumer group
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XGroupSetId;
+/// // Set to reprocess all messages
+/// let cmd = XGroupSetId::new("mystream", "mygroup", "0");
+///
+/// // Set to latest message
+/// let cmd = XGroupSetId::new("mystream", "mygroup", "$");
+///
+/// // Set with entries_read for lag tracking (Redis 7.0+)
+/// let cmd = XGroupSetId::new("mystream", "mygroup", "1234-0")
+///     .entries_read(1000);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XGroupSetId {
+    pub(crate) key: String,
+    pub(crate) group: String,
+    pub(crate) id: String,
+    pub(crate) entries_read: Option<i64>,
+}
+
+impl XGroupSetId {
+    /// Create a new XGROUP SETID command
+    pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            id: id.into(),
+            entries_read: None,
+        }
+    }
+
+    /// Set the entries_read count for lag tracking (Redis 7.0+)
+    pub fn entries_read(mut self, count: i64) -> Self {
+        self.entries_read = Some(count);
+        self
+    }
+}
+
+impl Command for XGroupSetId {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("XGROUP"))),
+            Frame::BulkString(Some(Bytes::from("SETID"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.group.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.id.clone()))),
+        ];
+
+        if let Some(count) = self.entries_read {
+            args.push(Frame::BulkString(Some(Bytes::from("ENTRIESREAD"))));
+            args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).to_string()),
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// XREADGROUP command - Read from a stream via a consumer group
 ///
 /// # Examples
@@ -1037,6 +1215,475 @@ fn parse_stream_entries(frame: &Frame) -> Result<Vec<StreamEntry>, RedisError> {
     }
 }
 
+/// Consumer information from XINFO CONSUMERS
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConsumerInfo {
+    /// Consumer name
+    pub name: String,
+    /// Number of pending messages
+    pub pending: i64,
+    /// Milliseconds since last attempted interaction
+    pub idle: i64,
+    /// Milliseconds since last successful interaction (Redis 7.2+)
+    pub inactive: Option<i64>,
+}
+
+/// XINFO CONSUMERS command - Get information about consumers in a consumer group
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XInfoConsumers;
+/// let cmd = XInfoConsumers::new("mystream", "mygroup");
+/// ```
+#[derive(Debug, Clone)]
+pub struct XInfoConsumers {
+    pub(crate) key: String,
+    pub(crate) group: String,
+}
+
+impl XInfoConsumers {
+    /// Create a new XINFO CONSUMERS command
+    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+        }
+    }
+}
+
+impl Command for XInfoConsumers {
+    type Response = Vec<ConsumerInfo>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("XINFO"))),
+            Frame::BulkString(Some(Bytes::from("CONSUMERS"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+            Frame::BulkString(Some(Bytes::from(self.group.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut consumers = Vec::new();
+                for item in items {
+                    if let Frame::Array(fields) = item {
+                        let mut name = String::new();
+                        let mut pending = 0;
+                        let mut idle = 0;
+                        let mut inactive = None;
+
+                        let mut i = 0;
+                        while i < fields.len() {
+                            if let Frame::BulkString(Some(key)) = &fields[i] {
+                                let key_str = String::from_utf8_lossy(key);
+                                if i + 1 < fields.len() {
+                                    match key_str.as_ref() {
+                                        "name" => {
+                                            if let Frame::BulkString(Some(v)) = &fields[i + 1] {
+                                                name = String::from_utf8_lossy(v).to_string();
+                                            }
+                                        }
+                                        "pending" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                pending = v;
+                                            }
+                                        }
+                                        "idle" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                idle = v;
+                                            }
+                                        }
+                                        "inactive" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                inactive = Some(v);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            i += 2;
+                        }
+
+                        consumers.push(ConsumerInfo {
+                            name,
+                            pending,
+                            idle,
+                            inactive,
+                        });
+                    }
+                }
+                Ok(consumers)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Consumer group information from XINFO GROUPS
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupInfo {
+    /// Group name
+    pub name: String,
+    /// Number of consumers in the group
+    pub consumers: i64,
+    /// Number of pending messages
+    pub pending: i64,
+    /// Last delivered ID
+    pub last_delivered_id: String,
+    /// Logical read counter (Redis 7.0+)
+    pub entries_read: Option<i64>,
+    /// Number of undelivered entries (Redis 7.0+)
+    pub lag: Option<i64>,
+}
+
+/// XINFO GROUPS command - Get information about consumer groups for a stream
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XInfoGroups;
+/// let cmd = XInfoGroups::new("mystream");
+/// ```
+#[derive(Debug, Clone)]
+pub struct XInfoGroups {
+    pub(crate) key: String,
+}
+
+impl XInfoGroups {
+    /// Create a new XINFO GROUPS command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for XInfoGroups {
+    type Response = Vec<GroupInfo>;
+
+    fn to_frame(&self) -> Frame {
+        Frame::Array(vec![
+            Frame::BulkString(Some(Bytes::from("XINFO"))),
+            Frame::BulkString(Some(Bytes::from("GROUPS"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+        ])
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(items) => {
+                let mut groups = Vec::new();
+                for item in items {
+                    if let Frame::Array(fields) = item {
+                        let mut name = String::new();
+                        let mut consumers = 0;
+                        let mut pending = 0;
+                        let mut last_delivered_id = String::new();
+                        let mut entries_read = None;
+                        let mut lag = None;
+
+                        let mut i = 0;
+                        while i < fields.len() {
+                            if let Frame::BulkString(Some(key)) = &fields[i] {
+                                let key_str = String::from_utf8_lossy(key);
+                                if i + 1 < fields.len() {
+                                    match key_str.as_ref() {
+                                        "name" => {
+                                            if let Frame::BulkString(Some(v)) = &fields[i + 1] {
+                                                name = String::from_utf8_lossy(v).to_string();
+                                            }
+                                        }
+                                        "consumers" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                consumers = v;
+                                            }
+                                        }
+                                        "pending" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                pending = v;
+                                            }
+                                        }
+                                        "last-delivered-id" => {
+                                            if let Frame::BulkString(Some(v)) = &fields[i + 1] {
+                                                last_delivered_id =
+                                                    String::from_utf8_lossy(v).to_string();
+                                            }
+                                        }
+                                        "entries-read" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                entries_read = Some(v);
+                                            }
+                                        }
+                                        "lag" => {
+                                            if let Frame::Integer(v) = fields[i + 1] {
+                                                lag = Some(v);
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                            i += 2;
+                        }
+
+                        groups.push(GroupInfo {
+                            name,
+                            consumers,
+                            pending,
+                            last_delivered_id,
+                            entries_read,
+                            lag,
+                        });
+                    }
+                }
+                Ok(groups)
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// Stream information from XINFO STREAM
+#[derive(Debug, Clone, PartialEq)]
+pub struct StreamInfo {
+    /// Number of entries in the stream
+    pub length: i64,
+    /// Number of radix tree keys
+    pub radix_tree_keys: i64,
+    /// Number of radix tree nodes
+    pub radix_tree_nodes: i64,
+    /// Number of consumer groups
+    pub groups: i64,
+    /// Last generated ID
+    pub last_generated_id: String,
+    /// Maximum deleted entry ID
+    pub max_deleted_entry_id: Option<String>,
+    /// Total entries added during stream lifetime
+    pub entries_added: Option<i64>,
+    /// First entry (ID and fields)
+    pub first_entry: Option<StreamEntry>,
+    /// Last entry (ID and fields)
+    pub last_entry: Option<StreamEntry>,
+}
+
+/// XINFO STREAM command - Get information about a stream
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// # use redis_tower::commands::streams::XInfoStream;
+/// // Basic stream info
+/// let cmd = XInfoStream::new("mystream");
+///
+/// // Full info with entries (Redis 6.0+)
+/// let cmd = XInfoStream::new("mystream").full();
+///
+/// // Limit entries returned
+/// let cmd = XInfoStream::new("mystream").full().count(100);
+/// ```
+#[derive(Debug, Clone)]
+pub struct XInfoStream {
+    pub(crate) key: String,
+    pub(crate) full: bool,
+    pub(crate) count: Option<i64>,
+}
+
+impl XInfoStream {
+    /// Create a new XINFO STREAM command
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            full: false,
+            count: None,
+        }
+    }
+
+    /// Request full information including entries (Redis 6.0+)
+    pub fn full(mut self) -> Self {
+        self.full = true;
+        self
+    }
+
+    /// Limit the number of entries returned in full mode
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for XInfoStream {
+    type Response = StreamInfo;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(Bytes::from("XINFO"))),
+            Frame::BulkString(Some(Bytes::from("STREAM"))),
+            Frame::BulkString(Some(Bytes::from(self.key.clone()))),
+        ];
+
+        if self.full {
+            args.push(Frame::BulkString(Some(Bytes::from("FULL"))));
+            if let Some(count) = self.count {
+                args.push(Frame::BulkString(Some(Bytes::from("COUNT"))));
+                args.push(Frame::BulkString(Some(Bytes::from(count.to_string()))));
+            }
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(fields) => {
+                let mut length = 0;
+                let mut radix_tree_keys = 0;
+                let mut radix_tree_nodes = 0;
+                let mut groups = 0;
+                let mut last_generated_id = String::new();
+                let mut max_deleted_entry_id = None;
+                let mut entries_added = None;
+                let mut first_entry = None;
+                let mut last_entry = None;
+
+                let mut i = 0;
+                while i < fields.len() {
+                    if let Frame::BulkString(Some(key)) = &fields[i] {
+                        let key_str = String::from_utf8_lossy(key);
+                        if i + 1 < fields.len() {
+                            match key_str.as_ref() {
+                                "length" => {
+                                    if let Frame::Integer(v) = fields[i + 1] {
+                                        length = v;
+                                    }
+                                }
+                                "radix-tree-keys" => {
+                                    if let Frame::Integer(v) = fields[i + 1] {
+                                        radix_tree_keys = v;
+                                    }
+                                }
+                                "radix-tree-nodes" => {
+                                    if let Frame::Integer(v) = fields[i + 1] {
+                                        radix_tree_nodes = v;
+                                    }
+                                }
+                                "groups" => {
+                                    if let Frame::Integer(v) = fields[i + 1] {
+                                        groups = v;
+                                    }
+                                }
+                                "last-generated-id" => {
+                                    if let Frame::BulkString(Some(v)) = &fields[i + 1] {
+                                        last_generated_id = String::from_utf8_lossy(v).to_string();
+                                    }
+                                }
+                                "max-deleted-entry-id" => {
+                                    if let Frame::BulkString(Some(v)) = &fields[i + 1] {
+                                        max_deleted_entry_id =
+                                            Some(String::from_utf8_lossy(v).to_string());
+                                    }
+                                }
+                                "entries-added" => {
+                                    if let Frame::Integer(v) = fields[i + 1] {
+                                        entries_added = Some(v);
+                                    }
+                                }
+                                "first-entry" => {
+                                    if let Frame::Array(entry_fields) = &fields[i + 1] {
+                                        if entry_fields.len() >= 2 {
+                                            if let (
+                                                Frame::BulkString(Some(id)),
+                                                Frame::Array(field_pairs),
+                                            ) = (&entry_fields[0], &entry_fields[1])
+                                            {
+                                                let mut entry_map = HashMap::new();
+                                                for j in (0..field_pairs.len()).step_by(2) {
+                                                    if j + 1 < field_pairs.len() {
+                                                        if let (
+                                                            Frame::BulkString(Some(k)),
+                                                            Frame::BulkString(Some(v)),
+                                                        ) =
+                                                            (&field_pairs[j], &field_pairs[j + 1])
+                                                        {
+                                                            entry_map.insert(
+                                                                String::from_utf8_lossy(k)
+                                                                    .to_string(),
+                                                                String::from_utf8_lossy(v)
+                                                                    .to_string(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                first_entry = Some(StreamEntry {
+                                                    id: String::from_utf8_lossy(id).to_string(),
+                                                    fields: entry_map,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                "last-entry" => {
+                                    if let Frame::Array(entry_fields) = &fields[i + 1] {
+                                        if entry_fields.len() >= 2 {
+                                            if let (
+                                                Frame::BulkString(Some(id)),
+                                                Frame::Array(field_pairs),
+                                            ) = (&entry_fields[0], &entry_fields[1])
+                                            {
+                                                let mut entry_map = HashMap::new();
+                                                for j in (0..field_pairs.len()).step_by(2) {
+                                                    if j + 1 < field_pairs.len() {
+                                                        if let (
+                                                            Frame::BulkString(Some(k)),
+                                                            Frame::BulkString(Some(v)),
+                                                        ) =
+                                                            (&field_pairs[j], &field_pairs[j + 1])
+                                                        {
+                                                            entry_map.insert(
+                                                                String::from_utf8_lossy(k)
+                                                                    .to_string(),
+                                                                String::from_utf8_lossy(v)
+                                                                    .to_string(),
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                last_entry = Some(StreamEntry {
+                                                    id: String::from_utf8_lossy(id).to_string(),
+                                                    fields: entry_map,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    i += 2;
+                }
+
+                Ok(StreamInfo {
+                    length,
+                    radix_tree_keys,
+                    radix_tree_nodes,
+                    groups,
+                    last_generated_id,
+                    max_deleted_entry_id,
+                    entries_added,
+                    first_entry,
+                    last_entry,
+                })
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1140,6 +1787,481 @@ mod tests {
             );
         } else {
             panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xgroup_createconsumer_frame() {
+        let cmd = XGroupCreateConsumer::new("stream", "group", "consumer1");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 5);
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XGROUP"))));
+            assert_eq!(
+                items[1],
+                Frame::BulkString(Some(Bytes::from("CREATECONSUMER")))
+            );
+            assert_eq!(items[2], Frame::BulkString(Some(Bytes::from("stream"))));
+            assert_eq!(items[3], Frame::BulkString(Some(Bytes::from("group"))));
+            assert_eq!(items[4], Frame::BulkString(Some(Bytes::from("consumer1"))));
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xgroup_delconsumer_frame() {
+        let cmd = XGroupDelConsumer::new("stream", "group", "consumer1");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 5);
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XGROUP"))));
+            assert_eq!(
+                items[1],
+                Frame::BulkString(Some(Bytes::from("DELCONSUMER")))
+            );
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xgroup_setid_frame() {
+        let cmd = XGroupSetId::new("stream", "group", "$");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XGROUP"))));
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("SETID"))));
+            assert_eq!(items[4], Frame::BulkString(Some(Bytes::from("$"))));
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xgroup_setid_with_entries_read() {
+        let cmd = XGroupSetId::new("stream", "group", "1234-0").entries_read(1000);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 7);
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from("ENTRIESREAD"))))
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from("1000"))))
+            );
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xinfo_consumers_frame() {
+        let cmd = XInfoConsumers::new("stream", "group");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 4);
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XINFO"))));
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("CONSUMERS"))));
+            assert_eq!(items[2], Frame::BulkString(Some(Bytes::from("stream"))));
+            assert_eq!(items[3], Frame::BulkString(Some(Bytes::from("group"))));
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xinfo_groups_frame() {
+        let cmd = XInfoGroups::new("stream");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XINFO"))));
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("GROUPS"))));
+            assert_eq!(items[2], Frame::BulkString(Some(Bytes::from("stream"))));
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xinfo_stream_frame() {
+        let cmd = XInfoStream::new("stream");
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], Frame::BulkString(Some(Bytes::from("XINFO"))));
+            assert_eq!(items[1], Frame::BulkString(Some(Bytes::from("STREAM"))));
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+
+    #[test]
+    fn test_xinfo_stream_full() {
+        let cmd = XInfoStream::new("stream").full().count(100);
+
+        let frame = cmd.to_frame();
+        if let Frame::Array(items) = frame {
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from("FULL"))))
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from("COUNT"))))
+            );
+            assert!(
+                items
+                    .iter()
+                    .any(|f| f == &Frame::BulkString(Some(Bytes::from("100"))))
+            );
+        } else {
+            panic!("Expected Array frame");
+        }
+    }
+}
+
+/// XGROUP HELP command - Get help text for XGROUP subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct XGroupHelp;
+
+impl XGroupHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for XGroupHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for XGroupHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XGROUP"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XINFO HELP command - Get help text for XINFO subcommands
+///
+/// Available since Redis 5.0.0.
+#[derive(Debug, Clone, Copy)]
+pub struct XInfoHelp;
+
+impl XInfoHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for XInfoHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::commands::Command for XInfoHelp {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XINFO"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("HELP"))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) => Ok(items
+                .into_iter()
+                .filter_map(|item| match item {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        Some(String::from_utf8_lossy(&data).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XAUTOCLAIM command - Automatic claim of pending messages (Redis 6.2+)
+///
+/// Claims pending messages that have been idle for a given time and assigns them to a consumer.
+///
+/// Available since Redis 6.2.0.
+#[derive(Debug, Clone)]
+pub struct XAutoClaim {
+    key: String,
+    group: String,
+    consumer: String,
+    min_idle_time: i64,
+    start: String,
+    count: Option<i64>,
+}
+
+impl XAutoClaim {
+    /// Create a new XAUTOCLAIM command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        consumer: impl Into<String>,
+        min_idle_time: i64,
+        start: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            consumer: consumer.into(),
+            min_idle_time,
+            start: start.into(),
+            count: None,
+        }
+    }
+
+    /// Set maximum number of messages to claim
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl crate::commands::Command for XAutoClaim {
+    type Response = (String, Vec<StreamEntry>);
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut frames = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XAUTOCLAIM"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.key.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.group.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.consumer.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                self.min_idle_time.to_string(),
+            ))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.start.clone()))),
+        ];
+        if let Some(count) = self.count {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                "COUNT",
+            ))));
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                count.to_string(),
+            ))));
+        }
+        crate::codec::Frame::Array(frames)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Array(items) if items.len() >= 2 => {
+                let next_id = match &items[0] {
+                    crate::codec::Frame::BulkString(Some(data)) => {
+                        String::from_utf8_lossy(data).to_string()
+                    }
+                    _ => return Err(crate::types::RedisError::UnexpectedResponse),
+                };
+                Ok((next_id, vec![]))
+            }
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XACK command variant that also deletes acknowledged messages
+/// Note: This is not a standard Redis command - included for completeness
+#[derive(Debug, Clone)]
+pub struct XAckDel {
+    key: String,
+    group: String,
+    ids: Vec<String>,
+}
+
+impl XAckDel {
+    /// Create a new XACKDEL command
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        ids: Vec<impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            ids: ids.into_iter().map(|id| id.into()).collect(),
+        }
+    }
+}
+
+impl crate::commands::Command for XAckDel {
+    type Response = i64;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut frames = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XACKDEL"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.key.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.group.clone()))),
+        ];
+        for id in &self.ids {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                id.clone(),
+            ))));
+        }
+        crate::codec::Frame::Array(frames)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Integer(n) => Ok(n),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XDEL variant with extended functionality
+/// Note: This is not a standard Redis command - included for completeness
+#[derive(Debug, Clone)]
+pub struct XDelEx {
+    key: String,
+    ids: Vec<String>,
+}
+
+impl XDelEx {
+    /// Create a new XDELEX command
+    pub fn new(key: impl Into<String>, ids: Vec<impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            ids: ids.into_iter().map(|id| id.into()).collect(),
+        }
+    }
+}
+
+impl crate::commands::Command for XDelEx {
+    type Response = i64;
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        let mut frames = vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XDELEX"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.key.clone()))),
+        ];
+        for id in &self.ids {
+            frames.push(crate::codec::Frame::BulkString(Some(bytes::Bytes::from(
+                id.clone(),
+            ))));
+        }
+        crate::codec::Frame::Array(frames)
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::Integer(n) => Ok(n),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// XSETID command - Set the last delivered ID for a stream (Redis 7.0+)
+///
+/// Sets the last delivered ID for a stream.
+///
+/// Available since Redis 7.0.0.
+#[derive(Debug, Clone)]
+pub struct XSetId {
+    key: String,
+    id: String,
+}
+
+impl XSetId {
+    /// Create a new XSETID command
+    pub fn new(key: impl Into<String>, id: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            id: id.into(),
+        }
+    }
+}
+
+impl crate::commands::Command for XSetId {
+    type Response = ();
+
+    fn to_frame(&self) -> crate::codec::Frame {
+        crate::codec::Frame::Array(vec![
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from("XSETID"))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.key.clone()))),
+            crate::codec::Frame::BulkString(Some(bytes::Bytes::from(self.id.clone()))),
+        ])
+    }
+
+    fn parse_response(
+        frame: crate::codec::Frame,
+    ) -> Result<Self::Response, crate::types::RedisError> {
+        match frame {
+            crate::codec::Frame::SimpleString(_) => Ok(()),
+            crate::codec::Frame::Error(e) => Err(crate::types::RedisError::from_redis_error(
+                &String::from_utf8_lossy(&e),
+            )),
+            _ => Err(crate::types::RedisError::UnexpectedResponse),
         }
     }
 }
