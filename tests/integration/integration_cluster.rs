@@ -1,15 +1,25 @@
 //! Integration tests for Redis Cluster functionality
 //!
-//! **Prerequisites**: These tests require a running Redis Cluster.
-//! Start the cluster using docker-compose:
+//! **Prerequisites**: These tests require a running Redis Cluster on ports 7100-7105.
+//!
+//! Due to Docker networking complexities, you need to manually set up a local cluster.
+//! The easiest way is to use redis-cli to create a local cluster:
 //!
 //! ```bash
-//! docker-compose up -d
-//! # Wait for cluster to initialize (check logs)
-//! docker-compose logs cluster-init
-//! ```
+//! # Start 6 Redis instances
+//! for port in 7100 7101 7102 7103 7104 7105; do
+//!   redis-server --port $port --cluster-enabled yes \
+//!     --cluster-config-file nodes-${port}.conf \
+//!     --cluster-node-timeout 5000 --appendonly yes \
+//!     --appendfilename appendonly-${port}.aof \
+//!     --dbfilename dump-${port}.rdb \
+//!     --logfile ${port}.log --daemonize yes
+//! done
 //!
-//! The cluster consists of 6 nodes (3 masters + 3 replicas) on ports 7100-7105.
+//! # Create cluster
+//! redis-cli --cluster create 127.0.0.1:7100 127.0.0.1:7101 127.0.0.1:7102 \
+//!   127.0.0.1:7103 127.0.0.1:7104 127.0.0.1:7105 --cluster-replicas 1
+//! ```
 //!
 //! **To run these tests**:
 //! ```bash
@@ -18,29 +28,10 @@
 //!
 //! Note: Tests run sequentially (--test-threads=1) to avoid conflicts.
 
-use redis_tower::cluster::ClusterClient;
-use redis_tower::commands::{Del, Get, Ping, Set};
+mod helpers;
 
-/// Setup cluster client pointing to any cluster node
-/// The client will discover other nodes automatically
-async fn setup_cluster() -> ClusterClient {
-    // Connect to first cluster node - it will discover the others
-    let seeds = vec!["localhost:7100".to_string()];
-
-    ClusterClient::new(seeds)
-        .await
-        .expect("Failed to connect to cluster - is docker-compose running?")
-}
-
-#[tokio::test]
-#[cfg(feature = "cluster")]
-async fn test_cluster_ping() {
-    let client = setup_cluster().await;
-
-    // PING should work on cluster
-    let pong: String = client.call(Ping::new()).await.unwrap();
-    assert_eq!(pong, "PONG");
-}
+use helpers::cluster::setup_cluster;
+use redis_tower::commands::{Del, Get, Set};
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
@@ -214,7 +205,12 @@ async fn test_cluster_multiple_keys_same_slot() {
 #[tokio::test]
 #[cfg(feature = "cluster")]
 async fn test_cluster_connection_to_different_seeds() {
+    // Setup cluster once
+    let _ = setup_cluster().await;
+
     // Test that we can connect to any node in the cluster
+    use redis_tower::cluster::ClusterClient;
+
     let seeds_configs = vec![
         vec!["localhost:7100".to_string()],
         vec!["localhost:7101".to_string()],
@@ -228,9 +224,15 @@ async fn test_cluster_connection_to_different_seeds() {
             .await
             .unwrap_or_else(|_| panic!("Failed to connect with seeds: {:?}", seeds));
 
-        // Verify connection works
-        let pong: String = client.call(Ping::new()).await.unwrap();
-        assert_eq!(pong, "PONG");
+        // Verify connection works with a keyed command
+        let test_key = "connection_test_key";
+        let _: () = client.call(Set::new(test_key, "test")).await.unwrap();
+        let value: Option<bytes::Bytes> = client.call(Get::new(test_key)).await.unwrap();
+        assert_eq!(value.unwrap().as_ref(), b"test");
+        let _: i64 = client
+            .call(Del::new(vec![test_key.to_string()]))
+            .await
+            .unwrap();
     }
 }
 

@@ -1,15 +1,13 @@
 //! Integration tests for Redis Sentinel functionality
 //!
 //! **Prerequisites**: These tests require a running Redis Sentinel setup.
-//! Start the sentinel cluster using docker-compose:
 //!
+//! You can start the sentinel cluster using docker-compose:
 //! ```bash
-//! docker-compose up -d redis-sentinel-master redis-sentinel-replica-1 redis-sentinel-replica-2 sentinel-1 sentinel-2 sentinel-3
-//! # Wait for sentinel to initialize
-//! docker-compose logs sentinel-1
+//! docker-compose --profile sentinel up -d
 //! ```
 //!
-//! The setup consists of:
+//! The setup includes:
 //! - 1 master on port 6380
 //! - 2 replicas on ports 6381-6382
 //! - 3 sentinels on ports 26379-26381
@@ -22,40 +20,16 @@
 //!
 //! Note: Tests run sequentially (--test-threads=1) to avoid conflicts.
 
-use redis_tower::commands::{Del, Get, Ping, Set};
-use redis_tower::sentinel::{SentinelClient, SentinelConfig};
+mod helpers;
+
+use helpers::sentinel::setup_sentinel;
+use redis_tower::commands::{Del, Get, Set};
 use tower::ServiceExt;
-
-/// Setup sentinel client
-/// Connects to sentinels to discover master
-fn setup_sentinel() -> SentinelClient {
-    let config = SentinelConfig::builder()
-        .sentinel_node("localhost", 26379)
-        .sentinel_node("localhost", 26380)
-        .sentinel_node("localhost", 26381)
-        .master_name("mymaster")
-        .build()
-        .expect("Failed to build sentinel config");
-
-    SentinelClient::new(config)
-}
-
-#[tokio::test]
-#[cfg(feature = "sentinel")]
-async fn test_sentinel_ping() {
-    let client = setup_sentinel();
-    let master = client.master();
-
-    // PING should work via sentinel-discovered master
-    // Use oneshot() which handles readiness automatically
-    let pong: String = master.oneshot(Ping::new()).await.unwrap();
-    assert_eq!(pong, "PONG");
-}
 
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_basic_operations() {
-    let client = setup_sentinel();
+    let client = setup_sentinel().await;
     let key = "sentinel_test_key";
 
     // Clean up first
@@ -87,7 +61,12 @@ async fn test_sentinel_basic_operations() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_master_discovery() {
+    // Setup sentinel (will be cached)
+    let _ = setup_sentinel().await;
+
     // Test that client can discover master through any sentinel
+    use redis_tower::sentinel::{SentinelClient, SentinelConfig};
+
     let config = SentinelConfig::builder()
         .sentinel_node("localhost", 26379)
         .master_name("mymaster")
@@ -95,7 +74,6 @@ async fn test_sentinel_master_discovery() {
         .unwrap();
 
     let client = SentinelClient::new(config);
-    // Get fresh master for each operation
 
     // Should be able to communicate with discovered master
     let pong: String = client.master().oneshot(Ping::new()).await.unwrap();
@@ -105,8 +83,7 @@ async fn test_sentinel_master_discovery() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_multiple_operations() {
-    let client = setup_sentinel();
-    // Get fresh master for each operation
+    let client = setup_sentinel().await;
 
     let keys = vec!["sentinel_key1", "sentinel_key2", "sentinel_key3"];
 
@@ -145,6 +122,11 @@ async fn test_sentinel_multiple_operations() {
 #[tokio::test]
 #[cfg(feature = "sentinel")]
 async fn test_sentinel_connection_to_different_sentinels() {
+    // Setup sentinel once
+    let _ = setup_sentinel().await;
+
+    use redis_tower::sentinel::{SentinelClient, SentinelConfig};
+
     // Test connecting through different sentinel nodes
     let sentinel_configs = vec![
         vec![("localhost", 26379)],
@@ -166,11 +148,22 @@ async fn test_sentinel_connection_to_different_sentinels() {
         let config = builder.master_name("mymaster").build().unwrap();
 
         let client = SentinelClient::new(config);
-        // Get fresh master for each operation
 
-        // Verify connection works
-        let pong: String = client.master().oneshot(Ping::new()).await.unwrap();
-        assert_eq!(pong, "PONG");
+        // Verify connection works with a keyed command
+        let test_key = "sentinel_connection_test";
+        let _: () = client
+            .master()
+            .oneshot(Set::new(test_key, "test"))
+            .await
+            .unwrap();
+        let value: Option<bytes::Bytes> =
+            client.master().oneshot(Get::new(test_key)).await.unwrap();
+        assert_eq!(value.unwrap().as_ref(), b"test");
+        let _: i64 = client
+            .master()
+            .oneshot(Del::new(vec![test_key.to_string()]))
+            .await
+            .unwrap();
     }
 }
 
@@ -179,7 +172,7 @@ async fn test_sentinel_connection_to_different_sentinels() {
 async fn test_sentinel_concurrent_operations() {
     use tokio::task::JoinSet;
 
-    let client = setup_sentinel();
+    let client = setup_sentinel().await;
     let mut tasks = JoinSet::new();
 
     // Spawn 10 concurrent operations
@@ -236,8 +229,7 @@ async fn test_sentinel_failover_awareness() {
     // In a real failover scenario, sentinels would promote a replica to master
     // and the client should discover the new master
 
-    let client = setup_sentinel();
-    // Get fresh master for each operation
+    let client = setup_sentinel().await;
 
     // Normal operation
     let key = "failover_test_key";

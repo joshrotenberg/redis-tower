@@ -17,6 +17,7 @@ services:
   redis-cluster-1:
     image: redis:7.2-alpine
     container_name: redis-cluster-1
+    profiles: ["cluster"]
     ports:
       - "7100:7100"
       - "17100:17100"
@@ -26,6 +27,12 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7100
+      --cluster-announce-bus-port 17100
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7100
+      --cluster-announce-bus-port 17100
       --appendonly yes
       --protected-mode no
     networks:
@@ -34,6 +41,7 @@ services:
       - redis-cluster-1-data:/data
 
   redis-cluster-2:
+    profiles: ["cluster"]
     image: redis:7.2-alpine
     container_name: redis-cluster-2
     ports:
@@ -45,6 +53,9 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7101
+      --cluster-announce-bus-port 17101
       --appendonly yes
       --protected-mode no
     networks:
@@ -53,6 +64,7 @@ services:
       - redis-cluster-2-data:/data
 
   redis-cluster-3:
+    profiles: ["cluster"]
     image: redis:7.2-alpine
     container_name: redis-cluster-3
     ports:
@@ -64,6 +76,9 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7102
+      --cluster-announce-bus-port 17102
       --appendonly yes
       --protected-mode no
     networks:
@@ -72,6 +87,7 @@ services:
       - redis-cluster-3-data:/data
 
   redis-cluster-4:
+    profiles: ["cluster"]
     image: redis:7.2-alpine
     container_name: redis-cluster-4
     ports:
@@ -83,6 +99,9 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7103
+      --cluster-announce-bus-port 17103
       --appendonly yes
       --protected-mode no
     networks:
@@ -91,6 +110,7 @@ services:
       - redis-cluster-4-data:/data
 
   redis-cluster-5:
+    profiles: ["cluster"]
     image: redis:7.2-alpine
     container_name: redis-cluster-5
     ports:
@@ -102,6 +122,9 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7104
+      --cluster-announce-bus-port 17104
       --appendonly yes
       --protected-mode no
     networks:
@@ -110,6 +133,7 @@ services:
       - redis-cluster-5-data:/data
 
   redis-cluster-6:
+    profiles: ["cluster"]
     image: redis:7.2-alpine
     container_name: redis-cluster-6
     ports:
@@ -121,6 +145,9 @@ services:
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
+      --cluster-announce-ip 127.0.0.1
+      --cluster-announce-port 7105
+      --cluster-announce-bus-port 17105
       --appendonly yes
       --protected-mode no
     networks:
@@ -132,6 +159,7 @@ services:
   # Master on port 6380, replicas on 6381-6382, sentinels on 26379-26381
 
   redis-sentinel-master:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: redis-sentinel-master
     ports:
@@ -146,6 +174,7 @@ services:
       - redis-sentinel-master-data:/data
 
   redis-sentinel-replica-1:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: redis-sentinel-replica-1
     ports:
@@ -163,6 +192,7 @@ services:
       - redis-sentinel-replica-1-data:/data
 
   redis-sentinel-replica-2:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: redis-sentinel-replica-2
     ports:
@@ -180,6 +210,7 @@ services:
       - redis-sentinel-replica-2-data:/data
 
   sentinel-1:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: sentinel-1
     ports:
@@ -203,6 +234,7 @@ services:
         redis-sentinel /tmp/sentinel.conf
 
   sentinel-2:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: sentinel-2
     ports:
@@ -226,6 +258,7 @@ services:
         redis-sentinel /tmp/sentinel.conf
 
   sentinel-3:
+    profiles: ["sentinel"]
     image: redis:7.2-alpine
     container_name: sentinel-3
     ports:
@@ -253,6 +286,7 @@ services:
   cluster-init:
     image: redis:7.2-alpine
     container_name: cluster-init
+    profiles: ["cluster"]
     depends_on:
       - redis-cluster-1
       - redis-cluster-2
