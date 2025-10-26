@@ -128,6 +128,126 @@ services:
     volumes:
       - redis-cluster-6-data:/data
 
+  # Redis Sentinel Setup (1 master + 2 replicas + 3 sentinels)
+  # Master on port 6380, replicas on 6381-6382, sentinels on 26379-26381
+
+  redis-sentinel-master:
+    image: redis:7.2-alpine
+    container_name: redis-sentinel-master
+    ports:
+      - "6380:6380"
+    command: >
+      redis-server
+      --port 6380
+      --protected-mode no
+    networks:
+      - redis-net
+    volumes:
+      - redis-sentinel-master-data:/data
+
+  redis-sentinel-replica-1:
+    image: redis:7.2-alpine
+    container_name: redis-sentinel-replica-1
+    ports:
+      - "6381:6381"
+    command: >
+      redis-server
+      --port 6381
+      --replicaof redis-sentinel-master 6380
+      --protected-mode no
+    depends_on:
+      - redis-sentinel-master
+    networks:
+      - redis-net
+    volumes:
+      - redis-sentinel-replica-1-data:/data
+
+  redis-sentinel-replica-2:
+    image: redis:7.2-alpine
+    container_name: redis-sentinel-replica-2
+    ports:
+      - "6382:6382"
+    command: >
+      redis-server
+      --port 6382
+      --replicaof redis-sentinel-master 6380
+      --protected-mode no
+    depends_on:
+      - redis-sentinel-master
+    networks:
+      - redis-net
+    volumes:
+      - redis-sentinel-replica-2-data:/data
+
+  sentinel-1:
+    image: redis:7.2-alpine
+    container_name: sentinel-1
+    ports:
+      - "26379:26379"
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica-1
+      - redis-sentinel-replica-2
+    networks:
+      - redis-net
+    command:
+      - sh
+      - -c
+      - |
+        echo "port 26379" > /tmp/sentinel.conf
+        echo "sentinel monitor mymaster redis-sentinel-master 6380 2" >> /tmp/sentinel.conf
+        echo "sentinel down-after-milliseconds mymaster 5000" >> /tmp/sentinel.conf
+        echo "sentinel parallel-syncs mymaster 1" >> /tmp/sentinel.conf
+        echo "sentinel failover-timeout mymaster 10000" >> /tmp/sentinel.conf
+        echo "protected-mode no" >> /tmp/sentinel.conf
+        redis-sentinel /tmp/sentinel.conf
+
+  sentinel-2:
+    image: redis:7.2-alpine
+    container_name: sentinel-2
+    ports:
+      - "26380:26380"
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica-1
+      - redis-sentinel-replica-2
+    networks:
+      - redis-net
+    command:
+      - sh
+      - -c
+      - |
+        echo "port 26380" > /tmp/sentinel.conf
+        echo "sentinel monitor mymaster redis-sentinel-master 6380 2" >> /tmp/sentinel.conf
+        echo "sentinel down-after-milliseconds mymaster 5000" >> /tmp/sentinel.conf
+        echo "sentinel parallel-syncs mymaster 1" >> /tmp/sentinel.conf
+        echo "sentinel failover-timeout mymaster 10000" >> /tmp/sentinel.conf
+        echo "protected-mode no" >> /tmp/sentinel.conf
+        redis-sentinel /tmp/sentinel.conf
+
+  sentinel-3:
+    image: redis:7.2-alpine
+    container_name: sentinel-3
+    ports:
+      - "26381:26381"
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica-1
+      - redis-sentinel-replica-2
+    networks:
+      - redis-net
+    command:
+      - sh
+      - -c
+      - |
+        echo "port 26381" > /tmp/sentinel.conf
+        echo "sentinel monitor mymaster redis-sentinel-master 6380 2" >> /tmp/sentinel.conf
+        echo "sentinel down-after-milliseconds mymaster 5000" >> /tmp/sentinel.conf
+        echo "sentinel parallel-syncs mymaster 1" >> /tmp/sentinel.conf
+        echo "sentinel failover-timeout mymaster 10000" >> /tmp/sentinel.conf
+        echo "protected-mode no" >> /tmp/sentinel.conf
+        redis-sentinel /tmp/sentinel.conf
+
   # Cluster initialization service
   # This creates the cluster once all nodes are ready
   cluster-init:
@@ -176,3 +296,6 @@ volumes:
   redis-cluster-4-data:
   redis-cluster-5-data:
   redis-cluster-6-data:
+  redis-sentinel-master-data:
+  redis-sentinel-replica-1-data:
+  redis-sentinel-replica-2-data:

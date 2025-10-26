@@ -177,6 +177,18 @@ name = "integration_bloom"
 path = "tests/integration/integration_bloom.rs"
 required-features = ["bloom"]
 
+# Cluster integration tests (requires docker-compose cluster)
+[[test]]
+name = "integration_cluster"
+path = "tests/integration/integration_cluster.rs"
+required-features = ["cluster"]
+
+# Sentinel integration tests (requires docker-compose sentinel)
+[[test]]
+name = "integration_sentinel"
+path = "tests/integration/integration_sentinel.rs"
+required-features = ["sentinel"]
+
 [profile.release]
 opt-level = 3
 lto = true
