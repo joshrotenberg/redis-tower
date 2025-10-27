@@ -547,6 +547,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "deprecated")]
+    #[allow(deprecated)]
     fn test_rpoplpush_frame() {
         let cmd = RPopLPush::new("source", "destination");
         let frame = cmd.to_frame();
@@ -566,6 +568,8 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "deprecated")]
+    #[allow(deprecated)]
     fn test_brpoplpush_frame() {
         let cmd = BRPopLPush::new("source", "destination", 10.0);
         let frame = cmd.to_frame();
