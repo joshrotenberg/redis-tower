@@ -7,7 +7,41 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// LPUSH command - push elements to the head of a list
+/// LPUSH command - Insert one or more elements at the head of a list
+///
+/// Insert all the specified values at the head of the list stored at key. If key does not exist,
+/// it is created as empty list before performing the push operations. Elements are inserted one
+/// after the other to the head of the list, from the leftmost element to the rightmost element.
+///
+/// # Request
+/// - `key`: The list key
+/// - `values`: One or more values to push
+///
+/// # Response
+/// Returns `i64` - The length of the list after the push operations
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LPush;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Push single value
+/// let cmd = LPush::single("mylist", b"value1");
+/// let length = client.call(cmd).await?;
+///
+/// // Push multiple values
+/// let cmd = LPush::new("mylist", vec![b"value2".to_vec().into(), b"value3".to_vec().into()]);
+/// let length = client.call(cmd).await?;
+/// println!("List length: {}", length);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LPush {
     pub(crate) key: String,
@@ -55,7 +89,35 @@ impl Command for LPush {
     }
 }
 
-/// RPUSH command - push elements to the tail of a list
+/// RPUSH command - Insert one or more elements at the tail of a list
+///
+/// Insert all the specified values at the tail of the list stored at key. If key does not exist,
+/// it is created as empty list before performing the push operations.
+///
+/// # Request
+/// - `key`: The list key
+/// - `values`: One or more values to push
+///
+/// # Response
+/// Returns `i64` - The length of the list after the push operations
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::RPush;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = RPush::single("queue", b"job1");
+/// let length = client.call(cmd).await?;
+/// println!("Queue length: {}", length);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct RPush {
     pub(crate) key: String,
@@ -103,7 +165,39 @@ impl Command for RPush {
     }
 }
 
-/// LPOP command - pop an element from the head of a list
+/// LPOP command - Remove and get the first element in a list
+///
+/// Removes and returns the first element of the list stored at key.
+///
+/// # Request
+/// - `key`: The list key
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value of the first element
+/// - `None` - The list does not exist or is empty
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LPop;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = LPop::new("mylist");
+/// let value = client.call(cmd).await?;
+///
+/// match value {
+///     Some(bytes) => println!("Popped: {:?}", bytes),
+///     None => println!("List is empty"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LPop {
     pub(crate) key: String,
@@ -136,7 +230,39 @@ impl Command for LPop {
     }
 }
 
-/// RPOP command - pop an element from the tail of a list
+/// RPOP command - Remove and get the last element in a list
+///
+/// Removes and returns the last element of the list stored at key.
+///
+/// # Request
+/// - `key`: The list key
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value of the last element
+/// - `None` - The list does not exist or is empty
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::RPop;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = RPop::new("mylist");
+/// let value = client.call(cmd).await?;
+///
+/// match value {
+///     Some(bytes) => println!("Popped: {:?}", bytes),
+///     None => println!("List is empty"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct RPop {
     pub(crate) key: String,
@@ -169,7 +295,42 @@ impl Command for RPop {
     }
 }
 
-/// LRANGE command - get a range of elements from a list
+/// LRANGE command - Get a range of elements from a list
+///
+/// Returns the specified elements of the list stored at key. The offsets start and stop are
+/// zero-based indexes. These offsets can also be negative numbers indicating offsets starting
+/// at the end of the list.
+///
+/// # Request
+/// - `key`: The list key
+/// - `start`: Start index (0-based, negative = from end)
+/// - `stop`: Stop index (inclusive, -1 = last element)
+///
+/// # Response
+/// Returns `Vec<Bytes>` - List of elements in the specified range.
+/// Empty vector if the range is out of bounds or key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LRange;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get all elements
+/// let cmd = LRange::all("mylist");
+/// let elements = client.call(cmd).await?;
+///
+/// // Get first 10 elements
+/// let cmd = LRange::new("mylist", 0, 9);
+/// let elements = client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LRange {
     pub(crate) key: String,
@@ -237,26 +398,35 @@ impl Command for LRange {
 
 // ========== Blocking List Operations (Level 4) ==========
 
-/// BLPOP command - blocking pop from head of list
+/// BLPOP command - Remove and get the first element in a list, or block until one is available
 ///
-/// Blocks until an element is available or timeout is reached.
-/// Returns the key and value, or None if timeout occurs.
+/// BLPOP is a blocking list pop primitive. It blocks the connection when there are no elements
+/// to pop from any of the given lists. An element is popped from the head of the first list that
+/// is non-empty, with the given keys being checked in the order that they are given.
 ///
-/// # Level 4 Complexity
-/// - Blocks the connection until data arrives or timeout
-/// - Returns (key, value) tuple instead of just value
-/// - Timeout of 0 means block indefinitely
+/// # Request
+/// - `keys`: One or more list keys to check (in order)
+/// - `timeout`: Timeout in seconds (0 to block indefinitely)
 ///
-/// # Example
+/// # Response
+/// Returns `Option<(Bytes, Bytes)>`:
+/// - `Some((key, value))` - The key that provided the element and the popped value
+/// - `None` - Timeout occurred, no elements available
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
 /// ```no_run
 /// use redis_tower::commands::lists::BLPop;
 /// use redis_tower::RedisClient;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisClient::connect("localhost:6379").await?;
-///
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Block for up to 5 seconds
-/// let result = client.call(BLPop::new(vec!["queue".to_string()], 5)).await?;
+/// let cmd = BLPop::new(vec!["queue".to_string()], 5);
+/// let result = client.call(cmd).await?;
 ///
 /// match result {
 ///     Some((key, value)) => println!("Got {} from {}",
@@ -1372,7 +1542,34 @@ impl ReadOnly for LInsert {}
 impl ReadOnly for LRem {}
 impl ReadOnly for LTrim {}
 
-/// LLEN command - get list length
+/// LLEN command - Get the length of a list
+///
+/// Returns the length of the list stored at key. If key does not exist, it is interpreted
+/// as an empty list and 0 is returned.
+///
+/// # Request
+/// - `key`: The list key
+///
+/// # Response
+/// Returns `i64` - The length of the list, or 0 if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LLen;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = LLen::new("mylist");
+/// let length = client.call(cmd).await?;
+/// println!("List has {} elements", length);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LLen {
     pub(crate) key: String,
@@ -1404,7 +1601,41 @@ impl Command for LLen {
     }
 }
 
-/// LINDEX command - get element by index
+/// LINDEX command - Get an element from a list by its index
+///
+/// Returns the element at index in the list stored at key. The index is zero-based.
+/// Negative indices can be used to designate elements starting at the tail of the list.
+///
+/// # Request
+/// - `key`: The list key
+/// - `index`: The index (0-based, negative = from end, -1 = last element)
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The element at the specified index
+/// - `None` - Index is out of range or key does not exist
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LIndex;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get first element
+/// let cmd = LIndex::new("mylist", 0);
+/// let value = client.call(cmd).await?;
+///
+/// // Get last element
+/// let cmd = LIndex::new("mylist", -1);
+/// let value = client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LIndex {
     pub(crate) key: String,
@@ -1442,7 +1673,40 @@ impl Command for LIndex {
     }
 }
 
-/// LSET command - set element at index
+/// LSET command - Set the value of an element in a list by its index
+///
+/// Sets the list element at index to value. The index is zero-based. An error is returned
+/// for out of range indexes.
+///
+/// # Request
+/// - `key`: The list key
+/// - `index`: The index (0-based, negative = from end)
+/// - `value`: The new value
+///
+/// # Response
+/// Returns `()` - Always succeeds if index is valid
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LSet;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Set first element
+/// let cmd = LSet::new("mylist", 0, b"new value");
+/// client.call(cmd).await?;
+///
+/// // Set last element
+/// let cmd = LSet::new("mylist", -1, b"new last");
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LSet {
     pub(crate) key: String,
@@ -1602,7 +1866,41 @@ impl Command for LRem {
     }
 }
 
-/// LTRIM command - trim list to range
+/// LTRIM command - Trim a list to the specified range
+///
+/// Trim an existing list so that it will contain only the specified range of elements.
+/// Both start and stop are zero-based indexes, where 0 is the first element, 1 is the next,
+/// and so on. Negative indexes can be used to designate elements starting from the tail.
+///
+/// # Request
+/// - `key`: The list key
+/// - `start`: Start index (0-based, negative = from end)
+/// - `stop`: Stop index (inclusive, -1 = last element)
+///
+/// # Response
+/// Returns `()` - Always succeeds (even if key doesn't exist)
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::lists::LTrim;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Keep only first 10 elements
+/// let cmd = LTrim::new("mylist", 0, 9);
+/// client.call(cmd).await?;
+///
+/// // Keep only last 5 elements
+/// let cmd = LTrim::new("mylist", -5, -1);
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LTrim {
     pub(crate) key: String,
