@@ -290,6 +290,10 @@ name = "integration_timeseries"
 path = "tests/integration/integration_timeseries.rs"
 required-features = ["timeseries"]
 
+[[test]]
+name = "integration_unix_socket"
+path = "tests/integration/integration_unix_socket.rs"
+
 [profile.release]
 opt-level = 3
 lto = true

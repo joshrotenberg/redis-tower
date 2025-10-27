@@ -108,12 +108,11 @@ impl ResilientConnection {
         *inner = None;
     }
 
-    /// Execute a command with automatic reconnection
+    /// Execute a command with automatic reconnection (deprecated)
     ///
     /// # Deprecated
-    /// Execute a Redis command.
-    ///
-    /// Note: Consider using [`call`](Self::call) for consistency with Tower's Service trait.
+    /// Use [`call`](Self::call) instead for consistency with Tower's Service trait.
+    #[deprecated(since = "0.2.0", note = "Use `call()` instead")]
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command + Clone,
@@ -157,7 +156,7 @@ impl ResilientConnection {
                 }
             };
 
-            match conn.execute(command.clone()).await {
+            match conn.call(command.clone()).await {
                 Ok(response) => break Ok(response),
                 Err(e) if Self::is_connection_error(&e) => {
                     self.mark_failed().await;
