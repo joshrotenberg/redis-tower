@@ -181,12 +181,18 @@ pub mod commands;
 pub mod config;
 pub mod connection_pool;
 pub mod health;
+pub mod hooks;
 pub mod metrics;
+pub mod monitor;
 pub mod parser;
+
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
 pub mod read_preference;
+#[cfg(feature = "serde-json")]
+pub mod serde;
+pub mod streaming;
 pub mod tcp;
 pub mod tls;
 pub mod tracing;

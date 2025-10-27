@@ -9,7 +9,7 @@
 #[cfg(feature = "modules")]
 mod tests {
     use redis_tower::RedisClient;
-    use redis_tower::commands::Del;
+    use redis_tower::commands::strings::Del;
     use redis_tower::modules::cms::*;
 
     async fn setup_redis() -> RedisClient {

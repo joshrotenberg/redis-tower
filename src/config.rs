@@ -4,6 +4,7 @@ use std::time::Duration;
 use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
 
 use crate::health::HealthCheckConfig;
+use crate::hooks::Hooks;
 use crate::metrics::{MetricsCollector, MetricsConfig};
 use crate::tcp::TcpConfig;
 use crate::tls::TlsConfig;
@@ -29,6 +30,9 @@ pub struct ClientConfig {
 
     /// Metrics collector
     pub metrics: MetricsCollector,
+
+    /// Error and reconnection hooks
+    pub hooks: Hooks,
 }
 
 impl ClientConfig {
@@ -54,6 +58,7 @@ impl Default for ClientConfig {
             health_check: HealthCheckConfig::default(),
             tracing: TracingConfig::default(),
             metrics: MetricsCollector::new(),
+            hooks: Hooks::new(),
         }
     }
 }
@@ -67,6 +72,7 @@ pub struct ClientConfigBuilder {
     health_check: Option<HealthCheckConfig>,
     tracing: Option<TracingConfig>,
     metrics: Option<MetricsCollector>,
+    hooks: Option<Hooks>,
 }
 
 impl ClientConfigBuilder {
@@ -266,6 +272,102 @@ impl ClientConfigBuilder {
         self
     }
 
+    /// Set error and reconnection hooks
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    /// use redis_tower::hooks::Hooks;
+    ///
+    /// let hooks = Hooks::new()
+    ///     .with_error_callback(|error| async move {
+    ///         eprintln!("Redis error: {:?}", error);
+    ///     })
+    ///     .with_connect_callback(|attempt| async move {
+    ///         println!("Connected on attempt {}", attempt);
+    ///     });
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .hooks(hooks)
+    ///     .build();
+    /// ```
+    pub fn hooks(mut self, hooks: Hooks) -> Self {
+        self.hooks = Some(hooks);
+        self
+    }
+
+    /// Set error callback
+    ///
+    /// Convenience method to set just the error callback without creating a Hooks object.
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .on_error(|error| async move {
+    ///         eprintln!("Redis error: {:?}", error);
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn on_error<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(crate::types::RedisError) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let hooks = self.hooks.take().unwrap_or_default();
+        self.hooks = Some(hooks.with_error_callback(callback));
+        self
+    }
+
+    /// Set connect callback
+    ///
+    /// Convenience method to set just the connect callback without creating a Hooks object.
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .on_connect(|attempt| async move {
+    ///         println!("Connected on attempt {}", attempt);
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn on_connect<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(usize) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let hooks = self.hooks.take().unwrap_or_default();
+        self.hooks = Some(hooks.with_connect_callback(callback));
+        self
+    }
+
+    /// Set reconnect attempt callback
+    ///
+    /// Convenience method to set just the reconnect attempt callback without creating a Hooks object.
+    ///
+    /// # Example
+    /// ```
+    /// use redis_tower::config::ClientConfig;
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .on_reconnect_attempt(|attempt| async move {
+    ///         println!("Attempting reconnect #{}", attempt);
+    ///     })
+    ///     .build();
+    /// ```
+    pub fn on_reconnect_attempt<F, Fut>(mut self, callback: F) -> Self
+    where
+        F: Fn(usize) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let hooks = self.hooks.take().unwrap_or_default();
+        self.hooks = Some(hooks.with_reconnect_attempt_callback(callback));
+        self
+    }
+
     /// Build the client configuration
     pub fn build(self) -> ClientConfig {
         ClientConfig {
@@ -284,6 +386,7 @@ impl ClientConfigBuilder {
             health_check: self.health_check.unwrap_or_default(),
             tracing: self.tracing.unwrap_or_default(),
             metrics: self.metrics.unwrap_or_default(),
+            hooks: self.hooks.unwrap_or_default(),
         }
     }
 }
@@ -297,6 +400,7 @@ impl Default for ClientConfigBuilder {
             health_check: None,
             tracing: None,
             metrics: None,
+            hooks: None,
         }
     }
 }

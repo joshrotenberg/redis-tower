@@ -23,6 +23,8 @@ pub mod functions;
 pub mod geo;
 pub mod hashes;
 pub mod hyperloglog;
+#[cfg(feature = "serde-json")]
+pub mod json;
 pub mod keys;
 pub mod latency;
 pub mod lists;
@@ -71,6 +73,8 @@ pub use hashes::{
     HRandField, HSet, HSetEx, HSetNx, HStrLen, HTtl, HVals,
 };
 pub use hyperloglog::{PfAdd, PfCount, PfDebug, PfMerge, PfSelfTest};
+#[cfg(feature = "serde-json")]
+pub use json::{GetJson, MSetJson, SetJson};
 pub use keys::{
     Copy, Dump, ExpireAt, ExpireTime, Keys, Migrate, Move, ObjectEncoding, ObjectFreq,
     ObjectIdleTime, ObjectRefCount, PExpire, PExpireAt, PExpireTime, PTtl, Persist, Rename,

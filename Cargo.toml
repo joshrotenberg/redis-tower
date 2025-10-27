@@ -42,7 +42,7 @@ socket2 = "0.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde_json = { version = "1.0", optional = true }
 
 # Cryptography
 sha1 = "0.10"
@@ -92,6 +92,11 @@ required-features = ["cluster"]
 [[example]]
 name = "sentinel_basic"
 required-features = ["sentinel"]
+
+# Serde JSON example
+[[example]]
+name = "serde_json"
+required-features = ["serde-json"]
 
 # Integration tests in tests/commands/
 [[test]]
@@ -158,6 +163,11 @@ path = "tests/integration/integration_core.rs"
 [[test]]
 name = "integration_pubsub"
 path = "tests/integration/integration_pubsub.rs"
+
+[[test]]
+name = "integration_serde"
+path = "tests/integration/integration_serde.rs"
+required-features = ["serde-json"]
 
 [[test]]
 name = "integration_transactions"
@@ -281,6 +291,10 @@ name = "integration_timeseries"
 path = "tests/integration/integration_timeseries.rs"
 required-features = ["timeseries"]
 
+[[test]]
+name = "integration_unix_socket"
+path = "tests/integration/integration_unix_socket.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -299,6 +313,8 @@ tls-native-tls = ["dep:native-tls", "dep:tokio-native-tls"]
 tls-rustls = ["dep:rustls", "dep:tokio-rustls", "rustls/std", "dep:rustls-native-certs"]
 tls-rustls-ring = ["tls-rustls", "rustls/ring"]
 tls-rustls-webpki = ["tls-rustls", "dep:webpki-roots"]
+# Serde JSON integration (feature-gated)
+serde-json = ["dep:serde_json"]  # JSON serialization for Rust structs
 # Backwards compatibility (feature-gated)
 deprecated = []       # Include deprecated commands (GETSET, RPOPLPUSH, GEORADIUS, etc.)
 # Redis module support (feature-gated)
