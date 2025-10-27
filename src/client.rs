@@ -5,6 +5,7 @@ use crate::commands::Command;
 use crate::config::ClientConfig;
 use crate::connection_pool::ResilientConnection;
 use crate::pipeline::{Pipeline, PipelineExecutor, PipelineResults};
+use crate::tcp::TcpConfig;
 use crate::tls::TlsConfig;
 use crate::types::RedisError;
 use crate::url::RedisUrl;
@@ -100,6 +101,44 @@ pub struct RedisConnection {
     pub(crate) framed: Arc<Mutex<Framed<RedisStream, RespCodec>>>,
 }
 
+/// Apply TCP configuration to a TcpStream
+fn apply_tcp_config(stream: &TcpStream, config: &TcpConfig) -> Result<(), RedisError> {
+    if let Some(nodelay) = config.nodelay {
+        stream.set_nodelay(nodelay)?;
+        tracing::debug!("TCP_NODELAY set to {}", nodelay);
+    }
+
+    if let Some(linger) = config.linger {
+        stream.set_linger(linger)?;
+        tracing::debug!("SO_LINGER set to {:?}", linger);
+    }
+
+    if let Some(ttl) = config.ttl {
+        stream.set_ttl(ttl)?;
+        tracing::debug!("IP_TTL set to {}", ttl);
+    }
+
+    #[cfg(target_os = "linux")]
+    if let Some(timeout) = config.user_timeout {
+        // Use socket2 to set TCP_USER_TIMEOUT on Linux
+        use socket2::{Socket, TcpKeepalive};
+        use std::os::fd::{AsRawFd, FromRawFd};
+
+        let fd = stream.as_raw_fd();
+        let socket = unsafe { Socket::from_raw_fd(fd) };
+
+        // Set TCP_USER_TIMEOUT
+        let timeout_ms = timeout.as_millis() as u32;
+        socket.set_tcp_user_timeout(Some(std::time::Duration::from_millis(timeout_ms as u64)))?;
+        tracing::debug!("TCP_USER_TIMEOUT set to {:?}", timeout);
+
+        // Don't drop the socket (would close the fd)
+        std::mem::forget(socket);
+    }
+
+    Ok(())
+}
+
 impl RedisConnection {
     /// Connect to a Redis server without TLS
     ///
@@ -135,6 +174,33 @@ impl RedisConnection {
     /// ```
     #[tracing::instrument(fields(addr, tls = ?tls))]
     pub async fn connect_with_config(addr: &str, tls: TlsConfig) -> Result<Self, RedisError> {
+        Self::connect_with_full_config(addr, tls, TcpConfig::default()).await
+    }
+
+    /// Connect to a Redis server with TLS and TCP configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::client::RedisConnection;
+    /// use redis_tower::tcp::TcpConfig;
+    /// use redis_tower::tls::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tcp = TcpConfig::new().with_nodelay(true);
+    /// let conn = RedisConnection::connect_with_full_config(
+    ///     "127.0.0.1:6379",
+    ///     TlsConfig::None,
+    ///     tcp
+    /// ).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[tracing::instrument(fields(addr, tls = ?tls, tcp = ?tcp))]
+    pub async fn connect_with_full_config(
+        addr: &str,
+        tls: TlsConfig,
+        tcp: TcpConfig,
+    ) -> Result<Self, RedisError> {
         tracing::info!("establishing connection");
 
         // Check if this is a Unix socket path (starts with / or ./)
@@ -145,8 +211,13 @@ impl RedisConnection {
             RedisStream::Unix(unix_stream)
         } else {
             // TCP connection
-            let tcp_stream = TcpStream::connect(addr).await?;
+            let mut tcp_stream = TcpStream::connect(addr).await?;
             tracing::debug!("TCP connection established");
+
+            // Apply TCP configuration
+            if tcp.is_configured() {
+                apply_tcp_config(&tcp_stream, &tcp)?;
+            }
 
             match tls {
                 TlsConfig::None => RedisStream::Plain(tcp_stream),

@@ -6,6 +6,7 @@ use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
 use crate::health::HealthCheckConfig;
 use crate::hooks::Hooks;
 use crate::metrics::{MetricsCollector, MetricsConfig};
+use crate::tcp::TcpConfig;
 use crate::tls::TlsConfig;
 use crate::tracing::TracingConfig;
 
@@ -14,6 +15,9 @@ use crate::tracing::TracingConfig;
 pub struct ClientConfig {
     /// TLS configuration
     pub tls: TlsConfig,
+
+    /// TCP socket configuration
+    pub tcp: TcpConfig,
 
     /// Reconnection configuration
     pub reconnect: ReconnectConfig,
@@ -42,6 +46,7 @@ impl Default for ClientConfig {
     fn default() -> Self {
         Self {
             tls: TlsConfig::None,
+            tcp: TcpConfig::default(),
             reconnect: ReconnectConfig::builder()
                 .policy(ReconnectPolicy::exponential(
                     Duration::from_millis(100),
@@ -62,6 +67,7 @@ impl Default for ClientConfig {
 #[derive(Debug)]
 pub struct ClientConfigBuilder {
     tls: TlsConfig,
+    tcp: Option<TcpConfig>,
     reconnect: Option<ReconnectConfig>,
     health_check: Option<HealthCheckConfig>,
     tracing: Option<TracingConfig>,
@@ -95,6 +101,26 @@ impl ClientConfigBuilder {
     /// ```
     pub fn tls(mut self, tls: TlsConfig) -> Self {
         self.tls = tls;
+        self
+    }
+
+    /// Set TCP socket configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use redis_tower::config::ClientConfig;
+    /// use redis_tower::tcp::TcpConfig;
+    ///
+    /// let tcp = TcpConfig::new()
+    ///     .with_nodelay(true)
+    ///     .with_ttl(64);
+    ///
+    /// let config = ClientConfig::builder()
+    ///     .tcp(tcp)
+    ///     .build();
+    /// ```
+    pub fn tcp(mut self, tcp: TcpConfig) -> Self {
+        self.tcp = Some(tcp);
         self
     }
 
@@ -346,6 +372,7 @@ impl ClientConfigBuilder {
     pub fn build(self) -> ClientConfig {
         ClientConfig {
             tls: self.tls,
+            tcp: self.tcp.unwrap_or_default(),
             reconnect: self.reconnect.unwrap_or_else(|| {
                 ReconnectConfig::builder()
                     .policy(ReconnectPolicy::exponential(
@@ -368,6 +395,7 @@ impl Default for ClientConfigBuilder {
     fn default() -> Self {
         Self {
             tls: TlsConfig::None,
+            tcp: None,
             reconnect: None,
             health_check: None,
             tracing: None,

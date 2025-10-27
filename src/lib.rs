@@ -193,6 +193,7 @@ pub mod read_preference;
 #[cfg(feature = "serde-json")]
 pub mod serde;
 pub mod streaming;
+pub mod tcp;
 pub mod tls;
 pub mod tracing;
 pub mod transaction;

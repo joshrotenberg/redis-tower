@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let config = ClientConfig::builder().build();
 
-        let mut client =
+        let client =
             ResilientRedisClient::connect_with_full_config("localhost:6379", config).await?;
 
         // Perform some operations
@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let config = ClientConfig::builder().health_check(health_check).build();
 
-        let mut client =
+        let client =
             ResilientRedisClient::connect_with_full_config("localhost:6379", config).await?;
 
         // Perform operations that will trigger health checks
@@ -78,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let config = ClientConfig::builder().no_health_check().build();
 
-        let mut client =
+        let client =
             ResilientRedisClient::connect_with_full_config("localhost:6379", config).await?;
 
         // Perform operations - no health checks will occur
@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let config = ClientConfig::builder().health_check(health_check).build();
 
-        let mut client =
+        let client =
             ResilientRedisClient::connect_with_full_config("localhost:6379", config).await?;
 
         // Monitor health over 10 seconds
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let config = ClientConfig::builder().health_check(health_check).build();
 
-        let mut client =
+        let client =
             ResilientRedisClient::connect_with_full_config("localhost:6379", config).await?;
 
         println!("  Initial status: {:?}", client.health_status().await);
