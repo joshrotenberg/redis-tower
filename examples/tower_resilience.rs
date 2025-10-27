@@ -9,9 +9,10 @@ use redis_tower::client::RedisClient;
 use redis_tower::commands::{Get, Incr, Set};
 use std::time::Duration;
 use tower::ServiceBuilder;
-use tower::ServiceExt;
 use tower_resilience::{
-    CircuitBreakerLayer, ExponentialBackoff, RateLimitLayer, RetryLayer, TimeoutLayer,
+    circuitbreaker::CircuitBreakerLayer,
+    retry::{ExponentialBackoff, RetryLayer},
+    timelimiter::TimeLimiterLayer,
 };
 
 #[tokio::main]
@@ -33,7 +34,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Prevents requests from hanging indefinitely\n");
     {
         let mut service = ServiceBuilder::new()
-            .layer(TimeoutLayer::new(Duration::from_secs(5)))
+            .layer(
+                TimeLimiterLayer::builder()
+                    .timeout_duration(Duration::from_secs(5))
+                    .build(),
+            )
             .service(client.clone());
 
         let value: Option<bytes::Bytes> = service.call(Get::new("demo:key")).await?;
