@@ -189,6 +189,7 @@ pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
 pub mod read_preference;
+pub mod streaming;
 pub mod tls;
 pub mod tracing;
 pub mod transaction;
