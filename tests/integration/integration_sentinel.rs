@@ -23,7 +23,7 @@
 mod helpers;
 
 use helpers::sentinel::setup_sentinel;
-use redis_tower::commands::{Del, Get, Set};
+use redis_tower::commands::{Del, Get, Ping, Set};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -85,7 +85,7 @@ async fn test_sentinel_master_discovery() {
 async fn test_sentinel_multiple_operations() {
     let client = setup_sentinel().await;
 
-    let keys = vec!["sentinel_key1", "sentinel_key2", "sentinel_key3"];
+    let keys = ["sentinel_key1", "sentinel_key2", "sentinel_key3"];
 
     // Clean up
     let key_strings: Vec<String> = keys.iter().map(|k| k.to_string()).collect();

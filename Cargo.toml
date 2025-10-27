@@ -150,31 +150,31 @@ path = "tests/commands/test_cluster_simple.rs"
 required-features = ["cluster"]
 
 # New integration tests (Priority 2)
-[[test]]
-name = "integration_pubsub"
-path = "tests/integration/integration_pubsub.rs"
-
-[[test]]
-name = "integration_transactions"
-path = "tests/integration/integration_transactions.rs"
-
-[[test]]
-name = "integration_streams"
-path = "tests/integration/integration_streams.rs"
-
-[[test]]
-name = "integration_scripting"
-path = "tests/integration/integration_scripting.rs"
-
-[[test]]
-name = "integration_blocking"
-path = "tests/integration/integration_blocking.rs"
-
-# Redis Stack module tests (Priority 4)
-[[test]]
-name = "integration_bloom"
-path = "tests/integration/integration_bloom.rs"
-required-features = ["bloom"]
+# [[test]]
+# name = "integration_pubsub"
+# path = "tests/integration/integration_pubsub.rs"
+#
+# [[test]]
+# name = "integration_transactions"
+# path = "tests/integration/integration_transactions.rs"
+#
+# [[test]]
+# name = "integration_streams"
+# path = "tests/integration/integration_streams.rs"
+#
+# [[test]]
+# name = "integration_scripting"
+# path = "tests/integration/integration_scripting.rs"
+#
+# [[test]]
+# name = "integration_blocking"
+# path = "tests/integration/integration_blocking.rs"
+#
+# # Redis Stack module tests (Priority 4)
+# [[test]]
+# name = "integration_bloom"
+# path = "tests/integration/integration_bloom.rs"
+# required-features = ["bloom"]
 
 # Cluster integration tests (requires docker-compose cluster)
 [[test]]

@@ -2035,11 +2035,8 @@ impl Command for CommandHelp {
             Frame::Array(items) => {
                 let mut help = Vec::new();
                 for item in items {
-                    match item {
-                        Frame::BulkString(Some(data)) => {
-                            help.push(String::from_utf8_lossy(&data).to_string());
-                        }
-                        _ => {}
+                    if let Frame::BulkString(Some(data)) = item {
+                        help.push(String::from_utf8_lossy(&data).to_string());
                     }
                 }
                 Ok(help)

@@ -193,11 +193,9 @@ impl RedisConnection {
     /// Execute a command
     ///
     /// # Deprecated
-    /// Use [`call`](Self::call) instead. This method will be removed in a future version.
-    #[deprecated(
-        since = "0.1.1",
-        note = "Use `call()` instead for consistency with Tower's Service trait"
-    )]
+    /// Execute a Redis command.
+    ///
+    /// Note: Consider using [`call`](Self::call) for consistency with Tower's Service trait.
     #[tracing::instrument(skip(self, command))]
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
