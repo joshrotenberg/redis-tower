@@ -354,7 +354,19 @@ impl RedisClient {
     where
         Cmd: Command,
     {
-        self.connection.execute(command).await
+        self.connection.call(command).await
+    }
+
+    /// Execute a command (deprecated alias for call)
+    ///
+    /// # Deprecated
+    /// Use [`call`](Self::call) instead for consistency with Tower's Service trait.
+    #[deprecated(since = "0.2.0", note = "Use `call()` instead")]
+    pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command,
+    {
+        self.call(command).await
     }
 }
 
@@ -456,7 +468,19 @@ impl ResilientRedisClient {
     where
         Cmd: Command + Clone,
     {
-        self.connection.execute(command).await
+        self.connection.call(command).await
+    }
+
+    /// Execute a command (deprecated alias for call)
+    ///
+    /// # Deprecated
+    /// Use [`call`](Self::call) instead for consistency with Tower's Service trait.
+    #[deprecated(since = "0.2.0", note = "Use `call()` instead")]
+    pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command + Clone,
+    {
+        self.call(command).await
     }
 
     /// Get the current health status of the connection
