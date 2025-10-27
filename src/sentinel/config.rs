@@ -12,6 +12,9 @@ pub struct SentinelConfig {
     /// Name of the master service to monitor
     pub(crate) master_name: String,
 
+    /// Username for Sentinel ACL authentication (Redis 6.2+, optional)
+    pub(crate) sentinel_username: Option<String>,
+
     /// Password for authenticating with Sentinel nodes (optional)
     pub(crate) sentinel_password: Option<String>,
 
@@ -39,6 +42,7 @@ impl std::fmt::Debug for SentinelConfig {
         f.debug_struct("SentinelConfig")
             .field("sentinels", &self.sentinels)
             .field("master_name", &self.master_name)
+            .field("sentinel_username", &self.sentinel_username)
             .field(
                 "sentinel_password",
                 &self.sentinel_password.as_ref().map(|_| "***"),
@@ -68,6 +72,7 @@ impl SentinelConfig {
 pub struct SentinelConfigBuilder {
     sentinels: Vec<(String, u16)>,
     master_name: Option<String>,
+    sentinel_username: Option<String>,
     sentinel_password: Option<String>,
     redis_password: Option<String>,
     redis_username: Option<String>,
@@ -101,7 +106,18 @@ impl SentinelConfigBuilder {
         self
     }
 
+    /// Set username for Sentinel ACL authentication (Redis 6.2+)
+    ///
+    /// When set along with `sentinel_password`, uses ACL authentication (AUTH username password).
+    /// When only `sentinel_password` is set, uses simple authentication (AUTH password).
+    pub fn sentinel_username(mut self, username: impl Into<String>) -> Self {
+        self.sentinel_username = Some(username.into());
+        self
+    }
+
     /// Set password for Sentinel authentication
+    ///
+    /// Can be used alone (simple AUTH) or with `sentinel_username` (ACL AUTH).
     pub fn sentinel_password(mut self, password: impl Into<String>) -> Self {
         self.sentinel_password = Some(password.into());
         self
@@ -154,6 +170,7 @@ impl SentinelConfigBuilder {
         Ok(SentinelConfig {
             sentinels: self.sentinels,
             master_name,
+            sentinel_username: self.sentinel_username,
             sentinel_password: self.sentinel_password,
             redis_password: self.redis_password,
             redis_username: self.redis_username,
@@ -223,6 +240,40 @@ mod tests {
         assert_eq!(config.sentinel_password, Some("sentinel-pass".to_string()));
         assert_eq!(config.redis_password, Some("redis-pass".to_string()));
         assert_eq!(config.redis_username, Some("default".to_string()));
+    }
+
+    #[test]
+    fn test_builder_with_sentinel_acl_auth() {
+        let config = SentinelConfig::builder()
+            .sentinel_node("localhost", 26379)
+            .master_name("mymaster")
+            .sentinel_username("sentinel-user")
+            .sentinel_password("sentinel-pass")
+            .redis_username("redis-user")
+            .redis_password("redis-pass")
+            .build()
+            .unwrap();
+
+        assert_eq!(config.sentinel_username, Some("sentinel-user".to_string()));
+        assert_eq!(config.sentinel_password, Some("sentinel-pass".to_string()));
+        assert_eq!(config.redis_username, Some("redis-user".to_string()));
+        assert_eq!(config.redis_password, Some("redis-pass".to_string()));
+    }
+
+    #[test]
+    fn test_builder_sentinel_password_only() {
+        // Test simple auth (no username) for Sentinel
+        let config = SentinelConfig::builder()
+            .sentinel_node("localhost", 26379)
+            .master_name("mymaster")
+            .sentinel_password("sentinel-pass")
+            .build()
+            .unwrap();
+
+        assert_eq!(config.sentinel_username, None);
+        assert_eq!(config.sentinel_password, Some("sentinel-pass".to_string()));
+        assert_eq!(config.redis_username, None);
+        assert_eq!(config.redis_password, None);
     }
 
     #[test]
