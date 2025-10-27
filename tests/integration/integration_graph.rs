@@ -1,7 +1,7 @@
 #[cfg(feature = "modules")]
 mod tests {
     use redis_tower::RedisClient;
-    use redis_tower::commands::keys::Del;
+    use redis_tower::commands::strings::Del;
     use redis_tower::modules::graph::*;
 
     async fn setup_redis() -> RedisClient {

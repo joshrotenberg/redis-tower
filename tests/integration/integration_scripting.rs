@@ -157,7 +157,7 @@ async fn test_script_exists() {
         .unwrap();
 
     assert_eq!(exists.len(), 1);
-    assert_eq!(exists[0], true);
+    assert!(exists[0]);
 
     // Check non-existent script
     let fake_sha = "0".repeat(40);
@@ -167,7 +167,7 @@ async fn test_script_exists() {
         .unwrap();
 
     assert_eq!(exists.len(), 1);
-    assert_eq!(exists[0], false);
+    assert!(!exists[0]);
 }
 
 #[tokio::test]
@@ -186,9 +186,9 @@ async fn test_script_exists_multiple() {
         .unwrap();
 
     assert_eq!(exists.len(), 3);
-    assert_eq!(exists[0], true);
-    assert_eq!(exists[1], true);
-    assert_eq!(exists[2], false);
+    assert!(exists[0]);
+    assert!(exists[1]);
+    assert!(!exists[2]);
 }
 
 #[tokio::test]
@@ -204,7 +204,7 @@ async fn test_script_flush() {
         .call(ScriptExists::new().sha1(sha.clone()))
         .await
         .unwrap();
-    assert_eq!(exists[0], true);
+    assert!(exists[0]);
 
     // Flush all scripts
     client.call(ScriptFlush::new()).await.unwrap();
@@ -214,7 +214,7 @@ async fn test_script_flush() {
         .call(ScriptExists::new().sha1(sha.clone()))
         .await
         .unwrap();
-    assert_eq!(exists[0], false);
+    assert!(!exists[0]);
 
     // EVALSHA should fail
     let result: Result<RedisValue, _> = client.call(EvalSha::new(&sha)).await;

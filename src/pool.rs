@@ -68,6 +68,14 @@ pub struct PoolConfig {
     pub recycle_hook: Option<RecycleHook>,
     /// Background reaper interval (None = disabled)
     pub reaper_interval: Option<Duration>,
+    /// Enable dynamic scaling based on load (default: false)
+    pub enable_dynamic_scaling: bool,
+    /// Scale up when utilization exceeds this threshold (0.0-1.0, default: 0.8)
+    pub scale_up_threshold: f32,
+    /// Scale down when utilization falls below this threshold (0.0-1.0, default: 0.2)
+    pub scale_down_threshold: f32,
+    /// How many connections to add during scale-up (default: 1)
+    pub scale_increment: usize,
 }
 
 impl Default for PoolConfig {
@@ -81,6 +89,10 @@ impl Default for PoolConfig {
             validation: ValidationStrategy::OnCheckout,
             recycle_hook: None,
             reaper_interval: Some(Duration::from_secs(30)), // 30 seconds
+            enable_dynamic_scaling: false,
+            scale_up_threshold: 0.8,
+            scale_down_threshold: 0.2,
+            scale_increment: 1,
         }
     }
 }
@@ -96,6 +108,10 @@ impl std::fmt::Debug for PoolConfig {
             .field("validation", &self.validation)
             .field("has_recycle_hook", &self.recycle_hook.is_some())
             .field("reaper_interval", &self.reaper_interval)
+            .field("enable_dynamic_scaling", &self.enable_dynamic_scaling)
+            .field("scale_up_threshold", &self.scale_up_threshold)
+            .field("scale_down_threshold", &self.scale_down_threshold)
+            .field("scale_increment", &self.scale_increment)
             .finish()
     }
 }
@@ -148,6 +164,41 @@ impl PoolConfig {
     /// Set background reaper interval
     pub fn with_reaper_interval(mut self, duration: Option<Duration>) -> Self {
         self.reaper_interval = duration;
+        self
+    }
+
+    /// Enable dynamic scaling based on load
+    ///
+    /// When enabled, the pool will automatically scale up/down based on utilization.
+    /// Requires the background reaper to be enabled (reaper_interval must be Some).
+    pub fn with_dynamic_scaling(mut self, enabled: bool) -> Self {
+        self.enable_dynamic_scaling = enabled;
+        self
+    }
+
+    /// Set scale-up threshold (0.0-1.0)
+    ///
+    /// When utilization exceeds this threshold, the pool will add connections.
+    /// Default: 0.8 (80%)
+    pub fn with_scale_up_threshold(mut self, threshold: f32) -> Self {
+        self.scale_up_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set scale-down threshold (0.0-1.0)
+    ///
+    /// When utilization falls below this threshold, the pool will remove idle connections.
+    /// Default: 0.2 (20%)
+    pub fn with_scale_down_threshold(mut self, threshold: f32) -> Self {
+        self.scale_down_threshold = threshold.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set how many connections to add during scale-up
+    ///
+    /// Default: 1
+    pub fn with_scale_increment(mut self, increment: usize) -> Self {
+        self.scale_increment = increment.max(1);
         self
     }
 
@@ -269,6 +320,16 @@ pub struct PoolStats {
     // Current state
     /// Currently in-use connections
     pub in_use_count: AtomicUsize,
+
+    // Scaling stats
+    /// Total scale-up operations
+    pub total_scale_ups: AtomicUsize,
+    /// Total scale-down operations
+    pub total_scale_downs: AtomicUsize,
+    /// Total connections added via scaling
+    pub scaled_up_connections: AtomicUsize,
+    /// Total connections removed via scaling
+    pub scaled_down_connections: AtomicUsize,
 }
 
 /// A round-robin connection pool with health checking and lifecycle management
@@ -358,6 +419,11 @@ impl ConnectionPool {
         // Remove stale connections
         self.cleanup_stale().await;
 
+        // Dynamic scaling if enabled
+        if self.config.enable_dynamic_scaling {
+            self.check_and_scale().await;
+        }
+
         // Maintain minimum idle
         let _ = self.ensure_min_idle().await;
 
@@ -367,6 +433,41 @@ impl ConnectionPool {
             ValidationStrategy::WhileIdle(_) | ValidationStrategy::All
         ) {
             self.validate_idle_connections().await;
+        }
+    }
+
+    /// Check utilization and scale the pool accordingly
+    async fn check_and_scale(&self) {
+        let current_size = self.size().await;
+        if current_size == 0 {
+            return; // Empty pool, let ensure_min_idle handle it
+        }
+
+        let in_use = self.stats.in_use_count.load(Ordering::Relaxed);
+        let utilization = in_use as f32 / current_size as f32;
+
+        if utilization > self.config.scale_up_threshold {
+            // High utilization: scale up
+            if current_size < self.config.max_size {
+                tracing::debug!(
+                    "Pool {} utilization {:.1}% > {:.1}% threshold, scaling up",
+                    self.addr,
+                    utilization * 100.0,
+                    self.config.scale_up_threshold * 100.0
+                );
+                let _ = self.scale_up().await;
+            }
+        } else if utilization < self.config.scale_down_threshold {
+            // Low utilization: scale down
+            if current_size > self.config.min_idle {
+                tracing::debug!(
+                    "Pool {} utilization {:.1}% < {:.1}% threshold, scaling down",
+                    self.addr,
+                    utilization * 100.0,
+                    self.config.scale_down_threshold * 100.0
+                );
+                self.scale_down().await;
+            }
         }
     }
 
@@ -603,6 +704,108 @@ impl ConnectionPool {
         Ok(())
     }
 
+    /// Scale up the pool by adding connections
+    ///
+    /// Called when utilization exceeds the scale_up_threshold.
+    /// Adds `scale_increment` connections up to `max_size`.
+    async fn scale_up(&self) -> Result<(), RedisError> {
+        let current_size = self.size().await;
+        let increment = self.config.scale_increment;
+        let target_size = (current_size + increment).min(self.config.max_size);
+
+        if current_size >= self.config.max_size {
+            return Ok(()); // Already at max
+        }
+
+        let mut added = 0;
+        for _ in 0..increment {
+            if self.size().await >= target_size {
+                break;
+            }
+
+            match RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await {
+                Ok(conn) => {
+                    self.stats.total_created.fetch_add(1, Ordering::Relaxed);
+
+                    let pooled = PooledConnection::new(conn);
+                    let mut connections = self.connections.write().await;
+                    if connections.len() < self.config.max_size {
+                        connections.push(pooled);
+                        added += 1;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to create connection during scale-up: {}", e);
+                    break;
+                }
+            }
+        }
+
+        if added > 0 {
+            self.stats.total_scale_ups.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .scaled_up_connections
+                .fetch_add(added, Ordering::Relaxed);
+            tracing::debug!(
+                "Scaled up pool {} from {} to {} connections (+{})",
+                self.addr,
+                current_size,
+                self.size().await,
+                added
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Scale down the pool by removing idle connections
+    ///
+    /// Called when utilization falls below the scale_down_threshold.
+    /// Removes idle connections while respecting `min_idle`.
+    async fn scale_down(&self) {
+        let mut connections = self.connections.write().await;
+        let current_size = connections.len();
+
+        if current_size <= self.config.min_idle {
+            return; // Already at minimum
+        }
+
+        // Find idle connections to remove
+        let mut to_remove = Vec::new();
+        for (i, pooled) in connections.iter().enumerate() {
+            if to_remove.len() >= self.config.scale_increment {
+                break;
+            }
+
+            // Only remove idle connections (use_count can help identify rarely used ones)
+            if pooled.idle_time() > Duration::from_secs(10)
+                && connections.len() - to_remove.len() > self.config.min_idle
+            {
+                to_remove.push(i);
+            }
+        }
+
+        if !to_remove.is_empty() {
+            // Remove in reverse order to preserve indices
+            for &idx in to_remove.iter().rev() {
+                connections.remove(idx);
+            }
+
+            let removed = to_remove.len();
+            self.stats.total_scale_downs.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .scaled_down_connections
+                .fetch_add(removed, Ordering::Relaxed);
+            tracing::debug!(
+                "Scaled down pool {} from {} to {} connections (-{})",
+                self.addr,
+                current_size,
+                connections.len(),
+                removed
+            );
+        }
+    }
+
     /// Get the current pool size
     pub async fn size(&self) -> usize {
         self.connections.read().await.len()
@@ -661,6 +864,10 @@ impl ConnectionPool {
             } else {
                 0.0
             },
+            total_scale_ups: self.stats.total_scale_ups.load(Ordering::Relaxed),
+            total_scale_downs: self.stats.total_scale_downs.load(Ordering::Relaxed),
+            scaled_up_connections: self.stats.scaled_up_connections.load(Ordering::Relaxed),
+            scaled_down_connections: self.stats.scaled_down_connections.load(Ordering::Relaxed),
         }
     }
 }
@@ -702,6 +909,14 @@ pub struct PoolStatistics {
     pub max_wait_time_ms: u64,
     /// Average wait time in milliseconds
     pub avg_wait_time_ms: f64,
+    /// Total scale-up operations
+    pub total_scale_ups: usize,
+    /// Total scale-down operations
+    pub total_scale_downs: usize,
+    /// Total connections added via scaling
+    pub scaled_up_connections: usize,
+    /// Total connections removed via scaling
+    pub scaled_down_connections: usize,
 }
 
 impl PoolStatistics {
@@ -846,5 +1061,79 @@ mod tests {
     fn test_default_recycle_hook() {
         let _hook = PoolConfig::default_redis_recycle_hook();
         // Just verify it compiles and can be created
+    }
+
+    #[test]
+    fn test_pool_config_dynamic_scaling() {
+        let config = PoolConfig::new(20)
+            .with_dynamic_scaling(true)
+            .with_scale_up_threshold(0.75)
+            .with_scale_down_threshold(0.25)
+            .with_scale_increment(2);
+
+        assert_eq!(config.enable_dynamic_scaling, true);
+        assert_eq!(config.scale_up_threshold, 0.75);
+        assert_eq!(config.scale_down_threshold, 0.25);
+        assert_eq!(config.scale_increment, 2);
+    }
+
+    #[test]
+    fn test_pool_config_scaling_threshold_clamping() {
+        // Thresholds should be clamped to 0.0-1.0 range
+        let config = PoolConfig::new(10)
+            .with_scale_up_threshold(1.5) // Should clamp to 1.0
+            .with_scale_down_threshold(-0.5); // Should clamp to 0.0
+
+        assert_eq!(config.scale_up_threshold, 1.0);
+        assert_eq!(config.scale_down_threshold, 0.0);
+    }
+
+    #[test]
+    fn test_pool_config_scale_increment_minimum() {
+        // Scale increment should be at least 1
+        let config = PoolConfig::new(10).with_scale_increment(0);
+
+        assert_eq!(config.scale_increment, 1);
+    }
+
+    #[test]
+    fn test_pool_statistics_scaling_metrics() {
+        let pool = ConnectionPool::new("127.0.0.1:6379".to_string(), 10);
+
+        // Simulate some scaling operations
+        pool.stats.total_scale_ups.store(3, Ordering::Relaxed);
+        pool.stats.total_scale_downs.store(2, Ordering::Relaxed);
+        pool.stats.scaled_up_connections.store(6, Ordering::Relaxed);
+        pool.stats
+            .scaled_down_connections
+            .store(4, Ordering::Relaxed);
+
+        let stats = pool.stats();
+        assert_eq!(stats.total_scale_ups, 3);
+        assert_eq!(stats.total_scale_downs, 2);
+        assert_eq!(stats.scaled_up_connections, 6);
+        assert_eq!(stats.scaled_down_connections, 4);
+    }
+
+    #[test]
+    fn test_pool_scaling_enabled_requires_reaper() {
+        // Dynamic scaling requires reaper to be enabled
+        let config = PoolConfig::new(10)
+            .with_dynamic_scaling(true)
+            .with_reaper_interval(Some(Duration::from_secs(30)));
+
+        assert!(config.enable_dynamic_scaling);
+        assert!(config.reaper_interval.is_some());
+    }
+
+    #[test]
+    fn test_pool_config_debug_includes_scaling() {
+        let config = PoolConfig::new(10).with_dynamic_scaling(true);
+        let debug_str = format!("{:?}", config);
+
+        assert!(debug_str.contains("enable_dynamic_scaling"));
+        assert!(debug_str.contains("scale_up_threshold"));
+        assert!(debug_str.contains("scale_down_threshold"));
+        assert!(debug_str.contains("scale_increment"));
     }
 }
