@@ -151,6 +151,278 @@ impl Command for Scan {
     }
 }
 
+/// SSCAN command for iterating over set members.
+///
+/// Incrementally iterates over the members of a set using a cursor.
+///
+/// # Example
+///
+/// ```rust
+/// use redis_tower::commands::SScan;
+///
+/// let scan = SScan::new("myset", 0)
+///     .pattern("prefix:*")
+///     .count(100);
+/// ```
+///
+/// Available since: Redis 2.8.0
+#[derive(Debug, Clone)]
+pub struct SScan {
+    pub(crate) key: String,
+    pub(crate) cursor: u64,
+    pub(crate) pattern: Option<String>,
+    pub(crate) count: Option<usize>,
+}
+
+impl SScan {
+    /// Create a new SSCAN command.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The set key to scan
+    /// * `cursor` - The cursor position (0 to start)
+    pub fn new(key: impl Into<String>, cursor: u64) -> Self {
+        Self {
+            key: key.into(),
+            cursor,
+            pattern: None,
+            count: None,
+        }
+    }
+
+    /// Set the MATCH pattern for filtering members.
+    pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pattern = Some(pattern.into());
+        self
+    }
+
+    /// Set the COUNT hint for number of members to return.
+    pub fn count(mut self, count: usize) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+/// Result from SSCAN command containing cursor and members.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SScanResult {
+    /// Next cursor position (0 indicates iteration complete)
+    pub cursor: u64,
+    /// Set members matching the scan
+    pub members: Vec<Bytes>,
+}
+
+impl Command for SScan {
+    type Response = SScanResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(b"SSCAN".to_vec().into())),
+            Frame::BulkString(Some(self.key.as_bytes().to_vec().into())),
+            Frame::BulkString(Some(self.cursor.to_string().as_bytes().to_vec().into())),
+        ];
+
+        if let Some(pattern) = &self.pattern {
+            args.push(Frame::BulkString(Some(b"MATCH".to_vec().into())));
+            args.push(Frame::BulkString(Some(pattern.as_bytes().to_vec().into())));
+        }
+
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(b"COUNT".to_vec().into())));
+            args.push(Frame::BulkString(Some(
+                count.to_string().as_bytes().to_vec().into(),
+            )));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(mut parts) if parts.len() == 2 => {
+                let cursor = match parts.remove(0) {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(&data)
+                        .parse::<u64>()
+                        .map_err(|_| RedisError::Protocol("Invalid cursor".to_string()))?,
+                    _ => {
+                        return Err(RedisError::Protocol(
+                            "SSCAN cursor must be bulk string".to_string(),
+                        ));
+                    }
+                };
+
+                let members = match parts.remove(0) {
+                    Frame::Array(members) => {
+                        let mut result = Vec::with_capacity(members.len());
+                        for member in members {
+                            match member {
+                                Frame::BulkString(Some(value)) => {
+                                    result.push(value);
+                                }
+                                _ => {
+                                    return Err(RedisError::Protocol(
+                                        "SSCAN members must be bulk strings".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        result
+                    }
+                    _ => {
+                        return Err(RedisError::Protocol(
+                            "SSCAN members must be array".to_string(),
+                        ));
+                    }
+                };
+
+                Ok(SScanResult { cursor, members })
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
+/// ZSCAN command for iterating over sorted set members and scores.
+///
+/// Incrementally iterates over the members and scores of a sorted set using a cursor.
+///
+/// # Example
+///
+/// ```rust
+/// use redis_tower::commands::ZScan;
+///
+/// let scan = ZScan::new("leaderboard", 0)
+///     .pattern("player:*")
+///     .count(100);
+/// ```
+///
+/// Available since: Redis 2.8.0
+#[derive(Debug, Clone)]
+pub struct ZScan {
+    pub(crate) key: String,
+    pub(crate) cursor: u64,
+    pub(crate) pattern: Option<String>,
+    pub(crate) count: Option<usize>,
+}
+
+impl ZScan {
+    /// Create a new ZSCAN command.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sorted set key to scan
+    /// * `cursor` - The cursor position (0 to start)
+    pub fn new(key: impl Into<String>, cursor: u64) -> Self {
+        Self {
+            key: key.into(),
+            cursor,
+            pattern: None,
+            count: None,
+        }
+    }
+
+    /// Set the MATCH pattern for filtering members.
+    pub fn pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pattern = Some(pattern.into());
+        self
+    }
+
+    /// Set the COUNT hint for number of members to return.
+    pub fn count(mut self, count: usize) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+/// Result from ZSCAN command containing cursor and member-score pairs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ZScanResult {
+    /// Next cursor position (0 indicates iteration complete)
+    pub cursor: u64,
+    /// Sorted set members with scores
+    pub members: Vec<(Bytes, f64)>,
+}
+
+impl Command for ZScan {
+    type Response = ZScanResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            Frame::BulkString(Some(b"ZSCAN".to_vec().into())),
+            Frame::BulkString(Some(self.key.as_bytes().to_vec().into())),
+            Frame::BulkString(Some(self.cursor.to_string().as_bytes().to_vec().into())),
+        ];
+
+        if let Some(pattern) = &self.pattern {
+            args.push(Frame::BulkString(Some(b"MATCH".to_vec().into())));
+            args.push(Frame::BulkString(Some(pattern.as_bytes().to_vec().into())));
+        }
+
+        if let Some(count) = self.count {
+            args.push(Frame::BulkString(Some(b"COUNT".to_vec().into())));
+            args.push(Frame::BulkString(Some(
+                count.to_string().as_bytes().to_vec().into(),
+            )));
+        }
+
+        Frame::Array(args)
+    }
+
+    fn parse_response(frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(mut parts) if parts.len() == 2 => {
+                let cursor = match parts.remove(0) {
+                    Frame::BulkString(Some(data)) => String::from_utf8_lossy(&data)
+                        .parse::<u64>()
+                        .map_err(|_| RedisError::Protocol("Invalid cursor".to_string()))?,
+                    _ => {
+                        return Err(RedisError::Protocol(
+                            "ZSCAN cursor must be bulk string".to_string(),
+                        ));
+                    }
+                };
+
+                let members = match parts.remove(0) {
+                    Frame::Array(elements) if elements.len() % 2 == 0 => {
+                        let mut result = Vec::with_capacity(elements.len() / 2);
+                        let mut iter = elements.into_iter();
+                        while let (Some(member), Some(score)) = (iter.next(), iter.next()) {
+                            match (member, score) {
+                                (
+                                    Frame::BulkString(Some(member)),
+                                    Frame::BulkString(Some(score)),
+                                ) => {
+                                    let score_val =
+                                        String::from_utf8_lossy(&score).parse::<f64>().map_err(
+                                            |_| RedisError::Protocol("Invalid score".to_string()),
+                                        )?;
+                                    result.push((member, score_val));
+                                }
+                                _ => {
+                                    return Err(RedisError::Protocol(
+                                        "ZSCAN elements must be bulk strings".to_string(),
+                                    ));
+                                }
+                            }
+                        }
+                        result
+                    }
+                    _ => {
+                        return Err(RedisError::Protocol(
+                            "ZSCAN members must be array with even length".to_string(),
+                        ));
+                    }
+                };
+
+                Ok(ZScanResult { cursor, members })
+            }
+            Frame::Error(e) => Err(RedisError::from_redis_error(&String::from_utf8_lossy(&e))),
+            _ => Err(RedisError::UnexpectedResponse),
+        }
+    }
+}
+
 /// HSCAN command - iterate over fields in a hash
 #[derive(Debug, Clone)]
 pub struct HScan {
