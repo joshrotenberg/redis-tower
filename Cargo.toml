@@ -213,6 +213,23 @@ path = "tests/integration/integration_bitmap.rs"
 name = "integration_connection"
 path = "tests/integration/integration_connection.rs"
 
+[[test]]
+name = "integration_acl"
+path = "tests/integration/integration_acl.rs"
+
+[[test]]
+name = "integration_functions"
+path = "tests/integration/integration_functions.rs"
+harness = true
+
+[[test]]
+name = "integration_latency"
+path = "tests/integration/integration_latency.rs"
+
+[[test]]
+name = "integration_module"
+path = "tests/integration/integration_module.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
