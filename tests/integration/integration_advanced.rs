@@ -1,45 +1,9 @@
-//! Advanced integration tests for Redis commands
-//!
-//! These tests cover more advanced Redis features:
-//! - Transactions (MULTI/EXEC/DISCARD)
-//! - HyperLogLog probabilistic counting
-//! - Bitmap operations
-//! - Geospatial commands
-//! - More list operations
-//! - Sorted set advanced operations
-//! - Lua scripting
-//!
-//! Run with: cargo test --test integration_advanced
+mod helpers;
 
 use bytes::Bytes;
-use redis_tower::client::RedisClient;
+use helpers::standalone::setup_redis;
 use redis_tower::commands::*;
 use redis_tower::types::RedisValue;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
-
-/// Helper to create a Redis client connected to a testcontainer
-async fn setup_redis() -> RedisClient {
-    let container = Redis::default()
-        .start()
-        .await
-        .expect("Failed to start Redis container");
-
-    let host = container.get_host().await.expect("Failed to get host");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("Failed to get port");
-
-    let client = RedisClient::connect(&format!("{}:{}", host, port))
-        .await
-        .expect("Failed to connect to Redis");
-
-    // Keep container alive by leaking it (tests are short-lived)
-    std::mem::forget(container);
-
-    client
-}
 
 #[tokio::test]
 async fn test_hyperloglog_pfadd_pfcount() {

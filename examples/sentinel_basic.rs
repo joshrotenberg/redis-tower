@@ -9,7 +9,7 @@
 
 use redis_tower::commands::{Get, Incr, Set};
 use redis_tower::sentinel::{SentinelClient, SentinelConfig};
-use tower::Service;
+use tower::ServiceExt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,19 +30,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get a master connection with automatic failover
     // Tower's Reconnect middleware will automatically reconnect to the new master
     // if a failover occurs
-    let mut master = client.master();
+    let master = client.master();
 
-    // Execute SET command (Tower will automatically ready the connection)
+    // Execute SET command using oneshot (handles poll_ready automatically)
     println!("Setting key 'greeting' to 'Hello from Sentinel'");
     master
-        .call(Set::new("greeting", "Hello from Sentinel"))
+        .clone()
+        .oneshot(Set::new("greeting", "Hello from Sentinel"))
         .await
         .map_err(|e| format!("Failed to set key: {}", e))?;
 
     // Execute GET command
     println!("Getting key 'greeting'");
     let value: Option<bytes::Bytes> = master
-        .call(Get::new("greeting"))
+        .clone()
+        .oneshot(Get::new("greeting"))
         .await
         .map_err(|e| format!("Failed to get key: {}", e))?;
 
@@ -55,13 +57,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTesting counter increment...");
 
     master
-        .call(Set::new("counter", "0"))
+        .clone()
+        .oneshot(Set::new("counter", "0"))
         .await
         .map_err(|e| format!("Failed to set counter: {}", e))?;
 
     for i in 1..=5 {
         let count: i64 = master
-            .call(Incr::new("counter"))
+            .clone()
+            .oneshot(Incr::new("counter"))
             .await
             .map_err(|e| format!("Failed to increment counter: {}", e))?;
         println!("Counter incremented to: {}", count);

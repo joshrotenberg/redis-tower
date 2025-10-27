@@ -320,11 +320,8 @@ impl Command for Vlinks {
             Frame::Array(items) => {
                 let mut result = Vec::new();
                 for item in items {
-                    match item {
-                        Frame::BulkString(Some(data)) => {
-                            result.push(String::from_utf8_lossy(&data).to_string());
-                        }
-                        _ => {}
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).to_string());
                     }
                 }
                 Ok(result)
@@ -380,11 +377,8 @@ impl Command for Vrandmember {
             Frame::Array(items) => {
                 let mut result = Vec::new();
                 for item in items {
-                    match item {
-                        Frame::BulkString(Some(data)) => {
-                            result.push(String::from_utf8_lossy(&data).to_string());
-                        }
-                        _ => {}
+                    if let Frame::BulkString(Some(data)) = item {
+                        result.push(String::from_utf8_lossy(&data).to_string());
                     }
                 }
                 Ok(result)

@@ -19,3 +19,6 @@ Thumbs.db
 flamegraph.svg
 perf.data*
 tmp/
+
+# Redis dump files
+dump.rdb

@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   # Standalone Redis for basic examples
   redis-standalone:
@@ -12,17 +10,18 @@ services:
       - redis-net
 
   # Redis Cluster Setup (3 masters + 3 replicas)
-  # Cluster spans slots 0-16383 across 3 master nodes
+  # Each node listens on port 6379 inside container, mapped to 7100-7105 on host
 
   redis-cluster-1:
     image: redis:7.2-alpine
     container_name: redis-cluster-1
+    profiles: ["cluster"]
     ports:
-      - "7100:7100"
-      - "17100:17100"
+      - "7100:6379"
+      - "17100:16379"
     command: >
       redis-server
-      --port 7100
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -36,12 +35,13 @@ services:
   redis-cluster-2:
     image: redis:7.2-alpine
     container_name: redis-cluster-2
+    profiles: ["cluster"]
     ports:
-      - "7101:7101"
-      - "17101:17101"
+      - "7101:6379"
+      - "17101:16379"
     command: >
       redis-server
-      --port 7101
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -55,12 +55,13 @@ services:
   redis-cluster-3:
     image: redis:7.2-alpine
     container_name: redis-cluster-3
+    profiles: ["cluster"]
     ports:
-      - "7102:7102"
-      - "17102:17102"
+      - "7102:6379"
+      - "17102:16379"
     command: >
       redis-server
-      --port 7102
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -74,12 +75,13 @@ services:
   redis-cluster-4:
     image: redis:7.2-alpine
     container_name: redis-cluster-4
+    profiles: ["cluster"]
     ports:
-      - "7103:7103"
-      - "17103:17103"
+      - "7103:6379"
+      - "17103:16379"
     command: >
       redis-server
-      --port 7103
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -93,12 +95,13 @@ services:
   redis-cluster-5:
     image: redis:7.2-alpine
     container_name: redis-cluster-5
+    profiles: ["cluster"]
     ports:
-      - "7104:7104"
-      - "17104:17104"
+      - "7104:6379"
+      - "17104:16379"
     command: >
       redis-server
-      --port 7104
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -112,12 +115,13 @@ services:
   redis-cluster-6:
     image: redis:7.2-alpine
     container_name: redis-cluster-6
+    profiles: ["cluster"]
     ports:
-      - "7105:7105"
-      - "17105:17105"
+      - "7105:6379"
+      - "17105:16379"
     command: >
       redis-server
-      --port 7105
+      --port 6379
       --cluster-enabled yes
       --cluster-config-file nodes.conf
       --cluster-node-timeout 5000
@@ -128,11 +132,11 @@ services:
     volumes:
       - redis-cluster-6-data:/data
 
-  # Cluster initialization service
-  # This creates the cluster once all nodes are ready
+  # Cluster initialization - creates cluster after nodes are up
   cluster-init:
     image: redis:7.2-alpine
     container_name: cluster-init
+    profiles: ["cluster"]
     depends_on:
       - redis-cluster-1
       - redis-cluster-2
@@ -140,30 +144,150 @@ services:
       - redis-cluster-4
       - redis-cluster-5
       - redis-cluster-6
+    command: >
+      sh -c "echo 'Waiting for Redis nodes to start...' &&
+        sleep 5 &&
+        echo 'Creating Redis cluster...' &&
+        redis-cli --cluster create redis-cluster-1:6379 redis-cluster-2:6379 redis-cluster-3:6379 redis-cluster-4:6379 redis-cluster-5:6379 redis-cluster-6:6379 --cluster-replicas 1 --cluster-yes &&
+        echo 'Redis cluster created successfully!' &&
+        echo 'Cluster info:' &&
+        redis-cli -h redis-cluster-1 cluster info &&
+        echo 'Cluster nodes:' &&
+        redis-cli -h redis-cluster-1 cluster nodes"
     networks:
       - redis-net
-    command:
-      - sh
-      - -c
-      - |
-        echo 'Waiting for Redis nodes to start...'
-        sleep 10
-        echo 'Creating Redis cluster...'
-        redis-cli --cluster create \
-          redis-cluster-1:7100 \
-          redis-cluster-2:7101 \
-          redis-cluster-3:7102 \
-          redis-cluster-4:7103 \
-          redis-cluster-5:7104 \
-          redis-cluster-6:7105 \
-          --cluster-replicas 1 \
-          --cluster-yes
-        echo 'Redis cluster created successfully!'
-        echo 'Cluster info:'
-        redis-cli -h redis-cluster-1 -p 7100 cluster info
-        echo 'Cluster nodes:'
-        redis-cli -h redis-cluster-1 -p 7100 cluster nodes
-    restart: "no"
+
+  # Redis Sentinel Setup (1 master + 1 replica + 3 sentinels)
+  # Using bitnami images for simplified configuration
+
+  redis-sentinel-master:
+    image: bitnami/redis:latest
+    container_name: redis-sentinel-master
+    profiles: ["sentinel"]
+    ports:
+      - "6380:6379"
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - REDIS_REPLICATION_MODE=master
+    networks:
+      - redis-net
+
+  redis-sentinel-replica:
+    image: bitnami/redis:latest
+    container_name: redis-sentinel-replica
+    profiles: ["sentinel"]
+    ports:
+      - "6381:6379"
+    environment:
+      - ALLOW_EMPTY_PASSWORD=yes
+      - REDIS_REPLICATION_MODE=slave
+      - REDIS_MASTER_HOST=redis-sentinel-master
+      - REDIS_MASTER_PORT_NUMBER=6379
+    depends_on:
+      - redis-sentinel-master
+    networks:
+      - redis-net
+
+  sentinel-1:
+    image: bitnami/redis-sentinel:latest
+    container_name: sentinel-1
+    profiles: ["sentinel"]
+    ports:
+      - "26379:26379"
+    environment:
+      - REDIS_SENTINEL_PORT_NUMBER=26379
+      - REDIS_MASTER_HOST=redis-sentinel-master
+      - REDIS_MASTER_PORT_NUMBER=6379
+      - REDIS_MASTER_SET=mymaster
+      - REDIS_SENTINEL_QUORUM=2
+      - REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS=5000
+      - ALLOW_EMPTY_PASSWORD=yes
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica
+    networks:
+      - redis-net
+
+  sentinel-2:
+    image: bitnami/redis-sentinel:latest
+    container_name: sentinel-2
+    profiles: ["sentinel"]
+    ports:
+      - "26380:26379"
+    environment:
+      - REDIS_SENTINEL_PORT_NUMBER=26379
+      - REDIS_MASTER_HOST=redis-sentinel-master
+      - REDIS_MASTER_PORT_NUMBER=6379
+      - REDIS_MASTER_SET=mymaster
+      - REDIS_SENTINEL_QUORUM=2
+      - REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS=5000
+      - ALLOW_EMPTY_PASSWORD=yes
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica
+    networks:
+      - redis-net
+
+  sentinel-3:
+    image: bitnami/redis-sentinel:latest
+    container_name: sentinel-3
+    profiles: ["sentinel"]
+    ports:
+      - "26381:26379"
+    environment:
+      - REDIS_SENTINEL_PORT_NUMBER=26379
+      - REDIS_MASTER_HOST=redis-sentinel-master
+      - REDIS_MASTER_PORT_NUMBER=6379
+      - REDIS_MASTER_SET=mymaster
+      - REDIS_SENTINEL_QUORUM=2
+      - REDIS_SENTINEL_DOWN_AFTER_MILLISECONDS=5000
+      - ALLOW_EMPTY_PASSWORD=yes
+    depends_on:
+      - redis-sentinel-master
+      - redis-sentinel-replica
+    networks:
+      - redis-net
+
+  # Test runners - run integration tests inside Docker network
+  test-cluster:
+    image: rust:1.87-alpine
+    container_name: test-cluster
+    profiles: ["cluster"]
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo
+    networks:
+      - redis-net
+    depends_on:
+      - cluster-init
+    environment:
+      - RUST_LOG=debug
+      - DOCKER_NETWORK=true
+    command: >
+      sh -c "apk add --no-cache musl-dev openssl-dev &&
+        cargo test --test integration_cluster --features cluster -- --test-threads=1 --nocapture"
+
+  test-sentinel:
+    image: rust:1.87-alpine
+    container_name: test-sentinel
+    profiles: ["sentinel"]
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-cache:/usr/local/cargo
+    networks:
+      - redis-net
+    depends_on:
+      - sentinel-1
+      - sentinel-2
+      - sentinel-3
+    environment:
+      - RUST_LOG=debug
+      - DOCKER_NETWORK=true
+    command: >
+      sh -c "apk add --no-cache musl-dev openssl-dev &&
+        cargo test --test integration_sentinel --features sentinel -- --test-threads=1 --nocapture"
 
 networks:
   redis-net:
@@ -176,3 +300,4 @@ volumes:
   redis-cluster-4-data:
   redis-cluster-5-data:
   redis-cluster-6-data:
+  cargo-cache:

@@ -1,42 +1,10 @@
-//! Integration tests for Transaction commands
-//!
-//! These tests cover Redis transactions using the Transaction builder:
-//! - Transaction builder with queue/exec/discard
-//! - WATCH/UNWATCH (optimistic locking)
-//! - Transaction atomicity
-//! - Transaction abort scenarios
-//!
-//! Run with: cargo test --test integration_transactions
+mod helpers;
 
 use bytes::Bytes;
+use helpers::standalone::setup_redis;
 use redis_tower::client::RedisConnection;
 use redis_tower::commands::strings::{Del, Get, Incr, Set};
 use redis_tower::transaction::{Transaction, Unwatch, Watch};
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
-
-/// Helper to create a Redis connection (not client) for transactions
-async fn setup_redis() -> RedisConnection {
-    let container = Redis::default()
-        .start()
-        .await
-        .expect("Failed to start Redis container");
-
-    let host = container.get_host().await.expect("Failed to get host");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("Failed to get port");
-
-    let conn = RedisConnection::connect(&format!("{}:{}", host, port))
-        .await
-        .expect("Failed to connect to Redis");
-
-    // Keep container alive by leaking it (tests are short-lived)
-    std::mem::forget(container);
-
-    conn
-}
 
 #[tokio::test]
 async fn test_basic_transaction() {

@@ -44,6 +44,469 @@ impl Command for HGet {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hget_frame() {
+        let cmd = HGet::new("myhash", "field1");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HGET"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("field1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hset_frame() {
+        let cmd = HSet::new("myhash", "field1", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HSET"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("field1"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("value1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hsetnx_frame() {
+        let cmd = HSetNx::new("myhash", "field1", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HSETNX"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hrandfield_basic() {
+        let cmd = HRandField::new("myhash");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HRANDFIELD"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hrandfield_with_count() {
+        let cmd = HRandField::new("myhash").count(3);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("3"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hrandfield_with_values() {
+        let cmd = HRandField::new("myhash").count(2).with_values();
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("WITHVALUES"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hexists_frame() {
+        let cmd = HExists::new("myhash", "field1");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HEXISTS"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hlen_frame() {
+        let cmd = HLen::new("myhash");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HLEN"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hkeys_frame() {
+        let cmd = HKeys::new("myhash");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HKEYS"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hvals_frame() {
+        let cmd = HVals::new("myhash");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HVALS"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hmget_frame() {
+        let cmd = HMGet::new(
+            "myhash",
+            vec![
+                "field1".to_string(),
+                "field2".to_string(),
+                "field3".to_string(),
+            ],
+        );
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HMGET"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("field1"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("field2"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("field3"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hincrby_frame() {
+        let cmd = HIncrBy::new("myhash", "counter", 5);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HINCRBY"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("5"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hincrbyfloat_frame() {
+        let cmd = HIncrByFloat::new("myhash", "score", 2.5);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("HINCRBYFLOAT")))
+                );
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("2.5"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hstrlen_frame() {
+        let cmd = HStrLen::new("myhash", "field1");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HSTRLEN"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hgetall_frame() {
+        let cmd = HGetAll::new("myhash");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HGETALL"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hdel_frame() {
+        let cmd = HDel::new("myhash", vec!["field1".to_string(), "field2".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HDEL"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("field1"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("field2"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hexpire_frame() {
+        let cmd = HExpire::new("myhash", 60, vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HEXPIRE"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("60"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hexpireat_frame() {
+        let cmd = HExpireAt::new("myhash", 1234567890, vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HEXPIREAT"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hexpiretime_frame() {
+        let cmd = HExpireTime::new("myhash", vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("HEXPIRETIME")))
+                );
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hpexpire_frame() {
+        let cmd = HPExpire::new("myhash", 60000, vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HPEXPIRE"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("60000"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hpexpireat_frame() {
+        let cmd = HPExpireAt::new("myhash", 1234567890000, vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HPEXPIREAT"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hpexpiretime_frame() {
+        let cmd = HPExpireTime::new("myhash", vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(
+                    parts[0],
+                    Frame::BulkString(Some(Bytes::from("HPEXPIRETIME")))
+                );
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hpersist_frame() {
+        let cmd = HPersist::new("myhash", vec!["field1".to_string(), "field2".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HPERSIST"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("FIELDS"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("2"))));
+                assert_eq!(parts.len(), 6); // HPERSIST key FIELDS 2 field1 field2
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hpttl_frame() {
+        let cmd = HPTtl::new("myhash", vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HPTTL"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_httl_frame() {
+        let cmd = HTtl::new("myhash", vec!["field1".to_string()]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HTTL"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hmset_frame() {
+        let fields = vec![
+            ("field1".to_string(), Bytes::from("value1")),
+            ("field2".to_string(), Bytes::from("value2")),
+        ];
+
+        let cmd = HMSet::new("myhash", fields);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HMSET"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert!(parts.len() >= 6); // HMSET key field1 value1 field2 value2
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hsetex_frame() {
+        let cmd = HSetEx::new("myhash", 60, "field1", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HSETEX"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("60"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hgetdel_frame() {
+        let cmd = HGetDel::new("myhash", "field1");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HGETDEL"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("myhash"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("field1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hgetex_basic() {
+        let cmd = HGetEx::new("myhash", "field1");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("HGETEX"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_hgetex_with_expiration() {
+        let cmd = HGetEx::new("myhash", "field1").ex(60);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("EX"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("60"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+}
+
 /// HSET command - set a field in a hash
 #[derive(Debug, Clone)]
 pub struct HSet {

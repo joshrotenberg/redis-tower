@@ -84,7 +84,23 @@ impl ResilientConnection {
     }
 
     /// Execute a command with automatic reconnection
+    ///
+    /// # Deprecated
+    /// Execute a Redis command.
+    ///
+    /// Note: Consider using [`call`](Self::call) for consistency with Tower's Service trait.
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command + Clone,
+    {
+        self.call(command).await
+    }
+
+    /// Call a command with automatic reconnection
+    ///
+    /// This is the preferred method for executing commands on a connection pool.
+    /// Automatically retries failed commands based on the reconnection policy.
+    pub async fn call<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command + Clone,
     {

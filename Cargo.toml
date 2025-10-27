@@ -67,9 +67,8 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio-test = "0.4"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 fred = { version = "9.3", features = ["i-all"] }
-testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["redis"] }
 proptest = "1.6"
+docker-wrapper = { path = "/tmp/docker-wrapper", features = ["template-redis-cluster", "template-redis-sentinel"] }
 
 [[bench]]
 name = "comparison"
@@ -152,6 +151,10 @@ required-features = ["cluster"]
 
 # New integration tests (Priority 2)
 [[test]]
+name = "integration_core"
+path = "tests/integration/integration_core.rs"
+
+[[test]]
 name = "integration_pubsub"
 path = "tests/integration/integration_pubsub.rs"
 
@@ -171,11 +174,44 @@ path = "tests/integration/integration_scripting.rs"
 name = "integration_blocking"
 path = "tests/integration/integration_blocking.rs"
 
+[[test]]
+name = "integration_advanced"
+path = "tests/integration/integration_advanced.rs"
+
 # Redis Stack module tests (Priority 4)
 [[test]]
 name = "integration_bloom"
 path = "tests/integration/integration_bloom.rs"
 required-features = ["bloom"]
+
+# Cluster integration tests (requires docker-compose cluster)
+[[test]]
+name = "integration_cluster"
+path = "tests/integration/integration_cluster.rs"
+required-features = ["cluster"]
+
+# Sentinel integration tests (requires docker-compose sentinel)
+[[test]]
+name = "integration_sentinel"
+path = "tests/integration/integration_sentinel.rs"
+required-features = ["sentinel"]
+
+# New integration tests for remaining command modules
+[[test]]
+name = "integration_keys"
+path = "tests/integration/integration_keys.rs"
+
+[[test]]
+name = "integration_server"
+path = "tests/integration/integration_server.rs"
+
+[[test]]
+name = "integration_bitmap"
+path = "tests/integration/integration_bitmap.rs"
+
+[[test]]
+name = "integration_connection"
+path = "tests/integration/integration_connection.rs"
 
 [profile.release]
 opt-level = 3

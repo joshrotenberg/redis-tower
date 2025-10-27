@@ -335,6 +335,389 @@ impl Command for BLPop {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_lpush_single() {
+        let cmd = LPush::single("mylist", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPUSH"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("value1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lpush_multiple() {
+        let cmd = LPush::new("mylist", vec![Bytes::from("v1"), Bytes::from("v2")]);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPUSH"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_rpush_single() {
+        let cmd = RPush::single("mylist", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("RPUSH"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lpop_single() {
+        let cmd = LPop::new("mylist");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPOP"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_rpop_single() {
+        let cmd = RPop::new("mylist");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("RPOP"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lrange_frame() {
+        let cmd = LRange::new("mylist", 0, -1);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LRANGE"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("0"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("-1"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_blpop_frame() {
+        let cmd = BLPop::new(vec!["list1".to_string(), "list2".to_string()], 5);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BLPOP"))));
+                assert_eq!(parts.len(), 4); // BLPOP list1 list2 5
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_brpop_frame() {
+        let cmd = BRPop::new(vec!["list1".to_string()], 10);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BRPOP"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("10"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lpushx_frame() {
+        let cmd = LPushX::single("mylist", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPUSHX"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_rpushx_frame() {
+        let cmd = RPushX::single("mylist", Bytes::from("value1"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("RPUSHX"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lmove_frame() {
+        let cmd = LMove::new("src", "dst", MoveDirection::Left, MoveDirection::Right);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LMOVE"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("src"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("dst"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("LEFT"))));
+                assert_eq!(parts[4], Frame::BulkString(Some(Bytes::from("RIGHT"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_blmove_frame() {
+        let cmd = BLMove::new("src", "dst", MoveDirection::Right, MoveDirection::Left, 5.0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 6);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BLMOVE"))));
+                assert_eq!(parts[5], Frame::BulkString(Some(Bytes::from("5"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lmpop_frame() {
+        let cmd = LMPop::new(vec!["list1".to_string()], MoveDirection::Left).count(2);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LMPOP"))));
+                assert!(parts.len() >= 5); // LMPOP 1 list1 LEFT COUNT 2
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_blmpop_frame() {
+        let cmd = BLMPop::new(vec!["list1".to_string()], MoveDirection::Right, 5.0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BLMPOP"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("5"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_rpoplpush_frame() {
+        let cmd = RPopLPush::new("source", "destination");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("RPOPLPUSH"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("source"))));
+                assert_eq!(
+                    parts[2],
+                    Frame::BulkString(Some(Bytes::from("destination")))
+                );
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_brpoplpush_frame() {
+        let cmd = BRPopLPush::new("source", "destination", 10.0);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BRPOPLPUSH"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("10"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_llen_frame() {
+        let cmd = LLen::new("mylist");
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LLEN"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lindex_frame() {
+        let cmd = LIndex::new("mylist", 5);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LINDEX"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("5"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lset_frame() {
+        let cmd = LSet::new("mylist", 2, Bytes::from("newvalue"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LSET"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("2"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("newvalue"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_linsert_before() {
+        let cmd = LInsert::before("mylist", Bytes::from("pivot"), Bytes::from("value"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 5);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LINSERT"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("BEFORE"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_linsert_after() {
+        let cmd = LInsert::after("mylist", Bytes::from("pivot"), Bytes::from("value"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("AFTER"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lrem_frame() {
+        let cmd = LRem::new("mylist", 2, Bytes::from("value"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LREM"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("2"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_ltrim_frame() {
+        let cmd = LTrim::new("mylist", 0, 99);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 4);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LTRIM"))));
+                assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("0"))));
+                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("99"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lpos_basic() {
+        let cmd = LPos::new("mylist", Bytes::from("element"));
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPOS"))));
+                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("mylist"))));
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+
+    #[test]
+    fn test_lpos_with_options() {
+        let cmd = LPos::new("mylist", Bytes::from("element"))
+            .rank(2)
+            .count(3)
+            .maxlen(100);
+        let frame = cmd.to_frame();
+
+        match frame {
+            Frame::Array(parts) => {
+                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("LPOS"))));
+                assert!(parts.len() > 3); // Has RANK, COUNT, MAXLEN options
+            }
+            _ => panic!("Expected Array frame"),
+        }
+    }
+}
+
 /// LPUSHX command - push to head only if list exists
 ///
 /// Similar to LPUSH but only pushes if the key already exists and holds a list.

@@ -199,7 +199,25 @@ impl ClusterClient {
     /// Automatically routes to the correct node based on the key's hash slot.
     /// Handles MOVED and ASK redirects transparently.
     /// Routes read-only commands to replicas based on read preference.
+    ///
+    /// # Deprecated
+    /// Execute a Redis command with cluster routing.
+    ///
+    /// Note: Consider using [`call`](Self::call) for consistency with Tower's Service trait.
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly,
+    {
+        self.call(command).await
+    }
+
+    /// Call a command on the cluster.
+    ///
+    /// This is the preferred method for executing commands on a cluster.
+    /// Automatically routes to the correct node based on the key's hash slot.
+    /// Handles MOVED and ASK redirects transparently.
+    /// Routes read-only commands to replicas based on read preference.
+    pub async fn call<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command + Clone + KeyExtractor + crate::cluster::read_preference::ReadOnly,
     {

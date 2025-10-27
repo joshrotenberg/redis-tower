@@ -191,8 +191,25 @@ impl RedisConnection {
     }
 
     /// Execute a command
+    ///
+    /// # Deprecated
+    /// Execute a Redis command.
+    ///
+    /// Note: Consider using [`call`](Self::call) for consistency with Tower's Service trait.
     #[tracing::instrument(skip(self, command))]
     pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command,
+    {
+        self.call(command).await
+    }
+
+    /// Call a command on this connection
+    ///
+    /// This is the preferred method for executing commands. It provides the same
+    /// functionality as `execute()` but follows Tower's `Service::call()` naming convention.
+    #[tracing::instrument(skip(self, command))]
+    pub async fn call<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
     where
         Cmd: Command,
     {

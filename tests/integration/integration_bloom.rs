@@ -1,51 +1,9 @@
-//! Integration tests for Redis Bloom Filter module
-//!
-//! **Requires**: Redis Stack or RedisBloom module loaded
-//!
-//! These tests use the `redis/redis-stack-server` Docker image via testcontainers
-//! which includes the RedisBloom module.
-//!
-//! Tests cover:
-//! - BF.RESERVE - Create filter with custom parameters
-//! - BF.ADD/BF.MADD - Add single/multiple items
-//! - BF.EXISTS/BF.MEXISTS - Check single/multiple items
-//! - BF.INFO - Get filter information
-//! - BF.INSERT - Add with auto-creation
-//! - BF.CARD - Get cardinality estimate
-//!
-//! Run with: cargo test --test integration_bloom --features bloom
+mod helpers;
 
-use redis_tower::client::RedisClient;
-use redis_tower::modules::bloom::*;
-use testcontainers::GenericImage;
-use testcontainers::core::WaitFor;
-use testcontainers::runners::AsyncRunner;
-
-/// Helper to create a Redis Stack client for bloom filter testing
-async fn setup_redis_stack() -> RedisClient {
-    let image = GenericImage::new("redis/redis-stack-server", "latest")
-        .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
-
-    let container = image
-        .start()
-        .await
-        .expect("Failed to start Redis Stack container");
-
-    let host = container.get_host().await.expect("Failed to get host");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("Failed to get port");
-
-    let client = RedisClient::connect(&format!("{}:{}", host, port))
-        .await
-        .expect("Failed to connect to Redis Stack");
-
-    // Keep container alive by leaking it
-    std::mem::forget(container);
-
-    client
-}
+use bytes::Bytes;
+use helpers::standalone::setup_redis;
+use redis_tower::commands::*;
+use std::collections::HashMap;
 
 #[tokio::test]
 #[cfg(feature = "bloom")]
