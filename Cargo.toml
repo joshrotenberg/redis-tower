@@ -213,6 +213,73 @@ path = "tests/integration/integration_bitmap.rs"
 name = "integration_connection"
 path = "tests/integration/integration_connection.rs"
 
+[[test]]
+name = "integration_acl"
+path = "tests/integration/integration_acl.rs"
+
+[[test]]
+name = "integration_functions"
+path = "tests/integration/integration_functions.rs"
+harness = true
+
+[[test]]
+name = "integration_latency"
+path = "tests/integration/integration_latency.rs"
+
+[[test]]
+name = "integration_module"
+path = "tests/integration/integration_module.rs"
+
+[[test]]
+name = "integration_scan"
+path = "tests/integration/integration_scan.rs"
+
+# Redis Stack module integration tests (requires Redis Stack)
+[[test]]
+name = "integration_cms"
+path = "tests/integration/integration_cms.rs"
+required-features = ["modules"]
+
+[[test]]
+name = "integration_cuckoo"
+path = "tests/integration/integration_cuckoo.rs"
+required-features = ["modules"]
+
+[[test]]
+name = "integration_tdigest"
+path = "tests/integration/integration_tdigest.rs"
+required-features = ["modules"]
+
+[[test]]
+name = "integration_topk"
+path = "tests/integration/integration_topk.rs"
+required-features = ["modules"]
+
+[[test]]
+name = "integration_vector"
+path = "tests/integration/integration_vector.rs"
+required-features = ["modules"]
+
+[[test]]
+name = "integration_json"
+path = "tests/integration/integration_json.rs"
+required-features = ["json"]
+
+[[test]]
+name = "integration_graph"
+path = "tests/integration/integration_graph.rs"
+required-features = ["graph"]
+
+[[test]]
+name = "integration_search"
+path = "tests/integration/integration_search.rs"
+required-features = ["search"]
+
+[[test]]
+name = "integration_timeseries"
+path = "tests/integration/integration_timeseries.rs"
+required-features = ["timeseries"]
+
 [profile.release]
 opt-level = 3
 lto = true
