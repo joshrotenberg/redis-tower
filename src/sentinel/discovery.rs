@@ -19,6 +19,7 @@ pub async fn discover_master(config: &SentinelConfig) -> Result<(String, u16), R
             host,
             *port,
             &config.master_name,
+            config.sentinel_username.as_deref(),
             config.sentinel_password.as_deref(),
             config.sentinel_timeout,
         )
@@ -87,6 +88,7 @@ pub async fn discover_replicas(config: &SentinelConfig) -> Result<Vec<(String, u
             host,
             *port,
             &config.master_name,
+            config.sentinel_username.as_deref(),
             config.sentinel_password.as_deref(),
             config.sentinel_timeout,
         )
@@ -125,6 +127,7 @@ async fn query_sentinel_for_master(
     host: &str,
     port: u16,
     master_name: &str,
+    username: Option<&str>,
     password: Option<&str>,
     sentinel_timeout: Duration,
 ) -> Result<Option<(String, u16)>, RedisError> {
@@ -140,9 +143,9 @@ async fn query_sentinel_for_master(
     .await
     .map_err(|_| RedisError::Connection(format!("Timeout connecting to sentinel {}", addr)))??;
 
-    // Authenticate if password provided
+    // Authenticate if credentials provided
     if let Some(pass) = password {
-        authenticate_sentinel(&conn, pass).await?;
+        authenticate_sentinel(&conn, username, pass).await?;
     }
 
     // Query for master address
@@ -159,6 +162,7 @@ async fn query_sentinel_for_replicas(
     host: &str,
     port: u16,
     master_name: &str,
+    username: Option<&str>,
     password: Option<&str>,
     sentinel_timeout: Duration,
 ) -> Result<Vec<ReplicaInfo>, RedisError> {
@@ -177,9 +181,9 @@ async fn query_sentinel_for_replicas(
     .await
     .map_err(|_| RedisError::Connection(format!("Timeout connecting to sentinel {}", addr)))??;
 
-    // Authenticate if password provided
+    // Authenticate if credentials provided
     if let Some(pass) = password {
-        authenticate_sentinel(&conn, pass).await?;
+        authenticate_sentinel(&conn, username, pass).await?;
     }
 
     // Query for replicas
@@ -224,10 +228,26 @@ async fn verify_master(host: &str, port: u16, config: &SentinelConfig) -> Result
 }
 
 /// Authenticate with a Sentinel node
-async fn authenticate_sentinel(conn: &RedisConnection, password: &str) -> Result<(), RedisError> {
-    use crate::commands::Auth;
-
-    conn.execute(Auth::new(password)).await
+///
+/// Supports both simple authentication (password only) and ACL authentication (username + password).
+/// When username is provided, uses ACL authentication (Redis 6.2+).
+async fn authenticate_sentinel(
+    conn: &RedisConnection,
+    username: Option<&str>,
+    password: &str,
+) -> Result<(), RedisError> {
+    match username {
+        Some(user) => {
+            // ACL authentication (Redis 6.2+)
+            use crate::commands::AuthAcl;
+            conn.execute(AuthAcl::new(user, password)).await
+        }
+        None => {
+            // Simple authentication (pre-ACL)
+            use crate::commands::Auth;
+            conn.execute(Auth::new(password)).await
+        }
+    }
 }
 
 /// Authenticate with a Redis node (simple AUTH)
