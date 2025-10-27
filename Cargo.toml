@@ -230,6 +230,10 @@ path = "tests/integration/integration_latency.rs"
 name = "integration_module"
 path = "tests/integration/integration_module.rs"
 
+[[test]]
+name = "integration_scan"
+path = "tests/integration/integration_scan.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
