@@ -24,7 +24,7 @@
 use crate::RedisError;
 use crate::client::RedisClient;
 use crate::commands::scan::{HScan, SScan, Scan, ZScan};
-use crate::commands::streams::{StreamEntries, StreamEntry, XAck, XRead, XReadGroup};
+use crate::commands::streams::{StreamEntry, XAck, XRead, XReadGroup};
 use bytes::Bytes;
 
 /// Streaming iterator for SCAN command
