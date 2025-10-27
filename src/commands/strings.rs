@@ -5,7 +5,41 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// GET command - retrieve a value
+/// GET command - Retrieve the value of a key
+///
+/// Get the value of key. If the key does not exist the special value None is returned.
+/// An error is returned if the value stored at key is not a string, because GET only
+/// handles string values.
+///
+/// # Request
+/// - `key`: The key to retrieve
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value stored at the key
+/// - `None` - Key does not exist
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::Get;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = Get::new("mykey");
+/// let value = client.call(cmd).await?;
+///
+/// match value {
+///     Some(bytes) => println!("Value: {:?}", bytes),
+///     None => println!("Key does not exist"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Get {
     pub(crate) key: String,
@@ -402,9 +436,41 @@ impl Command for SetBit {
     }
 }
 
-/// GETEX command - get with expiration options
+/// GETEX command - Get the value of a key and optionally set its expiration
 ///
+/// Get the value of key and optionally set its expiration. GETEX is similar to GET, but is a
+/// write command with additional options.
+///
+/// # Request
+/// - `key`: The key to retrieve
+/// - Optional expiration via builder methods: `ex()`, `px()`, `exat()`, `pxat()`, `persist()`
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value stored at the key
+/// - `None` - Key does not exist
+///
+/// # Redis Version
 /// Available since Redis 6.2.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::GetEx;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get and set expiration in 60 seconds
+/// let cmd = GetEx::new("mykey").ex(60);
+/// let value = client.call(cmd).await?;
+///
+/// // Get and remove expiration
+/// let cmd = GetEx::new("mykey").persist();
+/// let value = client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct GetEx {
     pub(crate) key: String,
@@ -512,9 +578,40 @@ impl Command for GetEx {
     }
 }
 
-/// GETDEL command - get and delete
+/// GETDEL command - Get the value of a key and delete the key
 ///
+/// Get the value of key and delete the key. This command is similar to GET, except for the fact
+/// that it also deletes the key on success (if and only if the key's value type is a string).
+///
+/// # Request
+/// - `key`: The key to retrieve and delete
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value that was stored at the key (now deleted)
+/// - `None` - Key does not exist
+///
+/// # Redis Version
 /// Available since Redis 6.2.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::GetDel;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = GetDel::new("mykey");
+/// let value = client.call(cmd).await?;
+/// // Key is now deleted
+/// match value {
+///     Some(bytes) => println!("Retrieved and deleted: {:?}", bytes),
+///     None => println!("Key did not exist"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct GetDel {
     pub(crate) key: String,
@@ -799,17 +896,36 @@ impl Command for Expire {
     }
 }
 
-/// MSET command - set multiple key-value pairs
+/// MSET command - Set multiple keys to multiple values
 ///
-/// # Example
+/// Sets the given keys to their respective values. MSET replaces existing values with new values,
+/// just as regular SET. MSET is atomic, so all given keys are set at once. It is not possible for
+/// clients to see that some of the keys were updated while others are unchanged.
+///
+/// # Request
+/// - `pairs`: One or more key-value pairs to set
+///
+/// # Response
+/// Returns `String` - Always "OK"
+///
+/// # Redis Version
+/// Available since Redis 1.0.1
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Mset;
+/// use redis_tower::commands::strings::Mset;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Mset::new()
-///     .pair("key1", b"value1".to_vec())
-///     .pair("key2", b"value2".to_vec())
-///     .pair("key3", b"value3".to_vec());
-/// // Response: "OK"
+///     .pair("key1", b"value1")
+///     .pair("key2", b"value2")
+///     .pair("key3", b"value3");
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Mset {
@@ -943,17 +1059,36 @@ impl Command for Msetnx {
     }
 }
 
-/// SETEX command - set with expiration in seconds
+/// SETEX command - Set the value and expiration of a key
 ///
-/// Sets a key to a value with an expiration time in seconds.
-/// Equivalent to `SET key value EX seconds`.
+/// Set key to hold the string value and set key to timeout after a given number of seconds.
+/// This command is equivalent to executing SET key value EX seconds.
+/// SETEX is atomic, and can be reproduced by using the previous two commands inside a MULTI/EXEC block.
 ///
-/// # Example
+/// # Request
+/// - `key`: The key to set
+/// - `seconds`: Expiration time in seconds
+/// - `value`: The value to store
+///
+/// # Response
+/// Returns `()` - Always succeeds
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Setex;
+/// use redis_tower::commands::strings::Setex;
+/// use redis_tower::RedisClient;
 ///
-/// let cmd = Setex::new("mykey", 60, b"myvalue".to_vec());
-/// // Sets key to expire in 60 seconds
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Set key with 60 second expiration
+/// let cmd = Setex::new("session:token", 60, b"abc123");
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Setex {
@@ -1094,7 +1229,35 @@ impl Command for Setnx {
     }
 }
 
-/// SET command - set a value
+/// SET command - Set the string value of a key
+///
+/// Set key to hold the string value. If key already holds a value, it is overwritten,
+/// regardless of its type. Any previous time to live associated with the key is discarded
+/// on successful SET operation.
+///
+/// # Request
+/// - `key`: The key to set
+/// - `value`: The value to store
+///
+/// # Response
+/// Returns `()` - Always succeeds with OK
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::Set;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = Set::new("mykey", b"Hello World");
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Set {
     pub(crate) key: String,
@@ -1131,7 +1294,38 @@ impl Command for Set {
     }
 }
 
-/// DEL command - delete one or more keys
+/// DEL command - Delete one or more keys
+///
+/// Removes the specified keys. A key is ignored if it does not exist.
+///
+/// # Request
+/// - `keys`: One or more keys to delete
+///
+/// # Response
+/// Returns `i64` - The number of keys that were removed
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::Del;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Delete single key
+/// let cmd = Del::new(vec!["mykey".to_string()]);
+/// let count = client.call(cmd).await?;
+/// println!("Deleted {} keys", count);
+///
+/// // Delete multiple keys
+/// let cmd = Del::new(vec!["key1".to_string(), "key2".to_string(), "key3".to_string()]);
+/// let count = client.call(cmd).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Del {
     pub(crate) keys: Vec<String>,
@@ -1166,7 +1360,35 @@ impl Command for Del {
     }
 }
 
-/// INCR command - increment a value atomically
+/// INCR command - Increment the integer value of a key by one
+///
+/// Increments the number stored at key by one. If the key does not exist, it is set to 0
+/// before performing the operation. An error is returned if the key contains a value of the
+/// wrong type or contains a string that can not be represented as integer.
+///
+/// # Request
+/// - `key`: The key to increment
+///
+/// # Response
+/// Returns `i64` - The value of the key after the increment
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::Incr;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = Incr::new("counter");
+/// let new_value = client.call(cmd).await?;
+/// println!("Counter is now: {}", new_value);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Incr {
     pub(crate) key: String,
@@ -1198,7 +1420,35 @@ impl Command for Incr {
     }
 }
 
-/// DECR command - decrement a value atomically
+/// DECR command - Decrement the integer value of a key by one
+///
+/// Decrements the number stored at key by one. If the key does not exist, it is set to 0
+/// before performing the operation. An error is returned if the key contains a value of the
+/// wrong type or contains a string that can not be represented as integer.
+///
+/// # Request
+/// - `key`: The key to decrement
+///
+/// # Response
+/// Returns `i64` - The value of the key after the decrement
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::Decr;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = Decr::new("counter");
+/// let new_value = client.call(cmd).await?;
+/// println!("Counter is now: {}", new_value);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Decr {
     pub(crate) key: String,
@@ -1230,7 +1480,43 @@ impl Command for Decr {
     }
 }
 
-/// MGET command - get multiple values at once
+/// MGET command - Get the values of all the given keys
+///
+/// Returns the values of all specified keys. For every key that does not hold a string value
+/// or does not exist, the special value None is returned. Because of this, the operation never fails.
+///
+/// # Request
+/// - `keys`: One or more keys to retrieve
+///
+/// # Response
+/// Returns `Vec<Option<Bytes>>` - List of values at the specified keys, in the same order as requested.
+/// Each element is:
+/// - `Some(value)` - The value stored at the key
+/// - `None` - Key does not exist or is not a string
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::strings::MGet;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = MGet::new(vec!["key1".to_string(), "key2".to_string(), "key3".to_string()]);
+/// let values = client.call(cmd).await?;
+///
+/// for (i, value) in values.iter().enumerate() {
+///     match value {
+///         Some(bytes) => println!("key{}: {:?}", i+1, bytes),
+///         None => println!("key{}: does not exist", i+1),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct MGet {
     pub(crate) keys: Vec<String>,
