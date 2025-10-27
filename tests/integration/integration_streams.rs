@@ -1,9 +1,7 @@
 mod helpers;
 
-use bytes::Bytes;
 use helpers::standalone::setup_redis;
 use redis_tower::commands::*;
-use std::collections::HashMap;
 
 #[tokio::test]
 async fn test_xadd_and_xlen() {
@@ -50,7 +48,7 @@ async fn test_xadd_with_maxlen() {
         let _: String = client
             .call(
                 XAdd::new(stream)
-                    .field("count", &i.to_string())
+                    .field("count", i.to_string())
                     .maxlen_exact(5), // Keep exactly 5 entries
             )
             .await
@@ -73,7 +71,7 @@ async fn test_xdel() {
         .await
         .unwrap();
 
-    let id2: String = client
+    let _id2: String = client
         .call(XAdd::new(stream).field("data", "entry2"))
         .await
         .unwrap();
@@ -98,7 +96,7 @@ async fn test_xtrim() {
     // Add 10 entries
     for i in 0..10 {
         let _: String = client
-            .call(XAdd::new(stream).field("count", &i.to_string()))
+            .call(XAdd::new(stream).field("count", i.to_string()))
             .await
             .unwrap();
     }
@@ -186,7 +184,7 @@ async fn test_xdel_multiple_ids() {
         .call(XAdd::new(stream).field("n", "3"))
         .await
         .unwrap();
-    let id4: String = client
+    let _id4: String = client
         .call(XAdd::new(stream).field("n", "4"))
         .await
         .unwrap();
@@ -208,7 +206,7 @@ async fn test_xdel_nonexistent_id() {
     let client = setup_redis().await;
     let stream = "del_nonexist_stream";
 
-    let id: String = client
+    let _id: String = client
         .call(XAdd::new(stream).field("data", "test"))
         .await
         .unwrap();
@@ -234,7 +232,7 @@ async fn test_xtrim_approx() {
     // Add 100 entries
     for i in 0..100 {
         let _: String = client
-            .call(XAdd::new(stream).field("count", &i.to_string()))
+            .call(XAdd::new(stream).field("count", i.to_string()))
             .await
             .unwrap();
     }
@@ -245,7 +243,7 @@ async fn test_xtrim_approx() {
     let len: i64 = client.call(XLen::new(stream)).await.unwrap();
     // With ~, Redis may keep significantly more entries for efficiency
     // Typical behavior: keeps entries in macro nodes, which can be 100+ entries
-    assert!(len >= 50 && len <= 100); // Approximate, so allow generous margin
+    assert!((50..=100).contains(&len)); // Approximate, so allow generous margin
 }
 
 #[tokio::test]
@@ -258,9 +256,9 @@ async fn test_stream_as_message_queue() {
         let _: String = client
             .call(
                 XAdd::new(stream)
-                    .field("job_id", &format!("job_{}", i))
+                    .field("job_id", format!("job_{}", i))
                     .field("status", "pending")
-                    .field("data", &format!("payload_{}", i)),
+                    .field("data", format!("payload_{}", i)),
             )
             .await
             .unwrap();
@@ -304,7 +302,7 @@ async fn test_concurrent_xadd() {
         let stream = stream.to_string();
         let handle = tokio::spawn(async move {
             client
-                .call(XAdd::new(&stream).field("worker", &i.to_string()))
+                .call(XAdd::new(&stream).field("worker", i.to_string()))
                 .await
                 .unwrap()
         });

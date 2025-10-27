@@ -18,7 +18,7 @@
 
 use redis_tower::RedisClient;
 use redis_tower::commands::{lists, streams, strings};
-use std::collections::HashMap;
+
 use std::time::Duration;
 
 #[tokio::main]
