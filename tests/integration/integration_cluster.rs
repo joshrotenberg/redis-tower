@@ -40,7 +40,6 @@ use redis_tower::commands::{Del, Get, Set};
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_basic_operations() {
     let client = setup_cluster().await;
     let key = "cluster_test_key";
@@ -61,7 +60,6 @@ async fn test_cluster_basic_operations() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_key_routing() {
     let client = setup_cluster().await;
 
@@ -97,7 +95,6 @@ async fn test_cluster_key_routing() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_hash_tags() {
     let client = setup_cluster().await;
 
@@ -146,7 +143,6 @@ async fn test_cluster_hash_tags() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_moved_redirect() {
     let client = setup_cluster().await;
 
@@ -171,7 +167,6 @@ async fn test_cluster_moved_redirect() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_multiple_keys_same_slot() {
     let client = setup_cluster().await;
 
@@ -204,7 +199,6 @@ async fn test_cluster_multiple_keys_same_slot() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_connection_to_different_seeds() {
     // Setup cluster once
     let _ = setup_cluster().await;
@@ -239,7 +233,6 @@ async fn test_cluster_connection_to_different_seeds() {
 
 #[tokio::test]
 #[cfg(feature = "cluster")]
-#[ignore = "Docker networking issue - CLUSTER SLOTS returns internal IPs"]
 async fn test_cluster_concurrent_operations() {
     use tokio::task::JoinSet;
 
