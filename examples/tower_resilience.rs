@@ -11,7 +11,9 @@ use std::time::Duration;
 use tower::ServiceBuilder;
 use tower::ServiceExt;
 use tower_resilience::{
-    CircuitBreakerLayer, ExponentialBackoff, RateLimitLayer, RetryLayer, TimeoutLayer,
+    circuitbreaker::CircuitBreakerLayer,
+    retry::{ExponentialBackoff, RetryLayer},
+    timelimiter::TimeLimiterLayer,
 };
 
 #[tokio::main]

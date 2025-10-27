@@ -14,14 +14,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::Mutex;
 use tokio_util::codec::Framed;
 use tower::Service;
 
-/// Stream type that can be either plain TCP or TLS
+/// Stream type that can be either plain TCP, Unix socket, or TLS
 pub(crate) enum RedisStream {
     Plain(TcpStream),
+    Unix(UnixStream),
     #[cfg(feature = "tls-native-tls")]
     NativeTls(Box<tokio_native_tls::TlsStream<TcpStream>>),
     #[cfg(feature = "tls-rustls")]
@@ -36,6 +37,7 @@ impl AsyncRead for RedisStream {
     ) -> Poll<std::io::Result<()>> {
         match &mut *self {
             RedisStream::Plain(s) => Pin::new(s).poll_read(cx, buf),
+            RedisStream::Unix(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(feature = "tls-native-tls")]
             RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_read(cx, buf),
             #[cfg(feature = "tls-rustls")]
@@ -52,6 +54,7 @@ impl AsyncWrite for RedisStream {
     ) -> Poll<Result<usize, std::io::Error>> {
         match &mut *self {
             RedisStream::Plain(s) => Pin::new(s).poll_write(cx, buf),
+            RedisStream::Unix(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(feature = "tls-native-tls")]
             RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_write(cx, buf),
             #[cfg(feature = "tls-rustls")]
@@ -65,6 +68,7 @@ impl AsyncWrite for RedisStream {
     ) -> Poll<Result<(), std::io::Error>> {
         match &mut *self {
             RedisStream::Plain(s) => Pin::new(s).poll_flush(cx),
+            RedisStream::Unix(s) => Pin::new(s).poll_flush(cx),
             #[cfg(feature = "tls-native-tls")]
             RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_flush(cx),
             #[cfg(feature = "tls-rustls")]
@@ -78,6 +82,7 @@ impl AsyncWrite for RedisStream {
     ) -> Poll<Result<(), std::io::Error>> {
         match &mut *self {
             RedisStream::Plain(s) => Pin::new(s).poll_shutdown(cx),
+            RedisStream::Unix(s) => Pin::new(s).poll_shutdown(cx),
             #[cfg(feature = "tls-native-tls")]
             RedisStream::NativeTls(s) => Pin::new(s.as_mut()).poll_shutdown(cx),
             #[cfg(feature = "tls-rustls")]
@@ -131,30 +136,40 @@ impl RedisConnection {
     #[tracing::instrument(fields(addr, tls = ?tls))]
     pub async fn connect_with_config(addr: &str, tls: TlsConfig) -> Result<Self, RedisError> {
         tracing::info!("establishing connection");
-        let tcp_stream = TcpStream::connect(addr).await?;
-        tracing::debug!("TCP connection established");
 
-        let stream = match tls {
-            TlsConfig::None => RedisStream::Plain(tcp_stream),
+        // Check if this is a Unix socket path (starts with / or ./)
+        let stream = if addr.starts_with('/') || addr.starts_with("./") {
+            tracing::debug!("connecting to Unix socket");
+            let unix_stream = UnixStream::connect(addr).await?;
+            tracing::debug!("Unix socket connection established");
+            RedisStream::Unix(unix_stream)
+        } else {
+            // TCP connection
+            let tcp_stream = TcpStream::connect(addr).await?;
+            tracing::debug!("TCP connection established");
 
-            #[cfg(feature = "tls-native-tls")]
-            TlsConfig::NativeTls(config) => {
-                tracing::debug!("establishing TLS connection (native-tls)");
-                // Extract domain from address for SNI
-                let domain = addr.split(':').next().unwrap_or(addr);
-                let tls_stream = config.connect(domain, tcp_stream).await?;
-                tracing::debug!("TLS handshake complete");
-                RedisStream::NativeTls(Box::new(tls_stream))
-            }
+            match tls {
+                TlsConfig::None => RedisStream::Plain(tcp_stream),
 
-            #[cfg(feature = "tls-rustls")]
-            TlsConfig::Rustls(config) => {
-                tracing::debug!("establishing TLS connection (rustls)");
-                // Extract domain from address for SNI
-                let domain = addr.split(':').next().unwrap_or(addr);
-                let tls_stream = config.connect(domain, tcp_stream).await?;
-                tracing::debug!("TLS handshake complete");
-                RedisStream::Rustls(Box::new(tls_stream))
+                #[cfg(feature = "tls-native-tls")]
+                TlsConfig::NativeTls(config) => {
+                    tracing::debug!("establishing TLS connection (native-tls)");
+                    // Extract domain from address for SNI
+                    let domain = addr.split(':').next().unwrap_or(addr);
+                    let tls_stream = config.connect(domain, tcp_stream).await?;
+                    tracing::debug!("TLS handshake complete");
+                    RedisStream::NativeTls(Box::new(tls_stream))
+                }
+
+                #[cfg(feature = "tls-rustls")]
+                TlsConfig::Rustls(config) => {
+                    tracing::debug!("establishing TLS connection (rustls)");
+                    // Extract domain from address for SNI
+                    let domain = addr.split(':').next().unwrap_or(addr);
+                    let tls_stream = config.connect(domain, tcp_stream).await?;
+                    tracing::debug!("TLS handshake complete");
+                    RedisStream::Rustls(Box::new(tls_stream))
+                }
             }
         };
 
@@ -339,7 +354,27 @@ impl RedisClient {
     where
         Cmd: Command,
     {
-        self.connection.execute(command).await
+        self.connection.call(command).await
+    }
+
+    /// Execute a command (deprecated alias for call)
+    ///
+    /// # Deprecated
+    /// Use [`call`](Self::call) instead for consistency with Tower's Service trait.
+    #[deprecated(since = "0.2.0", note = "Use `call()` instead")]
+    pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command,
+    {
+        self.call(command).await
+    }
+
+    /// Get the inner connection
+    ///
+    /// This consumes the client and returns the underlying connection.
+    /// Useful for operations that need direct connection access, like MONITOR streaming.
+    pub fn into_inner(self) -> RedisConnection {
+        self.connection
     }
 }
 
@@ -383,6 +418,7 @@ impl ResilientRedisClient {
             config.reconnect,
             config.health_check,
             config.metrics,
+            config.hooks,
         )
         .await?;
 
@@ -441,7 +477,19 @@ impl ResilientRedisClient {
     where
         Cmd: Command + Clone,
     {
-        self.connection.execute(command).await
+        self.connection.call(command).await
+    }
+
+    /// Execute a command (deprecated alias for call)
+    ///
+    /// # Deprecated
+    /// Use [`call`](Self::call) instead for consistency with Tower's Service trait.
+    #[deprecated(since = "0.2.0", note = "Use `call()` instead")]
+    pub async fn execute<Cmd>(&self, command: Cmd) -> Result<Cmd::Response, RedisError>
+    where
+        Cmd: Command + Clone,
+    {
+        self.call(command).await
     }
 
     /// Get the current health status of the connection
