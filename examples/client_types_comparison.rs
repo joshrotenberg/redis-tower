@@ -8,10 +8,11 @@
 //!
 //! Run with: cargo run --example client_types_comparison
 
-use redis_tower::client::{RedisClient, RedisConnection, ResilientRedisClient};
+use redis_tower::ResilientRedisClient;
+use redis_tower::client::{RedisClient, RedisConnection};
 use redis_tower::commands::{Get, Incr, Set};
 use redis_tower::config::ClientConfig;
-use redis_tower::pool::{ConnectionPool, PoolConfig};
+// Note: ConnectionPool is not yet implemented
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -68,16 +69,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Use when: You need automatic reconnection for unreliable networks");
     {
         // Configure reconnection behavior
-        let config = ClientConfig::builder()
-            .address("127.0.0.1:6379")
-            .reconnect_exponential(
+        use tower_resilience::reconnect::{ReconnectConfig, ReconnectPolicy};
+
+        let reconnect = ReconnectConfig::builder()
+            .policy(ReconnectPolicy::exponential(
                 std::time::Duration::from_millis(100), // min delay
                 std::time::Duration::from_secs(5),     // max delay
-            )
-            .max_reconnect_attempts(10) // or unlimited with .unlimited_reconnect_attempts()
+            ))
+            .max_attempts(10)
             .build();
 
-        let client = ResilientRedisClient::connect_with_full_config(config).await?;
+        let config = ClientConfig::builder().reconnect(reconnect).build();
+
+        let client =
+            ResilientRedisClient::connect_with_full_config("127.0.0.1:6379", config).await?;
 
         // Same .call() API, but reconnects automatically on failure
         client
@@ -94,65 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!();
 
-    // 4. ConnectionPool - Multiple connections with pooling
-    println!("4. ConnectionPool - Multiple connections with round-robin");
-    println!("   Use when: You have high concurrency needs (many concurrent requests)");
-    {
-        let pool_config = PoolConfig::builder()
-            .max_size(10) // Up to 10 connections
-            .min_idle(2) // Keep 2 idle connections ready
-            .connection_timeout(std::time::Duration::from_secs(5))
-            .build();
-
-        let pool = ConnectionPool::new("127.0.0.1:6379", pool_config).await?;
-
-        // Get a connection from the pool
-        let conn = pool.get().await?;
-
-        // Use .execute() on pooled connection
-        conn.execute(Set::new("demo:pool", "pool_value")).await?;
-        let value: Option<bytes::Bytes> = conn.execute(Get::new("demo:pool")).await?;
-        println!(
-            "   Value: {:?}",
-            value.map(|b| String::from_utf8_lossy(&b).to_string())
-        );
-
-        // Connection automatically returned to pool when dropped
-        drop(conn);
-
-        // Simulate concurrent requests
-        let mut handles = vec![];
-        for i in 0..5 {
-            let pool = pool.clone();
-            let handle = tokio::spawn(async move {
-                let conn = pool.get().await.unwrap();
-                let count: i64 = conn.execute(Incr::new("demo:pool_counter")).await.unwrap();
-                println!("   Task {} incremented counter to: {}", i, count);
-            });
-            handles.push(handle);
-        }
-
-        // Wait for all tasks
-        for handle in handles {
-            handle.await?;
-        }
-
-        // Check pool stats
-        let stats = pool.stats();
-        println!(
-            "   Pool stats: {} active, {} idle, {} total created",
-            stats
-                .active_connections
-                .load(std::sync::atomic::Ordering::Relaxed),
-            stats
-                .idle_connections
-                .load(std::sync::atomic::Ordering::Relaxed),
-            stats
-                .total_created
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    }
-    println!();
+    // 4. ConnectionPool - Not yet implemented
+    // TODO: Implement ConnectionPool for multiple connections with pooling
+    println!("4. ConnectionPool - Not yet implemented");
+    println!("   Future: Multiple connections with round-robin for high concurrency");
 
     // Decision Guide
     println!("=== When to Use Each ===\n");
@@ -181,13 +131,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ✓ Health checking");
     println!("  ✗ No pooling (single connection)\n");
 
-    println!("ConnectionPool:");
-    println!("  ✓ High concurrency (100s-1000s requests/sec)");
-    println!("  ✓ Web servers");
-    println!("  ✓ Multiple concurrent tasks");
-    println!("  ✓ Connection reuse");
-    println!("  ✓ Round-robin load distribution");
-    println!("  ⚠ Use with RedisConnection (not RedisClient)\n");
+    println!("ConnectionPool: (Not yet implemented)");
+    println!("  Future features:");
+    println!("  • High concurrency (100s-1000s requests/sec)");
+    println!("  • Web servers");
+    println!("  • Multiple concurrent tasks");
+    println!("  • Connection reuse\n");
 
     println!("=== Common Patterns ===\n");
 
@@ -198,13 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  → ResilientRedisClient (auto-reconnect for long-running process)\n");
 
     println!("Web server (Axum/Actix):");
-    println!("  → ConnectionPool (handle concurrent requests efficiently)\n");
+    println!("  → ResilientRedisClient (for now, ConnectionPool planned)\n");
 
     println!("Microservice with Tower middleware:");
     println!("  → ResilientRedisClient + Tower layers (retry, circuit breaker, timeout)\n");
-
-    println!("Transaction-heavy application:");
-    println!("  → ConnectionPool + RedisConnection (get from pool, run transaction)\n");
 
     Ok(())
 }
