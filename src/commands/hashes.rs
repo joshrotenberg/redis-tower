@@ -6,7 +6,40 @@ use crate::types::RedisError;
 use bytes::Bytes;
 use std::collections::HashMap;
 
-/// HGET command - get a field from a hash
+/// HGET command - Get the value of a hash field
+///
+/// Returns the value associated with field in the hash stored at key.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `field`: The field name
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(value)` - The value associated with the field
+/// - `None` - Field does not exist or hash does not exist
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HGet;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HGet::new("user:1000", "name");
+/// let name = client.call(cmd).await?;
+///
+/// match name {
+///     Some(bytes) => println!("Name: {:?}", bytes),
+///     None => println!("Field not found"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HGet {
     pub(crate) key: String,
@@ -507,7 +540,43 @@ mod tests {
     }
 }
 
-/// HSET command - set a field in a hash
+/// HSET command - Set the value of a hash field
+///
+/// Sets field in the hash stored at key to value. If key does not exist, a new key holding
+/// a hash is created. If field already exists in the hash, it is overwritten.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `field`: The field name to set
+/// - `value`: The value to store
+///
+/// # Response
+/// Returns `i64`:
+/// - `1` - New field was created
+/// - `0` - Existing field was updated
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HSet;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HSet::new("user:1000", "name", b"Alice");
+/// let is_new = client.call(cmd).await?;
+///
+/// if is_new == 1 {
+///     println!("Created new field");
+/// } else {
+///     println!("Updated existing field");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HSet {
     pub(crate) key: String,
@@ -753,7 +822,41 @@ impl ReadOnly for HIncrBy {}
 impl ReadOnly for HIncrByFloat {}
 impl ReadOnly for HSetNx {}
 
-/// HEXISTS command - check if field exists
+/// HEXISTS command - Determine if a hash field exists
+///
+/// Returns if field is an existing field in the hash stored at key.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `field`: The field name to check
+///
+/// # Response
+/// Returns `bool`:
+/// - `true` - The hash contains the field
+/// - `false` - The hash does not contain the field, or key does not exist
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HExists;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HExists::new("user:1000", "email");
+/// let exists = client.call(cmd).await?;
+///
+/// if exists {
+///     println!("Email field exists");
+/// } else {
+///     println!("Email field does not exist");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HExists {
     pub(crate) key: String,
@@ -790,7 +893,33 @@ impl Command for HExists {
     }
 }
 
-/// HLEN command - get number of fields
+/// HLEN command - Get the number of fields in a hash
+///
+/// Returns the number of fields contained in the hash stored at key.
+///
+/// # Request
+/// - `key`: The hash key
+///
+/// # Response
+/// Returns `i64` - The number of fields in the hash, or 0 if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HLen;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HLen::new("user:1000");
+/// let count = client.call(cmd).await?;
+/// println!("Hash has {} fields", count);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HLen {
     pub(crate) key: String,
@@ -822,7 +951,37 @@ impl Command for HLen {
     }
 }
 
-/// HKEYS command - get all field names
+/// HKEYS command - Get all field names in a hash
+///
+/// Returns all field names in the hash stored at key.
+///
+/// # Request
+/// - `key`: The hash key
+///
+/// # Response
+/// Returns `Vec<String>` - List of field names in the hash.
+/// Empty vector if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HKeys;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HKeys::new("user:1000");
+/// let fields = client.call(cmd).await?;
+///
+/// for field in fields {
+///     println!("Field: {}", field);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HKeys {
     pub(crate) key: String,
@@ -865,7 +1024,37 @@ impl Command for HKeys {
     }
 }
 
-/// HVALS command - get all values
+/// HVALS command - Get all values in a hash
+///
+/// Returns all values in the hash stored at key.
+///
+/// # Request
+/// - `key`: The hash key
+///
+/// # Response
+/// Returns `Vec<Bytes>` - List of values in the hash.
+/// Empty vector if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HVals;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HVals::new("user:1000");
+/// let values = client.call(cmd).await?;
+///
+/// for value in values {
+///     println!("Value: {:?}", value);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HVals {
     pub(crate) key: String,
@@ -908,7 +1097,46 @@ impl Command for HVals {
     }
 }
 
-/// HMGET command - get multiple field values
+/// HMGET command - Get the values of multiple hash fields
+///
+/// Returns the values associated with the specified fields in the hash stored at key.
+/// For every field that does not exist in the hash, None is returned. Because non-existing
+/// keys are treated as empty hashes, running HMGET against a non-existing key will return
+/// a list of None values.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `fields`: One or more field names to retrieve
+///
+/// # Response
+/// Returns `Vec<Option<Bytes>>` - List of values in the same order as the requested fields.
+/// Each element is:
+/// - `Some(value)` - The value for that field
+/// - `None` - Field does not exist in the hash
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HMGet;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HMGet::new("user:1000", vec!["name".to_string(), "email".to_string()]);
+/// let values = client.call(cmd).await?;
+///
+/// for (i, value) in values.iter().enumerate() {
+///     match value {
+///         Some(bytes) => println!("Field {}: {:?}", i, bytes),
+///         None => println!("Field {} does not exist", i),
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HMGet {
     pub(crate) key: String,
@@ -968,7 +1196,37 @@ impl Command for HMGet {
     }
 }
 
-/// HINCRBY command - increment hash field by integer
+/// HINCRBY command - Increment the integer value of a hash field by the given number
+///
+/// Increments the number stored at field in the hash stored at key by increment. If key does
+/// not exist, a new key holding a hash is created. If field does not exist the value is set
+/// to 0 before the operation is performed.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `field`: The field name to increment
+/// - `increment`: The increment value (can be negative for decrement)
+///
+/// # Response
+/// Returns `i64` - The value of the field after the increment operation
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HIncrBy;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HIncrBy::new("user:1000", "login_count", 1);
+/// let new_count = client.call(cmd).await?;
+/// println!("Login count is now: {}", new_count);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HIncrBy {
     pub(crate) key: String,
@@ -1089,7 +1347,38 @@ impl Command for HStrLen {
     }
 }
 
-/// HGETALL command - get all fields and values from a hash
+/// HGETALL command - Get all fields and values in a hash
+///
+/// Returns all fields and values of the hash stored at key. In the returned value,
+/// every field name is followed by its value.
+///
+/// # Request
+/// - `key`: The hash key
+///
+/// # Response
+/// Returns `HashMap<String, Bytes>` - All field-value pairs in the hash.
+/// Empty HashMap if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HGetAll;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = HGetAll::new("user:1000");
+/// let fields = client.call(cmd).await?;
+///
+/// for (field, value) in fields {
+///     println!("{}: {:?}", field, value);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HGetAll {
     pub(crate) key: String,
@@ -1148,7 +1437,42 @@ impl Command for HGetAll {
     }
 }
 
-/// HDEL command - delete fields from a hash
+/// HDEL command - Delete one or more hash fields
+///
+/// Removes the specified fields from the hash stored at key. Specified fields that do not
+/// exist within this hash are ignored. If key does not exist, it is treated as an empty hash
+/// and this command returns 0.
+///
+/// # Request
+/// - `key`: The hash key
+/// - `fields`: One or more field names to delete
+///
+/// # Response
+/// Returns `i64` - The number of fields that were removed from the hash,
+/// not including specified but non-existing fields.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::hashes::HDel;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Delete single field
+/// let cmd = HDel::single("user:1000", "email");
+/// let count = client.call(cmd).await?;
+///
+/// // Delete multiple fields
+/// let cmd = HDel::new("user:1000", vec!["email".to_string(), "phone".to_string()]);
+/// let count = client.call(cmd).await?;
+/// println!("Deleted {} fields", count);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HDel {
     pub(crate) key: String,
