@@ -1,43 +1,7 @@
-//! Integration tests for Pub/Sub commands
-//!
-//! **Note on SUBSCRIBE/PSUBSCRIBE**: These commands put the connection into pub/sub mode
-//! and require using `PubSubConnection` instead of `RedisClient`. These tests focus on
-//! commands that work with regular connections:
-//! - PUBLISH (works on any connection)
-//! - PUBSUB CHANNELS/NUMSUB/NUMPAT (introspection commands)
-//!
-//! For full pub/sub functionality with SUBSCRIBE/PSUBSCRIBE, see examples/pubsub.rs
-//! which demonstrates using `PubSubConnection`.
-//!
-//! Run with: cargo test --test integration_pubsub
+mod helpers;
 
-use redis_tower::client::RedisClient;
+use helpers::standalone::setup_redis;
 use redis_tower::commands::pubsub::*;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::redis::Redis;
-
-/// Helper to create a Redis client connected to a testcontainer
-async fn setup_redis() -> RedisClient {
-    let container = Redis::default()
-        .start()
-        .await
-        .expect("Failed to start Redis container");
-
-    let host = container.get_host().await.expect("Failed to get host");
-    let port = container
-        .get_host_port_ipv4(6379)
-        .await
-        .expect("Failed to get port");
-
-    let client = RedisClient::connect(&format!("{}:{}", host, port))
-        .await
-        .expect("Failed to connect to Redis");
-
-    // Keep container alive by leaking it (tests are short-lived)
-    std::mem::forget(container);
-
-    client
-}
 
 #[tokio::test]
 async fn test_publish_no_subscribers() {
