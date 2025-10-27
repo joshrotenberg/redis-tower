@@ -1,14 +1,13 @@
 mod helpers;
 
 use bytes::Bytes;
-use helpers::standalone::setup_redis;
-use redis_tower::client::RedisConnection;
+use helpers::standalone::setup_redis_connection;
 use redis_tower::commands::strings::{Del, Get, Incr, Set};
 use redis_tower::transaction::{Transaction, Unwatch, Watch};
 
 #[tokio::test]
 async fn test_basic_transaction() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Create transaction and queue commands
     let mut tx = Transaction::new(&conn);
@@ -31,7 +30,7 @@ async fn test_basic_transaction() {
 
 #[tokio::test]
 async fn test_discard_transaction() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Start transaction and queue command
     let mut tx = Transaction::new(&conn);
@@ -49,7 +48,7 @@ async fn test_discard_transaction() {
 
 #[tokio::test]
 async fn test_transaction_with_incr() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set initial value
     conn.execute(Set::new("tx_counter", "0")).await.unwrap();
@@ -76,7 +75,7 @@ async fn test_transaction_with_incr() {
 
 #[tokio::test]
 async fn test_transaction_return_values() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     let mut tx = Transaction::new(&conn);
     tx.queue(Set::new("k1", "v1")).await.unwrap();
@@ -98,7 +97,7 @@ async fn test_transaction_return_values() {
 
 #[tokio::test]
 async fn test_empty_transaction() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Execute empty transaction - should fail
     let tx = Transaction::new(&conn);
@@ -110,7 +109,7 @@ async fn test_empty_transaction() {
 
 #[tokio::test]
 async fn test_multiple_transactions() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // First transaction
     let mut tx1 = Transaction::new(&conn);
@@ -132,7 +131,7 @@ async fn test_multiple_transactions() {
 
 #[tokio::test]
 async fn test_transaction_with_watch() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up a key to watch
     conn.execute(Set::new("watched_key", "initial"))
@@ -162,7 +161,7 @@ async fn test_transaction_with_watch() {
 
 #[tokio::test]
 async fn test_transaction_with_successful_watch() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up a key to watch
     conn.execute(Set::new("watched_key2", "initial"))
@@ -187,7 +186,7 @@ async fn test_transaction_with_successful_watch() {
 
 #[tokio::test]
 async fn test_unwatch() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up and watch a key
     conn.execute(Set::new("watch_unwatch", "initial"))
@@ -215,7 +214,7 @@ async fn test_unwatch() {
 
 #[tokio::test]
 async fn test_transaction_atomicity() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up two counters
     conn.execute(Set::new("counter_a", "0")).await.unwrap();
@@ -245,7 +244,7 @@ async fn test_transaction_atomicity() {
 
 #[tokio::test]
 async fn test_transaction_with_del() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up some keys
     conn.execute(Set::new("del_key1", "value1")).await.unwrap();
@@ -272,7 +271,7 @@ async fn test_transaction_with_del() {
 
 #[tokio::test]
 async fn test_discard_clears_watched_keys() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Watch a key
     conn.execute(Set::new("discard_watch", "initial"))
@@ -302,7 +301,7 @@ async fn test_discard_clears_watched_keys() {
 
 #[tokio::test]
 async fn test_watch_multiple_keys() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Set up multiple keys
     conn.execute(Set::new("multi_watch_1", "v1")).await.unwrap();
@@ -330,7 +329,7 @@ async fn test_watch_multiple_keys() {
 
 #[tokio::test]
 async fn test_transaction_mixed_commands() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Mix of different command types in one transaction
     let mut tx = Transaction::new(&conn);
@@ -348,7 +347,7 @@ async fn test_transaction_mixed_commands() {
 
 #[tokio::test]
 async fn test_large_transaction() {
-    let conn = setup_redis().await;
+    let conn = setup_redis_connection().await;
 
     // Queue many commands
     let mut tx = Transaction::new(&conn);

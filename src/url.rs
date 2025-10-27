@@ -5,14 +5,21 @@
 use crate::tls::TlsConfig;
 use crate::types::RedisError;
 
+/// Connection type for Redis
+#[derive(Debug, Clone)]
+pub enum ConnectionType {
+    /// TCP connection with host and port
+    Tcp { host: String, port: u16 },
+    /// Unix domain socket with path
+    Unix { path: String },
+}
+
 /// Parsed Redis URL
 #[derive(Debug, Clone)]
 pub struct RedisUrl {
-    /// The host to connect to
-    pub host: String,
-    /// The port to connect to
-    pub port: u16,
-    /// TLS configuration (automatic for rediss://)
+    /// Connection type (TCP or Unix socket)
+    pub connection: ConnectionType,
+    /// TLS configuration (automatic for rediss://, not applicable for unix://)
     pub tls: TlsConfig,
     /// Database number (from URL path)
     pub db: Option<u8>,
@@ -30,6 +37,8 @@ impl RedisUrl {
     /// - `redis://localhost:6379/0`
     /// - `redis://user:pass@localhost:6379`
     /// - `rediss://localhost:6380` (TLS enabled automatically)
+    /// - `unix:///tmp/redis.sock` (Unix domain socket)
+    /// - `unix:///tmp/redis.sock?db=0` (Unix socket with database)
     /// - `localhost:6379` (defaults to redis://)
     ///
     /// # Example
@@ -38,6 +47,8 @@ impl RedisUrl {
     ///
     /// let url = RedisUrl::parse("rediss://localhost:6380").unwrap();
     /// assert!(url.tls.is_enabled());
+    ///
+    /// let unix_url = RedisUrl::parse("unix:///tmp/redis.sock").unwrap();
     /// ```
     pub fn parse(url: &str) -> Result<Self, RedisError> {
         // Handle URLs without scheme
@@ -51,6 +62,11 @@ impl RedisUrl {
         let (scheme, rest) = url
             .split_once("://")
             .ok_or_else(|| RedisError::Connection("Invalid URL format".to_string()))?;
+
+        // Handle Unix socket URLs separately
+        if scheme == "unix" {
+            return Self::parse_unix_url(rest);
+        }
 
         let use_tls = match scheme {
             "redis" => false,
@@ -139,8 +155,7 @@ impl RedisUrl {
         };
 
         Ok(Self {
-            host,
-            port,
+            connection: ConnectionType::Tcp { host, port },
             tls,
             db,
             username,
@@ -148,9 +163,72 @@ impl RedisUrl {
         })
     }
 
-    /// Get the address string (host:port)
+    /// Parse a Unix socket URL
+    ///
+    /// Format: unix:///path/to/socket or unix:///path/to/socket?db=0
+    fn parse_unix_url(rest: &str) -> Result<Self, RedisError> {
+        // Split path and query string
+        let (path, query) = if let Some((p, q)) = rest.split_once('?') {
+            (p, Some(q))
+        } else {
+            (rest, None)
+        };
+
+        // Path must be absolute
+        if !path.starts_with('/') {
+            return Err(RedisError::Connection(
+                "Unix socket path must be absolute".to_string(),
+            ));
+        }
+
+        // Parse query parameters
+        let mut db = None;
+        let mut username = None;
+        let mut password = None;
+
+        if let Some(query) = query {
+            for param in query.split('&') {
+                if let Some((key, value)) = param.split_once('=') {
+                    match key {
+                        "db" => {
+                            db = Some(value.parse::<u8>().map_err(|_| {
+                                RedisError::Connection(format!("Invalid database: {}", value))
+                            })?);
+                        }
+                        "user" => {
+                            username = Some(value.to_string());
+                        }
+                        "password" => {
+                            password = Some(value.to_string());
+                        }
+                        _ => {} // Ignore unknown parameters
+                    }
+                }
+            }
+        }
+
+        Ok(Self {
+            connection: ConnectionType::Unix {
+                path: path.to_string(),
+            },
+            tls: TlsConfig::None, // TLS not applicable for Unix sockets
+            db,
+            username,
+            password,
+        })
+    }
+
+    /// Get the address string (host:port for TCP, path for Unix)
     pub fn addr(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        match &self.connection {
+            ConnectionType::Tcp { host, port } => format!("{}:{}", host, port),
+            ConnectionType::Unix { path } => path.clone(),
+        }
+    }
+
+    /// Check if this is a Unix socket connection
+    pub fn is_unix(&self) -> bool {
+        matches!(self.connection, ConnectionType::Unix { .. })
     }
 }
 
@@ -161,8 +239,13 @@ mod tests {
     #[test]
     fn test_parse_simple_redis() {
         let url = RedisUrl::parse("redis://localhost:6379").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert!(!url.tls.is_enabled());
         assert_eq!(url.db, None);
         assert_eq!(url.username, None);
@@ -172,16 +255,26 @@ mod tests {
     #[test]
     fn test_parse_redis_with_db() {
         let url = RedisUrl::parse("redis://localhost:6379/5").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert_eq!(url.db, Some(5));
     }
 
     #[test]
     fn test_parse_redis_with_password() {
         let url = RedisUrl::parse("redis://:mypassword@localhost:6379").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert_eq!(url.username, None);
         assert_eq!(url.password, Some("mypassword".to_string()));
     }
@@ -189,8 +282,13 @@ mod tests {
     #[test]
     fn test_parse_redis_with_username_password() {
         let url = RedisUrl::parse("redis://user:pass@localhost:6379").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert_eq!(url.username, Some("user".to_string()));
         assert_eq!(url.password, Some("pass".to_string()));
     }
@@ -199,32 +297,52 @@ mod tests {
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     fn test_parse_rediss() {
         let url = RedisUrl::parse("rediss://localhost:6380").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6380);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6380);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert!(url.tls.is_enabled());
     }
 
     #[test]
     fn test_parse_no_scheme() {
         let url = RedisUrl::parse("localhost:6379").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
         assert!(!url.tls.is_enabled());
     }
 
     #[test]
     fn test_parse_default_port() {
         let url = RedisUrl::parse("redis://localhost").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6379);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6379);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
     }
 
     #[test]
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     fn test_parse_rediss_default_port() {
         let url = RedisUrl::parse("rediss://localhost").unwrap();
-        assert_eq!(url.host, "localhost");
-        assert_eq!(url.port, 6380);
+        match &url.connection {
+            ConnectionType::Tcp { host, port } => {
+                assert_eq!(host, "localhost");
+                assert_eq!(*port, 6380);
+            }
+            _ => panic!("Expected TCP connection"),
+        }
     }
 
     #[test]
@@ -249,5 +367,57 @@ mod tests {
     fn test_addr() {
         let url = RedisUrl::parse("redis://localhost:6379").unwrap();
         assert_eq!(url.addr(), "localhost:6379");
+    }
+
+    #[test]
+    fn test_parse_unix_socket() {
+        let url = RedisUrl::parse("unix:///tmp/redis.sock").unwrap();
+        match &url.connection {
+            ConnectionType::Unix { path } => {
+                assert_eq!(path, "/tmp/redis.sock");
+            }
+            _ => panic!("Expected Unix connection"),
+        }
+        assert!(!url.tls.is_enabled());
+        assert_eq!(url.db, None);
+        assert!(url.is_unix());
+    }
+
+    #[test]
+    fn test_parse_unix_socket_with_db() {
+        let url = RedisUrl::parse("unix:///var/run/redis.sock?db=5").unwrap();
+        match &url.connection {
+            ConnectionType::Unix { path } => {
+                assert_eq!(path, "/var/run/redis.sock");
+            }
+            _ => panic!("Expected Unix connection"),
+        }
+        assert_eq!(url.db, Some(5));
+        assert!(url.is_unix());
+    }
+
+    #[test]
+    fn test_parse_unix_socket_with_auth() {
+        let url = RedisUrl::parse("unix:///tmp/redis.sock?user=admin&password=secret").unwrap();
+        match &url.connection {
+            ConnectionType::Unix { path } => {
+                assert_eq!(path, "/tmp/redis.sock");
+            }
+            _ => panic!("Expected Unix connection"),
+        }
+        assert_eq!(url.username, Some("admin".to_string()));
+        assert_eq!(url.password, Some("secret".to_string()));
+    }
+
+    #[test]
+    fn test_parse_unix_socket_addr() {
+        let url = RedisUrl::parse("unix:///tmp/redis.sock").unwrap();
+        assert_eq!(url.addr(), "/tmp/redis.sock");
+    }
+
+    #[test]
+    fn test_parse_unix_socket_invalid_relative_path() {
+        let result = RedisUrl::parse("unix://tmp/redis.sock");
+        assert!(result.is_err());
     }
 }
