@@ -196,6 +196,23 @@ name = "integration_sentinel"
 path = "tests/integration/integration_sentinel.rs"
 required-features = ["sentinel"]
 
+# New integration tests for remaining command modules
+[[test]]
+name = "integration_keys"
+path = "tests/integration/integration_keys.rs"
+
+[[test]]
+name = "integration_server"
+path = "tests/integration/integration_server.rs"
+
+[[test]]
+name = "integration_bitmap"
+path = "tests/integration/integration_bitmap.rs"
+
+[[test]]
+name = "integration_connection"
+path = "tests/integration/integration_connection.rs"
+
 [profile.release]
 opt-level = 3
 lto = true
