@@ -341,6 +341,14 @@ impl RedisClient {
     {
         self.connection.execute(command).await
     }
+
+    /// Get the inner connection
+    ///
+    /// This consumes the client and returns the underlying connection.
+    /// Useful for operations that need direct connection access, like MONITOR streaming.
+    pub fn into_inner(self) -> RedisConnection {
+        self.connection
+    }
 }
 
 impl ResilientRedisClient {

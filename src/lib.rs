@@ -182,6 +182,7 @@ pub mod config;
 pub mod connection_pool;
 pub mod health;
 pub mod metrics;
+pub mod monitor;
 pub mod parser;
 pub mod pipeline;
 pub mod pool;
