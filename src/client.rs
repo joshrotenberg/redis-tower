@@ -391,6 +391,7 @@ impl ResilientRedisClient {
             config.reconnect,
             config.health_check,
             config.metrics,
+            config.hooks,
         )
         .await?;
 

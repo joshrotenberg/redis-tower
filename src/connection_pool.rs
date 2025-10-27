@@ -8,6 +8,7 @@ use tower_resilience::reconnect::ReconnectConfig;
 use crate::client::RedisConnection;
 use crate::commands::Command;
 use crate::health::{HealthCheckConfig, HealthChecker};
+use crate::hooks::Hooks;
 use crate::metrics::MetricsCollector;
 use crate::tls::TlsConfig;
 use crate::types::RedisError;
@@ -25,6 +26,8 @@ pub struct ResilientConnection {
     reconnect_config: Arc<ReconnectConfig>,
     health_checker: HealthChecker,
     metrics: MetricsCollector,
+    hooks: Hooks,
+    attempt_counter: Arc<Mutex<usize>>,
 }
 
 impl ResilientConnection {
@@ -35,9 +38,13 @@ impl ResilientConnection {
         reconnect_config: ReconnectConfig,
         health_check_config: HealthCheckConfig,
         metrics: MetricsCollector,
+        hooks: Hooks,
     ) -> Result<Self, RedisError> {
         let connection = RedisConnection::connect_with_config(&addr, tls.clone()).await?;
         metrics.record_connection_created();
+
+        // Notify initial connection
+        hooks.notify_connect(1).await;
 
         Ok(Self {
             addr: Arc::new(addr),
@@ -46,6 +53,8 @@ impl ResilientConnection {
             reconnect_config: Arc::new(reconnect_config),
             health_checker: HealthChecker::new(health_check_config),
             metrics,
+            hooks,
+            attempt_counter: Arc::new(Mutex::new(1)),
         })
     }
 
@@ -71,8 +80,24 @@ impl ResilientConnection {
 
         // Connection is dead or unhealthy, create a new one
         self.metrics.record_reconnection();
+
+        // Increment attempt counter
+        let mut attempt = self.attempt_counter.lock().await;
+        *attempt += 1;
+        let current_attempt = *attempt;
+        drop(attempt);
+
+        // Notify reconnection attempt
+        self.hooks
+            .notify_reconnect_attempt(current_attempt - 1)
+            .await;
+
         let new_conn = RedisConnection::connect_with_config(&self.addr, self.tls.clone()).await?;
         self.metrics.record_connection_created();
+
+        // Notify successful connection
+        self.hooks.notify_connect(current_attempt).await;
+
         *inner = Some(new_conn.clone());
         Ok(new_conn)
     }
@@ -115,9 +140,11 @@ impl ResilientConnection {
                 Ok(c) => c,
                 Err(e) if attempt >= max_attempts => {
                     self.metrics.record_error("connection");
+                    self.hooks.notify_error(e.clone()).await;
                     break Err(e);
                 }
-                Err(_) => {
+                Err(e) => {
+                    self.hooks.notify_error(e).await;
                     // Wait before retry
                     if let Some(delay) = self
                         .reconnect_config
@@ -137,9 +164,11 @@ impl ResilientConnection {
 
                     if attempt >= max_attempts {
                         self.metrics.record_error("connection");
+                        self.hooks.notify_error(e.clone()).await;
                         break Err(e);
                     }
 
+                    self.hooks.notify_error(e).await;
                     // Wait before retry
                     if let Some(delay) = self
                         .reconnect_config
@@ -160,6 +189,9 @@ impl ResilientConnection {
                         RedisError::Redis(_) => self.metrics.record_error("redis"),
                         _ => self.metrics.record_error("other"),
                     }
+
+                    // Notify error hook
+                    self.hooks.notify_error(e.clone()).await;
                     break Err(e);
                 }
             }

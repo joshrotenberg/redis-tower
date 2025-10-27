@@ -181,6 +181,7 @@ pub mod commands;
 pub mod config;
 pub mod connection_pool;
 pub mod health;
+pub mod hooks;
 pub mod metrics;
 pub mod monitor;
 pub mod parser;
