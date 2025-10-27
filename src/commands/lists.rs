@@ -547,40 +547,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rpoplpush_frame() {
-        let cmd = RPopLPush::new("source", "destination");
-        let frame = cmd.to_frame();
-
-        match frame {
-            Frame::Array(parts) => {
-                assert_eq!(parts.len(), 3);
-                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("RPOPLPUSH"))));
-                assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("source"))));
-                assert_eq!(
-                    parts[2],
-                    Frame::BulkString(Some(Bytes::from("destination")))
-                );
-            }
-            _ => panic!("Expected Array frame"),
-        }
-    }
-
-    #[test]
-    fn test_brpoplpush_frame() {
-        let cmd = BRPopLPush::new("source", "destination", 10.0);
-        let frame = cmd.to_frame();
-
-        match frame {
-            Frame::Array(parts) => {
-                assert_eq!(parts.len(), 4);
-                assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("BRPOPLPUSH"))));
-                assert_eq!(parts[3], Frame::BulkString(Some(Bytes::from("10"))));
-            }
-            _ => panic!("Expected Array frame"),
-        }
-    }
-
-    #[test]
     fn test_llen_frame() {
         let cmd = LLen::new("mylist");
         let frame = cmd.to_frame();

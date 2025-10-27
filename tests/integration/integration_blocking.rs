@@ -240,7 +240,7 @@ async fn test_blpop_concurrent_consumers() {
     // They should get different jobs
     let r1 = result1.unwrap();
     let r2 = result2.unwrap();
-    let values = vec![r1.1.as_ref(), r2.1.as_ref()];
+    let values = [r1.1.as_ref(), r2.1.as_ref()];
 
     assert!(values.contains(&b"job1".as_ref()));
     assert!(values.contains(&b"job2".as_ref()));
