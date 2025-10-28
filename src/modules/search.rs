@@ -90,38 +90,185 @@ use std::collections::HashMap;
 
 /// Search response that varies based on query options
 ///
+/// FT.SEARCH returns different response structures depending on which options you specify
+/// in your query. This enum provides type-safe access to the response format that matches
+/// your query options.
+///
+/// # Response Variants
+///
 /// The variant returned depends on the options used in FT.SEARCH:
-/// - Default (no options): `Documents`
-/// - NOCONTENT: `IdList`
-/// - WITHSCORES: `DocumentsWithScores`
-/// - WITHSCORES + WITHPAYLOADS: `DocumentsWithScoresAndPayloads`
-/// - WITHSCORES + WITHSORTKEYS: `DocumentsWithScoresAndSortKeys`
-/// - Full combination: `DocumentsWithAll`
+///
+/// ## `Documents` - Default Response (no options)
+/// Returns full documents with all their fields. Use this when you need complete document data.
+/// ```no_run
+/// use redis_tower::modules::search::{FtSearch, SearchResponse};
+/// # async fn example(client: redis_tower::RedisClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let response: SearchResponse = client.call(FtSearch::new("idx", "query")).await?;
+/// match response {
+///     SearchResponse::Documents { total, results } => {
+///         println!("Found {} documents", total);
+///         for doc in results {
+///             println!("ID: {}, Fields: {:?}", doc.id, doc.fields);
+///         }
+///     }
+///     _ => unreachable!(),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## `IdList` - ID-Only Response (NOCONTENT)
+/// Returns only document IDs, no field data. Use this when you only need to know which
+/// documents matched and will fetch details separately or just need counts.
+/// ```no_run
+/// use redis_tower::modules::search::{FtSearch, SearchResponse};
+/// # async fn example(client: redis_tower::RedisClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let response: SearchResponse = client.call(FtSearch::new("idx", "query").no_content()).await?;
+/// match response {
+///     SearchResponse::IdList { total, ids } => {
+///         println!("Found {} matching IDs: {:?}", total, ids);
+///     }
+///     _ => unreachable!(),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## `DocumentsWithScores` - Documents + Relevance Scores (WITHSCORES)
+/// Returns documents with their relevance scores (0.0 to 1.0). Use this for ranking results
+/// or implementing custom scoring logic.
+/// ```no_run
+/// use redis_tower::modules::search::{FtSearch, SearchResponse};
+/// # async fn example(client: redis_tower::RedisClient) -> Result<(), Box<dyn std::error::Error>> {
+/// let response: SearchResponse = client.call(FtSearch::new("idx", "query").with_scores()).await?;
+/// match response {
+///     SearchResponse::DocumentsWithScores { total, results } => {
+///         for doc in results {
+///             println!("ID: {}, Score: {}, Fields: {:?}", doc.id, doc.score, doc.fields);
+///         }
+///     }
+///     _ => unreachable!(),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ## `DocumentsWithScoresAndPayloads` - Scores + Custom Payloads (WITHSCORES + WITHPAYLOADS)
+/// Returns documents with scores and their custom payloads. Use this when you've stored
+/// metadata in document payloads.
+///
+/// ## `DocumentsWithScoresAndSortKeys` - Scores + Sort Keys (WITHSCORES + WITHSORTKEYS)
+/// Returns documents with scores and sort keys. Use this for distributed search scenarios
+/// where you need to merge results from multiple shards.
+///
+/// ## `DocumentsWithAll` - Complete Metadata (WITHSCORES + WITHPAYLOADS + WITHSORTKEYS)
+/// Returns documents with all available metadata: scores, payloads, and sort keys.
+/// Use this when you need complete information for complex processing.
+///
+/// # Response Fields
+///
+/// - `total`: Total number of matching documents (not just returned, but total in index)
+/// - `results`: Vector of document results in the format matching your query options
+/// - `ids`: Document IDs (IdList variant only)
+///
+/// # Example: Handling Different Response Types
+///
+/// ```no_run
+/// use redis_tower::modules::search::{FtSearch, SearchResponse};
+///
+/// # async fn example(client: redis_tower::RedisClient) -> Result<(), Box<dyn std::error::Error>> {
+/// // You can match on the response to handle different formats
+/// let response: SearchResponse = client.call(FtSearch::new("idx", "query").with_scores()).await?;
+///
+/// match response {
+///     SearchResponse::Documents { total, results } => {
+///         println!("Basic search returned {} documents", results.len());
+///     }
+///     SearchResponse::DocumentsWithScores { total, results } => {
+///         println!("Scored search returned {} documents", results.len());
+///         let top_result = results.first().unwrap();
+///         println!("Best match: {} (score: {})", top_result.id, top_result.score);
+///     }
+///     SearchResponse::IdList { total, ids } => {
+///         println!("ID-only search found {} matches", ids.len());
+///     }
+///     _ => println!("Other response format"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum SearchResponse {
     /// Basic search with full document content
+    ///
+    /// Returns complete documents with all indexed fields. This is the default response
+    /// when no special options are specified.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents in the index
+    /// - `results`: Vector of SearchDocument with id and fields
     Documents {
         total: i64,
         results: Vec<SearchDocument>,
     },
+
     /// NOCONTENT - only document IDs
+    ///
+    /// Returns only the IDs of matching documents, no field data. Use this when you only
+    /// need to count matches or get IDs for later retrieval.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents
+    /// - `ids`: Vector of document ID strings
     IdList { total: i64, ids: Vec<String> },
+
     /// WITHSCORES - documents with relevance scores
+    ///
+    /// Returns documents with their relevance scores (0.0 to 1.0 range, higher is better).
+    /// Scores indicate how well each document matches the query.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents
+    /// - `results`: Vector of ScoredDocument with id, score, and fields
     DocumentsWithScores {
         total: i64,
         results: Vec<ScoredDocument>,
     },
+
     /// WITHSCORES + WITHPAYLOADS
+    ///
+    /// Returns documents with scores and custom payloads. Payloads are optional binary
+    /// data attached to documents when they were indexed.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents
+    /// - `results`: Vector of ScoredPayloadDocument with id, score, payload, and fields
     DocumentsWithScoresAndPayloads {
         total: i64,
         results: Vec<ScoredPayloadDocument>,
     },
+
     /// WITHSCORES + WITHSORTKEYS (for distributed search)
+    ///
+    /// Returns documents with scores and sort keys. Sort keys are used in distributed
+    /// search to properly merge results from multiple shards.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents
+    /// - `results`: Vector of ScoredSortKeyDocument with id, score, sort_key, and fields
     DocumentsWithScoresAndSortKeys {
         total: i64,
         results: Vec<ScoredSortKeyDocument>,
     },
+
     /// WITHSCORES + WITHPAYLOADS + WITHSORTKEYS - complete metadata
+    ///
+    /// Returns documents with all available metadata: scores, payloads, and sort keys.
+    /// This provides the most complete information but has the largest response size.
+    ///
+    /// # Fields
+    /// - `total`: Total number of matching documents
+    /// - `results`: Vector of FullMetadataDocument with id, score, payload, sort_key, and fields
     DocumentsWithAll {
         total: i64,
         results: Vec<FullMetadataDocument>,
@@ -129,45 +276,160 @@ pub enum SearchResponse {
 }
 
 /// Basic search result document
+///
+/// Represents a single document from a basic FT.SEARCH query (no special options).
+/// Contains the document ID and all its indexed fields.
+///
+/// # Fields
+/// - `id`: Document identifier (the Redis key or a custom ID)
+/// - `fields`: HashMap of field names to values. Each field can have multiple values when
+///   using DIALECT 3+ multi-value fields. For single-value fields, the Vec will contain one element.
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::search::{SearchDocument};
+///
+/// # fn example(doc: SearchDocument) {
+/// println!("Document ID: {}", doc.id);
+/// for (field_name, values) in &doc.fields {
+///     println!("  {}: {}", field_name, values.join(", "));
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchDocument {
+    /// Document identifier
     pub id: String,
-    pub fields: HashMap<String, Vec<String>>, // Multiple values per field (DIALECT 3+)
+    /// Field names mapped to their values (Vec supports multi-value fields in DIALECT 3+)
+    pub fields: HashMap<String, Vec<String>>,
 }
 
 /// Document with relevance score
+///
+/// Returned when using WITHSCORES option. Includes the document's relevance score
+/// which indicates how well it matches the search query.
+///
+/// # Fields
+/// - `id`: Document identifier
+/// - `score`: Relevance score (0.0 to 1.0, where higher scores mean better matches)
+/// - `fields`: Document fields (same as SearchDocument)
+///
+/// # Score Interpretation
+/// - `1.0`: Perfect match
+/// - `0.5-0.99`: Good match with partial relevance
+/// - `0.0-0.49`: Weak match
+///
+/// Scores are calculated based on TF-IDF, field weights, and the scoring algorithm specified
+/// in your query (default is TFIDF).
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::search::{ScoredDocument};
+///
+/// # fn example(doc: ScoredDocument) {
+/// if doc.score > 0.8 {
+///     println!("High-relevance document: {} (score: {:.2})", doc.id, doc.score);
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredDocument {
+    /// Document identifier
     pub id: String,
+    /// Relevance score (0.0 to 1.0, higher is better)
     pub score: f64,
+    /// Document fields
     pub fields: HashMap<String, Vec<String>>,
 }
 
 /// Document with score and payload
+///
+/// Returned when using WITHSCORES + WITHPAYLOADS options. Includes the document's
+/// relevance score and its custom payload (if one was set during indexing).
+///
+/// # Fields
+/// - `id`: Document identifier
+/// - `score`: Relevance score (0.0 to 1.0)
+/// - `payload`: Optional custom binary data attached to the document
+/// - `fields`: Document fields
+///
+/// # Payload Usage
+/// Payloads are arbitrary binary data (up to 512MB) that can be attached to documents
+/// when indexing. They're useful for storing metadata that doesn't need to be indexed
+/// or searched, but should be returned with results (e.g., encoded data, timestamps,
+/// serialized objects).
+///
+/// Note: Payloads are deprecated in RediSearch 2.0+ in favor of storing metadata as
+/// regular fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredPayloadDocument {
+    /// Document identifier
     pub id: String,
+    /// Relevance score (0.0 to 1.0)
     pub score: f64,
+    /// Optional custom payload (binary data)
     pub payload: Option<Bytes>,
+    /// Document fields
     pub fields: HashMap<String, Vec<String>>,
 }
 
 /// Document with score and sort key
+///
+/// Returned when using WITHSCORES + WITHSORTKEYS options. Includes the document's
+/// relevance score and its sort key for distributed search scenarios.
+///
+/// # Fields
+/// - `id`: Document identifier
+/// - `score`: Relevance score (0.0 to 1.0)
+/// - `sort_key`: Optional sort key string for merging distributed results
+/// - `fields`: Document fields
+///
+/// # Sort Key Usage
+/// Sort keys are used in distributed RediSearch deployments to properly merge
+/// and sort results from multiple shards. The sort key is the value used for
+/// sorting (e.g., a timestamp or score) returned as a string.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredSortKeyDocument {
+    /// Document identifier
     pub id: String,
+    /// Relevance score (0.0 to 1.0)
     pub score: f64,
+    /// Optional sort key for distributed search
     pub sort_key: Option<String>,
+    /// Document fields
     pub fields: HashMap<String, Vec<String>>,
 }
 
 /// Document with all metadata (score, payload, sort key)
+///
+/// Returned when using WITHSCORES + WITHPAYLOADS + WITHSORTKEYS options.
+/// This provides the most complete information for each document but results
+/// in the largest response size.
+///
+/// # Fields
+/// - `id`: Document identifier
+/// - `score`: Relevance score (0.0 to 1.0)
+/// - `payload`: Optional custom binary payload
+/// - `sort_key`: Optional sort key for distributed search
+/// - `fields`: Document fields
+///
+/// # When to Use
+/// Use this response format when you need all available metadata for advanced
+/// processing, such as:
+/// - Custom scoring/ranking algorithms that combine multiple factors
+/// - Distributed search result merging
+/// - Applications that use payload metadata
 #[derive(Debug, Clone, PartialEq)]
 pub struct FullMetadataDocument {
+    /// Document identifier
     pub id: String,
+    /// Relevance score (0.0 to 1.0)
     pub score: f64,
+    /// Optional custom payload (binary data)
     pub payload: Option<Bytes>,
+    /// Optional sort key for distributed search
     pub sort_key: Option<String>,
+    /// Document fields
     pub fields: HashMap<String, Vec<String>>,
 }
 
@@ -176,14 +438,71 @@ pub struct FullMetadataDocument {
 // ============================================================================
 
 /// Aggregate response with optional cursor
+///
+/// FT.AGGREGATE returns aggregated results with grouping, transformations, and computations.
+/// The response can include a cursor for paginating through large result sets.
+///
+/// # Response Variants
+///
+/// ## `Results` - Complete Results (no cursor)
+/// All aggregation results returned in one response. Use this when the result set is small
+/// enough to fit in a single response.
+///
+/// ## `ResultsWithCursor` - Paginated Results (with WITHCURSOR)
+/// Results returned with a cursor ID for fetching additional pages. Use this when aggregating
+/// over large datasets that need pagination.
+///
+/// # Fields
+///
+/// - `total`: Total number of result rows
+/// - `results`: Vector of aggregation results, where each result is a HashMap of field names to values
+/// - `cursor_id`: Cursor identifier for fetching next page (ResultsWithCursor only)
+///
+/// # Example: Handling Aggregate Results
+///
+/// ```no_run
+/// use redis_tower::modules::search::{AggregateResponse};
+///
+/// # fn example(response: AggregateResponse) {
+/// match response {
+///     AggregateResponse::Results { total, results } => {
+///         println!("Aggregated {} rows", total);
+///         for row in results {
+///             for (field, value) in row {
+///                 println!("  {}: {}", field, value);
+///             }
+///         }
+///     }
+///     AggregateResponse::ResultsWithCursor { total, results, cursor_id } => {
+///         println!("Page of {} rows (cursor: {})", results.len(), cursor_id);
+///         // Use cursor_id with FT.CURSOR READ to get next page
+///     }
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum AggregateResponse {
     /// Complete results
+    ///
+    /// All aggregation results in a single response. Each result is a row with computed values.
+    ///
+    /// # Fields
+    /// - `total`: Total number of result rows
+    /// - `results`: Vector of rows, each row is a HashMap of field names to computed values
     Results {
         total: i64,
         results: Vec<HashMap<String, String>>,
     },
+
     /// Results with cursor for pagination
+    ///
+    /// Partial results with a cursor for fetching additional pages. Use FT.CURSOR READ
+    /// with the cursor_id to get the next page of results.
+    ///
+    /// # Fields
+    /// - `total`: Total number of result rows across all pages
+    /// - `results`: Current page of results
+    /// - `cursor_id`: Cursor identifier for fetching next page (pass to FT.CURSOR READ)
     ResultsWithCursor {
         total: i64,
         results: Vec<HashMap<String, String>>,
@@ -262,23 +581,77 @@ pub struct CursorStats {
 }
 
 /// Spell check result with suggestions
+///
+/// Returned by FT.SPELLCHECK. Contains a misspelled term and suggested corrections
+/// ranked by similarity score.
+///
+/// # Fields
+/// - `term`: The original term that was checked
+/// - `suggestions`: Vector of suggested corrections with scores
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::search::{SpellCheckResult};
+///
+/// # fn example(result: SpellCheckResult) {
+/// println!("Term '{}' has {} suggestions:", result.term, result.suggestions.len());
+/// for suggestion in result.suggestions {
+///     println!("  {} (score: {:.2})", suggestion.suggestion, suggestion.score);
+/// }
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpellCheckResult {
+    /// The original term that was spell-checked
     pub term: String,
+    /// Suggested corrections ranked by similarity
     pub suggestions: Vec<SpellSuggestion>,
 }
 
+/// A single spell check suggestion
+///
+/// Represents one possible correction for a misspelled term.
+///
+/// # Fields
+/// - `score`: Similarity score (0.0 to 1.0, higher means more similar)
+/// - `suggestion`: The suggested correction
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpellSuggestion {
+    /// Similarity score (0.0 to 1.0)
     pub score: f64,
+    /// The suggested corrected term
     pub suggestion: String,
 }
 
 /// Auto-complete suggestion
+///
+/// Returned by FT.SUGGET (auto-complete). Contains a suggestion string with
+/// optional score and payload metadata.
+///
+/// # Fields
+/// - `string`: The suggested completion
+/// - `score`: Optional relevance score (if WITHSCORES was used)
+/// - `payload`: Optional custom payload data (if WITHPAYLOADS was used)
+///
+/// # Example
+/// ```no_run
+/// use redis_tower::modules::search::{Suggestion};
+///
+/// # fn example(suggestion: Suggestion) {
+/// print!("Suggestion: {}", suggestion.string);
+/// if let Some(score) = suggestion.score {
+///     print!(" (score: {:.2})", score);
+/// }
+/// println!();
+/// # }
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct Suggestion {
+    /// The suggested completion string
     pub string: String,
+    /// Optional relevance score (present if WITHSCORES used)
     pub score: Option<f64>,
+    /// Optional custom payload (present if WITHPAYLOADS used)
     pub payload: Option<String>,
 }
 

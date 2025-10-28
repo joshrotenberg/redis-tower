@@ -13,11 +13,31 @@ use sha1::{Digest, Sha1};
 
 /// EVAL command - Execute a Lua script
 ///
-/// # Example
-/// ```no_run
-/// use redis_tower::commands::Eval;
-/// use redis_tower::types::RedisValue;
+/// Executes a Lua script on the Redis server. The script can access keys and arguments
+/// passed to it, and can call Redis commands. Scripts are atomic and executed as a single
+/// operation. The return type is dynamic (RedisValue) as scripts can return any Redis type.
 ///
+/// # Request
+/// - `script`: The Lua script source code
+/// - `keys` (optional): Keys that the script will access (available as KEYS in Lua)
+/// - `args` (optional): Additional arguments (available as ARGV in Lua)
+///
+/// # Response
+/// Returns `RedisValue` - The script's return value, which can be any Redis type:
+/// - Integer, String, Array, Null, etc. depending on what the script returns
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::scripting::Eval;
+/// use redis_tower::types::RedisValue;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let script = r#"
 ///     local key = KEYS[1]
 ///     local value = ARGV[1]
@@ -28,6 +48,9 @@ use sha1::{Digest, Sha1};
 /// let cmd = Eval::new(script)
 ///     .key("mykey")
 ///     .arg("myvalue");
+/// let result: RedisValue = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct Eval {
     pub(crate) script: String,
@@ -123,20 +146,41 @@ impl Command for Eval {
 
 /// EVALSHA command - Execute a Lua script by its SHA1 hash
 ///
-/// This is more efficient than EVAL when the script has already been
-/// loaded via SCRIPT LOAD or a previous EVAL.
+/// Executes a previously cached Lua script by its SHA1 hash. This is more efficient than EVAL
+/// when the same script is executed repeatedly, as it avoids sending the script source code.
+/// If the script is not in the cache, returns a NOSCRIPT error.
 ///
-/// # Example
+/// # Request
+/// - `sha1`: The SHA1 hash of the script (40-character hex string)
+/// - `keys` (optional): Keys that the script will access (available as KEYS in Lua)
+/// - `args` (optional): Additional arguments (available as ARGV in Lua)
+///
+/// # Response
+/// Returns `RedisValue` - The script's return value (same as EVAL)
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::{Eval, EvalSha};
+/// use redis_tower::commands::scripting::{Eval, EvalSha};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let script = r#"return redis.call('GET', KEYS[1])"#;
 /// let eval = Eval::new(script);
 /// let sha = eval.sha1();
 ///
-/// // First time: use EVAL (or SCRIPT LOAD)
-/// // Subsequent times: use EVALSHA
+/// // First time: use EVAL (or SCRIPT LOAD) to cache the script
+/// client.call(eval).await?;
+///
+/// // Subsequent times: use EVALSHA with the cached SHA1
 /// let cmd = EvalSha::new(&sha).key("mykey");
+/// let result = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct EvalSha {
     pub(crate) sha1: String,
@@ -230,15 +274,34 @@ impl Command for EvalSha {
 
 /// SCRIPT LOAD command - Load a script into the script cache
 ///
-/// Returns the SHA1 hash of the script.
+/// Loads a Lua script into the script cache without executing it. Returns the SHA1 hash of
+/// the script, which can be used with EVALSHA. The script remains cached until SCRIPT FLUSH
+/// is called or the server restarts.
 ///
-/// # Example
+/// # Request
+/// - `script`: The Lua script source code to cache
+///
+/// # Response
+/// Returns `String` - The SHA1 hash of the script (40-character hex string)
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::ScriptLoad;
+/// use redis_tower::commands::scripting::ScriptLoad;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let script = r#"return redis.call('GET', KEYS[1])"#;
 /// let cmd = ScriptLoad::new(script);
-/// // Response will be the SHA1 hash as a String
+/// let sha = client.call(cmd).await?;
+/// println!("Script cached with SHA1: {}", sha);
+/// // Now use EVALSHA with this SHA1
+/// # Ok(())
+/// # }
 /// ```
 pub struct ScriptLoad {
     pub(crate) script: String,
@@ -275,16 +338,36 @@ impl Command for ScriptLoad {
 
 /// SCRIPT EXISTS command - Check if scripts exist in the cache
 ///
-/// Returns a vector of booleans indicating which scripts exist.
+/// Checks if one or more scripts exist in the script cache by their SHA1 hashes.
+/// Returns a boolean for each SHA1 provided, in the same order.
 ///
-/// # Example
+/// # Request
+/// - `sha1s`: One or more SHA1 hashes to check (40-character hex strings)
+///
+/// # Response
+/// Returns `Vec<bool>` - Boolean for each SHA1:
+/// - `true` - Script exists in cache
+/// - `false` - Script does not exist in cache
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::ScriptExists;
+/// use redis_tower::commands::scripting::ScriptExists;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = ScriptExists::new()
-///     .sha1("abc123")
-///     .sha1("def456");
-/// // Response will be Vec<bool>
+///     .sha1("abc123...")
+///     .sha1("def456...");
+/// let exists = client.call(cmd).await?;
+/// println!("Script 1 exists: {}", exists[0]);
+/// println!("Script 2 exists: {}", exists[1]);
+/// # Ok(())
+/// # }
 /// ```
 pub struct ScriptExists {
     pub(crate) sha1s: Vec<String>,
@@ -355,12 +438,36 @@ impl Command for ScriptExists {
 
 /// SCRIPT FLUSH command - Remove all scripts from the script cache
 ///
-/// # Example
-/// ```no_run
-/// use redis_tower::commands::ScriptFlush;
+/// Removes all Lua scripts from the script cache. Can be executed synchronously (default)
+/// or asynchronously (Redis 6.2+). After flushing, all cached scripts must be reloaded
+/// before they can be used with EVALSHA.
 ///
+/// # Request
+/// - `async_mode` (optional): If true, flush asynchronously without blocking (Redis 6.2+)
+///
+/// # Response
+/// Returns `String` - "OK" on success
+///
+/// # Redis Version
+/// Available since Redis 2.6.0. ASYNC option available since Redis 6.2.0.
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::scripting::ScriptFlush;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Synchronous flush (blocks until complete)
 /// let cmd = ScriptFlush::new();
-/// // Response will be "OK"
+/// client.call(cmd).await?;
+///
+/// // Asynchronous flush (Redis 6.2+)
+/// let cmd = ScriptFlush::new().async_mode();
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ScriptFlush {
     pub(crate) async_mode: bool,
@@ -505,23 +612,40 @@ mod tests {
 
 /// SCRIPT DEBUG command - Set script debugging mode
 ///
-/// Sets the debugging mode for subsequent EVAL/EVALSHA commands.
+/// Sets the debugging mode for subsequent EVAL/EVALSHA commands. In debug mode, Redis will
+/// provide step-by-step execution information for Lua scripts. Use YES for synchronous debugging
+/// (blocking), SYNC for asynchronous debugging, or NO to disable.
 ///
+/// # Request
+/// - `mode`: The debugging mode (Yes, Sync, or No)
+///
+/// # Response
+/// Returns `()` - Always returns OK
+///
+/// # Redis Version
 /// Available since Redis 3.2.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{ScriptDebug, ScriptDebugMode};
+/// use redis_tower::commands::scripting::{ScriptDebug, ScriptDebugMode};
+/// use redis_tower::RedisClient;
 ///
-/// // Enable synchronous debugging
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Enable synchronous debugging (blocking)
 /// let cmd = ScriptDebug::new(ScriptDebugMode::Yes);
+/// client.call(cmd).await?;
 ///
 /// // Enable asynchronous debugging
 /// let cmd = ScriptDebug::new(ScriptDebugMode::Sync);
+/// client.call(cmd).await?;
 ///
 /// // Disable debugging
 /// let cmd = ScriptDebug::new(ScriptDebugMode::No);
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ScriptDebug {
@@ -574,17 +698,33 @@ impl Command for ScriptDebug {
 
 /// SCRIPT KILL command - Kill currently executing script
 ///
-/// Kills the currently executing Lua script, assuming no write operations
-/// were performed by the script.
+/// Kills the currently executing Lua script, assuming no write operations were performed
+/// by the script. If the script has already performed write operations, this command will
+/// fail and you must use SHUTDOWN NOSAVE to stop the server.
 ///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK if successful
+///
+/// # Redis Version
 /// Available since Redis 2.6.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::ScriptKill;
+/// use redis_tower::commands::scripting::ScriptKill;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Kill a long-running script
 /// let cmd = ScriptKill::new();
+/// client.call(cmd).await?;
+/// println!("Script killed successfully");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ScriptKill;

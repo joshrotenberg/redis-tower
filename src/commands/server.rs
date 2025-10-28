@@ -9,12 +9,44 @@ use bytes::Bytes;
 
 /// DBSIZE - Return the number of keys in the current database
 ///
-/// # Example
-/// ```no_run
-/// use redis_tower::commands::DbSize;
+/// Returns the total count of keys in the currently selected database.
+/// This is an O(1) operation as Redis maintains this count internally.
 ///
-/// let cmd = DbSize::new();
-/// // Response: number of keys (i64)
+/// **Available since**: Redis 1.0.0
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `i64` - The number of keys in the database.
+///
+/// # Examples
+///
+/// Basic usage:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::DbSize};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let count: i64 = client.send(DbSize::new()).await?;
+/// println!("Database contains {} keys", count);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Check if database is empty:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::DbSize};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let count: i64 = client.send(DbSize::new()).await?;
+/// if count == 0 {
+///     println!("Database is empty");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct DbSize;
@@ -50,16 +82,48 @@ impl Command for DbSize {
 
 /// FLUSHDB - Delete all keys in the current database
 ///
-/// # Warning
-/// This is a destructive operation that cannot be undone!
+/// Deletes all keys from the currently selected database. This is a destructive
+/// operation that permanently removes all data.
 ///
-/// # Example
+/// **Available since**: Redis 1.0.0
+/// **Time complexity**: O(N) where N is the number of keys in the database
+///
+/// **Warning**: This operation cannot be undone! All keys in the current database
+/// will be permanently deleted.
+///
+/// # Request
+/// - Optional: `ASYNC` - Delete keys asynchronously (non-blocking, Redis 4.0+)
+///
+/// # Response
+/// Returns `()` on success.
+///
+/// # Examples
+///
+/// Synchronous flush (blocks until complete):
 /// ```no_run
-/// use redis_tower::commands::FlushDb;
+/// use redis_tower::{RedisClient, commands::FlushDb};
 ///
-/// let cmd = FlushDb::new();
-/// // Optionally use async mode
-/// let cmd = FlushDb::new().async_mode();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Delete all keys in current database
+/// client.send(FlushDb::new()).await?;
+/// println!("Database flushed");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Asynchronous flush (non-blocking):
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::FlushDb};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Delete keys in background (Redis 4.0+)
+/// client.send(FlushDb::new().async_mode()).await?;
+/// println!("Database flush started in background");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct FlushDb {
@@ -109,16 +173,48 @@ impl Command for FlushDb {
 
 /// FLUSHALL - Delete all keys in all databases
 ///
-/// # Warning
-/// This is an extremely destructive operation that affects ALL databases!
+/// Deletes all keys from all databases on the server. This is an extremely
+/// destructive operation that permanently removes all data across all databases.
 ///
-/// # Example
+/// **Available since**: Redis 1.0.0
+/// **Time complexity**: O(N) where N is the total number of keys in all databases
+///
+/// **Warning**: This operation cannot be undone! All keys in ALL databases will
+/// be permanently deleted. Use with extreme caution!
+///
+/// # Request
+/// - Optional: `ASYNC` - Delete keys asynchronously (non-blocking, Redis 4.0+)
+///
+/// # Response
+/// Returns `()` on success.
+///
+/// # Examples
+///
+/// Synchronous flush all databases:
 /// ```no_run
-/// use redis_tower::commands::FlushAll;
+/// use redis_tower::{RedisClient, commands::FlushAll};
 ///
-/// let cmd = FlushAll::new();
-/// // Optionally use async mode
-/// let cmd = FlushAll::new().async_mode();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Delete all keys from ALL databases
+/// client.send(FlushAll::new()).await?;
+/// println!("All databases flushed");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Asynchronous flush (non-blocking):
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::FlushAll};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Delete keys in background (Redis 4.0+)
+/// client.send(FlushAll::new().async_mode()).await?;
+/// println!("Full flush started in background");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct FlushAll {
@@ -168,14 +264,52 @@ impl Command for FlushAll {
 
 /// RANDOMKEY - Return a random key from the current database
 ///
-/// Returns None if the database is empty.
+/// Returns a random key from the currently selected database. This is useful
+/// for sampling data or implementing random eviction policies.
 ///
-/// # Example
+/// **Available since**: Redis 1.0.0
+/// **Time complexity**: O(1)
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `Option<String>`:
+/// - `Some(String)` - A random key name from the database
+/// - `None` - If the database is empty
+///
+/// # Examples
+///
+/// Get a random key:
 /// ```no_run
-/// use redis_tower::commands::RandomKey;
+/// use redis_tower::{RedisClient, commands::RandomKey};
 ///
-/// let cmd = RandomKey::new();
-/// // Response: Option<String> - random key or None if database is empty
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let random_key: Option<String> = client.send(RandomKey::new()).await?;
+/// match random_key {
+///     Some(key) => println!("Random key: {}", key),
+///     None => println!("Database is empty"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Sample multiple random keys:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::RandomKey};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get 5 random keys (may include duplicates)
+/// for _ in 0..5 {
+///     if let Some(key) = client.send(RandomKey::new()).await? {
+///         println!("Key: {}", key);
+///     }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RandomKey;
@@ -210,16 +344,50 @@ impl Command for RandomKey {
     }
 }
 
-/// TIME - Return the server time
+/// TIME command - Get the server's current time
 ///
-/// Returns a tuple of (unix_timestamp_seconds, microseconds).
+/// Returns the current server time as a tuple of (unix_timestamp_seconds, microseconds).
+/// This is useful for synchronizing clocks and measuring time on the server side.
 ///
-/// # Example
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `(i64, i64)` - A tuple of:
+/// - Unix timestamp in seconds since epoch
+/// - Additional microseconds
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
+/// # Examples
+///
+/// Get server time:
 /// ```no_run
-/// use redis_tower::commands::Time;
+/// use redis_tower::{RedisClient, commands::Time};
 ///
-/// let cmd = Time::new();
-/// // Response: (i64, i64) - (seconds, microseconds)
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let (seconds, micros): (i64, i64) = client.send(Time::new()).await?;
+/// println!("Server time: {}.{:06} seconds", seconds, micros);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Calculate server latency:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Time};
+/// use std::time::{SystemTime, UNIX_EPOCH};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let local_time = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+/// let (server_time, _) = client.send(Time::new()).await?;
+/// let drift = (server_time - local_time).abs();
+/// println!("Clock drift: {} seconds", drift);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Time;
@@ -269,16 +437,52 @@ impl Command for Time {
     }
 }
 
-/// LASTSAVE - Get UNIX timestamp of last successful save to disk
+/// LASTSAVE command - Get timestamp of last successful save
 ///
-/// Returns the UNIX timestamp of the last DB save executed with success.
+/// Returns the Unix timestamp of the last successful database save to disk.
+/// This can be used to monitor persistence and ensure data durability.
 ///
-/// # Example
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `i64` - Unix timestamp (seconds since epoch) of the last successful SAVE or BGSAVE.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// Check last save time:
 /// ```no_run
-/// use redis_tower::commands::LastSave;
+/// use redis_tower::{RedisClient, commands::LastSave};
 ///
-/// let cmd = LastSave::new();
-/// // Response: i64 - UNIX timestamp
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let timestamp: i64 = client.send(LastSave::new()).await?;
+/// println!("Last save at Unix timestamp: {}", timestamp);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Calculate time since last save:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::LastSave};
+/// use std::time::{SystemTime, UNIX_EPOCH};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let last_save: i64 = client.send(LastSave::new()).await?;
+/// let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+/// let seconds_ago = now - last_save;
+/// println!("Last save was {} seconds ago", seconds_ago);
+///
+/// if seconds_ago > 3600 {
+///     println!("Warning: No save in over an hour!");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct LastSave;
@@ -314,18 +518,49 @@ impl Command for LastSave {
 
 /// SAVE command - Synchronously save the dataset to disk
 ///
-/// Performs a synchronous save of the dataset, creating a snapshot.
-/// This blocks the server until the save is complete.
+/// Performs a synchronous save of the entire dataset to disk, creating an RDB snapshot.
+/// This command blocks the server until the save operation is complete, which means
+/// **all clients will be blocked** during the save.
 ///
-/// **Warning**: SAVE is a blocking operation. Use BGSAVE in production
-/// to perform saves in the background.
+/// **Warning**: SAVE is a blocking operation that can take a long time with large datasets.
+/// Use BGSAVE in production environments to perform saves in the background without blocking.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `()` on successful completion.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
 ///
 /// # Examples
 ///
+/// Perform synchronous save (testing/development only):
 /// ```no_run
-/// use redis_tower::commands::Save;
+/// use redis_tower::{RedisClient, commands::Save};
 ///
-/// let cmd = Save;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // This will block until save completes
+/// client.send(Save).await?;
+/// println!("Database saved to disk");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// **Production usage**: Use BGSAVE instead:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::BgSave};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Non-blocking background save
+/// client.send(BgSave).await?;
+/// println!("Background save initiated");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct Save;
@@ -348,15 +583,59 @@ impl Command for Save {
 
 /// BGSAVE command - Asynchronously save the dataset to disk
 ///
-/// Creates a background save operation. Redis forks a child process
-/// that writes the dataset to disk while the parent continues serving requests.
+/// Initiates a background save operation to create an RDB snapshot. Redis forks a child
+/// process that writes the entire dataset to disk while the parent process continues
+/// to serve client requests normally. This is the recommended way to save data in
+/// production environments.
+///
+/// The save operation happens in the background and does not block the server.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `()` - The command returns immediately after the background save starts.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
 ///
 /// # Examples
 ///
+/// Initiate background save:
 /// ```no_run
-/// use redis_tower::commands::BgSave;
+/// use redis_tower::{RedisClient, commands::BgSave};
 ///
-/// let cmd = BgSave;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Start background save (returns immediately)
+/// client.send(BgSave).await?;
+/// println!("Background save initiated");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Monitor save progress:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::{BgSave, LastSave}};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get timestamp before save
+/// let before: i64 = client.send(LastSave::new()).await?;
+///
+/// // Start background save
+/// client.send(BgSave).await?;
+///
+/// // Wait and check if save completed
+/// tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+/// let after: i64 = client.send(LastSave::new()).await?;
+///
+/// if after > before {
+///     println!("Save completed successfully");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct BgSave;
@@ -377,27 +656,91 @@ impl Command for BgSave {
     }
 }
 
-/// INFO command - Get information and statistics about the server
+/// INFO command - Get comprehensive server information and statistics
 ///
-/// Returns information and statistics about the Redis server in a
-/// format that is both human-readable and easily parsable by computers.
+/// Returns detailed information and statistics about the Redis server in a format that
+/// is both human-readable and easily parsable by programs. The information is organized
+/// into sections that can be queried individually or all at once.
 ///
-/// You can optionally specify a section to limit the output:
-/// - server, clients, memory, persistence, stats, replication,
-///   cpu, commandstats, cluster, keyspace, modules, errorstats
-/// - all: Return all sections
-/// - default: Return default sections
+/// # Request
+/// - `section` (optional): Specific section to retrieve, or omit for default sections
+///
+/// Available sections:
+/// - `server`: General server information (version, uptime, config file)
+/// - `clients`: Connected clients information (count, longest output list)
+/// - `memory`: Memory usage statistics (used memory, peak memory, fragmentation)
+/// - `persistence`: RDB and AOF persistence statistics (last save time, changes since last save)
+/// - `stats`: General statistics (connections received, commands processed, keyspace hits/misses)
+/// - `replication`: Master/replica replication information
+/// - `cpu`: CPU usage statistics
+/// - `commandstats`: Per-command execution statistics
+/// - `cluster`: Redis Cluster information (if enabled)
+/// - `keyspace`: Database keyspace statistics (keys, expires)
+/// - `modules`: Loaded modules information (Redis 4.0+)
+/// - `errorstats`: Error statistics (Redis 6.0+)
+/// - `all`: Return all sections
+/// - `default`: Return default sections
+///
+/// # Response
+/// Returns `String` - Multi-line text with section headers and key:value pairs.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
 ///
 /// # Examples
 ///
+/// Get all server information:
 /// ```no_run
-/// use redis_tower::commands::Info;
+/// use redis_tower::{RedisClient, commands::Info};
 ///
-/// // Get all info
-/// let cmd = Info::all();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
 ///
-/// // Get specific section
-/// let cmd = Info::section("memory");
+/// let info: String = client.send(Info::all()).await?;
+/// println!("Server info:\n{}", info);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Get specific section (memory):
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let memory_info: String = client.send(Info::section("memory")).await?;
+/// println!("Memory usage:\n{}", memory_info);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Monitor keyspace statistics:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let keyspace: String = client.send(Info::section("keyspace")).await?;
+/// println!("Keyspace stats:\n{}", keyspace);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Parse command statistics:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let stats: String = client.send(Info::section("commandstats")).await?;
+/// // Parse the output to extract per-command metrics
+/// for line in stats.lines() {
+///     if line.starts_with("cmdstat_") {
+///         println!("{}", line);
+///     }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Info {
@@ -1307,12 +1650,55 @@ mod tests {
 
 /// BGREWRITEAOF command - Asynchronously rewrite the append-only file
 ///
+/// Initiates a background rewrite of the Append Only File (AOF). Redis will fork a child
+/// process that rewrites the AOF file, optimizing it by removing redundant commands and
+/// compacting the file size. The parent process continues serving requests normally.
+///
+/// This command is useful when the AOF file has grown large and needs optimization.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `()` - The command returns immediately after the background rewrite starts.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
 /// # Examples
 ///
+/// Initiate AOF rewrite:
 /// ```no_run
-/// use redis_tower::commands::BgRewriteAof;
+/// use redis_tower::{RedisClient, commands::BgRewriteAof};
 ///
-/// let cmd = BgRewriteAof::new();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Start background AOF rewrite
+/// client.send(BgRewriteAof::new()).await?;
+/// println!("AOF rewrite initiated");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Check AOF status:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::{BgRewriteAof, Info}};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get persistence info before rewrite
+/// let info: String = client.send(Info::section("persistence")).await?;
+/// println!("Before rewrite: {}", info);
+///
+/// // Initiate rewrite
+/// client.send(BgRewriteAof::new()).await?;
+///
+/// // Check status after
+/// let info: String = client.send(Info::section("persistence")).await?;
+/// println!("After rewrite: {}", info);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct BgRewriteAof;
@@ -1346,15 +1732,64 @@ impl Command for BgRewriteAof {
     }
 }
 
-/// CONFIG GET command - Get configuration parameters
+/// CONFIG GET command - Get Redis configuration parameters
+///
+/// Retrieves the values of one or more configuration parameters. You can use
+/// glob-style patterns (e.g., "max*") to match multiple parameters. This command
+/// is useful for inspecting the current server configuration.
+///
+/// # Request
+/// - `parameter`: Configuration parameter name or pattern (supports glob patterns like "max*")
+///
+/// # Response
+/// Returns `Vec<(String, String)>` - A list of (parameter_name, value) tuples.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
+/// Get single configuration parameter:
 /// ```no_run
-/// use redis_tower::commands::ConfigGet;
+/// use redis_tower::{RedisClient, commands::ConfigGet};
 ///
-/// let cmd = ConfigGet::new("maxmemory");
-/// let cmd = ConfigGet::new("save");
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let config: Vec<(String, String)> = client.send(ConfigGet::new("maxmemory")).await?;
+/// for (key, value) in config {
+///     println!("{}: {}", key, value);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Get multiple parameters with pattern:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::ConfigGet};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get all "max*" parameters
+/// let config: Vec<(String, String)> = client.send(ConfigGet::new("max*")).await?;
+/// for (key, value) in config {
+///     println!("{}: {}", key, value);
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Get all configuration parameters:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::ConfigGet};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get all parameters
+/// let config: Vec<(String, String)> = client.send(ConfigGet::new("*")).await?;
+/// println!("Found {} configuration parameters", config.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct ConfigGet {
@@ -1407,15 +1842,64 @@ impl Command for ConfigGet {
     }
 }
 
-/// CONFIG SET command - Set configuration parameters
+/// CONFIG SET command - Set Redis configuration parameters
+///
+/// Changes a configuration parameter's value at runtime without restarting the server.
+/// Most configuration parameters can be modified this way. Changes made with CONFIG SET
+/// are not persisted - use CONFIG REWRITE to save them to the configuration file.
+///
+/// # Request
+/// - `parameter`: Configuration parameter name to modify
+/// - `value`: New value for the parameter
+///
+/// # Response
+/// Returns `()` on successful configuration change.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
+/// Set memory limit:
 /// ```no_run
-/// use redis_tower::commands::ConfigSet;
+/// use redis_tower::{RedisClient, commands::ConfigSet};
 ///
-/// let cmd = ConfigSet::new("maxmemory", "2gb");
-/// let cmd = ConfigSet::new("timeout", "300");
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Set max memory to 2GB
+/// client.send(ConfigSet::new("maxmemory", "2gb")).await?;
+/// println!("Memory limit updated");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Configure timeouts:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::ConfigSet};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Set client timeout to 300 seconds
+/// client.send(ConfigSet::new("timeout", "300")).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Persist configuration changes:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::{ConfigSet, ConfigRewrite}};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Change configuration
+/// client.send(ConfigSet::new("maxmemory", "4gb")).await?;
+///
+/// // Persist to redis.conf
+/// client.send(ConfigRewrite::new()).await?;
+/// println!("Configuration saved to file");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct ConfigSet {
@@ -1454,14 +1938,59 @@ impl Command for ConfigSet {
     }
 }
 
-/// CONFIG REWRITE command - Rewrite the configuration file
+/// CONFIG REWRITE command - Rewrite the configuration file with current settings
+///
+/// Rewrites the redis.conf file to reflect the current server configuration. This includes
+/// all parameters that were changed at runtime using CONFIG SET. The existing configuration
+/// file is rewritten in-place, preserving comments and structure where possible.
+///
+/// **Note**: This command requires write permissions to the redis.conf file and the directory
+/// containing it.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `()` on successful rewrite of the configuration file.
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
 ///
 /// # Examples
 ///
+/// Persist runtime configuration changes:
 /// ```no_run
-/// use redis_tower::commands::ConfigRewrite;
+/// use redis_tower::{RedisClient, commands::{ConfigSet, ConfigRewrite}};
 ///
-/// let cmd = ConfigRewrite::new();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Make runtime changes
+/// client.send(ConfigSet::new("maxmemory", "4gb")).await?;
+/// client.send(ConfigSet::new("maxmemory-policy", "allkeys-lru")).await?;
+///
+/// // Save to redis.conf
+/// client.send(ConfigRewrite::new()).await?;
+/// println!("Configuration persisted to disk");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Backup workflow:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::{ConfigGet, ConfigRewrite}};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get current config before changes
+/// let before: Vec<(String, String)> = client.send(ConfigGet::new("*")).await?;
+///
+/// // ... make changes ...
+///
+/// // Persist changes
+/// client.send(ConfigRewrite::new()).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigRewrite;
@@ -1498,14 +2027,58 @@ impl Command for ConfigRewrite {
     }
 }
 
-/// CONFIG RESETSTAT command - Reset INFO statistics
+/// CONFIG RESETSTAT command - Reset runtime statistics
+///
+/// Resets the statistics reported by the INFO command. This includes counters like
+/// total connections received, total commands processed, keyspace hits/misses, and more.
+/// The server uptime is not reset.
+///
+/// This is useful when you want to start fresh statistics collection or after resolving
+/// issues to get clean metrics.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `()` after statistics are reset.
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
+/// Reset all statistics:
 /// ```no_run
-/// use redis_tower::commands::ConfigResetStat;
+/// use redis_tower::{RedisClient, commands::ConfigResetStat};
 ///
-/// let cmd = ConfigResetStat::new();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Reset stats
+/// client.send(ConfigResetStat::new()).await?;
+/// println!("Statistics reset");
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Reset stats after maintenance:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::{ConfigResetStat, Info}};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get stats before reset
+/// let before: String = client.send(Info::section("stats")).await?;
+/// println!("Before: {}", before);
+///
+/// // Reset statistics
+/// client.send(ConfigResetStat::new()).await?;
+///
+/// // Get clean stats
+/// let after: String = client.send(Info::section("stats")).await?;
+/// println!("After reset: {}", after);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct ConfigResetStat;
@@ -1581,12 +2154,48 @@ impl Command for CommandCmd {
 
 /// COMMAND COUNT command - Get total number of Redis commands
 ///
+/// Returns the total number of commands available in this Redis server. This includes
+/// all built-in commands plus any commands added by loaded modules.
+///
+/// # Request
+/// No parameters required.
+///
+/// # Response
+/// Returns `i64` - The total number of available commands.
+///
+/// # Redis Version
+/// Available since Redis 2.8.13
+///
 /// # Examples
 ///
+/// Get command count:
 /// ```no_run
-/// use redis_tower::commands::CommandCount;
+/// use redis_tower::{RedisClient, commands::CommandCount};
 ///
-/// let cmd = CommandCount::new();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// let count: i64 = client.send(CommandCount::new()).await?;
+/// println!("Redis server has {} commands", count);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Compare with module loading:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::CommandCount};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let before: i64 = client.send(CommandCount::new()).await?;
+/// println!("Before: {} commands", before);
+///
+/// // ... load a module ...
+///
+/// let after: i64 = client.send(CommandCount::new()).await?;
+/// println!("After: {} commands ({} new)", after, after - before);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct CommandCount;

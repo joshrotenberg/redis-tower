@@ -6,6 +6,33 @@ use crate::types::RedisError;
 use bytes::Bytes;
 
 /// AUTH command - Authenticate to the server with a password
+///
+/// Authenticates the current connection with Redis using a password. This is required
+/// when Redis is configured with `requirepass` in redis.conf. For ACL-based authentication
+/// (Redis 6.0+), use `AuthAcl` instead.
+///
+/// # Request
+/// - `password`: The password configured in redis.conf
+///
+/// # Response
+/// Returns `()` on successful authentication, or an error if the password is incorrect.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::connection::Auth;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// client.call(Auth::new("my_password")).await?;
+/// println!("Authenticated successfully");
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Auth {
     password: String,
@@ -40,6 +67,34 @@ impl Command for Auth {
 }
 
 /// AUTH command with username (ACL authentication)
+///
+/// Authenticates the current connection using ACL username and password (Redis 6.0+).
+/// This is the modern authentication method that supports multiple users with
+/// different permissions defined by ACL rules.
+///
+/// # Request
+/// - `username`: The ACL username
+/// - `password`: The password for this ACL user
+///
+/// # Response
+/// Returns `()` on successful authentication, or an error if credentials are invalid.
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::connection::AuthAcl;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// client.call(AuthAcl::new("alice", "alice_password")).await?;
+/// println!("Authenticated as alice");
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct AuthAcl {
     username: String,
@@ -117,6 +172,41 @@ impl Command for ReadWrite {
 }
 
 /// SELECT command - Change the selected database
+///
+/// Selects the Redis logical database with the given index. Redis databases are numbered
+/// from 0 to `databases-1` (default 16 databases, configurable in redis.conf).
+///
+/// **Note**: Database selection is per-connection. Different databases in the same Redis
+/// instance share the same memory and are not isolated security boundaries. Use separate
+/// Redis instances for true isolation.
+///
+/// # Request
+/// - `db`: Database index (0 to databases-1, typically 0-15)
+///
+/// # Response
+/// Returns `()` on success.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
+/// ```no_run
+/// use redis_tower::commands::connection::Select;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Select database 1
+/// client.call(Select::new(1)).await?;
+/// println!("Now using database 1");
+///
+/// // Select database 0 (default)
+/// client.call(Select::new(0)).await?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Select {
     db: u32,
