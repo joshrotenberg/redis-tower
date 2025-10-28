@@ -8,15 +8,59 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// Add one or more members to a sorted set, or update its score if it already exists.
+/// ZADD command - Add one or more members to a sorted set, or update its score
+///
+/// Adds all the specified members with the specified scores to the sorted set stored at key.
+/// If a specified member is already in the sorted set, the score is updated and the element
+/// reinserted at the right position to ensure the correct ordering.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `members`: One or more (score, member) pairs to add
+/// - `nx` (optional): Only add new elements, don't update existing ones
+/// - `xx` (optional): Only update existing elements, don't add new ones
+/// - `gt` (optional): Only update if new score is greater than current score
+/// - `lt` (optional): Only update if new score is less than current score
+/// - `ch` (optional): Return number of elements changed instead of added
+/// - `incr` (optional): Act like ZINCRBY, increment score
+///
+/// # Response
+/// Returns `i64`:
+/// - Without CH: Number of elements added (not updated)
+/// - With CH: Number of elements added + updated
+/// - With INCR: New score of the incremented element
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zadd;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zadd;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Add members to leaderboard
 /// let cmd = Zadd::new("leaderboard")
 ///     .member(100.0, "player1")
 ///     .member(200.0, "player2");
+/// let added = client.call(cmd).await?;
+/// println!("Added {} members", added);
+///
+/// // Only add if not exists
+/// let cmd = Zadd::new("leaderboard")
+///     .member(150.0, "player3")
+///     .nx();
+/// let added = client.call(cmd).await?;
+///
+/// // Update only if new score is greater
+/// let cmd = Zadd::new("leaderboard")
+///     .member(250.0, "player1")
+///     .gt();
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zadd {
@@ -133,15 +177,41 @@ impl Command for Zadd {
     }
 }
 
-/// Remove one or more members from a sorted set.
+/// ZREM command - Remove one or more members from a sorted set
+///
+/// Removes the specified members from the sorted set stored at key. Non-existing members are ignored.
+/// An error is returned when key exists and does not hold a sorted set.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `members`: One or more members to remove
+///
+/// # Response
+/// Returns `i64` - The number of members removed from the sorted set, not including non-existing members.
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zrem;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zrem;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Remove single member
+/// let cmd = Zrem::new("leaderboard").member("player1");
+/// let removed = client.call(cmd).await?;
+/// println!("Removed {} members", removed);
+///
+/// // Remove multiple members
 /// let cmd = Zrem::new("leaderboard")
-///     .member("player1")
-///     .member("player2");
+///     .member("player2")
+///     .member("player3");
+/// let removed = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zrem {
@@ -190,13 +260,32 @@ impl Command for Zrem {
     }
 }
 
-/// Get the number of members in a sorted set.
+/// ZCARD command - Get the cardinality (number of members) of a sorted set
+///
+/// Returns the sorted set cardinality (number of elements) of the sorted set stored at key.
+///
+/// # Request
+/// - `key`: The sorted set key
+///
+/// # Response
+/// Returns `i64` - The cardinality (number of elements) of the sorted set, or 0 if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zcard;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zcard;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Zcard::new("leaderboard");
+/// let count = client.call(cmd).await?;
+/// println!("Leaderboard has {} members", count);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zcard {
@@ -229,13 +318,40 @@ impl Command for Zcard {
     }
 }
 
-/// Get the score associated with the given member in a sorted set.
+/// ZSCORE command - Get the score associated with a member in a sorted set
+///
+/// Returns the score of member in the sorted set at key. If member does not exist in the sorted set,
+/// or key does not exist, None is returned.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `member`: The member to get the score for
+///
+/// # Response
+/// Returns `Option<f64>`:
+/// - `Some(score)` - The score of the member
+/// - `None` - Member does not exist in the sorted set, or key does not exist
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zscore;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zscore;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Zscore::new("leaderboard", "player1");
+/// let score = client.call(cmd).await?;
+///
+/// match score {
+///     Some(s) => println!("Player1 score: {}", s),
+///     None => println!("Player1 not found"),
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zscore {
@@ -279,14 +395,53 @@ impl Command for Zscore {
     }
 }
 
-/// Return a range of members in a sorted set, by index.
+/// ZRANGE command - Return a range of members in a sorted set, by index
+///
+/// Returns the specified range of elements in the sorted set stored at key. The elements are
+/// considered to be ordered from the lowest to the highest score. Lexicographical order is used
+/// for elements with equal score.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `start`: Start index (0-based, negative = from end)
+/// - `stop`: Stop index (inclusive, -1 = last element)
+/// - `withscores` (optional): Return scores along with members
+///
+/// # Response
+/// Returns `ZrangeResult` containing:
+/// - `members`: Vector of (member, score) tuples
+/// - If WITHSCORES not used, scores are set to 0.0
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zrange;
-/// let cmd = Zrange::new("leaderboard", 0, 9)
-///     .withscores();
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zrange;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get top 10 members
+/// let cmd = Zrange::new("leaderboard", 0, 9);
+/// let result = client.call(cmd).await?;
+/// for (member, _score) in result.members {
+///     println!("Member: {}", String::from_utf8_lossy(&member));
+/// }
+///
+/// // Get top 10 with scores
+/// let cmd = Zrange::new("leaderboard", 0, 9).withscores();
+/// let result = client.call(cmd).await?;
+/// for (member, score) in result.members {
+///     println!("{}: {}", String::from_utf8_lossy(&member), score);
+/// }
+///
+/// // Get all members
+/// let cmd = Zrange::new("leaderboard", 0, -1).withscores();
+/// let result = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zrange {
@@ -405,14 +560,46 @@ impl Command for Zrange {
     }
 }
 
-/// Return a range of members in a sorted set, by index, with scores ordered from high to low.
+/// ZREVRANGE command - Return a range of members in a sorted set, by index, with scores ordered from high to low
+///
+/// Returns the specified range of elements in the sorted set stored at key. The elements are
+/// considered to be ordered from the highest to the lowest score. Descending lexicographical order
+/// is used for elements with equal score.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `start`: Start index (0-based, negative = from end)
+/// - `stop`: Stop index (inclusive, -1 = last element)
+/// - `withscores` (optional): Return scores along with members
+///
+/// # Response
+/// Returns `ZrangeResult` containing:
+/// - `members`: Vector of (member, score) tuples in descending score order
+/// - If WITHSCORES not used, scores are set to 0.0
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zrevrange;
-/// let cmd = Zrevrange::new("leaderboard", 0, 9)
-///     .withscores();
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zrevrange;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get top 10 members (highest scores first)
+/// let cmd = Zrevrange::new("leaderboard", 0, 9).withscores();
+/// let result = client.call(cmd).await?;
+/// for (i, (member, score)) in result.members.iter().enumerate() {
+///     println!("{}. {}: {}", i + 1, String::from_utf8_lossy(member), score);
+/// }
+///
+/// // Get bottom 5 members
+/// let cmd = Zrevrange::new("leaderboard", -5, -1);
+/// let result = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zrevrange {
@@ -463,13 +650,40 @@ impl Command for Zrevrange {
     }
 }
 
-/// Determine the index of a member in a sorted set.
+/// ZRANK command - Determine the index of a member in a sorted set
+///
+/// Returns the rank of member in the sorted set stored at key, with the scores ordered from low to high.
+/// The rank (or index) is 0-based, which means that the member with the lowest score has rank 0.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `member`: The member to get the rank for
+///
+/// # Response
+/// Returns `Option<i64>`:
+/// - `Some(rank)` - The rank of the member (0-based index)
+/// - `None` - Member does not exist in the sorted set
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zrank;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zrank;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Zrank::new("leaderboard", "player1");
+/// let rank = client.call(cmd).await?;
+///
+/// match rank {
+///     Some(r) => println!("Player1 rank: {} (0-based)", r),
+///     None => println!("Player1 not in leaderboard"),
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zrank {
@@ -508,13 +722,40 @@ impl Command for Zrank {
     }
 }
 
-/// Determine the index of a member in a sorted set, with scores ordered from high to low.
+/// ZREVRANK command - Determine the index of a member in a sorted set, with scores ordered from high to low
+///
+/// Returns the rank of member in the sorted set stored at key, with the scores ordered from high to low.
+/// The rank (or index) is 0-based, which means that the member with the highest score has rank 0.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `member`: The member to get the rank for
+///
+/// # Response
+/// Returns `Option<i64>`:
+/// - `Some(rank)` - The rank of the member (0-based index, 0 = highest score)
+/// - `None` - Member does not exist in the sorted set
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zrevrank;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zrevrank;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Zrevrank::new("leaderboard", "player1");
+/// let rank = client.call(cmd).await?;
+///
+/// match rank {
+///     Some(r) => println!("Player1 is rank #{} (1st place = 0)", r),
+///     None => println!("Player1 not in leaderboard"),
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zrevrank {
@@ -548,13 +789,41 @@ impl Command for Zrevrank {
     }
 }
 
-/// Increment the score of a member in a sorted set.
+/// ZINCRBY command - Increment the score of a member in a sorted set
+///
+/// Increments the score of member in the sorted set stored at key by increment. If member does not
+/// exist in the sorted set, it is added with increment as its score (as if its previous score was 0.0).
+/// If key does not exist, a new sorted set with the specified member as its sole member is created.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `increment`: The amount to increment the score by (can be negative)
+/// - `member`: The member to increment
+///
+/// # Response
+/// Returns `f64` - The new score of the member after the increment.
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zincrby;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zincrby;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Increment player1's score by 10
 /// let cmd = Zincrby::new("leaderboard", 10.0, "player1");
+/// let new_score = client.call(cmd).await?;
+/// println!("Player1 new score: {}", new_score);
+///
+/// // Decrement by using negative increment
+/// let cmd = Zincrby::new("leaderboard", -5.0, "player2");
+/// let new_score = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zincrby {
@@ -599,15 +868,57 @@ impl Command for Zincrby {
     }
 }
 
-/// Incrementally iterate sorted sets elements and associated scores.
+/// ZSCAN command - Incrementally iterate sorted set elements and associated scores
+///
+/// ZSCAN is a cursor-based iterator for sorted sets. It allows incrementally iterating over the
+/// elements and scores in a sorted set without blocking the server. Unlike ZRANGE, ZSCAN is safe
+/// to use in production environments with large sorted sets.
+///
+/// # Request
+/// - `key`: The sorted set key
+/// - `cursor`: Cursor position (0 to start, use returned cursor for next iteration)
+/// - `pattern` (optional): Glob-style pattern to filter members
+/// - `count` (optional): Hint for number of elements to return per call
+///
+/// # Response
+/// Returns `ZscanResult` containing:
+/// - `cursor`: Next cursor position (0 means iteration complete)
+/// - `members`: Vector of (member, score) tuples found in this iteration
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::sorted_sets::Zscan;
+/// ```no_run
+/// use redis_tower::commands::sorted_sets::Zscan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Iterate over all members in sorted set
+/// let mut cursor = 0;
+/// loop {
+///     let cmd = Zscan::new("leaderboard", cursor);
+///     let result = client.call(cmd).await?;
+///
+///     for (member, score) in result.members {
+///         println!("{}: {}", String::from_utf8_lossy(&member), score);
+///     }
+///
+///     if result.cursor == 0 {
+///         break; // Iteration complete
+///     }
+///     cursor = result.cursor;
+/// }
+///
+/// // Scan with pattern and count hint
 /// let cmd = Zscan::new("leaderboard", 0)
 ///     .pattern("player*")
 ///     .count(100);
+/// let result = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Zscan {

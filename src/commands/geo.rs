@@ -75,21 +75,43 @@ impl GeoUnit {
 
 /// GEOADD command - Add geospatial items to a sorted set
 ///
+/// Adds the specified geospatial items (longitude, latitude, name) to the specified sorted set.
+/// Data is stored as a sorted set using geohash, so ZREM can be used to remove items and
+/// ZRANGE can be used to query items.
+///
+/// # Request
+/// - `key`: The sorted set key where geospatial data is stored
+/// - `items`: One or more GeoItem entries (longitude, latitude, member) to add
+///
+/// # Response
+/// Returns `i64` - The number of elements added to the sorted set (not including updates)
+///
+/// # Redis Version
+/// Available since Redis 3.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoAdd, GeoItem};
+/// use redis_tower::commands::geo::{GeoAdd, GeoItem};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Add single location
 /// let cmd = GeoAdd::new("locations", vec![
 ///     GeoItem::new(13.361389, 38.115556, "Palermo")
 /// ]);
+/// let added = client.call(cmd).await?;
+/// println!("Added {} locations", added);
 ///
 /// // Add multiple locations
 /// let cmd = GeoAdd::new("locations", vec![
 ///     GeoItem::new(13.361389, 38.115556, "Palermo"),
 ///     GeoItem::new(15.087269, 37.502669, "Catania"),
 /// ]);
+/// let added = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoAdd {
@@ -142,17 +164,44 @@ impl Command for GeoAdd {
 
 /// GEODIST command - Get distance between two members
 ///
+/// Returns the distance between two members in the geospatial index represented by the sorted set.
+/// The unit can be one of: meters (m), kilometers (km), miles (mi), or feet (ft).
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `member1`: The first member name
+/// - `member2`: The second member name
+/// - `unit` (optional): Distance unit (default: meters)
+///
+/// # Response
+/// Returns `Option<f64>`:
+/// - `Some(distance)` - The distance in the specified unit
+/// - `None` - If one or both members do not exist
+///
+/// # Redis Version
+/// Available since Redis 3.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoDist, GeoUnit};
+/// use redis_tower::commands::geo::{GeoDist, GeoUnit};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Get distance in meters (default)
 /// let cmd = GeoDist::new("locations", "Palermo", "Catania");
+/// let distance = client.call(cmd).await?;
+/// if let Some(dist) = distance {
+///     println!("Distance: {} meters", dist);
+/// }
 ///
 /// // Get distance in kilometers
 /// let cmd = GeoDist::new("locations", "Palermo", "Catania")
 ///     .unit(GeoUnit::Kilometers);
+/// let distance = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoDist {
@@ -218,12 +267,38 @@ impl Command for GeoDist {
 
 /// GEOHASH command - Get geohash strings for members
 ///
+/// Returns valid Geohash strings representing the position of the specified members in the
+/// geospatial index. Geohash strings can be used with various geohash tools and libraries.
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `members`: One or more member names to get geohashes for
+///
+/// # Response
+/// Returns `Vec<Option<String>>` - Geohash strings for each member:
+/// - `Some(geohash)` - The 11-character geohash string for existing members
+/// - `None` - For members that do not exist
+///
+/// # Redis Version
+/// Available since Redis 3.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::GeoHash;
+/// use redis_tower::commands::geo::GeoHash;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = GeoHash::new("locations", vec!["Palermo", "Catania"]);
+/// let hashes = client.call(cmd).await?;
+/// for (i, hash) in hashes.iter().enumerate() {
+///     if let Some(h) = hash {
+///         println!("Member {}: geohash = {}", i, h);
+///     }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoHash {
@@ -284,12 +359,39 @@ impl Command for GeoHash {
 
 /// GEOPOS command - Get coordinates for members
 ///
+/// Returns the longitude and latitude coordinates for the specified members of the geospatial
+/// index. Since the geospatial index stores coordinates in a lossy way (geohash), the returned
+/// coordinates may not be exactly the same as the ones used to add the element.
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `members`: One or more member names to get coordinates for
+///
+/// # Response
+/// Returns `Vec<Option<GeoCoordinate>>` - Coordinates for each member:
+/// - `Some(GeoCoordinate { longitude, latitude })` - The coordinates for existing members
+/// - `None` - For members that do not exist
+///
+/// # Redis Version
+/// Available since Redis 3.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::GeoPos;
+/// use redis_tower::commands::geo::GeoPos;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = GeoPos::new("locations", vec!["Palermo", "Catania"]);
+/// let positions = client.call(cmd).await?;
+/// for (i, pos) in positions.iter().enumerate() {
+///     if let Some(coord) = pos {
+///         println!("Member {}: lon={}, lat={}", i, coord.longitude, coord.latitude);
+///     }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoPos {
@@ -364,22 +466,50 @@ impl Command for GeoPos {
 
 /// GEOSEARCH command - Search for members in a radius (Redis 6.2+)
 ///
-/// Modern replacement for GEORADIUS/GEORADIUSBYMEMBER
+/// Returns the members of a geospatial index that are within the borders of the area specified
+/// by a given shape (circular or rectangular). This is the modern replacement for the deprecated
+/// GEORADIUS and GEORADIUSBYMEMBER commands.
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `from_member` OR `from_lonlat`: Search center (member name or coordinates)
+/// - `by_radius` OR `by_box`: Search shape (radius or box dimensions)
+/// - `count` (optional): Limit number of results
+/// - `with_coord` (optional): Include coordinates in response
+/// - `with_dist` (optional): Include distance from center in response
+/// - `with_hash` (optional): Include geohash in response
+///
+/// # Response
+/// Returns `Vec<String>` - Member names within the search area.
+/// When WITH* options are used, the response contains nested arrays with additional data,
+/// but only member names are returned for simplicity.
+///
+/// # Redis Version
+/// Available since Redis 6.2.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoSearch, GeoUnit};
+/// use redis_tower::commands::geo::{GeoSearch, GeoUnit};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Search by member with radius
 /// let cmd = GeoSearch::new("locations")
 ///     .from_member("Palermo")
 ///     .by_radius(100.0, GeoUnit::Kilometers);
+/// let members = client.call(cmd).await?;
+/// println!("Found {} members", members.len());
 ///
 /// // Search by coordinates with box
 /// let cmd = GeoSearch::new("locations")
 ///     .from_lonlat(15.0, 37.0)
-///     .by_box(400.0, 400.0, GeoUnit::Kilometers);
+///     .by_box(400.0, 400.0, GeoUnit::Kilometers)
+///     .count(10);
+/// let members = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoSearch {
@@ -539,24 +669,47 @@ impl Command for GeoSearch {
 
 /// GEOSEARCHSTORE command - Search and store results
 ///
-/// Performs a GEOSEARCH and stores the results in a destination key.
-/// Available since Redis 6.2.
+/// Performs a GEOSEARCH query and stores the results in a destination key as a sorted set.
+/// This is useful for storing the results of complex geospatial queries for later retrieval
+/// or further processing. With STOREDIST option, stores distances instead of geohashes.
+///
+/// # Request
+/// - `destination`: The destination key where results will be stored
+/// - `source`: The source sorted set key with geospatial data
+/// - `from_member` OR `from_lonlat`: Search center (member name or coordinates)
+/// - `by_radius` OR `by_box`: Search shape (radius or box dimensions)
+/// - `count` (optional): Limit number of results
+/// - `storedist` (optional): Store distances as scores instead of geohashes
+///
+/// # Response
+/// Returns `i64` - The number of elements stored in the destination key
+///
+/// # Redis Version
+/// Available since Redis 6.2.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoSearchStore, GeoUnit};
+/// use redis_tower::commands::geo::{GeoSearchStore, GeoUnit};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Search by radius from member and store
 /// let cmd = GeoSearchStore::new("dest", "locations")
 ///     .from_member("Palermo")
 ///     .by_radius(100.0, GeoUnit::Kilometers);
+/// let stored = client.call(cmd).await?;
+/// println!("Stored {} members", stored);
 ///
 /// // Search by box from coordinates and store with distances
 /// let cmd = GeoSearchStore::new("dest", "locations")
 ///     .from_lonlat(15.0, 37.0)
 ///     .by_box(200.0, 200.0, GeoUnit::Kilometers)
 ///     .storedist();
+/// let stored = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoSearchStore {
@@ -827,15 +980,39 @@ mod tests {
 
 /// GEORADIUS_RO command - Query by radius (read-only, Redis 6.2+)
 ///
-/// Read-only variant of GEORADIUS for replica routing in cluster mode.
-/// This is a deprecated command - use GEOSEARCH instead for new applications.
+/// Read-only variant of GEORADIUS for replica routing in cluster mode. This command is
+/// deprecated - use GEOSEARCH instead for new applications.
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `longitude`: Center longitude
+/// - `latitude`: Center latitude
+/// - `radius`: Search radius
+/// - `unit`: Distance unit (meters, kilometers, miles, feet)
+/// - `with_coord` (optional): Include coordinates in response
+/// - `with_dist` (optional): Include distance in response
+/// - `with_hash` (optional): Include geohash in response
+/// - `count` (optional): Limit result count
+///
+/// # Response
+/// Returns `Vec<String>` - Member names within the radius
+///
+/// # Redis Version
+/// Available since Redis 3.2.10. Deprecated since Redis 6.2.0 (use GEOSEARCH instead).
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoRadiusReadOnly, GeoUnit};
+/// use redis_tower::commands::geo::{GeoRadiusReadOnly, GeoUnit};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = GeoRadiusReadOnly::new("locations", 15.0, 37.0, 100.0, GeoUnit::Kilometers);
+/// let members = client.call(cmd).await?;
+/// println!("Found {} members", members.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoRadiusReadOnly {
@@ -976,15 +1153,38 @@ impl ReadOnly for GeoRadiusReadOnly {
 
 /// GEORADIUSBYMEMBER_RO command - Query by member radius (read-only, Redis 6.2+)
 ///
-/// Read-only variant of GEORADIUSBYMEMBER for replica routing in cluster mode.
-/// This is a deprecated command - use GEOSEARCH instead for new applications.
+/// Read-only variant of GEORADIUSBYMEMBER for replica routing in cluster mode. This command is
+/// deprecated - use GEOSEARCH instead for new applications.
+///
+/// # Request
+/// - `key`: The sorted set key with geospatial data
+/// - `member`: Center member name
+/// - `radius`: Search radius
+/// - `unit`: Distance unit (meters, kilometers, miles, feet)
+/// - `with_coord` (optional): Include coordinates in response
+/// - `with_dist` (optional): Include distance in response
+/// - `with_hash` (optional): Include geohash in response
+/// - `count` (optional): Limit result count
+///
+/// # Response
+/// Returns `Vec<String>` - Member names within the radius of the center member
+///
+/// # Redis Version
+/// Available since Redis 3.2.10. Deprecated since Redis 6.2.0 (use GEOSEARCH instead).
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{GeoRadiusByMemberReadOnly, GeoUnit};
+/// use redis_tower::commands::geo::{GeoRadiusByMemberReadOnly, GeoUnit};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = GeoRadiusByMemberReadOnly::new("locations", "Palermo", 100.0, GeoUnit::Kilometers);
+/// let members = client.call(cmd).await?;
+/// println!("Found {} members near Palermo", members.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GeoRadiusByMemberReadOnly {

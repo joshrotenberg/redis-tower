@@ -11,17 +11,31 @@ use bytes::Bytes;
 
 use super::Command;
 
-/// MULTI - Mark the start of a transaction block
+/// MULTI command - Mark the start of a transaction block
 ///
-/// Subsequent commands will be queued for atomic execution via EXEC.
+/// Marks the start of a transaction block. Subsequent commands will be queued and executed
+/// atomically when EXEC is called. All commands return "QUEUED" status until EXEC.
 ///
-/// # Returns
-/// Always returns OK
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK to indicate transaction mode started
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Example
-/// ```
-/// use redis_tower::commands::{Multi, Command};
-/// let cmd = Multi;
+/// ```no_run
+/// use redis_tower::commands::transactions::Multi;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// client.call(Multi).await?;
+/// // Now in transaction mode - subsequent commands are queued
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Multi;
@@ -42,19 +56,38 @@ impl Command for Multi {
     }
 }
 
-/// EXEC - Execute all commands issued after MULTI
+/// EXEC command - Execute all commands issued after MULTI
 ///
-/// Executes all previously queued commands in a transaction and restores
-/// the connection state to normal.
+/// Executes all previously queued commands in a transaction atomically and restores
+/// the connection state to normal. When using WATCH, returns None if any watched key
+/// was modified, aborting the transaction.
 ///
-/// # Returns
-/// Array of replies, one for each command in the transaction.
-/// When using WATCH, returns Null if the execution was aborted.
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `Option<Vec<RedisValue>>`:
+/// - `Some(results)` - Array of command results, one per queued command
+/// - `None` - Transaction aborted (a WATCH key was modified)
+///
+/// # Redis Version
+/// Available since Redis 1.2.0
 ///
 /// # Example
-/// ```
-/// use redis_tower::commands::{Exec, Command};
-/// let cmd = Exec;
+/// ```no_run
+/// use redis_tower::commands::transactions::Exec;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let results = client.call(Exec).await?;
+/// if let Some(values) = results {
+///     println!("Transaction executed: {} commands", values.len());
+/// } else {
+///     println!("Transaction aborted (WATCH key modified)");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Exec;
@@ -80,18 +113,31 @@ impl Command for Exec {
     }
 }
 
-/// DISCARD - Discard all commands issued after MULTI
+/// DISCARD command - Discard all commands issued after MULTI
 ///
-/// Flushes all previously queued commands in a transaction and restores
-/// the connection state to normal.
+/// Flushes all previously queued commands in a transaction and restores the connection
+/// state to normal. If WATCH was used, all watched keys are unwatched.
 ///
-/// # Returns
-/// Always returns OK
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Example
-/// ```
-/// use redis_tower::commands::{Discard, Command};
-/// let cmd = Discard;
+/// ```no_run
+/// use redis_tower::commands::transactions::Discard;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// client.call(Discard).await?;
+/// // Transaction discarded, connection back to normal mode
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Discard;
@@ -112,18 +158,33 @@ impl Command for Discard {
     }
 }
 
-/// WATCH - Watch the given keys to determine execution of MULTI/EXEC block
+/// WATCH command - Watch keys for conditional transaction execution
 ///
-/// Marks the given keys to be watched for conditional execution of a transaction.
-/// If any watched key is modified before EXEC, the transaction will be aborted.
+/// Marks the given keys to be watched for conditional execution of a transaction. If any
+/// watched key is modified before EXEC, the entire transaction will be aborted and EXEC
+/// returns None. This provides optimistic locking for implementing check-and-set operations.
 ///
-/// # Returns
-/// Always returns OK
+/// # Request
+/// - `keys`: One or more keys to watch for modifications
+///
+/// # Response
+/// Returns `()` - Always returns OK
+///
+/// # Redis Version
+/// Available since Redis 2.2.0
 ///
 /// # Example
-/// ```
-/// use redis_tower::commands::{Watch, Command};
-/// let cmd = Watch::new(vec!["key1", "key2"]);
+/// ```no_run
+/// use redis_tower::commands::transactions::Watch;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Watch keys before starting transaction
+/// client.call(Watch::new(vec!["balance", "pending"])).await?;
+/// // If these keys are modified before EXEC, transaction aborts
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Watch {
@@ -168,18 +229,31 @@ impl Command for Watch {
     }
 }
 
-/// UNWATCH - Forget about all watched keys
+/// UNWATCH command - Forget about all watched keys
 ///
-/// Flushes all the previously watched keys for a transaction.
-/// If you call EXEC or DISCARD, there's no need to manually call UNWATCH.
+/// Flushes all the previously watched keys for a transaction. If you call EXEC or DISCARD,
+/// there's no need to manually call UNWATCH as they automatically unwatch all keys.
 ///
-/// # Returns
-/// Always returns OK
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK
+///
+/// # Redis Version
+/// Available since Redis 2.2.0
 ///
 /// # Example
-/// ```
-/// use redis_tower::commands::{Unwatch, Command};
-/// let cmd = Unwatch;
+/// ```no_run
+/// use redis_tower::commands::transactions::Unwatch;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// client.call(Unwatch).await?;
+/// // All watched keys are now unwatched
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unwatch;
