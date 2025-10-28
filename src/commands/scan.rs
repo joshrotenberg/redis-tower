@@ -1,33 +1,178 @@
 //! Scan commands for iterating over large datasets
 //!
-//! SCAN family commands allow iterating over keys without blocking the server.
-//! They return a cursor that can be used for subsequent calls.
+//! The SCAN family of commands (SCAN, SSCAN, HSCAN, ZSCAN) provide cursor-based iteration
+//! over Redis data structures without blocking the server. Unlike KEYS, SMEMBERS, HGETALL,
+//! and ZRANGE, these commands work incrementally and are safe to use in production.
+//!
+//! # Key Characteristics
+//!
+//! - **Non-blocking**: Each call does a small amount of work
+//! - **Cursor-based**: Maintains iteration state via cursor (0 = start/complete)
+//! - **No guarantees**: Elements may appear multiple times or be missed if modified during iteration
+//! - **Pattern matching**: Optional MATCH filter for selecting specific elements
+//! - **Count hint**: Optional COUNT to suggest number of elements per call (not a hard limit)
+//!
+//! # Common Pattern
+//!
+//! ```no_run
+//! use redis_tower::commands::scan::{Scan, ScanResult};
+//! use redis_tower::RedisClient;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let client = RedisClient::connect("127.0.0.1:6379").await?;
+//! let mut cursor = 0;
+//! let mut all_keys = Vec::new();
+//!
+//! loop {
+//!     let result: ScanResult = client.call(Scan::new(cursor)).await?;
+//!     all_keys.extend(result.keys);
+//!
+//!     cursor = result.cursor;
+//!     if cursor == 0 {
+//!         break; // Iteration complete
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # When to Use SCAN vs Alternatives
+//!
+//! **Use SCAN family when**:
+//! - You need to iterate over large datasets (>1000 elements)
+//! - You can't afford to block the server
+//! - You can tolerate duplicate/missing elements during iteration
+//!
+//! **Use blocking alternatives when**:
+//! - Dataset is small (<1000 elements)
+//! - You need exact snapshot semantics
+//! - Performance isn't critical
 
 use crate::codec::Frame;
 use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// SCAN command - iterate over keys in the database
+/// SCAN command - Incrementally iterate over all keys in the database
 ///
-/// Returns a ScanResult with cursor and keys.
+/// Iterates over the keyspace of the currently selected database using a cursor. Unlike
+/// KEYS, SCAN is safe to use in production as it doesn't block the server. The iteration
+/// is stateless on the server - the cursor encodes all the state.
 ///
-/// # Example
+/// **Important**: SCAN may return duplicate keys or miss keys that are modified during
+/// iteration. Elements present from start to finish are guaranteed to be returned.
+///
+/// # Request
+/// - `cursor`: Cursor position (0 to start new iteration)
+/// - `pattern` (optional): MATCH pattern to filter keys (glob-style: *, ?, [])
+/// - `count` (optional): COUNT hint for elements per call (default ~10, not a hard limit)
+///
+/// # Response
+/// Returns `ScanResult`:
+/// - `cursor`: Next cursor position (0 indicates iteration complete)
+/// - `keys`: Keys found in this iteration (may be empty even when cursor != 0)
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
+///
+/// # Examples
+///
+/// Basic iteration over all keys:
 /// ```no_run
-/// use redis_tower::commands::scan::Scan;
-/// use redis_tower::client::RedisConnection;
+/// use redis_tower::commands::scan::{Scan, ScanResult};
+/// use redis_tower::RedisClient;
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut all_keys = Vec::new();
 ///
-/// // Start scanning from cursor 0
-/// let mut result = client.execute(Scan::new(0)).await?;
-/// println!("Found {} keys", result.keys.len());
+/// loop {
+///     let result: ScanResult = client.call(Scan::new(cursor)).await?;
+///     all_keys.extend(result.keys);
+///     println!("Scanned {} keys, cursor now at {}", all_keys.len(), result.cursor);
 ///
-/// // Continue scanning until cursor is 0
-/// while result.cursor != 0 {
-///     result = client.execute(Scan::new(result.cursor)).await?;
-///     println!("Found {} more keys", result.keys.len());
+///     cursor = result.cursor;
+///     if cursor == 0 {
+///         break; // Iteration complete
+///     }
+/// }
+///
+/// println!("Total keys found: {}", all_keys.len());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Pattern matching with MATCH:
+/// ```no_run
+/// use redis_tower::commands::scan::Scan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut user_keys = Vec::new();
+///
+/// loop {
+///     // Only return keys matching pattern "user:*"
+///     let result = client.call(
+///         Scan::new(cursor).pattern("user:*")
+///     ).await?;
+///
+///     user_keys.extend(result.keys);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+///
+/// println!("Found {} user keys", user_keys.len());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Using COUNT hint for performance tuning:
+/// ```no_run
+/// use redis_tower::commands::scan::Scan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+///
+/// loop {
+///     // Request ~100 keys per call (hint, not guarantee)
+///     let result = client.call(
+///         Scan::new(cursor).count(100)
+///     ).await?;
+///
+///     println!("Got {} keys in this batch", result.keys.len());
+///
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Combined pattern and count:
+/// ```no_run
+/// use redis_tower::commands::scan::Scan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut session_keys = Vec::new();
+///
+/// loop {
+///     let result = client.call(
+///         Scan::new(cursor)
+///             .pattern("session:*")
+///             .count(50)  // Request 50 keys per iteration
+///     ).await?;
+///
+///     session_keys.extend(result.keys);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
 /// }
 /// # Ok(())
 /// # }
@@ -151,21 +296,106 @@ impl Command for Scan {
     }
 }
 
-/// SSCAN command for iterating over set members.
+/// SSCAN command - Incrementally iterate over set members
 ///
-/// Incrementally iterates over the members of a set using a cursor.
+/// Iterates over the members of a set using a cursor. Unlike SMEMBERS, SSCAN doesn't
+/// block the server and is safe to use with large sets in production. The cursor is
+/// specific to the set being scanned.
 ///
-/// # Example
+/// **Important**: Like all SCAN commands, SSCAN may return duplicate members or miss
+/// members that are added/removed during iteration.
 ///
-/// ```rust
-/// use redis_tower::commands::SScan;
+/// # Request
+/// - `key`: The set key to scan
+/// - `cursor`: Cursor position (0 to start new iteration)
+/// - `pattern` (optional): MATCH pattern to filter members (glob-style: *, ?, [])
+/// - `count` (optional): COUNT hint for elements per call (default ~10, not a hard limit)
 ///
-/// let scan = SScan::new("myset", 0)
-///     .pattern("prefix:*")
-///     .count(100);
+/// # Response
+/// Returns `SScanResult`:
+/// - `cursor`: Next cursor position (0 indicates iteration complete)
+/// - `members`: Set members found in this iteration (may be empty even when cursor != 0)
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
+///
+/// # Examples
+///
+/// Basic set member iteration:
+/// ```no_run
+/// use redis_tower::commands::scan::{SScan, SScanResult};
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut all_members = Vec::new();
+///
+/// loop {
+///     let result: SScanResult = client.call(
+///         SScan::new("active_users", cursor)
+///     ).await?;
+///
+///     all_members.extend(result.members);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+///
+/// println!("Found {} active users", all_members.len());
+/// # Ok(())
+/// # }
 /// ```
 ///
-/// Available since: Redis 2.8.0
+/// Pattern matching members:
+/// ```no_run
+/// use redis_tower::commands::scan::SScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut admin_users = Vec::new();
+///
+/// loop {
+///     // Only return members matching pattern "admin:*"
+///     let result = client.call(
+///         SScan::new("users", cursor).pattern("admin:*")
+///     ).await?;
+///
+///     admin_users.extend(result.members);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Using COUNT for large sets:
+/// ```no_run
+/// use redis_tower::commands::scan::SScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+///
+/// loop {
+///     let result = client.call(
+///         SScan::new("large_set", cursor)
+///             .count(1000)  // Process in larger batches
+///     ).await?;
+///
+///     // Process batch
+///     for member in result.members {
+///         println!("Processing: {}", String::from_utf8_lossy(&member));
+///     }
+///
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct SScan {
     pub(crate) key: String,
@@ -283,21 +513,116 @@ impl Command for SScan {
     }
 }
 
-/// ZSCAN command for iterating over sorted set members and scores.
+/// ZSCAN command - Incrementally iterate over sorted set members with scores
 ///
-/// Incrementally iterates over the members and scores of a sorted set using a cursor.
+/// Iterates over the members and scores of a sorted set using a cursor. Unlike ZRANGE,
+/// ZSCAN doesn't block the server and is safe to use with large sorted sets in production.
+/// Returns members with their scores as tuples.
 ///
-/// # Example
+/// **Important**: Like all SCAN commands, ZSCAN may return duplicate members or miss
+/// members that are added/removed during iteration.
 ///
-/// ```rust
-/// use redis_tower::commands::ZScan;
+/// # Request
+/// - `key`: The sorted set key to scan
+/// - `cursor`: Cursor position (0 to start new iteration)
+/// - `pattern` (optional): MATCH pattern to filter members (glob-style: *, ?, [])
+/// - `count` (optional): COUNT hint for elements per call (default ~10, not a hard limit)
 ///
-/// let scan = ZScan::new("leaderboard", 0)
-///     .pattern("player:*")
-///     .count(100);
+/// # Response
+/// Returns `ZScanResult`:
+/// - `cursor`: Next cursor position (0 indicates iteration complete)
+/// - `members`: Vec of (member, score) tuples found in this iteration
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
+///
+/// # Examples
+///
+/// Basic sorted set iteration:
+/// ```no_run
+/// use redis_tower::commands::scan::{ZScan, ZScanResult};
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut all_entries = Vec::new();
+///
+/// loop {
+///     let result: ZScanResult = client.call(
+///         ZScan::new("leaderboard", cursor)
+///     ).await?;
+///
+///     for (member, score) in &result.members {
+///         println!("{}: {}", String::from_utf8_lossy(member), score);
+///     }
+///
+///     all_entries.extend(result.members);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 ///
-/// Available since: Redis 2.8.0
+/// Pattern matching with scores:
+/// ```no_run
+/// use redis_tower::commands::scan::ZScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut premium_users = Vec::new();
+///
+/// loop {
+///     // Only return members matching pattern "premium:*"
+///     let result = client.call(
+///         ZScan::new("user_scores", cursor).pattern("premium:*")
+///     ).await?;
+///
+///     premium_users.extend(result.members);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+///
+/// // Sort by score (ZSCAN doesn't guarantee order)
+/// premium_users.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Processing large leaderboard in batches:
+/// ```no_run
+/// use redis_tower::commands::scan::ZScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut total_score = 0.0;
+/// let mut count = 0;
+///
+/// loop {
+///     let result = client.call(
+///         ZScan::new("game_scores", cursor)
+///             .count(500)  // Process 500 entries per batch
+///     ).await?;
+///
+///     for (_member, score) in result.members {
+///         total_score += score;
+///         count += 1;
+///     }
+///
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+///
+/// let average = total_score / count as f64;
+/// println!("Average score: {:.2}", average);
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct ZScan {
     pub(crate) key: String,
@@ -423,7 +748,148 @@ impl Command for ZScan {
     }
 }
 
-/// HSCAN command - iterate over fields in a hash
+/// HSCAN command - Incrementally iterate over hash fields and values
+///
+/// Iterates over the field-value pairs of a hash using a cursor. Unlike HGETALL, HSCAN
+/// doesn't block the server and is safe to use with large hashes in production. Returns
+/// field-value pairs as tuples.
+///
+/// **Important**: Like all SCAN commands, HSCAN may return duplicate fields or miss
+/// fields that are added/removed during iteration.
+///
+/// # Request
+/// - `key`: The hash key to scan
+/// - `cursor`: Cursor position (0 to start new iteration)
+/// - `pattern` (optional): MATCH pattern to filter field names (glob-style: *, ?, [])
+/// - `count` (optional): COUNT hint for elements per call (default ~10, not a hard limit)
+///
+/// # Response
+/// Returns `HScanResult`:
+/// - `cursor`: Next cursor position (0 indicates iteration complete)
+/// - `fields`: Vec of (field, value) tuples found in this iteration
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
+///
+/// # Examples
+///
+/// Basic hash field iteration:
+/// ```no_run
+/// use redis_tower::commands::scan::{HScan, HScanResult};
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut all_fields = Vec::new();
+///
+/// loop {
+///     let result: HScanResult = client.call(
+///         HScan::new("user:1000", cursor)
+///     ).await?;
+///
+///     for (field, value) in &result.fields {
+///         println!("{}: {}",
+///             String::from_utf8_lossy(field),
+///             String::from_utf8_lossy(value)
+///         );
+///     }
+///
+///     all_fields.extend(result.fields);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Pattern matching hash fields:
+/// ```no_run
+/// use redis_tower::commands::scan::HScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut metadata_fields = Vec::new();
+///
+/// loop {
+///     // Only return fields matching pattern "meta:*"
+///     let result = client.call(
+///         HScan::new("object:1", cursor).pattern("meta:*")
+///     ).await?;
+///
+///     metadata_fields.extend(result.fields);
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Processing large hash in batches:
+/// ```no_run
+/// use redis_tower::commands::scan::HScan;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+///
+/// loop {
+///     let result = client.call(
+///         HScan::new("large_config", cursor)
+///             .count(100)  // Process 100 fields per batch
+///     ).await?;
+///
+///     // Validate or process each field
+///     for (field, value) in result.fields {
+///         let field_name = String::from_utf8_lossy(&field);
+///         let field_value = String::from_utf8_lossy(&value);
+///
+///         if field_value.is_empty() {
+///             println!("Warning: Empty value for field {}", field_name);
+///         }
+///     }
+///
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Collecting specific fields:
+/// ```no_run
+/// use redis_tower::commands::scan::HScan;
+/// use redis_tower::RedisClient;
+/// use std::collections::HashMap;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let mut cursor = 0;
+/// let mut config = HashMap::new();
+///
+/// loop {
+///     let result = client.call(
+///         HScan::new("app:config", cursor).pattern("feature:*")
+///     ).await?;
+///
+///     for (field, value) in result.fields {
+///         config.insert(
+///             String::from_utf8_lossy(&field).to_string(),
+///             String::from_utf8_lossy(&value).to_string()
+///         );
+///     }
+///
+///     cursor = result.cursor;
+///     if cursor == 0 { break; }
+/// }
+///
+/// println!("Found {} feature flags", config.len());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct HScan {
     pub(crate) key: String,
