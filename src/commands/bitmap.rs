@@ -10,16 +10,38 @@ use bytes::Bytes;
 
 /// SETBIT command - Set or clear a bit at a given offset
 ///
+/// Sets or clears the bit at the specified offset in the string value stored at key.
+/// The string is grown to accommodate the offset if needed. When the string is grown,
+/// added bits are set to 0.
+///
+/// # Request
+/// - `key`: The string key to modify
+/// - `offset`: The bit offset (0-based)
+/// - `value`: true to set bit to 1, false to set bit to 0
+///
+/// # Response
+/// Returns `bool` - The original bit value at the offset (before modification)
+///
+/// # Redis Version
+/// Available since Redis 2.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::SetBit;
+/// use redis_tower::commands::bitmap::SetBit;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Set bit at offset 100 to 1
-/// let cmd = SetBit::new("bitmap", 100, true);
+/// let old_value = client.call(SetBit::new("bitmap", 100, true)).await?;
+/// println!("Previous bit value: {}", old_value);
 ///
 /// // Clear bit at offset 200
 /// let cmd = SetBit::new("bitmap", 200, false);
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct SetBit {
@@ -63,12 +85,32 @@ impl Command for SetBit {
 
 /// GETBIT command - Get the value of a bit at a given offset
 ///
+/// Returns the bit value at the specified offset in the string value stored at key.
+/// When offset is beyond the string length, or the key does not exist, returns 0.
+///
+/// # Request
+/// - `key`: The string key to read from
+/// - `offset`: The bit offset (0-based)
+///
+/// # Response
+/// Returns `bool` - The bit value at the offset (true = 1, false = 0)
+///
+/// # Redis Version
+/// Available since Redis 2.2.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::GetBit;
+/// use redis_tower::commands::bitmap::GetBit;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = GetBit::new("bitmap", 100);
+/// let bit_value = client.call(cmd).await?;
+/// println!("Bit at offset 100: {}", if bit_value { 1 } else { 0 });
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct GetBit {
@@ -109,19 +151,40 @@ impl Command for GetBit {
 
 /// BITCOUNT command - Count the number of set bits in a string
 ///
+/// Counts the number of set bits (population counting) in the string value stored at key.
+/// By default, all bytes are examined. You can specify a range using byte or bit indices.
+///
+/// # Request
+/// - `key`: The string key to analyze
+/// - `range` (optional): Byte range (start, end) to limit counting
+/// - `bit_range` (optional): Bit range (start, end) to limit counting (Redis 7.0+)
+///
+/// # Response
+/// Returns `i64` - The number of bits set to 1
+///
+/// # Redis Version
+/// Available since Redis 2.6.0. BIT index option available since Redis 7.0.0.
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::BitCount;
+/// use redis_tower::commands::bitmap::BitCount;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Count all bits
-/// let cmd = BitCount::new("bitmap");
+/// let total = client.call(BitCount::new("bitmap")).await?;
+/// println!("Total set bits: {}", total);
 ///
 /// // Count bits in a byte range
 /// let cmd = BitCount::new("bitmap").range(0, 10);
+/// let count = client.call(cmd).await?;
 ///
 /// // Count bits in a bit range (Redis 7.0+)
 /// let cmd = BitCount::new("bitmap").bit_range(100, 200);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BitCount {
@@ -215,16 +278,39 @@ impl BitOp {
 
 /// BITOP command - Perform bitwise operations between strings
 ///
+/// Performs a bitwise operation (AND, OR, XOR, or NOT) between multiple strings and stores
+/// the result in the destination key. Except for NOT, all operations accept multiple source keys.
+/// NOT operation accepts exactly one source key.
+///
+/// # Request
+/// - `operation`: The bitwise operation (AND, OR, XOR, NOT)
+/// - `dest_key`: The destination key where result is stored
+/// - `keys`: One or more source keys (NOT requires exactly one)
+///
+/// # Response
+/// Returns `i64` - The size of the string stored in the destination key (in bytes)
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::{BitOp as BitOpType, BitOp};
+/// use redis_tower::commands::bitmap::{BitOp, BitOpCmd};
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // AND operation
-/// let cmd = BitOp::new(BitOpType::And, "result", vec!["key1", "key2"]);
+/// let cmd = BitOpCmd::new(BitOp::And, "result", vec!["key1", "key2"]);
+/// let size = client.call(cmd).await?;
+/// println!("Result size: {} bytes", size);
 ///
 /// // NOT operation (single key)
-/// let cmd = BitOp::new(BitOpType::Not, "result", vec!["key1"]);
+/// let cmd = BitOpCmd::new(BitOp::Not, "result", vec!["key1"]);
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BitOpCmd {
@@ -278,19 +364,43 @@ impl Command for BitOpCmd {
 
 /// BITPOS command - Find the first bit set to 1 or 0
 ///
+/// Returns the position of the first bit set to 1 or 0 in the string value stored at key.
+/// By default, all bytes are examined. You can limit the search to a byte or bit range.
+///
+/// # Request
+/// - `key`: The string key to search in
+/// - `bit`: true to find first 1, false to find first 0
+/// - `range` (optional): Byte range (start, end) to limit search
+/// - `bit_range` (optional): Bit range (start, end) to limit search (Redis 7.0+)
+///
+/// # Response
+/// Returns `i64`:
+/// - Position of the first bit matching the search (0-based)
+/// - -1 if no matching bit is found
+///
+/// # Redis Version
+/// Available since Redis 2.8.7. BIT index option available since Redis 7.0.0.
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::BitPos;
+/// use redis_tower::commands::bitmap::BitPos;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Find first bit set to 1
-/// let cmd = BitPos::new("bitmap", true);
+/// let pos = client.call(BitPos::new("bitmap", true)).await?;
+/// println!("First 1 bit at position: {}", pos);
 ///
 /// // Find first bit set to 0 in byte range
 /// let cmd = BitPos::new("bitmap", false).range(0, 10);
+/// let pos = client.call(cmd).await?;
 ///
 /// // Find first bit set to 1 in bit range (Redis 7.0+)
 /// let cmd = BitPos::new("bitmap", true).bit_range(100, 200);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BitPos {
