@@ -7,14 +7,40 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// PERSIST command - Remove expiration from a key
+/// PERSIST command - Remove the expiration from a key
+///
+/// Remove the existing timeout on key, turning the key from volatile (a key with an expire set)
+/// to persistent (a key that will never expire as no timeout is associated).
+///
+/// # Request
+/// - `key`: The key to persist
+///
+/// # Response
+/// Returns `bool`:
+/// - `true` - The timeout was removed successfully
+/// - `false` - The key does not exist or does not have an associated timeout
+///
+/// # Redis Version
+/// Available since Redis 2.2.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Persist;
+/// use redis_tower::commands::keys::Persist;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Persist::new("mykey");
+/// let removed = client.call(cmd).await?;
+///
+/// if removed {
+///     println!("Expiration removed, key is now persistent");
+/// } else {
+///     println!("Key has no expiration or doesn't exist");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Persist {
@@ -491,15 +517,36 @@ impl Command for PExpireAt {
 
 /// RENAME command - Rename a key
 ///
+/// Renames key to newkey. It returns an error when key does not exist. If newkey already exists
+/// it is overwritten. Before Redis 3.2.0, an error was returned if source and destination names
+/// are the same. Starting with Redis 3.2.0, RENAME does nothing if names are identical.
+///
+/// # Request
+/// - `key`: The source key to rename
+/// - `new_key`: The destination key name
+///
+/// # Response
+/// Returns `()` - Command always succeeds if key exists.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Rename;
+/// use redis_tower::commands::keys::Rename;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Rename::new("oldkey", "newkey");
+/// client.call(cmd).await?;
+/// println!("Key renamed successfully");
+/// # Ok(())
+/// # }
 /// ```
 ///
-/// Note: If newkey already exists, it is overwritten.
+/// **Note:** If newkey already exists, it is overwritten.
 #[derive(Debug, Clone)]
 pub struct Rename {
     key: String,
@@ -582,18 +629,47 @@ impl Command for RenameNx {
     }
 }
 
-/// TYPE command - Get the type of a key
+/// TYPE command - Determine the type stored at key
+///
+/// Returns the string representation of the type of the value stored at key. The different
+/// types that can be returned are: string, list, set, zset, hash, and stream.
+///
+/// # Request
+/// - `key`: The key to check
+///
+/// # Response
+/// Returns `String` - The type of the key:
+/// - `"string"` - String value
+/// - `"list"` - List value
+/// - `"set"` - Set value
+/// - `"zset"` - Sorted set value
+/// - `"hash"` - Hash value
+/// - `"stream"` - Stream value
+/// - `"none"` - Key does not exist
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Type;
+/// use redis_tower::commands::keys::Type;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Type::new("mykey");
-/// ```
+/// let key_type = client.call(cmd).await?;
 ///
-/// # Return values
-/// Returns one of: "string", "list", "set", "zset", "hash", "stream", or "none"
+/// match key_type.as_str() {
+///     "string" => println!("It's a string"),
+///     "list" => println!("It's a list"),
+///     "none" => println!("Key doesn't exist"),
+///     _ => println!("Type: {}", key_type),
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct Type {
     key: String,
@@ -627,23 +703,46 @@ impl Command for Type {
 
 /// KEYS command - Find all keys matching a pattern
 ///
+/// Returns all keys matching pattern. While the time complexity for this operation is O(N),
+/// the constant times are fairly low. For example, Redis running on an entry level laptop can
+/// scan a 1 million key database in 40 milliseconds.
+///
+/// **Warning:** Consider KEYS as a command that should only be used in production environments
+/// with extreme care. It may ruin performance when it is executed against large databases.
+/// This command is intended for debugging and special operations. Use SCAN for production.
+///
+/// # Request
+/// - `pattern`: Glob-style pattern (* matches any characters, ? matches one character, [abc] matches a, b, or c)
+///
+/// # Response
+/// Returns `Vec<String>` - All keys matching the pattern. Empty vector if no keys match.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Keys;
+/// use redis_tower::commands::keys::Keys;
+/// use redis_tower::RedisClient;
 ///
-/// // Get all keys
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Get all keys (use carefully!)
 /// let cmd = Keys::new("*");
+/// let all_keys = client.call(cmd).await?;
 ///
 /// // Get keys with prefix
 /// let cmd = Keys::new("user:*");
+/// let user_keys = client.call(cmd).await?;
 ///
-/// // Get keys with pattern
+/// // Get keys matching pattern
 /// let cmd = Keys::new("user:[0-9]*");
+/// let numbered_users = client.call(cmd).await?;
+/// println!("Found {} matching keys", numbered_users.len());
+/// # Ok(())
+/// # }
 /// ```
-///
-/// Warning: This command should be used with caution in production as it blocks
-/// the server. Consider using SCAN instead for production use cases.
 #[derive(Debug, Clone)]
 pub struct Keys {
     pattern: String,
@@ -691,16 +790,39 @@ impl Command for Keys {
     }
 }
 
-/// TOUCH command - Update the access time of one or more keys
+/// TOUCH command - Alters the last access time of a key(s)
 ///
-/// Returns the number of keys that were touched (existed).
+/// Returns the number of existing keys specified. A key is ignored if it does not exist.
+/// This command is useful to update the LRU (Least Recently Used) information for keys,
+/// which affects their eviction when maxmemory-policy is set to an LRU-based policy.
+///
+/// # Request
+/// - `keys`: One or more keys to touch
+///
+/// # Response
+/// Returns `i64` - The number of keys that exist and were touched.
+///
+/// # Redis Version
+/// Available since Redis 3.2.1
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Touch;
+/// use redis_tower::commands::keys::Touch;
+/// use redis_tower::RedisClient;
 ///
-/// let cmd = Touch::new(vec!["key1".to_string(), "key2".to_string()]);
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Touch single key
+/// let cmd = Touch::single("mykey");
+/// let touched = client.call(cmd).await?;
+///
+/// // Touch multiple keys
+/// let cmd = Touch::new(vec!["key1".to_string(), "key2".to_string(), "key3".to_string()]);
+/// let touched = client.call(cmd).await?;
+/// println!("Touched {} keys", touched);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Touch {
@@ -743,17 +865,40 @@ impl Command for Touch {
     }
 }
 
-/// UNLINK command - Async delete of one or more keys
+/// UNLINK command - Delete a key asynchronously in another thread
 ///
-/// Like DEL but performs the actual memory reclamation in a different thread,
-/// so it doesn't block. Returns the number of keys that were unlinked.
+/// This command is very similar to DEL: it removes the specified keys. Just like DEL a key
+/// is ignored if it does not exist. However, UNLINK performs the actual memory reclamation
+/// in a different thread, so it is not blocking. This is more efficient when deleting large
+/// values.
+///
+/// # Request
+/// - `keys`: One or more keys to unlink
+///
+/// # Response
+/// Returns `i64` - The number of keys that were unlinked.
+///
+/// # Redis Version
+/// Available since Redis 4.0.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Unlink;
+/// use redis_tower::commands::keys::Unlink;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Unlink single key
+/// let cmd = Unlink::single("large_key");
+/// let unlinked = client.call(cmd).await?;
+///
+/// // Unlink multiple keys asynchronously
 /// let cmd = Unlink::new(vec!["key1".to_string(), "key2".to_string()]);
+/// let unlinked = client.call(cmd).await?;
+/// println!("Unlinked {} keys", unlinked);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Unlink {
@@ -796,23 +941,48 @@ impl Command for Unlink {
     }
 }
 
-/// COPY command - Copy a key to a new key (Redis 6.2+)
+/// COPY command - Copy the value of a key to a new key
 ///
-/// Returns true if the copy was successful, false otherwise.
+/// This command copies the value stored at the source key to the destination key. By default,
+/// the destination key is created in the logical database used by the connection. The DB option
+/// allows specifying an alternative logical database index for the destination key.
+///
+/// # Request
+/// - `source`: The source key to copy from
+/// - `destination`: The destination key to copy to
+/// - `db` (optional): Database index to copy to
+/// - `replace` (optional): Overwrite destination if it exists
+///
+/// # Response
+/// Returns `bool`:
+/// - `true` - The source key was copied successfully
+/// - `false` - The source key does not exist, or destination exists and REPLACE was not used
+///
+/// # Redis Version
+/// Available since Redis 6.2.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Copy;
+/// use redis_tower::commands::keys::Copy;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Simple copy
 /// let cmd = Copy::new("source", "dest");
+/// let copied = client.call(cmd).await?;
 ///
-/// // Copy with REPLACE option
+/// // Copy with REPLACE option (overwrite if dest exists)
 /// let cmd = Copy::new("source", "dest").replace();
+/// let copied = client.call(cmd).await?;
 ///
 /// // Copy to different database
 /// let cmd = Copy::new("source", "dest").db(2);
+/// let copied = client.call(cmd).await?;
+/// println!("Copy successful: {}", copied);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Copy {
@@ -1019,17 +1189,42 @@ impl Command for PExpireTime {
     }
 }
 
-/// DUMP command - Serialize value at key
+/// DUMP command - Return a serialized version of the value stored at a key
 ///
-/// Returns a serialized version of the value stored at the specified key.
-/// The returned value can be restored using RESTORE.
+/// Serialize the value stored at key in a Redis-specific format and return it to the user.
+/// The returned value can be synthesized back into a Redis key using the RESTORE command.
+/// The serialization format is opaque and non-standard, however it has a few semantic characteristics.
+///
+/// # Request
+/// - `key`: The key to serialize
+///
+/// # Response
+/// Returns `Option<Bytes>`:
+/// - `Some(data)` - The serialized value
+/// - `None` - The key does not exist
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Dump;
+/// use redis_tower::commands::keys::Dump;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Dump::new("mykey");
+/// let serialized = client.call(cmd).await?;
+///
+/// if let Some(data) = serialized {
+///     println!("Serialized {} bytes", data.len());
+///     // Can be restored with RESTORE command
+/// } else {
+///     println!("Key does not exist");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Dump {
@@ -1063,28 +1258,50 @@ impl Command for Dump {
     }
 }
 
-/// RESTORE command - Deserialize value to key
+/// RESTORE command - Create a key using the provided serialized value
 ///
-/// Creates a key associated with a value that is obtained via DUMP.
-/// Available with TTL and optional REPLACE modifier.
+/// Create a key associated with a value that is obtained by deserializing the provided
+/// serialized value (obtained via DUMP). If ttl is 0 the key is created without any expire,
+/// otherwise the specified expire time (in milliseconds) is set.
+///
+/// # Request
+/// - `key`: The key to create
+/// - `ttl`: Time to live in milliseconds (0 for no expiry)
+/// - `serialized_value`: Serialized value from DUMP command
+/// - `replace` (optional): Replace existing key if it exists
+/// - `absttl` (optional): TTL represents absolute Unix timestamp in milliseconds
+/// - `idletime` (optional): Set the idle time for LRU eviction (seconds)
+/// - `freq` (optional): Set the frequency counter for LFU eviction
+///
+/// # Response
+/// Returns `String` - "OK" on success
+///
+/// # Redis Version
+/// Available since Redis 2.6.0
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Restore;
+/// use redis_tower::commands::keys::Restore;
+/// use redis_tower::RedisClient;
 /// use bytes::Bytes;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// # let serialized_data = Bytes::from(vec![1, 2, 3]);
 /// // Restore without TTL
-/// let cmd = Restore::new("mykey", 0, Bytes::from(vec![1, 2, 3]));
+/// let cmd = Restore::new("mykey", 0, serialized_data.clone());
+/// client.call(cmd).await?;
 ///
 /// // Restore with 10 second TTL
-/// let cmd = Restore::new("mykey", 10000, Bytes::from(vec![1, 2, 3]));
+/// let cmd = Restore::new("mykey2", 10000, serialized_data.clone());
+/// client.call(cmd).await?;
 ///
-/// // Restore with REPLACE option
-/// let cmd = Restore::new("mykey", 0, Bytes::from(vec![1, 2, 3])).replace();
-///
-/// // Restore with absolute TTL (Redis 5.0+)
-/// let cmd = Restore::new("mykey", 1735689600000, Bytes::from(vec![1, 2, 3])).absttl();
+/// // Restore with REPLACE option (overwrite if exists)
+/// let cmd = Restore::new("mykey", 0, serialized_data.clone()).replace();
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Restore {
@@ -2060,27 +2277,60 @@ mod sort_tests {
     }
 }
 
-/// SCAN command - Incrementally iterate the key space
+/// SCAN command - Incrementally iterate over the keys space
 ///
-/// SCAN is a cursor based iterator that allows incrementally iterating
-/// over the entire key space without blocking the server.
+/// SCAN is a cursor-based iterator that allows incrementally iterating over the entire key space
+/// without blocking the server. Unlike KEYS, SCAN doesn't block the server and is safe to use in
+/// production environments. SCAN guarantees to return all the elements that are present from the
+/// start to the end of the iteration (assuming no modifications).
+///
+/// # Request
+/// - `cursor`: Cursor position (0 to start, use returned cursor for next iteration)
+/// - `pattern` (optional): Glob-style pattern to filter keys
+/// - `count` (optional): Hint for number of elements to return per call
+/// - `key_type` (optional): Filter by key type (string, list, set, zset, hash, stream)
+///
+/// # Response
+/// Returns `(u64, Vec<String>)`:
+/// - First element: Next cursor position (0 means iteration complete)
+/// - Second element: Vector of keys found in this iteration
+///
+/// # Redis Version
+/// Available since Redis 2.8.0. TYPE filter available since Redis 6.0.0.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Scan;
+/// use redis_tower::commands::keys::Scan;
+/// use redis_tower::RedisClient;
 ///
-/// // Basic scan with cursor 0 (start)
-/// let cmd = Scan::new(0);
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Iterate over all keys
+/// let mut cursor = 0;
+/// loop {
+///     let cmd = Scan::new(cursor);
+///     let (next_cursor, keys) = client.call(cmd).await?;
+///
+///     for key in keys {
+///         println!("Key: {}", key);
+///     }
+///
+///     if next_cursor == 0 {
+///         break; // Iteration complete
+///     }
+///     cursor = next_cursor;
+/// }
 ///
 /// // Scan with pattern matching
 /// let cmd = Scan::new(0).pattern("user:*");
+/// let (cursor, user_keys) = client.call(cmd).await?;
 ///
-/// // Scan with count hint
-/// let cmd = Scan::new(10).count(100);
-///
-/// // Scan with type filter (Redis 6.0+)
-/// let cmd = Scan::new(0).key_type("string");
+/// // Scan with count hint and type filter
+/// let cmd = Scan::new(0).count(100).key_type("string");
+/// let (cursor, string_keys) = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Scan {
