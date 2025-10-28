@@ -10,23 +10,45 @@ use bytes::Bytes;
 
 /// ACL SETUSER command - Create or modify a user
 ///
+/// Creates or modifies a Redis user with specified permissions, passwords, and access rules.
+/// Users can be enabled/disabled, assigned passwords, restricted to key patterns, and granted
+/// specific command permissions. This is the primary command for managing user access control.
+///
+/// # Request
+/// - `username`: The username to create or modify
+/// - `rules`: ACL rules to apply (on/off, passwords, key patterns, command permissions)
+///
+/// # Response
+/// Returns `()` - Always returns OK on success
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclSetUser;
-/// // Create a user with password
+/// ```no_run
+/// use redis_tower::commands::acl::AclSetUser;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Create a user with password and limited commands
 /// let cmd = AclSetUser::new("alice")
 ///     .on()
 ///     .password("secret123")
 ///     .command("+get")
 ///     .command("+set");
+/// client.call(cmd).await?;
 ///
-/// // Create user with key patterns
+/// // Create user with key pattern restrictions
 /// let cmd = AclSetUser::new("bob")
 ///     .on()
 ///     .password("pass456")
 ///     .key_pattern("user:*")
 ///     .command("allcommands");
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclSetUser {
@@ -127,11 +149,31 @@ impl Command for AclSetUser {
 
 /// ACL GETUSER command - Get user details
 ///
+/// Returns all the rules and settings for a specific user, including flags, passwords (hashed),
+/// command permissions, and key patterns. Returns null if the user doesn't exist.
+///
+/// # Request
+/// - `username`: The username to retrieve details for
+///
+/// # Response
+/// Returns `String` - Debug representation of user details array (simplified)
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclGetUser;
+/// ```no_run
+/// use redis_tower::commands::acl::AclGetUser;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclGetUser::new("alice");
+/// let details = client.call(cmd).await?;
+/// println!("User details: {}", details);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclGetUser {
@@ -166,13 +208,33 @@ impl Command for AclGetUser {
 
 /// ACL DELUSER command - Delete users
 ///
+/// Deletes one or more users from the ACL list. The default user cannot be deleted.
+/// Returns the number of users that were deleted.
+///
+/// # Request
+/// - `usernames`: One or more usernames to delete
+///
+/// # Response
+/// Returns `i64` - Number of users successfully deleted
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclDelUser;
+/// ```no_run
+/// use redis_tower::commands::acl::AclDelUser;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclDelUser::new()
 ///     .username("alice")
 ///     .username("bob");
+/// let deleted = client.call(cmd).await?;
+/// println!("Deleted {} users", deleted);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclDelUser {
@@ -227,11 +289,34 @@ impl Command for AclDelUser {
 
 /// ACL LIST command - List all users in ACL format
 ///
+/// Returns an array where each element is a string representing one user's ACL rules
+/// in the same format accepted by ACL SETUSER. Useful for backing up or inspecting
+/// the entire ACL configuration.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `Vec<String>` - Array of ACL rule strings, one per user
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclList;
+/// ```no_run
+/// use redis_tower::commands::acl::AclList;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclList::new();
+/// let users = client.call(cmd).await?;
+/// for user_acl in users {
+///     println!("User ACL: {}", user_acl);
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclList;
@@ -278,11 +363,31 @@ impl Command for AclList {
 
 /// ACL USERS command - List all usernames
 ///
+/// Returns a simple list of all defined usernames. This is faster than ACL LIST
+/// when you only need the usernames without their full ACL rules.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `Vec<String>` - Array of usernames
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclUsers;
+/// ```no_run
+/// use redis_tower::commands::acl::AclUsers;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclUsers::new();
+/// let usernames = client.call(cmd).await?;
+/// println!("Existing users: {:?}", usernames);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclUsers;
@@ -329,11 +434,31 @@ impl Command for AclUsers {
 
 /// ACL WHOAMI command - Get the current connection's username
 ///
+/// Returns the username of the current connection. Useful for debugging authentication
+/// or determining which user a connection is authenticated as.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `String` - The username of the authenticated user ("default" if not authenticated)
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclWhoAmI;
+/// ```no_run
+/// use redis_tower::commands::acl::AclWhoAmI;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclWhoAmI::new();
+/// let username = client.call(cmd).await?;
+/// println!("Currently authenticated as: {}", username);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclWhoAmI;
@@ -372,15 +497,39 @@ impl Command for AclWhoAmI {
 
 /// ACL CAT command - List available command categories
 ///
+/// Returns a list of command categories (e.g., "read", "write", "admin") when called without
+/// arguments. When called with a category name, returns all commands in that category.
+/// Categories are used in ACL rules to grant or deny groups of related commands.
+///
+/// # Request
+/// - `category` (optional): Specific category to list commands for
+///
+/// # Response
+/// Returns `Vec<String>`:
+/// - Without category: List of all available categories
+/// - With category: List of all commands in that category
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclCat;
+/// ```no_run
+/// use redis_tower::commands::acl::AclCat;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // List all categories
-/// let cmd = AclCat::new();
+/// let categories = client.call(AclCat::new()).await?;
+/// println!("Available categories: {:?}", categories);
 ///
 /// // List commands in a category
 /// let cmd = AclCat::category("string");
+/// let commands = client.call(cmd).await?;
+/// println!("String commands: {:?}", commands);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclCat {
@@ -442,15 +591,37 @@ impl Command for AclCat {
 
 /// ACL LOG command - Show ACL security events log
 ///
+/// Returns a log of ACL security events such as authentication failures and command rejections.
+/// Can retrieve a specific number of recent entries or reset the entire log.
+///
+/// # Request
+/// - `count` (optional): Number of recent log entries to return
+/// - `reset` (method): Reset the log instead of reading it
+///
+/// # Response
+/// Returns `String` - Debug representation of log entries (simplified)
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclLog;
+/// ```no_run
+/// use redis_tower::commands::acl::AclLog;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Get last 10 log entries
 /// let cmd = AclLog::new().count(10);
+/// let log = client.call(cmd).await?;
+/// println!("Recent ACL events: {}", log);
 ///
 /// // Reset the log
 /// let cmd = AclLog::reset();
+/// client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclLog {
@@ -513,11 +684,32 @@ impl Command for AclLog {
 
 /// ACL LOAD command - Reload ACL rules from configured ACL file
 ///
+/// Reloads the ACL configuration from the file specified in the aclfile configuration directive.
+/// All current ACL configuration is replaced with the contents of the file. If the file has
+/// errors, the command fails and the old ACL configuration remains in effect.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK on success
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclLoad;
+/// ```no_run
+/// use redis_tower::commands::acl::AclLoad;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclLoad::new();
+/// client.call(cmd).await?;
+/// println!("ACL configuration reloaded from file");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclLoad;
@@ -556,11 +748,31 @@ impl Command for AclLoad {
 
 /// ACL SAVE command - Save ACL rules to configured ACL file
 ///
+/// Saves the current ACL configuration to the file specified in the aclfile configuration
+/// directive. The file is completely overwritten with the current in-memory ACL configuration.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `()` - Always returns OK on success
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclSave;
+/// ```no_run
+/// use redis_tower::commands::acl::AclSave;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = AclSave::new();
+/// client.call(cmd).await?;
+/// println!("ACL configuration saved to file");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclSave;
@@ -599,15 +811,36 @@ impl Command for AclSave {
 
 /// ACL GENPASS command - Generate a secure password
 ///
+/// Generates a cryptographically secure pseudorandom password suitable for use with ACL SETUSER.
+/// The default output is a 256-bit (64 hex characters) password, but you can specify a different
+/// bit length. Useful for creating strong passwords programmatically.
+///
+/// # Request
+/// - `bits` (optional): Number of bits for the password (default: 256)
+///
+/// # Response
+/// Returns `String` - The generated password as a hexadecimal string
+///
+/// # Redis Version
+/// Available since Redis 6.0.0
+///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::commands::acl::AclGenPass;
+/// ```no_run
+/// use redis_tower::commands::acl::AclGenPass;
+/// use redis_tower::RedisClient;
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Generate default 256-bit password
-/// let cmd = AclGenPass::new();
+/// let password = client.call(AclGenPass::new()).await?;
+/// println!("Generated password: {}", password);
 ///
 /// // Generate 128-bit password
 /// let cmd = AclGenPass::new().bits(128);
+/// let password = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct AclGenPass {
