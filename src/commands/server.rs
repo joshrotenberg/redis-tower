@@ -656,27 +656,91 @@ impl Command for BgSave {
     }
 }
 
-/// INFO command - Get information and statistics about the server
+/// INFO command - Get comprehensive server information and statistics
 ///
-/// Returns information and statistics about the Redis server in a
-/// format that is both human-readable and easily parsable by computers.
+/// Returns detailed information and statistics about the Redis server in a format that
+/// is both human-readable and easily parsable by programs. The information is organized
+/// into sections that can be queried individually or all at once.
 ///
-/// You can optionally specify a section to limit the output:
-/// - server, clients, memory, persistence, stats, replication,
-///   cpu, commandstats, cluster, keyspace, modules, errorstats
-/// - all: Return all sections
-/// - default: Return default sections
+/// # Request
+/// - `section` (optional): Specific section to retrieve, or omit for default sections
+///
+/// Available sections:
+/// - `server`: General server information (version, uptime, config file)
+/// - `clients`: Connected clients information (count, longest output list)
+/// - `memory`: Memory usage statistics (used memory, peak memory, fragmentation)
+/// - `persistence`: RDB and AOF persistence statistics (last save time, changes since last save)
+/// - `stats`: General statistics (connections received, commands processed, keyspace hits/misses)
+/// - `replication`: Master/replica replication information
+/// - `cpu`: CPU usage statistics
+/// - `commandstats`: Per-command execution statistics
+/// - `cluster`: Redis Cluster information (if enabled)
+/// - `keyspace`: Database keyspace statistics (keys, expires)
+/// - `modules`: Loaded modules information (Redis 4.0+)
+/// - `errorstats`: Error statistics (Redis 6.0+)
+/// - `all`: Return all sections
+/// - `default`: Return default sections
+///
+/// # Response
+/// Returns `String` - Multi-line text with section headers and key:value pairs.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
 ///
 /// # Examples
 ///
+/// Get all server information:
 /// ```no_run
-/// use redis_tower::commands::Info;
+/// use redis_tower::{RedisClient, commands::Info};
 ///
-/// // Get all info
-/// let cmd = Info::all();
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
 ///
-/// // Get specific section
-/// let cmd = Info::section("memory");
+/// let info: String = client.send(Info::all()).await?;
+/// println!("Server info:\n{}", info);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Get specific section (memory):
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let memory_info: String = client.send(Info::section("memory")).await?;
+/// println!("Memory usage:\n{}", memory_info);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Monitor keyspace statistics:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let keyspace: String = client.send(Info::section("keyspace")).await?;
+/// println!("Keyspace stats:\n{}", keyspace);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Parse command statistics:
+/// ```no_run
+/// use redis_tower::{RedisClient, commands::Info};
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let stats: String = client.send(Info::section("commandstats")).await?;
+/// // Parse the output to extract per-command metrics
+/// for line in stats.lines() {
+///     if line.starts_with("cmdstat_") {
+///         println!("{}", line);
+///     }
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Info {
