@@ -1,16 +1,40 @@
 //! JSON commands for serde integration
 //!
-//! These commands provide convenient JSON serialization/deserialization
-//! for storing and retrieving Rust structs in Redis.
+//! This module provides convenient wrappers around Redis string commands (SET, GET, MSET)
+//! that automatically serialize/deserialize Rust structs as JSON. These are NOT RedisJSON
+//! module commands - they use standard Redis strings to store JSON-encoded data.
+//!
+//! # Use Cases
+//!
+//! - **Storing structured data** - Save Rust structs directly to Redis
+//! - **Type-safe retrieval** - Get type-checked data back from Redis
+//! - **API caching** - Cache API responses as structs
+//! - **Session storage** - Store session data with strong typing
+//! - **Configuration** - Store app configuration as JSON strings
 //!
 //! # Feature Flag
 //!
 //! This module requires the `serde-json` feature to be enabled.
 //!
-//! # Example
+//! # vs RedisJSON Module
+//!
+//! **This module (JSON helpers)**:
+//! - Uses standard Redis STRING commands
+//! - Stores entire struct as JSON string
+//! - No JSON path operations
+//! - Works with any Redis instance
+//! - Good for simple get/set of entire objects
+//!
+//! **RedisJSON module** (see `modules::json`):
+//! - Requires RedisJSON module installed
+//! - Supports JSON path queries (JSONPath)
+//! - Can update nested fields atomically
+//! - Better for complex JSON operations
+//!
+//! # Complete Example
 //!
 //! ```no_run
-//! use redis_tower::commands::{GetJson, SetJson};
+//! use redis_tower::commands::{GetJson, SetJson, MSetJson};
 //! use redis_tower::RedisClient;
 //! use serde::{Deserialize, Serialize};
 //!
@@ -24,18 +48,54 @@
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = RedisClient::connect("localhost:6379").await?;
 //!
+//! // Store struct as JSON
 //! let user = User {
 //!     id: 123,
 //!     name: "Alice".to_string(),
 //!     email: "alice@example.com".to_string(),
 //! };
-//!
-//! // Store as JSON
 //! client.call(SetJson::new("user:123", &user)?).await?;
 //!
 //! // Retrieve and deserialize
-//! let stored: User = client.call(GetJson::new("user:123")).await?;
-//! assert_eq!(user, stored);
+//! let stored: Option<User> = client.call(GetJson::new("user:123")).await?;
+//! assert_eq!(stored, Some(user));
+//!
+//! // Bulk store multiple structs
+//! let users = vec![
+//!     ("user:1", User { id: 1, name: "Alice".into(), email: "alice@example.com".into() }),
+//!     ("user:2", User { id: 2, name: "Bob".into(), email: "bob@example.com".into() }),
+//! ];
+//! client.call(MSetJson::new(users)?).await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Error Handling
+//!
+//! JSON commands can fail at two points:
+//! 1. **Serialization** - When creating the command (returns `RedisError`)
+//! 2. **Deserialization** - When parsing the response (returns `RedisError`)
+//!
+//! ```no_run
+//! use redis_tower::commands::{SetJson, GetJson};
+//! use redis_tower::RedisClient;
+//! use serde::{Deserialize, Serialize};
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct Config {
+//!     timeout: u64,
+//! }
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let client = RedisClient::connect("localhost:6379").await?;
+//! let config = Config { timeout: 5000 };
+//!
+//! // Serialization error caught here
+//! let cmd = SetJson::new("config", &config)?;
+//! client.call(cmd).await?;
+//!
+//! // Deserialization error caught here
+//! let retrieved: Option<Config> = client.call(GetJson::new("config")).await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -49,10 +109,26 @@ use serde::{Deserialize, Serialize};
 
 /// SET command with JSON serialization
 ///
-/// Stores a Rust struct as JSON in Redis.
+/// Stores a Rust struct as a JSON string in Redis using the SET command. The struct
+/// is serialized to JSON using serde_json and stored as a Redis string value.
 ///
-/// # Example
+/// **Important**: This replaces any existing value at the key. Use with TTL or other
+/// SET options by using the regular `Set` command with manually serialized JSON.
 ///
+/// # Request
+/// - `key`: Redis key to store the JSON value
+/// - `value`: Reference to any type that implements `Serialize`
+///
+/// # Response
+/// Returns `()` on success
+///
+/// # Errors
+/// - Serialization fails if the struct cannot be serialized to JSON
+/// - Redis error if the SET command fails
+///
+/// # Examples
+///
+/// Basic struct storage:
 /// ```no_run
 /// use redis_tower::commands::SetJson;
 /// use redis_tower::RedisClient;
@@ -65,10 +141,72 @@ use serde::{Deserialize, Serialize};
 /// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisClient::connect("localhost:6379").await?;
-///
+/// # let client = RedisClient::connect("localhost:6379").await?;
 /// let config = Config { timeout: 5000, retries: 3 };
-/// client.call(SetJson::new("config", &config)?).await?;
+/// client.call(SetJson::new("app:config", &config)?).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Storing API response:
+/// ```no_run
+/// use redis_tower::commands::SetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct ApiResponse {
+///     status: u16,
+///     data: Vec<String>,
+///     timestamp: u64,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// let response = ApiResponse {
+///     status: 200,
+///     data: vec!["item1".into(), "item2".into()],
+///     timestamp: 1234567890,
+/// };
+///
+/// client.call(SetJson::new("cache:api:users", &response)?).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Storing nested structures:
+/// ```no_run
+/// use redis_tower::commands::SetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct Address {
+///     street: String,
+///     city: String,
+///     zip: String,
+/// }
+///
+/// #[derive(Serialize)]
+/// struct User {
+///     id: u64,
+///     name: String,
+///     address: Address,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// let user = User {
+///     id: 123,
+///     name: "Alice".into(),
+///     address: Address {
+///         street: "123 Main St".into(),
+///         city: "Springfield".into(),
+///         zip: "12345".into(),
+///     },
+/// };
+///
+/// client.call(SetJson::new("user:123", &user)?).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -111,26 +249,114 @@ impl Command for SetJson {
 
 /// GET command with JSON deserialization
 ///
-/// Retrieves a JSON string from Redis and deserializes it to a Rust struct.
+/// Retrieves a JSON string from Redis and deserializes it to a Rust struct using
+/// serde_json. The type parameter `T` specifies the target struct type.
 ///
-/// # Example
+/// **Important**: Returns `Option<T>` - `None` if the key doesn't exist, `Some(T)` if
+/// deserialization succeeds. Deserialization errors return a `RedisError`.
 ///
+/// # Request
+/// - `key`: Redis key containing the JSON value
+///
+/// # Response
+/// Returns `Option<T>`:
+/// - `Some(T)`: Key exists and JSON was successfully deserialized
+/// - `None`: Key does not exist in Redis
+///
+/// # Errors
+/// - Deserialization fails if JSON is malformed or doesn't match struct shape
+/// - Redis error if the GET command fails
+///
+/// # Examples
+///
+/// Basic struct retrieval:
 /// ```no_run
 /// use redis_tower::commands::GetJson;
 /// use redis_tower::RedisClient;
 /// use serde::Deserialize;
 ///
-/// #[derive(Deserialize)]
+/// #[derive(Deserialize, Debug)]
 /// struct Config {
 ///     timeout: u64,
 ///     retries: u32,
 /// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisClient::connect("localhost:6379").await?;
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// let config: Option<Config> = client.call(GetJson::new("app:config")).await?;
 ///
-/// let config: Config = client.call(GetJson::new("config")).await?;
-/// println!("Timeout: {}, Retries: {}", config.timeout, config.retries);
+/// match config {
+///     Some(cfg) => println!("Timeout: {}, Retries: {}", cfg.timeout, cfg.retries),
+///     None => println!("Config not found"),
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Handling missing keys:
+/// ```no_run
+/// use redis_tower::commands::GetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct User {
+///     id: u64,
+///     name: String,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// let user: Option<User> = client.call(GetJson::new("user:999")).await?;
+///
+/// let user = user.unwrap_or(User {
+///     id: 0,
+///     name: "Guest".into(),
+/// });
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Type inference from variable:
+/// ```no_run
+/// use redis_tower::commands::GetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct ApiResponse {
+///     status: u16,
+///     data: Vec<String>,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// // Type is inferred from variable type
+/// let response: Option<ApiResponse> = client.call(GetJson::new("cache:api:users")).await?;
+///
+/// if let Some(resp) = response {
+///     println!("Status: {}, {} items", resp.status, resp.data.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Turbofish syntax:
+/// ```no_run
+/// use redis_tower::commands::GetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Deserialize;
+///
+/// #[derive(Deserialize)]
+/// struct Session {
+///     user_id: u64,
+///     expires: u64,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// // Explicit type with turbofish
+/// let session = client.call(GetJson::<Session>::new("session:abc123")).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -174,10 +400,25 @@ where
 
 /// MSET command with JSON serialization
 ///
-/// Sets multiple key-value pairs with JSON serialization.
+/// Sets multiple key-value pairs atomically with JSON serialization. All structs are
+/// serialized to JSON and stored using a single MSET command.
 ///
-/// # Example
+/// **Important**: This is an atomic operation - all keys are set or none are. All values
+/// must be the same type `T`.
 ///
+/// # Request
+/// - `pairs`: Vec of (key, value) tuples where all values implement `Serialize`
+///
+/// # Response
+/// Returns `()` on success
+///
+/// # Errors
+/// - Serialization fails if any struct cannot be serialized to JSON
+/// - Redis error if the MSET command fails
+///
+/// # Examples
+///
+/// Bulk storing multiple structs:
 /// ```no_run
 /// use redis_tower::commands::MSetJson;
 /// use redis_tower::RedisClient;
@@ -190,14 +431,96 @@ where
 /// }
 ///
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisClient::connect("localhost:6379").await?;
-///
+/// # let client = RedisClient::connect("localhost:6379").await?;
 /// let pairs = vec![
 ///     ("status:200", Status { code: 200, message: "OK".into() }),
 ///     ("status:404", Status { code: 404, message: "Not Found".into() }),
+///     ("status:500", Status { code: 500, message: "Internal Server Error".into() }),
 /// ];
 ///
 /// client.call(MSetJson::new(pairs)?).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Caching multiple API responses:
+/// ```no_run
+/// use redis_tower::commands::MSetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct UserProfile {
+///     id: u64,
+///     name: String,
+///     email: String,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// let users = vec![
+///     ("user:1", UserProfile { id: 1, name: "Alice".into(), email: "alice@example.com".into() }),
+///     ("user:2", UserProfile { id: 2, name: "Bob".into(), email: "bob@example.com".into() }),
+///     ("user:3", UserProfile { id: 3, name: "Carol".into(), email: "carol@example.com".into() }),
+/// ];
+///
+/// // Atomically store all user profiles
+/// client.call(MSetJson::new(users)?).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Initializing application state:
+/// ```no_run
+/// use redis_tower::commands::MSetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct Config {
+///     max_connections: u32,
+///     timeout_ms: u64,
+///     retry_count: u8,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// // Set up different configs for different environments
+/// let configs = vec![
+///     ("config:dev", Config { max_connections: 10, timeout_ms: 5000, retry_count: 3 }),
+///     ("config:staging", Config { max_connections: 50, timeout_ms: 3000, retry_count: 5 }),
+///     ("config:prod", Config { max_connections: 100, timeout_ms: 1000, retry_count: 10 }),
+/// ];
+///
+/// client.call(MSetJson::new(configs)?).await?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// Building from iterator:
+/// ```no_run
+/// use redis_tower::commands::MSetJson;
+/// use redis_tower::RedisClient;
+/// use serde::Serialize;
+///
+/// #[derive(Serialize)]
+/// struct Score {
+///     user_id: u64,
+///     points: u32,
+/// }
+///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("localhost:6379").await?;
+/// // Collect from iterator
+/// let scores: Vec<_> = (1..=5)
+///     .map(|id| {
+///         let key = format!("score:{}", id);
+///         let score = Score { user_id: id, points: id as u32 * 100 };
+///         (key, score)
+///     })
+///     .collect();
+///
+/// client.call(MSetJson::new(scores)?).await?;
 /// # Ok(())
 /// # }
 /// ```
