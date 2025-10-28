@@ -9,21 +9,43 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// SADD command - add members to a set
+/// SADD command - Add one or more members to a set
 ///
-/// # Example
+/// Add the specified members to the set stored at key. Specified members that are already a member
+/// of this set are ignored. If key does not exist, a new set is created before adding the specified members.
+///
+/// # Request
+/// - `key`: The set key
+/// - `members`: One or more members to add
+///
+/// # Response
+/// Returns `i64` - The number of elements that were added to the set, not including elements
+/// already present.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Sadd;
+/// use redis_tower::commands::sets::Sadd;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Add single member
-/// let cmd = Sadd::new("myset", b"member1".to_vec());
-/// // Response: 1 (number of members added)
+/// let cmd = Sadd::new("myset", b"member1");
+/// let added = client.call(cmd).await?;
+/// println!("Added {} members", added); // 1
 ///
 /// // Add multiple members
-/// let cmd = Sadd::new("myset", b"member1".to_vec())
-///     .member(b"member2".to_vec())
-///     .member(b"member3".to_vec());
-/// // Response: count of newly added members
+/// let cmd = Sadd::new("myset", b"member2")
+///     .member(b"member3")
+///     .member(b"member4");
+/// let added = client.call(cmd).await?;
+/// println!("Added {} members", added); // 2 (member1 already exists)
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Sadd {
@@ -82,20 +104,41 @@ impl Command for Sadd {
     }
 }
 
-/// SREM command - remove members from a set
+/// SREM command - Remove one or more members from a set
 ///
-/// # Example
+/// Remove the specified members from the set stored at key. Specified members that are not a member
+/// of this set are ignored. If key does not exist, it is treated as an empty set and this command returns 0.
+///
+/// # Request
+/// - `key`: The set key
+/// - `members`: One or more members to remove
+///
+/// # Response
+/// Returns `i64` - The number of members that were removed from the set, not including non-existing members.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Srem;
+/// use redis_tower::commands::sets::Srem;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Remove single member
-/// let cmd = Srem::new("myset", b"member1".to_vec());
-/// // Response: 1 if removed, 0 if member didn't exist
+/// let cmd = Srem::new("myset", b"member1");
+/// let removed = client.call(cmd).await?;
+/// println!("Removed {} members", removed); // 1 if existed, 0 if not
 ///
 /// // Remove multiple members
-/// let cmd = Srem::new("myset", b"member1".to_vec())
-///     .member(b"member2".to_vec());
-/// // Response: count of members actually removed
+/// let cmd = Srem::new("myset", b"member2")
+///     .member(b"member3");
+/// let removed = client.call(cmd).await?;
+/// println!("Removed {} members", removed);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Srem {
@@ -154,14 +197,36 @@ impl Command for Srem {
     }
 }
 
-/// SMEMBERS command - get all members of a set
+/// SMEMBERS command - Get all the members in a set
 ///
-/// # Example
+/// Returns all the members of the set stored at key. The order of elements is not guaranteed.
+/// This has the same effect as running SINTER with one argument.
+///
+/// # Request
+/// - `key`: The set key
+///
+/// # Response
+/// Returns `Vec<Bytes>` - All members of the set. Empty vector if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Smembers;
+/// use redis_tower::commands::sets::Smembers;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Smembers::new("myset");
-/// // Response: Vec<Bytes> of all members (order not guaranteed)
+/// let members = client.call(cmd).await?;
+///
+/// for member in members {
+///     println!("Member: {}", String::from_utf8_lossy(&member));
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Smembers {
@@ -207,14 +272,40 @@ impl Command for Smembers {
     }
 }
 
-/// SISMEMBER command - check if a value is a member of a set
+/// SISMEMBER command - Determine if a given value is a member of a set
 ///
-/// # Example
+/// Returns if member is a member of the set stored at key.
+///
+/// # Request
+/// - `key`: The set key
+/// - `member`: The member to check
+///
+/// # Response
+/// Returns `bool`:
+/// - `true` - The member exists in the set
+/// - `false` - The member does not exist, or key does not exist
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Sismember;
+/// use redis_tower::commands::sets::Sismember;
+/// use redis_tower::RedisClient;
 ///
-/// let cmd = Sismember::new("myset", b"member1".to_vec());
-/// // Response: true if member exists, false otherwise
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let cmd = Sismember::new("myset", b"member1");
+/// let exists = client.call(cmd).await?;
+///
+/// if exists {
+///     println!("Member exists in set");
+/// } else {
+///     println!("Member not found");
+/// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Sismember {
@@ -252,14 +343,32 @@ impl Command for Sismember {
     }
 }
 
-/// SCARD command - get the number of members in a set
+/// SCARD command - Get the number of members in a set
 ///
-/// # Example
+/// Returns the set cardinality (number of elements) of the set stored at key.
+///
+/// # Request
+/// - `key`: The set key
+///
+/// # Response
+/// Returns `i64` - The cardinality (number of elements) of the set, or 0 if key does not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Scard;
+/// use redis_tower::commands::sets::Scard;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// let cmd = Scard::new("myset");
-/// // Response: number of members in the set
+/// let count = client.call(cmd).await?;
+/// println!("Set has {} members", count);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Scard {
@@ -292,16 +401,42 @@ impl Command for Scard {
     }
 }
 
-/// SINTER command - compute the intersection of multiple sets
+/// SINTER command - Get the intersection of multiple sets
 ///
-/// # Example
+/// Returns the members of the set resulting from the intersection of all the given sets.
+/// Keys that do not exist are considered to be empty sets. With one of the keys being an
+/// empty set, the resulting set is also empty.
+///
+/// # Request
+/// - `keys`: One or more set keys to intersect
+///
+/// # Response
+/// Returns `Vec<Bytes>` - Members in the intersection of all sets. Empty vector if any key
+/// does not exist or intersection is empty.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Sinter;
+/// use redis_tower::commands::sets::Sinter;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Intersect two sets
+/// let cmd = Sinter::new("set1").key("set2");
+/// let intersection = client.call(cmd).await?;
+///
+/// // Intersect multiple sets
 /// let cmd = Sinter::new("set1")
 ///     .key("set2")
 ///     .key("set3");
-/// // Response: Vec<Bytes> of members present in all sets
+/// let intersection = client.call(cmd).await?;
+/// println!("Found {} common members", intersection.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Sinter {
@@ -368,16 +503,41 @@ impl Command for Sinter {
     }
 }
 
-/// SUNION command - compute the union of multiple sets
+/// SUNION command - Get the union of multiple sets
 ///
-/// # Example
+/// Returns the members of the set resulting from the union of all the given sets.
+/// Keys that do not exist are considered to be empty sets.
+///
+/// # Request
+/// - `keys`: One or more set keys to union
+///
+/// # Response
+/// Returns `Vec<Bytes>` - All unique members across all sets. Empty vector if all keys
+/// do not exist.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Sunion;
+/// use redis_tower::commands::sets::Sunion;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Union two sets
+/// let cmd = Sunion::new("set1").key("set2");
+/// let union = client.call(cmd).await?;
+///
+/// // Union multiple sets
 /// let cmd = Sunion::new("set1")
 ///     .key("set2")
 ///     .key("set3");
-/// // Response: Vec<Bytes> of all unique members across all sets
+/// let union = client.call(cmd).await?;
+/// println!("Found {} total unique members", union.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Sunion {
@@ -444,18 +604,41 @@ impl Command for Sunion {
     }
 }
 
-/// SDIFF command - compute the difference of multiple sets
+/// SDIFF command - Get the difference between sets
 ///
-/// Returns members in the first set that don't exist in any of the other sets.
+/// Returns the members of the set resulting from the difference between the first set and
+/// all the successive sets. Keys that do not exist are considered to be empty sets.
 ///
-/// # Example
+/// # Request
+/// - `keys`: First key is the source set, remaining keys are sets to subtract from it
+///
+/// # Response
+/// Returns `Vec<Bytes>` - Members in the first set that are not in any of the other sets.
+/// Empty vector if first key does not exist or all members are in other sets.
+///
+/// # Redis Version
+/// Available since Redis 1.0.0
+///
+/// # Examples
+///
 /// ```no_run
-/// use redis_tower::commands::Sdiff;
+/// use redis_tower::commands::sets::Sdiff;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// // Difference between two sets
+/// let cmd = Sdiff::new("set1").key("set2");
+/// let difference = client.call(cmd).await?;
+///
+/// // Members in set1 but not in set2 or set3
 /// let cmd = Sdiff::new("set1")
 ///     .key("set2")
 ///     .key("set3");
-/// // Response: Vec<Bytes> of members in set1 but not in set2 or set3
+/// let difference = client.call(cmd).await?;
+/// println!("Found {} unique members in set1", difference.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Sdiff {
@@ -1184,20 +1367,44 @@ impl Command for SInterCard {
     }
 }
 
-/// SPOP command - remove and return random member(s) from a set
+/// SPOP command - Remove and return one or multiple random members from a set
+///
+/// Removes and returns one or more random members from the set value stored at key.
+/// This operation is similar to SRANDMEMBER, but it removes the returned members from the set.
+///
+/// # Request
+/// - `key`: The set key
+/// - `count` (optional): Number of members to pop
+///
+/// # Response
+/// Returns `Vec<Bytes>`:
+/// - When count is not specified: Vector with one member, or empty vector if set is empty
+/// - When count is specified: Vector with up to count members, or empty vector if set is empty
+///
+/// # Redis Version
+/// Available since Redis 1.0.0. COUNT option available since Redis 3.2.0.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Spop;
+/// use redis_tower::commands::sets::Spop;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Pop single random member
 /// let cmd = Spop::new("myset");
-/// // Response: Some(member) or None if set is empty
+/// let members = client.call(cmd).await?;
+/// if let Some(member) = members.first() {
+///     println!("Popped: {}", String::from_utf8_lossy(member));
+/// }
 ///
 /// // Pop multiple random members
 /// let cmd = Spop::new("myset").count(3);
-/// // Response: Vec<Bytes> of popped members
+/// let members = client.call(cmd).await?;
+/// println!("Popped {} members", members.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Spop {
@@ -1260,24 +1467,52 @@ impl Command for Spop {
     }
 }
 
-/// SRANDMEMBER command - get random member(s) from a set without removing
+/// SRANDMEMBER command - Get one or multiple random members from a set
+///
+/// Returns one or more random members from the set value stored at key. Unlike SPOP,
+/// this command does not remove the members from the set.
+///
+/// # Request
+/// - `key`: The set key
+/// - `count` (optional): Number of members to return
+///   - Positive: Return up to count unique members
+///   - Negative: Return exactly |count| members, possibly with repetition
+///
+/// # Response
+/// Returns `Vec<Bytes>`:
+/// - When count is not specified: Vector with one member, or empty vector if set is empty
+/// - When count is positive: Vector with up to count unique members
+/// - When count is negative: Vector with exactly |count| members (may have duplicates)
+///
+/// # Redis Version
+/// Available since Redis 1.0.0. COUNT option available since Redis 2.6.0.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::Srandmember;
+/// use redis_tower::commands::sets::Srandmember;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Get single random member
 /// let cmd = Srandmember::new("myset");
-/// // Response: Some(member) or None if set is empty
+/// let members = client.call(cmd).await?;
+/// if let Some(member) = members.first() {
+///     println!("Random member: {}", String::from_utf8_lossy(member));
+/// }
 ///
-/// // Get multiple random members (unique)
+/// // Get multiple unique members
 /// let cmd = Srandmember::new("myset").count(3);
-/// // Response: Vec<Bytes> with up to 3 unique members
+/// let members = client.call(cmd).await?;
+/// println!("Got {} unique members", members.len());
 ///
-/// // Get multiple with repetition (negative count)
+/// // Get with possible repetition
 /// let cmd = Srandmember::new("myset").count(-5);
-/// // Response: Vec<Bytes> with exactly 5 members (may repeat)
+/// let members = client.call(cmd).await?;
+/// println!("Got exactly {} members (may repeat)", members.len());
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct Srandmember {
