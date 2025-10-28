@@ -10,16 +10,39 @@ use bytes::Bytes;
 
 /// PFADD command - Add elements to a HyperLogLog
 ///
+/// Adds the specified elements to the HyperLogLog data structure stored at the specified key.
+/// HyperLogLog is a probabilistic data structure that estimates cardinality (unique count) with
+/// excellent space efficiency (typically 12KB per key).
+///
+/// # Request
+/// - `key`: The HyperLogLog key
+/// - `elements`: One or more elements to add to the set
+///
+/// # Response
+/// Returns `bool`:
+/// - `true` - At least one internal register was altered (HLL was modified)
+/// - `false` - No registers were altered (all elements already seen)
+///
+/// # Redis Version
+/// Available since Redis 2.8.9
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::PfAdd;
+/// use redis_tower::commands::hyperloglog::PfAdd;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Add single element
-/// let cmd = PfAdd::new("unique_visitors", vec!["user1"]);
+/// let modified = client.call(PfAdd::new("unique_visitors", vec!["user1"])).await?;
+/// println!("HLL modified: {}", modified);
 ///
 /// // Add multiple elements
 /// let cmd = PfAdd::new("unique_visitors", vec!["user1", "user2", "user3"]);
+/// let modified = client.call(cmd).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PfAdd {
@@ -67,16 +90,38 @@ impl Command for PfAdd {
 
 /// PFCOUNT command - Get the approximate cardinality of a HyperLogLog
 ///
+/// Returns the approximated cardinality (number of unique elements) computed by the HyperLogLog
+/// data structure. If multiple keys are provided, returns the approximated cardinality of the
+/// union of all the HyperLogLogs.
+///
+/// # Request
+/// - `keys`: One or more HyperLogLog keys (union computed if multiple)
+///
+/// # Response
+/// Returns `i64` - Approximated number of unique elements.
+/// Standard error is 0.81% for a 12KB HyperLogLog.
+///
+/// # Redis Version
+/// Available since Redis 2.8.9
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::PfCount;
+/// use redis_tower::commands::hyperloglog::PfCount;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Count single HLL
-/// let cmd = PfCount::new(vec!["unique_visitors"]);
+/// let count = client.call(PfCount::single("unique_visitors")).await?;
+/// println!("Approximate unique visitors: {}", count);
 ///
 /// // Count union of multiple HLLs
 /// let cmd = PfCount::new(vec!["visitors_page1", "visitors_page2"]);
+/// let total = client.call(cmd).await?;
+/// println!("Total unique visitors across pages: {}", total);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PfCount {
@@ -128,13 +173,34 @@ impl Command for PfCount {
 
 /// PFMERGE command - Merge multiple HyperLogLogs into one
 ///
+/// Merges multiple HyperLogLog values into a single one at the destination key. The resulting
+/// HyperLogLog will approximate the cardinality of the union of all source HyperLogLogs.
+/// If the destination key already exists, it is treated as one of the source sets and merged.
+///
+/// # Request
+/// - `dest_key`: The destination key where merged result is stored
+/// - `source_keys`: One or more source HyperLogLog keys to merge
+///
+/// # Response
+/// Returns `()` - Always returns OK
+///
+/// # Redis Version
+/// Available since Redis 2.8.9
+///
 /// # Examples
 ///
 /// ```no_run
-/// use redis_tower::commands::PfMerge;
+/// use redis_tower::commands::hyperloglog::PfMerge;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Merge multiple HLLs into a destination
 /// let cmd = PfMerge::new("total_visitors", vec!["page1", "page2", "page3"]);
+/// client.call(cmd).await?;
+/// println!("HyperLogLogs merged successfully");
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct PfMerge {
