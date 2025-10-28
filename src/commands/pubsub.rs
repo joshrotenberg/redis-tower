@@ -9,23 +9,33 @@ use crate::commands::Command;
 use crate::types::RedisError;
 use bytes::Bytes;
 
-/// Publish a message to a channel.
+/// PUBLISH command - Publish a message to a channel
 ///
-/// Returns the number of clients that received the message.
+/// Posts a message to the given channel. All clients subscribed to that channel will receive
+/// the message. If no clients are subscribed, the message is discarded.
+///
+/// # Request
+/// - `channel`: The channel name to publish to
+/// - `message`: The message to publish (as Bytes)
+///
+/// # Response
+/// Returns `i64` - The number of clients that received the message (subscriber count)
+///
+/// # Redis Version
+/// Available since Redis 2.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::Publish;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::Publish;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Publish a message
-/// let subscribers = client.execute(
+/// let subscribers = client.call(
 ///     Publish::new("news", "Breaking: Rust 2.0 released!")
 /// ).await?;
-///
 /// println!("Message delivered to {} subscribers", subscribers);
 /// # Ok(())
 /// # }
@@ -66,23 +76,31 @@ impl Command for Publish {
     }
 }
 
-/// Get the number of subscribers for channels.
+/// PUBSUB NUMSUB command - Get subscriber count for channels
 ///
 /// Returns the number of subscribers (not counting clients subscribed to patterns)
-/// for the specified channels.
+/// for the specified channels. Channels with no subscribers return 0.
+///
+/// # Request
+/// - `channels`: Array of channel names to get subscriber counts for
+///
+/// # Response
+/// Returns `Vec<(String, i64)>` - Array of (channel, subscriber_count) tuples
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::PubsubNumsub;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::PubsubNumsub;
+/// use redis_tower::RedisClient;
 ///
-/// let counts = client.execute(
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let counts = client.call(
 ///     PubsubNumsub::new(&["news", "updates"])
 /// ).await?;
-///
 /// for (channel, count) in &counts {
 ///     println!("{}: {} subscribers", channel, count);
 /// }
@@ -162,19 +180,29 @@ impl Command for PubsubNumsub {
     }
 }
 
-/// Get the number of patterns subscribed to.
+/// PUBSUB NUMPAT command - Get count of pattern subscriptions
 ///
-/// Returns the number of pattern subscriptions (those created with PSUBSCRIBE).
+/// Returns the total number of pattern subscriptions across all clients (those created with
+/// PSUBSCRIBE). This is a global count, not per-channel.
+///
+/// # Request
+/// (no parameters)
+///
+/// # Response
+/// Returns `i64` - Total number of active pattern subscriptions
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::PubsubNumpat;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::PubsubNumpat;
+/// use redis_tower::RedisClient;
 ///
-/// let count = client.execute(PubsubNumpat::new()).await?;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let count = client.call(PubsubNumpat::new()).await?;
 /// println!("Active pattern subscriptions: {}", count);
 /// # Ok(())
 /// # }
@@ -214,24 +242,35 @@ impl Command for PubsubNumpat {
     }
 }
 
-/// Get active channels.
+/// PUBSUB CHANNELS command - List active channels
 ///
-/// Lists the currently active channels. An active channel is a channel with one or more subscribers.
-/// If pattern is provided, only channels matching the pattern are returned.
+/// Lists the currently active channels. An active channel is a Pub/Sub channel with one or more
+/// subscribers (excluding clients subscribed to patterns). If a pattern is provided, only channels
+/// matching the glob-style pattern are returned.
+///
+/// # Request
+/// - `pattern` (optional): Glob-style pattern to filter channels (e.g., "news:*")
+///
+/// # Response
+/// Returns `Vec<String>` - Array of active channel names
+///
+/// # Redis Version
+/// Available since Redis 2.8.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::PubsubChannels;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::PubsubChannels;
+/// use redis_tower::RedisClient;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
 /// // Get all active channels
-/// let channels = client.execute(PubsubChannels::all()).await?;
+/// let channels = client.call(PubsubChannels::all()).await?;
+/// println!("Active channels: {:?}", channels);
 ///
 /// // Get channels matching a pattern
-/// let news_channels = client.execute(PubsubChannels::pattern("news:*")).await?;
+/// let news_channels = client.call(PubsubChannels::pattern("news:*")).await?;
 /// # Ok(())
 /// # }
 /// ```
@@ -294,19 +333,31 @@ impl Command for PubsubChannels {
     }
 }
 
-/// Get active sharded pub/sub channels.
+/// PUBSUB SHARDCHANNELS command - List active sharded channels
 ///
-/// Lists the currently active sharded pub/sub channels. Available in Redis 7.0+.
+/// Lists the currently active sharded pub/sub channels. Sharded pub/sub (Redis 7.0+) distributes
+/// channels across cluster nodes for better scalability. If a pattern is provided, only channels
+/// matching the pattern are returned.
+///
+/// # Request
+/// - `pattern` (optional): Glob-style pattern to filter channels
+///
+/// # Response
+/// Returns `Vec<String>` - Array of active sharded channel names
+///
+/// # Redis Version
+/// Available since Redis 7.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::PubsubShardchannels;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::PubsubShardchannels;
+/// use redis_tower::RedisClient;
 ///
-/// let channels = client.execute(PubsubShardchannels::all()).await?;
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let channels = client.call(PubsubShardchannels::all()).await?;
+/// println!("Active sharded channels: {:?}", channels);
 /// # Ok(())
 /// # }
 /// ```
@@ -369,22 +420,34 @@ impl Command for PubsubShardchannels {
     }
 }
 
-/// Get the number of subscribers for sharded channels.
+/// PUBSUB SHARDNUMSUB command - Get subscriber count for sharded channels
 ///
-/// Returns the number of subscribers for the specified sharded pub/sub channels.
-/// Available in Redis 7.0+.
+/// Returns the number of subscribers for the specified sharded pub/sub channels. Sharded channels
+/// distribute subscribers across cluster nodes for horizontal scalability.
+///
+/// # Request
+/// - `channels`: Array of sharded channel names to get subscriber counts for
+///
+/// # Response
+/// Returns `Vec<(String, i64)>` - Array of (channel, subscriber_count) tuples
+///
+/// # Redis Version
+/// Available since Redis 7.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::PubsubShardnumsub;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::PubsubShardnumsub;
+/// use redis_tower::RedisClient;
 ///
-/// let counts = client.execute(
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let counts = client.call(
 ///     PubsubShardnumsub::new(&["shard:1", "shard:2"])
 /// ).await?;
+/// for (channel, count) in &counts {
+///     println!("{}: {} subscribers", channel, count);
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -461,22 +524,34 @@ impl Command for PubsubShardnumsub {
     }
 }
 
-/// Publish a message to a sharded channel.
+/// SPUBLISH command - Publish message to sharded channel
 ///
-/// Posts a message to the given sharded channel. Available in Redis 7.0+.
-/// Returns the number of clients that received the message.
+/// Posts a message to the given sharded channel. Sharded pub/sub (Redis 7.0+) distributes channels
+/// across cluster nodes for better scalability. All clients subscribed to that sharded channel
+/// will receive the message.
+///
+/// # Request
+/// - `channel`: The sharded channel name to publish to
+/// - `message`: The message to publish (as Bytes)
+///
+/// # Response
+/// Returns `i64` - The number of clients that received the message (subscriber count)
+///
+/// # Redis Version
+/// Available since Redis 7.0.0
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// # use redis_tower::client::RedisConnection;
-/// # use redis_tower::commands::pubsub::Spublish;
-/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// let client = RedisConnection::connect("127.0.0.1:6379").await?;
+/// ```no_run
+/// use redis_tower::commands::pubsub::Spublish;
+/// use redis_tower::RedisClient;
 ///
-/// let subscribers = client.execute(
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let client = RedisClient::connect("127.0.0.1:6379").await?;
+/// let subscribers = client.call(
 ///     Spublish::new("shard:news", "Breaking news!")
 /// ).await?;
+/// println!("Message delivered to {} subscribers", subscribers);
 /// # Ok(())
 /// # }
 /// ```
