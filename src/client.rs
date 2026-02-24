@@ -109,7 +109,9 @@ fn apply_tcp_config(stream: &TcpStream, config: &TcpConfig) -> Result<(), RedisE
     }
 
     if let Some(linger) = config.linger {
-        stream.set_linger(linger)?;
+        use socket2::SockRef;
+        let sock_ref = SockRef::from(stream);
+        sock_ref.set_linger(linger)?;
         tracing::debug!("SO_LINGER set to {:?}", linger);
     }
 
