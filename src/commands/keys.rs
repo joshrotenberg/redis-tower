@@ -712,7 +712,7 @@ impl Command for Type {
 /// This command is intended for debugging and special operations. Use SCAN for production.
 ///
 /// # Request
-/// - `pattern`: Glob-style pattern (* matches any characters, ? matches one character, [abc] matches a, b, or c)
+/// - `pattern`: Glob-style pattern (`*` matches any characters, `?` matches one character, `[abc]` matches a, b, or c)
 ///
 /// # Response
 /// Returns `Vec<String>` - All keys matching the pattern. Empty vector if no keys match.

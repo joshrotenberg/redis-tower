@@ -250,16 +250,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await?;
 
-        if let Ok(arr) = result.as_array()
-            && let (Ok(allowed), Ok(remaining)) = (arr[0].as_i64(), arr[1].as_i64())
-        {
-            if allowed == 1 {
-                println!("  Request {}: ALLOWED (remaining: {})", i, remaining);
-            } else {
-                println!(
-                    "  Request {}: RATE LIMITED (retry in {} seconds)",
-                    i, remaining
-                );
+        if let Ok(arr) = result.as_array() {
+            if let (Ok(allowed), Ok(remaining)) = (arr[0].as_i64(), arr[1].as_i64()) {
+                if allowed == 1 {
+                    println!("  Request {}: ALLOWED (remaining: {})", i, remaining);
+                } else {
+                    println!(
+                        "  Request {}: RATE LIMITED (retry in {} seconds)",
+                        i, remaining
+                    );
+                }
             }
         }
     }

@@ -84,26 +84,26 @@ impl RedisError {
         // Check for MOVED error: "MOVED slot addr"
         if error_msg.starts_with("MOVED ") {
             let parts: Vec<&str> = error_msg.split_whitespace().collect();
-            if parts.len() >= 3
-                && let Ok(slot) = parts[1].parse::<u16>()
-            {
-                return RedisError::Moved {
-                    slot,
-                    addr: parts[2].to_string(),
-                };
+            if parts.len() >= 3 {
+                if let Ok(slot) = parts[1].parse::<u16>() {
+                    return RedisError::Moved {
+                        slot,
+                        addr: parts[2].to_string(),
+                    };
+                }
             }
         }
 
         // Check for ASK error: "ASK slot addr"
         if error_msg.starts_with("ASK ") {
             let parts: Vec<&str> = error_msg.split_whitespace().collect();
-            if parts.len() >= 3
-                && let Ok(slot) = parts[1].parse::<u16>()
-            {
-                return RedisError::Ask {
-                    slot,
-                    addr: parts[2].to_string(),
-                };
+            if parts.len() >= 3 {
+                if let Ok(slot) = parts[1].parse::<u16>() {
+                    return RedisError::Ask {
+                        slot,
+                        addr: parts[2].to_string(),
+                    };
+                }
             }
         }
 

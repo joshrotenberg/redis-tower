@@ -43,7 +43,7 @@ pub enum RedisValue {
 }
 
 impl RedisValue {
-    /// Convert to Option<Bytes>, returning None for Nil
+    /// Convert to `Option<Bytes>`, returning None for Nil
     pub fn as_bytes(&self) -> Result<Option<Bytes>, RedisError> {
         match self {
             RedisValue::Nil => Ok(None),

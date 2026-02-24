@@ -40,15 +40,15 @@ pub fn slot_for_key(key: &[u8]) -> u16 {
 /// Otherwise, returns the full key.
 fn extract_hash_tag(key: &[u8]) -> &[u8] {
     // Find first '{' and '}'
-    if let Some(start) = key.iter().position(|&b| b == b'{')
-        && let Some(end) = key[start + 1..].iter().position(|&b| b == b'}')
-    {
-        let tag_start = start + 1;
-        let tag_end = start + 1 + end;
+    if let Some(start) = key.iter().position(|&b| b == b'{') {
+        if let Some(end) = key[start + 1..].iter().position(|&b| b == b'}') {
+            let tag_start = start + 1;
+            let tag_end = start + 1 + end;
 
-        // Only use hash tag if it's not empty
-        if tag_end > tag_start {
-            return &key[tag_start..tag_end];
+            // Only use hash tag if it's not empty
+            if tag_end > tag_start {
+                return &key[tag_start..tag_end];
+            }
         }
     }
 

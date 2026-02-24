@@ -219,7 +219,7 @@ impl BfMadd {
         }
     }
 
-    /// Create from items that implement Into<Bytes>
+    /// Create from items that implement `Into<Bytes>`
     pub fn from_items<I, T>(key: impl Into<String>, items: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -348,7 +348,7 @@ impl BfMexists {
         }
     }
 
-    /// Create from items that implement Into<Bytes>
+    /// Create from items that implement `Into<Bytes>`
     pub fn from_items<I, T>(key: impl Into<String>, items: I) -> Self
     where
         I: IntoIterator<Item = T>,

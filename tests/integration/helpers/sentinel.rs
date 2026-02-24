@@ -5,6 +5,7 @@
 //
 // Without docker-wrapper, sentinel tests are compile-gated and skipped.
 
+#[allow(dead_code)]
 pub async fn setup_sentinel() -> redis_tower::sentinel::SentinelClient {
     panic!(
         "Sentinel tests require the docker-wrapper crate. \

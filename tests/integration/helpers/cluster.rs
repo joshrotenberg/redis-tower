@@ -8,6 +8,7 @@ use redis_tower::cluster::ClusterClient;
 /// The cluster configuration is:
 /// - Masters: 7100, 7101, 7102
 /// - Replicas: 7103, 7104, 7105
+#[allow(dead_code)]
 pub async fn setup_cluster() -> ClusterClient {
     let seeds = vec![
         "localhost:7100".to_string(),

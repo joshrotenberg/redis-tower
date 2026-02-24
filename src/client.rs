@@ -118,22 +118,14 @@ fn apply_tcp_config(stream: &TcpStream, config: &TcpConfig) -> Result<(), RedisE
         tracing::debug!("IP_TTL set to {}", ttl);
     }
 
+    // TCP_USER_TIMEOUT requires socket2 >= 0.6 which has set_tcp_user_timeout().
+    // For now, log a warning. TODO: upgrade socket2 to 0.6 to enable this.
     #[cfg(target_os = "linux")]
-    if let Some(timeout) = config.user_timeout {
-        // Use socket2 to set TCP_USER_TIMEOUT on Linux
-        use socket2::{Socket, TcpKeepalive};
-        use std::os::fd::{AsRawFd, FromRawFd};
-
-        let fd = stream.as_raw_fd();
-        let socket = unsafe { Socket::from_raw_fd(fd) };
-
-        // Set TCP_USER_TIMEOUT
-        let timeout_ms = timeout.as_millis() as u32;
-        socket.set_tcp_user_timeout(Some(std::time::Duration::from_millis(timeout_ms as u64)))?;
-        tracing::debug!("TCP_USER_TIMEOUT set to {:?}", timeout);
-
-        // Don't drop the socket (would close the fd)
-        std::mem::forget(socket);
+    if config.user_timeout.is_some() {
+        tracing::warn!(
+            "TCP_USER_TIMEOUT is configured but not yet supported; \
+             upgrade socket2 to 0.6 to enable this feature"
+        );
     }
 
     Ok(())
@@ -609,8 +601,7 @@ impl ResilientRedisClient {
 /// `Arc<Mutex<>>`. Requests that arrive while the mutex is held will block in
 /// `call()`, not in `poll_ready()`. This means Tower middleware that relies on
 /// backpressure signals (e.g. `Buffer`, load balancers) will not see accurate
-/// readiness. For proper backpressure, wrap with [`tower::buffer::Buffer`] or
-/// use [`RedisConnection::buffered`].
+/// readiness. For proper backpressure, wrap with [`tower::buffer::Buffer`].
 ///
 /// # Example
 /// ```no_run
