@@ -1465,22 +1465,22 @@ impl Command for ZMPop {
                     Frame::Array(pairs) => {
                         let mut result = Vec::new();
                         for pair in pairs {
-                            if let Frame::Array(ms) = pair
-                                && ms.len() == 2
-                            {
-                                let member = match &ms[0] {
-                                    Frame::BulkString(Some(m)) => {
-                                        String::from_utf8_lossy(m).to_string()
-                                    }
-                                    _ => return Err(RedisError::UnexpectedResponse),
-                                };
-                                let score = match &ms[1] {
-                                    Frame::BulkString(Some(s)) => {
-                                        String::from_utf8_lossy(s).parse::<f64>().unwrap()
-                                    }
-                                    _ => return Err(RedisError::UnexpectedResponse),
-                                };
-                                result.push((member, score));
+                            if let Frame::Array(ms) = pair {
+                                if ms.len() == 2 {
+                                    let member = match &ms[0] {
+                                        Frame::BulkString(Some(m)) => {
+                                            String::from_utf8_lossy(m).to_string()
+                                        }
+                                        _ => return Err(RedisError::UnexpectedResponse),
+                                    };
+                                    let score = match &ms[1] {
+                                        Frame::BulkString(Some(s)) => {
+                                            String::from_utf8_lossy(s).parse::<f64>().unwrap()
+                                        }
+                                        _ => return Err(RedisError::UnexpectedResponse),
+                                    };
+                                    result.push((member, score));
+                                }
                             }
                         }
                         result

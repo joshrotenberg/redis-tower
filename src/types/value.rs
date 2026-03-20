@@ -9,7 +9,7 @@ use std::collections::HashMap;
 ///
 /// This is primarily used for EVAL/EVALSHA where the return type
 /// is determined by the Lua script at runtime.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum RedisValue {
     /// Null/nil value
     Nil,
@@ -43,7 +43,7 @@ pub enum RedisValue {
 }
 
 impl RedisValue {
-    /// Convert to Option<Bytes>, returning None for Nil
+    /// Convert to `Option<Bytes>`, returning None for Nil
     pub fn as_bytes(&self) -> Result<Option<Bytes>, RedisError> {
         match self {
             RedisValue::Nil => Ok(None),
@@ -167,6 +167,26 @@ impl FromFrame for RedisValue {
                     items.into_iter().map(RedisValue::from_frame).collect();
                 Ok(RedisValue::Array(values?))
             }
+        }
+    }
+}
+
+/// Manual PartialEq that uses `f64::to_bits()` for the `Double` variant so that
+/// `NaN == NaN`, making the Eq impl sound. All other variants compare structurally.
+impl PartialEq for RedisValue {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (RedisValue::Nil, RedisValue::Nil) => true,
+            (RedisValue::Status(a), RedisValue::Status(b)) => a == b,
+            (RedisValue::Integer(a), RedisValue::Integer(b)) => a == b,
+            (RedisValue::BulkString(a), RedisValue::BulkString(b)) => a == b,
+            (RedisValue::Array(a), RedisValue::Array(b)) => a == b,
+            (RedisValue::Map(a), RedisValue::Map(b)) => a == b,
+            (RedisValue::Set(a), RedisValue::Set(b)) => a == b,
+            (RedisValue::Double(a), RedisValue::Double(b)) => a.to_bits() == b.to_bits(),
+            (RedisValue::Boolean(a), RedisValue::Boolean(b)) => a == b,
+            (RedisValue::Error(a), RedisValue::Error(b)) => a == b,
+            _ => false,
         }
     }
 }
@@ -479,6 +499,14 @@ mod tests {
         value.hash(&mut hasher);
         let _hash = hasher.finish();
         // If we got here without panicking, the test passes
+    }
+
+    #[test]
+    fn test_nan_equality_reflexive() {
+        // Eq contract requires reflexivity: x == x for all x.
+        // With f64's default PartialEq, NaN != NaN. Our manual impl fixes this.
+        let nan = RedisValue::Double(f64::NAN);
+        assert_eq!(nan, nan);
     }
 
     #[test]

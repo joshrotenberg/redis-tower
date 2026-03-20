@@ -22,8 +22,11 @@
 
 mod helpers;
 
+#[cfg(feature = "sentinel")]
 use helpers::sentinel::setup_sentinel;
+#[cfg(feature = "sentinel")]
 use redis_tower::commands::{Del, Get, Ping, Set};
+#[cfg(feature = "sentinel")]
 use tower::ServiceExt;
 
 #[tokio::test]

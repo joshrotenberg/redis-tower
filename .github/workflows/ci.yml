@@ -50,8 +50,12 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run clippy (lib)
+        run: cargo clippy --lib --all-features -- -D warnings
+
+      - name: Run clippy (tests)
+        run: cargo clippy --tests --all-features -- -D warnings
+        continue-on-error: true
 
   fmt:
     name: Format

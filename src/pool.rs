@@ -1071,7 +1071,7 @@ mod tests {
             .with_scale_down_threshold(0.25)
             .with_scale_increment(2);
 
-        assert_eq!(config.enable_dynamic_scaling, true);
+        assert!(config.enable_dynamic_scaling);
         assert_eq!(config.scale_up_threshold, 0.75);
         assert_eq!(config.scale_down_threshold, 0.25);
         assert_eq!(config.scale_increment, 2);

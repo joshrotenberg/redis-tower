@@ -3766,7 +3766,7 @@ pub enum DebugSubcommand {
     Digest,
     /// DEBUG DIGEST-VALUE key [key ...] - Get digest of specific keys
     DigestValue(Vec<String>),
-    /// DEBUG POPULATE count [prefix] [size] - Create test keys
+    /// DEBUG POPULATE count \[prefix\] \[size\] - Create test keys
     Populate {
         /// Number of keys to create
         count: i64,

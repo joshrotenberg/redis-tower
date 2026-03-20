@@ -382,9 +382,10 @@ async fn example_unsubscribe() -> Result<(), Box<dyn std::error::Error>> {
     // Wait for subscription confirmations
     for _ in 0..3 {
         if let Ok(Some(msg)) = timeout(Duration::from_millis(100), subscriber.next_message()).await
-            && let Ok(PubSubMessage::Subscribe { channel, count }) = msg
         {
-            println!("   ✓ Subscribed to '{}' (total: {})", channel, count);
+            if let Ok(PubSubMessage::Subscribe { channel, count }) = msg {
+                println!("   ✓ Subscribed to '{}' (total: {})", channel, count);
+            }
         }
     }
 
@@ -393,13 +394,13 @@ async fn example_unsubscribe() -> Result<(), Box<dyn std::error::Error>> {
     println!("   ✗ Unsubscribed from 'channel2'");
 
     // Wait for unsubscribe confirmation
-    if let Ok(Some(msg)) = timeout(Duration::from_millis(100), subscriber.next_message()).await
-        && let Ok(PubSubMessage::Unsubscribe { channel, count }) = msg
-    {
-        println!(
-            "   ✓ Unsubscribed from '{}' (remaining: {})",
-            channel, count
-        );
+    if let Ok(Some(msg)) = timeout(Duration::from_millis(100), subscriber.next_message()).await {
+        if let Ok(PubSubMessage::Unsubscribe { channel, count }) = msg {
+            println!(
+                "   ✓ Unsubscribed from '{}' (remaining: {})",
+                channel, count
+            );
+        }
     }
 
     println!(

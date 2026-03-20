@@ -109,7 +109,9 @@ fn apply_tcp_config(stream: &TcpStream, config: &TcpConfig) -> Result<(), RedisE
     }
 
     if let Some(linger) = config.linger {
-        stream.set_linger(linger)?;
+        use socket2::SockRef;
+        let sock_ref = SockRef::from(stream);
+        sock_ref.set_linger(linger)?;
         tracing::debug!("SO_LINGER set to {:?}", linger);
     }
 
@@ -118,22 +120,14 @@ fn apply_tcp_config(stream: &TcpStream, config: &TcpConfig) -> Result<(), RedisE
         tracing::debug!("IP_TTL set to {}", ttl);
     }
 
+    // TCP_USER_TIMEOUT requires socket2 >= 0.6 which has set_tcp_user_timeout().
+    // For now, log a warning. TODO: upgrade socket2 to 0.6 to enable this.
     #[cfg(target_os = "linux")]
-    if let Some(timeout) = config.user_timeout {
-        // Use socket2 to set TCP_USER_TIMEOUT on Linux
-        use socket2::{Socket, TcpKeepalive};
-        use std::os::fd::{AsRawFd, FromRawFd};
-
-        let fd = stream.as_raw_fd();
-        let socket = unsafe { Socket::from_raw_fd(fd) };
-
-        // Set TCP_USER_TIMEOUT
-        let timeout_ms = timeout.as_millis() as u32;
-        socket.set_tcp_user_timeout(Some(std::time::Duration::from_millis(timeout_ms as u64)))?;
-        tracing::debug!("TCP_USER_TIMEOUT set to {:?}", timeout);
-
-        // Don't drop the socket (would close the fd)
-        std::mem::forget(socket);
+    if config.user_timeout.is_some() {
+        tracing::warn!(
+            "TCP_USER_TIMEOUT is configured but not yet supported; \
+             upgrade socket2 to 0.6 to enable this feature"
+        );
     }
 
     Ok(())
@@ -211,7 +205,7 @@ impl RedisConnection {
             RedisStream::Unix(unix_stream)
         } else {
             // TCP connection
-            let mut tcp_stream = TcpStream::connect(addr).await?;
+            let tcp_stream = TcpStream::connect(addr).await?;
             tracing::debug!("TCP connection established");
 
             // Apply TCP configuration
@@ -603,6 +597,14 @@ impl ResilientRedisClient {
 /// This allows RedisConnection to be used with Tower middleware like
 /// timeouts, retries, circuit breakers, etc.
 ///
+/// # Backpressure caveat
+///
+/// `poll_ready` always returns `Ready` because the connection is shared via
+/// `Arc<Mutex<>>`. Requests that arrive while the mutex is held will block in
+/// `call()`, not in `poll_ready()`. This means Tower middleware that relies on
+/// backpressure signals (e.g. `Buffer`, load balancers) will not see accurate
+/// readiness. For proper backpressure, wrap with [`tower::buffer::Buffer`].
+///
 /// # Example
 /// ```no_run
 /// use redis_tower::client::RedisConnection;
@@ -627,7 +629,8 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Always ready - we use a mutex internally to serialize requests
+        // Always ready -- the mutex in call() serializes concurrent requests.
+        // See the backpressure caveat in the impl-level docs.
         Poll::Ready(Ok(()))
     }
 
@@ -654,6 +657,56 @@ where
             // Parse the response using the command's type-safe parser
             Cmd::parse_response(response_frame)
         })
+    }
+}
+
+/// Tower Service implementation for RedisClient
+///
+/// Delegates to the inner [`RedisConnection`]'s Service impl. See
+/// [`RedisConnection`]'s Service impl for backpressure caveats.
+impl<Cmd> Service<Cmd> for RedisClient
+where
+    Cmd: Command + Send + 'static,
+    Cmd::Response: Send + 'static,
+{
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, command: Cmd) -> Self::Future {
+        Service::call(&mut self.connection, command)
+    }
+}
+
+/// Tower Service implementation for ResilientRedisClient
+///
+/// Delegates to [`ResilientConnection::call`] which includes automatic
+/// reconnection and retry logic. Requires `Cmd: Clone` because failed
+/// commands may be retried on a new connection.
+///
+/// See [`RedisConnection`]'s Service impl for backpressure caveats.
+impl<Cmd> Service<Cmd> for ResilientRedisClient
+where
+    Cmd: Command + Clone + Send + 'static,
+    Cmd::Response: Send + 'static,
+{
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Always ready -- reconnection happens lazily inside call().
+        // See RedisConnection's Service impl for backpressure caveats.
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, command: Cmd) -> Self::Future {
+        let connection = self.connection.clone();
+        Box::pin(async move { connection.call(command).await })
     }
 }
 

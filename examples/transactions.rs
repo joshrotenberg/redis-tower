@@ -53,12 +53,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Last result should be "3"
-        if let Some(last) = results.last()
-            && let Ok(Some(bytes)) = last.as_bytes()
-        {
-            let value = String::from_utf8_lossy(&bytes);
-            println!("Final counter value: {}", value);
-            assert_eq!(value, "3");
+        if let Some(last) = results.last() {
+            if let Ok(Some(bytes)) = last.as_bytes() {
+                let value = String::from_utf8_lossy(&bytes);
+                println!("Final counter value: {}", value);
+                assert_eq!(value, "3");
+            }
         }
     } else {
         println!("Transaction was aborted");

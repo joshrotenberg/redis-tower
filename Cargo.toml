@@ -69,7 +69,9 @@ tokio-test = "0.4"
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
 fred = { version = "9.3", features = ["i-all"] }
 proptest = "1.6"
-docker-wrapper = { path = "/tmp/docker-wrapper", features = ["template-redis-cluster", "template-redis-sentinel"] }
+# docker-wrapper is needed for cluster/sentinel integration tests only.
+# Uncomment and point to your local checkout to run those tests:
+# docker-wrapper = { path = "../docker-wrapper", features = ["template-redis-cluster", "template-redis-sentinel"] }
 
 [[bench]]
 name = "comparison"

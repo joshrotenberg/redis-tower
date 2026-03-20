@@ -152,22 +152,21 @@ fn parse_replica_fields(fields: Vec<Frame>) -> Result<ReplicaInfo, RedisError> {
             let key = String::from_utf8(key_data.as_ref().to_vec())
                 .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
 
-            if i + 1 < fields.len()
-                && let Frame::BulkString(Some(value_data)) = &fields[i + 1]
-            {
-                let value = String::from_utf8(value_data.as_ref().to_vec())
-                    .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
+            if i + 1 < fields.len() {
+                if let Frame::BulkString(Some(value_data)) = &fields[i + 1] {
+                    let value = String::from_utf8(value_data.as_ref().to_vec())
+                        .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
 
-                match key.as_str() {
-                    "ip" => host = Some(value),
-                    "port" => {
-                        port =
-                            Some(value.parse::<u16>().map_err(|e| {
+                    match key.as_str() {
+                        "ip" => host = Some(value),
+                        "port" => {
+                            port = Some(value.parse::<u16>().map_err(|e| {
                                 RedisError::Protocol(format!("Invalid port: {}", e))
                             })?);
+                        }
+                        "flags" => flags = Some(value),
+                        _ => {}
                     }
-                    "flags" => flags = Some(value),
-                    _ => {}
                 }
             }
             i += 2;
@@ -250,21 +249,20 @@ fn parse_sentinel_fields(fields: Vec<Frame>) -> Result<SentinelInfo, RedisError>
             let key = String::from_utf8(key_data.as_ref().to_vec())
                 .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
 
-            if i + 1 < fields.len()
-                && let Frame::BulkString(Some(value_data)) = &fields[i + 1]
-            {
-                let value = String::from_utf8(value_data.as_ref().to_vec())
-                    .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
+            if i + 1 < fields.len() {
+                if let Frame::BulkString(Some(value_data)) = &fields[i + 1] {
+                    let value = String::from_utf8(value_data.as_ref().to_vec())
+                        .map_err(|e| RedisError::Protocol(format!("Invalid UTF-8: {}", e)))?;
 
-                match key.as_str() {
-                    "ip" => host = Some(value),
-                    "port" => {
-                        port =
-                            Some(value.parse::<u16>().map_err(|e| {
+                    match key.as_str() {
+                        "ip" => host = Some(value),
+                        "port" => {
+                            port = Some(value.parse::<u16>().map_err(|e| {
                                 RedisError::Protocol(format!("Invalid port: {}", e))
                             })?);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             i += 2;

@@ -108,7 +108,7 @@ impl<'a> Transaction<'a> {
 
     /// Execute the transaction and return all results
     ///
-    /// Returns a Vec<RedisValue> with one entry for each queued command.
+    /// Returns a `Vec<RedisValue>` with one entry for each queued command.
     /// If the transaction was aborted (e.g., due to WATCH), returns None.
     pub async fn exec(mut self) -> Result<Option<Vec<RedisValue>>, RedisError> {
         if !self.in_transaction {
