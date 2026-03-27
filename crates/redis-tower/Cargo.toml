@@ -1,0 +1,38 @@
+[package]
+name = "redis-tower"
+version = "0.1.0"
+description = "A Tower-based Redis client with strong typing, composable middleware, and resilience"
+documentation = "https://docs.rs/redis-tower"
+homepage = "https://github.com/joshrotenberg/redis-tower"
+keywords = ["redis", "tower", "async", "client", "database"]
+categories = ["database", "asynchronous", "network-programming"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+tls-native-tls = ["redis-tower-core/tls-native-tls"]
+tls-rustls = ["redis-tower-core/tls-rustls"]
+
+[dependencies]
+redis-tower-protocol = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
+
+tower-service = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio-stream = { workspace = true }
+tower = { workspace = true, features = ["buffer", "timeout"] }
+bytes = { workspace = true }
+redis-tower-protocol = { workspace = true }
