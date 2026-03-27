@@ -87,29 +87,23 @@ jobs:
   test-integration:
     name: Integration Tests
     runs-on: ubuntu-latest
-    services:
-      redis:
-        image: redis:8
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Redis
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Run integration tests
-        run: cargo test --test '*' --all-features
-        env:
-          REDIS_URL: redis://127.0.0.1:6379
+      - name: Run standalone integration tests
+        run: cargo test -p redis-tower --test integration --all-features
+
+      - name: Run cluster integration tests
+        run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored
 
   msrv:
     name: MSRV (1.87)

@@ -36,7 +36,7 @@ tokio-stream = { workspace = true }
 tower = { workspace = true, features = ["buffer", "timeout"] }
 bytes = { workspace = true }
 redis-tower-protocol = { workspace = true }
-docker-wrapper = { version = "0.11", features = ["testing"] }
+redis-test-harness = { path = "../redis-test-harness" }
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]
