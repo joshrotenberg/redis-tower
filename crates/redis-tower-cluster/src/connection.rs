@@ -2,17 +2,27 @@
 
 use std::collections::HashMap;
 
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor::extract_key;
 use crate::slot::slot_for_key;
-use crate::topology::{ClusterTopology, discover_topology};
+use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+
+/// Maximum number of redirects before giving up.
+const MAX_REDIRECTS: usize = 5;
 
 /// A Redis Cluster connection that routes commands to the correct node.
 ///
 /// Discovers the cluster topology via CLUSTER SLOTS on the seed node,
 /// then maintains one connection per master. Commands are routed based
 /// on the key's hash slot.
+///
+/// Handles MOVED and ASK redirects automatically:
+/// - **MOVED**: Updates the slot map, connects to the new node if needed,
+///   and retries the command.
+/// - **ASK**: Sends ASKING to the indicated node, then retries the command
+///   (single-shot, no slot map update).
 ///
 /// # Example
 ///
@@ -35,19 +45,20 @@ pub struct ClusterConnection {
     host_override: Option<String>,
 }
 
+/// Parsed redirect from a MOVED or ASK error.
+#[derive(Debug)]
+enum Redirect {
+    Moved { slot: u16, addr: String },
+    Ask { addr: String },
+}
+
 impl ClusterConnection {
     /// Connect to a cluster using a seed node address.
-    ///
-    /// Discovers the topology via CLUSTER SLOTS and connects to all masters.
-    /// Node addresses from the topology are used as-is.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
         Self::connect_inner(seed_addr, None).await
     }
 
     /// Connect to a cluster, remapping all node hosts to `host_override`.
-    ///
-    /// Use this when connecting through Docker or a proxy where the cluster
-    /// nodes announce internal IPs but you need to connect via localhost.
     pub async fn connect_with_host(
         seed_addr: &str,
         host_override: &str,
@@ -62,14 +73,8 @@ impl ClusterConnection {
         let seed_conn = RedisConnection::connect(seed_addr).await?;
         let mut topology = discover_topology(&seed_conn).await?;
 
-        // Remap node addresses if host override is set.
         if let Some(ref host) = host_override {
-            for range in &mut topology.slot_ranges {
-                range.master.host = host.clone();
-                for replica in &mut range.replicas {
-                    replica.host = host.clone();
-                }
-            }
+            remap_topology(&mut topology, host);
         }
 
         let mut nodes = HashMap::new();
@@ -100,20 +105,74 @@ impl ClusterConnection {
     }
 
     /// Execute a command, routing it to the correct cluster node.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let frame = cmd.to_frame();
-        let node_addr = self.route_command(&frame);
+    ///
+    /// Handles MOVED and ASK redirects transparently.
+    pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let cmd_frame = cmd.to_frame();
+        let initial_node = self.route_command(&cmd_frame).to_string();
 
-        let conn = self
-            .nodes
-            .get(node_addr)
-            .ok_or_else(|| RedisError::Redis(format!("no connection for node {node_addr}")))?;
+        let mut target_node = initial_node;
 
-        conn.execute(cmd).await
+        for _ in 0..MAX_REDIRECTS {
+            let conn = self.nodes.get(&target_node).ok_or_else(|| {
+                RedisError::Redis(format!("no connection for node {target_node}"))
+            })?;
+
+            let responses = conn.execute_pipeline(vec![cmd_frame.clone()]).await?;
+            let response = responses
+                .into_iter()
+                .next()
+                .ok_or(RedisError::ConnectionClosed)?;
+
+            match parse_redirect(&response) {
+                Some(Redirect::Moved { slot, addr }) => {
+                    let addr = self.remap_addr(&addr);
+                    self.ensure_connection(&addr).await?;
+                    self.update_slot_owner(slot, &addr);
+                    target_node = addr;
+                    continue;
+                }
+                Some(Redirect::Ask { addr }) => {
+                    let addr = self.remap_addr(&addr);
+                    self.ensure_connection(&addr).await?;
+                    // Send ASKING before the retry.
+                    let asking_conn = self.nodes.get(&addr).ok_or_else(|| {
+                        RedisError::Redis(format!("no connection for ASK node {addr}"))
+                    })?;
+                    asking_conn
+                        .execute_pipeline(vec![array(vec![bulk("ASKING")])])
+                        .await?;
+                    // Retry the command on the ASK target.
+                    let responses = asking_conn
+                        .execute_pipeline(vec![cmd_frame.clone()])
+                        .await?;
+                    let response = responses
+                        .into_iter()
+                        .next()
+                        .ok_or(RedisError::ConnectionClosed)?;
+
+                    if let Frame::Error(ref e) = response {
+                        return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+                    }
+                    return cmd.parse_response(response);
+                }
+                None => {
+                    // Normal response (or a non-redirect error).
+                    if let Frame::Error(ref e) = response {
+                        return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+                    }
+                    return cmd.parse_response(response);
+                }
+            }
+        }
+
+        Err(RedisError::Redis(format!(
+            "too many redirects ({MAX_REDIRECTS})"
+        )))
     }
 
     /// Determine which node should handle a command based on its key.
-    fn route_command(&self, frame: &redis_tower_core::Frame) -> &str {
+    fn route_command(&self, frame: &Frame) -> &str {
         if let Some(key) = extract_key(frame) {
             let slot = slot_for_key(key);
             if let Some(addr) = self.topology.master_for_slot(slot) {
@@ -126,6 +185,42 @@ impl ClusterConnection {
             }
         }
         &self.default_node
+    }
+
+    /// Remap an address using the host override if set.
+    fn remap_addr(&self, addr: &str) -> String {
+        if let Some(ref host) = self.host_override {
+            if let Some((_old_host, port)) = addr.rsplit_once(':') {
+                return format!("{host}:{port}");
+            }
+        }
+        addr.to_string()
+    }
+
+    /// Ensure we have a connection to the given address.
+    async fn ensure_connection(&mut self, addr: &str) -> Result<(), RedisError> {
+        if !self.nodes.contains_key(addr) {
+            let conn = RedisConnection::connect(addr).await?;
+            self.nodes.insert(addr.to_string(), conn);
+        }
+        Ok(())
+    }
+
+    /// Update the topology to assign a slot to a new node (after MOVED).
+    fn update_slot_owner(&mut self, slot: u16, addr: &str) {
+        if let Some((host, port_str)) = addr.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                for range in &mut self.topology.slot_ranges {
+                    if slot >= range.start && slot <= range.end {
+                        range.master = NodeAddr {
+                            host: host.to_string(),
+                            port,
+                        };
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// Get the current cluster topology.
@@ -144,12 +239,7 @@ impl ClusterConnection {
         let mut topology = discover_topology(conn).await?;
 
         if let Some(ref host) = self.host_override {
-            for range in &mut topology.slot_ranges {
-                range.master.host = host.clone();
-                for replica in &mut range.replicas {
-                    replica.host = host.clone();
-                }
-            }
+            remap_topology(&mut topology, host);
         }
 
         for addr in topology.master_addrs() {
@@ -163,5 +253,85 @@ impl ClusterConnection {
 
         self.topology = topology;
         Ok(())
+    }
+}
+
+/// Parse a MOVED or ASK redirect from an error frame.
+///
+/// Format: `MOVED <slot> <host>:<port>` or `ASK <slot> <host>:<port>`
+fn parse_redirect(frame: &Frame) -> Option<Redirect> {
+    let error_msg = match frame {
+        Frame::Error(e) => String::from_utf8_lossy(e),
+        _ => return None,
+    };
+
+    let parts: Vec<&str> = error_msg.splitn(3, ' ').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    match parts[0] {
+        "MOVED" => {
+            let slot = parts[1].parse::<u16>().ok()?;
+            Some(Redirect::Moved {
+                slot,
+                addr: parts[2].to_string(),
+            })
+        }
+        "ASK" => Some(Redirect::Ask {
+            addr: parts[2].to_string(),
+        }),
+        _ => None,
+    }
+}
+
+/// Remap all node addresses in a topology to use a specific host.
+fn remap_topology(topology: &mut ClusterTopology, host: &str) {
+    for range in &mut topology.slot_ranges {
+        range.master.host = host.to_string();
+        for replica in &mut range.replicas {
+            replica.host = host.to_string();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn parse_moved_redirect() {
+        let frame = Frame::Error(Bytes::from("MOVED 3999 127.0.0.1:7001"));
+        match parse_redirect(&frame) {
+            Some(Redirect::Moved { slot, addr }) => {
+                assert_eq!(slot, 3999);
+                assert_eq!(addr, "127.0.0.1:7001");
+            }
+            other => panic!("expected Moved, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_redirect() {
+        let frame = Frame::Error(Bytes::from("ASK 3999 127.0.0.1:7002"));
+        match parse_redirect(&frame) {
+            Some(Redirect::Ask { addr }) => {
+                assert_eq!(addr, "127.0.0.1:7002");
+            }
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_non_redirect_error() {
+        let frame = Frame::Error(Bytes::from("ERR unknown command"));
+        assert!(parse_redirect(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_non_error_frame() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        assert!(parse_redirect(&frame).is_none());
     }
 }
