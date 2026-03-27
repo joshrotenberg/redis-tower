@@ -408,3 +408,93 @@ fn mock_ping_success() {
     let result: String = mock.execute(Ping::new()).unwrap();
     assert_eq!(result, "PONG");
 }
+
+// -- RESP3 frame variants --
+
+#[test]
+fn resp3_expire_boolean() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Boolean(true));
+    assert!(mock.execute(Expire::new("key", 60)).unwrap());
+
+    mock.enqueue(Frame::Boolean(false));
+    assert!(!mock.execute(Expire::new("key", 60)).unwrap());
+}
+
+#[test]
+fn resp3_hexists_boolean() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Boolean(true));
+    assert!(mock.execute(HExists::new("key", "field")).unwrap());
+
+    mock.enqueue(Frame::Boolean(false));
+    assert!(!mock.execute(HExists::new("key", "field")).unwrap());
+}
+
+#[test]
+fn resp3_sismember_boolean() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Boolean(true));
+    assert!(mock.execute(SIsMember::new("key", "member")).unwrap());
+
+    mock.enqueue(Frame::Boolean(false));
+    assert!(!mock.execute(SIsMember::new("key", "member")).unwrap());
+}
+
+#[test]
+fn resp3_hgetall_map() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Map(vec![
+        (
+            Frame::BulkString(Some(Bytes::from("field1"))),
+            Frame::BulkString(Some(Bytes::from("value1"))),
+        ),
+        (
+            Frame::BulkString(Some(Bytes::from("field2"))),
+            Frame::BulkString(Some(Bytes::from("value2"))),
+        ),
+    ]));
+    let pairs: Vec<(Bytes, Bytes)> = mock.execute(HGetAll::new("key")).unwrap();
+    assert_eq!(pairs.len(), 2);
+    assert!(pairs.contains(&(Bytes::from("field1"), Bytes::from("value1"))));
+    assert!(pairs.contains(&(Bytes::from("field2"), Bytes::from("value2"))));
+}
+
+#[test]
+fn resp3_zscore_double() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Double(42.5));
+    let score: Option<f64> = mock.execute(ZScore::new("key", "member")).unwrap();
+    assert_eq!(score, Some(42.5));
+}
+
+#[test]
+fn resp3_zincrby_double() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Double(15.5));
+    let score: f64 = mock.execute(ZIncrBy::new("key", 5.5, "member")).unwrap();
+    assert!((score - 15.5).abs() < f64::EPSILON);
+}
+
+#[test]
+fn resp3_smembers_set() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Set(vec![
+        Frame::BulkString(Some(Bytes::from("a"))),
+        Frame::BulkString(Some(Bytes::from("b"))),
+        Frame::BulkString(Some(Bytes::from("c"))),
+    ]));
+    let members: Vec<Bytes> = mock.execute(SMembers::new("key")).unwrap();
+    assert_eq!(members.len(), 3);
+}
+
+#[test]
+fn resp3_sinter_set() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Set(vec![
+        Frame::BulkString(Some(Bytes::from("b"))),
+        Frame::BulkString(Some(Bytes::from("c"))),
+    ]));
+    let members: Vec<Bytes> = mock.execute(SInter::new("key")).unwrap();
+    assert_eq!(members.len(), 2);
+}

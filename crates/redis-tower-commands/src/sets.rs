@@ -142,8 +142,18 @@ impl Command for SMembers {
                     }),
                 })
                 .collect(),
+            Frame::Set(items) => items
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or set",
                 actual: format!("{other:?}"),
             }),
         }
@@ -185,8 +195,9 @@ impl Command for SIsMember {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "integer",
+                expected: "integer or boolean",
                 actual: format!("{other:?}"),
             }),
         }
@@ -277,8 +288,18 @@ impl Command for SInter {
                     }),
                 })
                 .collect(),
+            Frame::Set(items) => items
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or set",
                 actual: format!("{other:?}"),
             }),
         }
