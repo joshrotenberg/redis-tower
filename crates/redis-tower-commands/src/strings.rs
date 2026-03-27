@@ -38,7 +38,7 @@ impl Command for Get {
     }
 }
 
-/// SET key value [EX seconds] [PX milliseconds] [NX|XX] [GET]
+/// SET key value \[EX seconds\] \[PX milliseconds\] \[NX|XX\] \[GET\]
 ///
 /// Sets `key` to hold `value`. Returns `Ok` on success, or the old value
 /// if `GET` is specified.

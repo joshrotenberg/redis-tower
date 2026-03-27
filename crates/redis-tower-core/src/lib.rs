@@ -1,8 +1,8 @@
-//! Core connection and Tower [`Service`] implementation for redis-tower.
+//! Core connection and Tower `Service` implementation for redis-tower.
 //!
 //! This crate provides:
 //! - [`Command`] trait for defining typed Redis commands
-//! - [`RedisConnection`] implementing `tower::Service<Cmd>` for any `Cmd: Command`
+//! - [`RedisConnection`] implementing `Service<Cmd>` for any `Cmd: Command`
 //! - [`RedisStream`] abstracting TCP, Unix, and TLS transports
 //! - Configuration and URL parsing
 //!

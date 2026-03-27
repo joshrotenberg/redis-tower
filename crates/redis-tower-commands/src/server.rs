@@ -1,7 +1,7 @@
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
-/// PING [message]
+/// PING \[message\]
 ///
 /// Returns PONG, or echoes the message if provided.
 pub struct Ping {

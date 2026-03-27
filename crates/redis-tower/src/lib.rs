@@ -1,7 +1,7 @@
 //! A Tower-based Redis client with strong typing and composable middleware.
 //!
 //! redis-tower provides a Redis client where every connection is a
-//! [`tower::Service`], commands are typed request/response pairs, and
+//! `tower::Service`, commands are typed request/response pairs, and
 //! resilience is composed via standard Tower layers.
 //!
 //! # Quick Start
