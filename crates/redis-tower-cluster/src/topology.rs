@@ -180,3 +180,154 @@ fn extract_integer(frame: &Frame) -> Result<i64, RedisError> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    /// Build a mock CLUSTER SLOTS response frame.
+    type SlotDef<'a> = (u16, u16, (&'a str, u16), Vec<(&'a str, u16)>);
+
+    fn mock_cluster_slots_response(ranges: Vec<SlotDef<'_>>) -> Frame {
+        let mut slot_ranges = Vec::new();
+        for (start, end, (master_host, master_port), replicas) in ranges {
+            let mut range_items = vec![
+                Frame::Integer(start as i64),
+                Frame::Integer(end as i64),
+                Frame::Array(Some(vec![
+                    Frame::BulkString(Some(Bytes::from(master_host.to_string()))),
+                    Frame::Integer(master_port as i64),
+                    Frame::BulkString(Some(Bytes::from("master-node-id"))),
+                ])),
+            ];
+            for (host, port) in replicas {
+                range_items.push(Frame::Array(Some(vec![
+                    Frame::BulkString(Some(Bytes::from(host.to_string()))),
+                    Frame::Integer(port as i64),
+                    Frame::BulkString(Some(Bytes::from("replica-node-id"))),
+                ])));
+            }
+            slot_ranges.push(Frame::Array(Some(range_items)));
+        }
+        Frame::Array(Some(slot_ranges))
+    }
+
+    #[test]
+    fn parse_three_master_topology() {
+        let frame = mock_cluster_slots_response(vec![
+            (0, 5460, ("127.0.0.1", 7000), vec![]),
+            (5461, 10922, ("127.0.0.1", 7001), vec![]),
+            (10923, 16383, ("127.0.0.1", 7002), vec![]),
+        ]);
+        let topo = parse_cluster_slots(&frame).unwrap();
+        assert_eq!(topo.slot_ranges.len(), 3);
+        assert_eq!(topo.master_addrs().len(), 3);
+
+        // Verify slot ownership.
+        assert_eq!(topo.master_for_slot(0).unwrap().port, 7000);
+        assert_eq!(topo.master_for_slot(5460).unwrap().port, 7000);
+        assert_eq!(topo.master_for_slot(5461).unwrap().port, 7001);
+        assert_eq!(topo.master_for_slot(10922).unwrap().port, 7001);
+        assert_eq!(topo.master_for_slot(10923).unwrap().port, 7002);
+        assert_eq!(topo.master_for_slot(16383).unwrap().port, 7002);
+    }
+
+    #[test]
+    fn parse_topology_with_replicas() {
+        let frame = mock_cluster_slots_response(vec![
+            (0, 5460, ("127.0.0.1", 7000), vec![("127.0.0.1", 7003)]),
+            (5461, 10922, ("127.0.0.1", 7001), vec![("127.0.0.1", 7004)]),
+            (10923, 16383, ("127.0.0.1", 7002), vec![("127.0.0.1", 7005)]),
+        ]);
+        let topo = parse_cluster_slots(&frame).unwrap();
+        assert_eq!(topo.master_addrs().len(), 3);
+        assert_eq!(topo.replica_addrs().len(), 3);
+
+        let replicas_0 = topo.replicas_for_slot(0).unwrap();
+        assert_eq!(replicas_0.len(), 1);
+        assert_eq!(replicas_0[0].port, 7003);
+    }
+
+    #[test]
+    fn master_for_slot_out_of_range() {
+        let frame = mock_cluster_slots_response(vec![(0, 100, ("127.0.0.1", 7000), vec![])]);
+        let topo = parse_cluster_slots(&frame).unwrap();
+        assert!(topo.master_for_slot(101).is_none());
+    }
+
+    #[test]
+    fn replicas_for_slot_no_replicas() {
+        let frame = mock_cluster_slots_response(vec![(0, 16383, ("127.0.0.1", 7000), vec![])]);
+        let topo = parse_cluster_slots(&frame).unwrap();
+        let replicas = topo.replicas_for_slot(0).unwrap();
+        assert!(replicas.is_empty());
+    }
+
+    #[test]
+    fn parse_empty_topology() {
+        let frame = Frame::Array(Some(vec![]));
+        let topo = parse_cluster_slots(&frame).unwrap();
+        assert!(topo.slot_ranges.is_empty());
+        assert!(topo.master_for_slot(0).is_none());
+    }
+
+    #[test]
+    fn parse_invalid_frame_type() {
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        let result = parse_cluster_slots(&frame);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_invalid_range_too_few_elements() {
+        let frame = Frame::Array(Some(vec![Frame::Array(Some(vec![
+            Frame::Integer(0),
+            Frame::Integer(100),
+            // Missing master node array.
+        ]))]));
+        let result = parse_cluster_slots(&frame);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn node_addr_display() {
+        let addr = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+        };
+        assert_eq!(addr.to_string(), "127.0.0.1:7000");
+        assert_eq!(addr.addr_string(), "127.0.0.1:7000");
+    }
+
+    #[test]
+    fn node_addr_equality() {
+        let a = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+        };
+        let b = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+        };
+        let c = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7001,
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn multiple_replicas_per_slot() {
+        let frame = mock_cluster_slots_response(vec![(
+            0,
+            16383,
+            ("127.0.0.1", 7000),
+            vec![("127.0.0.1", 7001), ("127.0.0.1", 7002)],
+        )]);
+        let topo = parse_cluster_slots(&frame).unwrap();
+        let replicas = topo.replicas_for_slot(0).unwrap();
+        assert_eq!(replicas.len(), 2);
+    }
+}

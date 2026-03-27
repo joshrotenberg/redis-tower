@@ -167,4 +167,78 @@ mod tests {
             bulk("v")
         ])));
     }
+
+    #[test]
+    fn readonly_case_insensitive() {
+        assert!(is_readonly_command(&array(vec![bulk("get"), bulk("k")])));
+        assert!(is_readonly_command(&array(vec![bulk("Get"), bulk("k")])));
+    }
+
+    #[test]
+    fn empty_frame_not_readonly() {
+        assert!(!is_readonly_command(&Frame::Array(Some(vec![]))));
+        assert!(!is_readonly_command(&Frame::Null));
+    }
+
+    #[test]
+    fn extract_key_from_hset() {
+        let frame = array(vec![bulk("HSET"), bulk("hash"), bulk("field"), bulk("val")]);
+        assert_eq!(extract_key(&frame), Some(b"hash".as_slice()));
+    }
+
+    #[test]
+    fn extract_key_from_lpush() {
+        let frame = array(vec![bulk("LPUSH"), bulk("list"), bulk("item")]);
+        assert_eq!(extract_key(&frame), Some(b"list".as_slice()));
+    }
+
+    #[test]
+    fn extract_key_from_zadd() {
+        let frame = array(vec![
+            bulk("ZADD"),
+            bulk("zset"),
+            bulk("1.0"),
+            bulk("member"),
+        ]);
+        assert_eq!(extract_key(&frame), Some(b"zset".as_slice()));
+    }
+
+    #[test]
+    fn no_key_for_cluster_commands() {
+        assert_eq!(
+            extract_key(&array(vec![bulk("CLUSTER"), bulk("SLOTS")])),
+            None
+        );
+        assert_eq!(
+            extract_key(&array(vec![bulk("CLUSTER"), bulk("INFO")])),
+            None
+        );
+    }
+
+    #[test]
+    fn no_key_for_multi_exec() {
+        assert_eq!(extract_key(&array(vec![bulk("MULTI")])), None);
+        assert_eq!(extract_key(&array(vec![bulk("EXEC")])), None);
+        assert_eq!(extract_key(&array(vec![bulk("DISCARD")])), None);
+    }
+
+    #[test]
+    fn no_key_for_auth_select() {
+        assert_eq!(
+            extract_key(&array(vec![bulk("AUTH"), bulk("password")])),
+            None
+        );
+        assert_eq!(extract_key(&array(vec![bulk("SELECT"), bulk("0")])), None);
+    }
+
+    #[test]
+    fn null_frame_returns_none() {
+        assert_eq!(extract_key(&Frame::Null), None);
+    }
+
+    #[test]
+    fn single_element_array_no_key() {
+        // Only command name, no key argument.
+        assert_eq!(extract_key(&array(vec![bulk("RANDOMKEY")])), None);
+    }
 }

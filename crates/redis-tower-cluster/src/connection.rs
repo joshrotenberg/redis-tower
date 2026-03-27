@@ -418,6 +418,7 @@ fn remap_topology(topology: &mut ClusterTopology, host: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::topology::SlotRange;
     use bytes::Bytes;
 
     #[test]
@@ -458,5 +459,195 @@ mod tests {
     #[test]
     fn read_preference_default() {
         assert_eq!(ReadPreference::default(), ReadPreference::Master);
+    }
+
+    // -- remap_topology tests --
+
+    fn make_topology() -> ClusterTopology {
+        ClusterTopology {
+            slot_ranges: vec![
+                SlotRange {
+                    start: 0,
+                    end: 5460,
+                    master: NodeAddr {
+                        host: "10.0.0.1".to_string(),
+                        port: 7000,
+                    },
+                    replicas: vec![NodeAddr {
+                        host: "10.0.0.4".to_string(),
+                        port: 7003,
+                    }],
+                },
+                SlotRange {
+                    start: 5461,
+                    end: 10922,
+                    master: NodeAddr {
+                        host: "10.0.0.2".to_string(),
+                        port: 7001,
+                    },
+                    replicas: vec![],
+                },
+                SlotRange {
+                    start: 10923,
+                    end: 16383,
+                    master: NodeAddr {
+                        host: "10.0.0.3".to_string(),
+                        port: 7002,
+                    },
+                    replicas: vec![NodeAddr {
+                        host: "10.0.0.5".to_string(),
+                        port: 7004,
+                    }],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn remap_topology_changes_all_hosts() {
+        let mut topo = make_topology();
+        remap_topology(&mut topo, "127.0.0.1");
+
+        for range in &topo.slot_ranges {
+            assert_eq!(range.master.host, "127.0.0.1");
+            for replica in &range.replicas {
+                assert_eq!(replica.host, "127.0.0.1");
+            }
+        }
+    }
+
+    #[test]
+    fn remap_topology_preserves_ports() {
+        let mut topo = make_topology();
+        remap_topology(&mut topo, "localhost");
+
+        assert_eq!(topo.slot_ranges[0].master.port, 7000);
+        assert_eq!(topo.slot_ranges[1].master.port, 7001);
+        assert_eq!(topo.slot_ranges[2].master.port, 7002);
+    }
+
+    // -- remap_addr tests --
+
+    #[test]
+    fn remap_addr_with_override() {
+        let conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: String::new(),
+            host_override: Some("127.0.0.1".to_string()),
+            read_preference: ReadPreference::Master,
+            replica_counter: AtomicUsize::new(0),
+        };
+        assert_eq!(conn.remap_addr("10.0.0.1:7000"), "127.0.0.1:7000");
+    }
+
+    #[test]
+    fn remap_addr_without_override() {
+        let conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: String::new(),
+            host_override: None,
+            read_preference: ReadPreference::Master,
+            replica_counter: AtomicUsize::new(0),
+        };
+        assert_eq!(conn.remap_addr("10.0.0.1:7000"), "10.0.0.1:7000");
+    }
+
+    // -- route_command tests --
+
+    #[test]
+    fn route_to_correct_master() {
+        // Verify topology lookup routes to the right master based on slot.
+        let topo = ClusterTopology {
+            slot_ranges: vec![
+                SlotRange {
+                    start: 0,
+                    end: 5460,
+                    master: NodeAddr {
+                        host: "127.0.0.1".to_string(),
+                        port: 7000,
+                    },
+                    replicas: vec![],
+                },
+                SlotRange {
+                    start: 5461,
+                    end: 16383,
+                    master: NodeAddr {
+                        host: "127.0.0.1".to_string(),
+                        port: 7001,
+                    },
+                    replicas: vec![],
+                },
+            ],
+        };
+
+        // We need real entries in the map for routing to match.
+        // Use a trick: insert with empty connections isn't possible,
+        // but we can verify the routing logic by checking the addr_string.
+        // For a proper unit test, let's just verify the topology lookup:
+        let slot = slot_for_key(b"foo"); // 12182
+        let master = topo.master_for_slot(slot).unwrap();
+        assert_eq!(master.port, 7001); // slot 12182 > 5460
+
+        let slot2 = slot_for_key(b"hello"); // 866
+        let master2 = topo.master_for_slot(slot2).unwrap();
+        assert_eq!(master2.port, 7000); // slot 866 < 5460
+    }
+
+    // -- update_slot_owner tests --
+
+    #[test]
+    fn update_slot_owner_changes_master() {
+        let mut conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: "10.0.0.1:7000".to_string(),
+            host_override: None,
+            read_preference: ReadPreference::Master,
+            replica_counter: AtomicUsize::new(0),
+        };
+
+        // Slot 100 is in range 0-5460, owned by 10.0.0.1:7000.
+        assert_eq!(conn.topology.master_for_slot(100).unwrap().port, 7000);
+
+        // Simulate a MOVED redirect.
+        conn.update_slot_owner(100, "10.0.0.9:9000");
+        assert_eq!(conn.topology.master_for_slot(100).unwrap().host, "10.0.0.9");
+        assert_eq!(conn.topology.master_for_slot(100).unwrap().port, 9000);
+    }
+
+    // -- redirect edge cases --
+
+    #[test]
+    fn parse_moved_with_ipv6() {
+        let frame = Frame::Error(Bytes::from("MOVED 3999 ::1:7001"));
+        // This won't parse correctly with rsplit_once(':') but let's verify behavior.
+        match parse_redirect(&frame) {
+            Some(Redirect::Moved { slot, addr }) => {
+                assert_eq!(slot, 3999);
+                assert_eq!(addr, "::1:7001");
+            }
+            _ => panic!("should parse as Moved"),
+        }
+    }
+
+    #[test]
+    fn parse_moved_invalid_slot() {
+        let frame = Frame::Error(Bytes::from("MOVED notanumber 127.0.0.1:7001"));
+        assert!(parse_redirect(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_redirect_too_few_parts() {
+        let frame = Frame::Error(Bytes::from("MOVED"));
+        assert!(parse_redirect(&frame).is_none());
+    }
+
+    #[test]
+    fn read_preference_variants() {
+        assert_ne!(ReadPreference::Master, ReadPreference::Replica);
+        assert_ne!(ReadPreference::Replica, ReadPreference::PreferReplica);
+        assert_ne!(ReadPreference::Master, ReadPreference::PreferReplica);
     }
 }

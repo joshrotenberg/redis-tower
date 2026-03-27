@@ -102,4 +102,44 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn empty_key() {
+        let slot = slot_for_key(b"");
+        assert!(slot < SLOT_COUNT);
+    }
+
+    #[test]
+    fn hash_tag_with_nested_braces() {
+        // {a{b} -- the tag is "a{b" (first { to first }).
+        assert_eq!(extract_hash_tag(b"{a{b}c"), b"a{b");
+    }
+
+    #[test]
+    fn hash_tag_multiple_pairs() {
+        // {a}:{b} -- only the first tag is used.
+        assert_eq!(extract_hash_tag(b"{a}:{b}"), b"a");
+    }
+
+    #[test]
+    fn different_keys_different_slots() {
+        // These should hash to different slots (high probability).
+        let s1 = slot_for_key(b"key1");
+        let s2 = slot_for_key(b"key2");
+        let s3 = slot_for_key(b"key3");
+        // At least 2 of 3 should be different.
+        assert!(s1 != s2 || s2 != s3 || s1 != s3);
+    }
+
+    #[test]
+    fn binary_key() {
+        let key = [0u8, 1, 2, 255, 128, 64];
+        let slot = slot_for_key(&key);
+        assert!(slot < SLOT_COUNT);
+    }
+
+    #[test]
+    fn slot_count_constant() {
+        assert_eq!(SLOT_COUNT, 16384);
+    }
 }
