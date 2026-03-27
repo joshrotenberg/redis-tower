@@ -6,6 +6,7 @@ members = [
     "crates/redis-tower-commands",
     "crates/redis-tower",
     "crates/redis-tower-cluster",
+    "crates/redis-test-harness",
 ]
 
 [workspace.package]

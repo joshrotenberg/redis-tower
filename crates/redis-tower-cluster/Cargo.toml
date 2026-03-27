@@ -20,4 +20,4 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
-docker-wrapper = { version = "0.11", features = ["testing", "template-redis-cluster"] }
+redis-test-harness = { path = "../redis-test-harness" }

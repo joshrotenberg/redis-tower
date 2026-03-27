@@ -1,23 +1,39 @@
-//! Cluster integration tests.
+//! Cluster integration tests using redis-test-harness.
 //!
-//! These tests require a running Redis Cluster. They are ignored by default.
+//! These tests start a real 3-node Redis Cluster via local redis-server
+//! processes. Requires `redis-server` and `redis-cli` on PATH.
+//!
 //! Run with: `cargo test -p redis-tower-cluster --test cluster_integration -- --ignored`
-//!
-//! To set up a cluster manually:
-//! ```sh
-//! # Using docker-wrapper's RedisClusterTemplate, or manually with redis-cli --cluster create
-//! ```
-//!
-//! Set `REDIS_CLUSTER_ADDR` to the seed node address (default: 127.0.0.1:7000).
+
+use std::sync::OnceLock;
 
 use bytes::Bytes;
+use redis_test_harness::cluster::{ClusterConfig, RedisCluster};
 use redis_tower_cluster::ClusterConnection;
 use redis_tower_commands::*;
 
-async fn cluster() -> ClusterConnection {
-    let addr = std::env::var("REDIS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
-    // Use host override for Docker-based clusters where nodes announce container IPs.
-    ClusterConnection::connect_with_host(&addr, "127.0.0.1")
+/// Shared cluster instance -- started once, stopped on Drop.
+static CLUSTER: OnceLock<RedisCluster> = OnceLock::new();
+
+fn ensure_cluster() -> &'static RedisCluster {
+    CLUSTER.get_or_init(|| {
+        let cluster = RedisCluster::new(ClusterConfig {
+            masters: 3,
+            replicas_per_master: 0,
+            ..Default::default()
+        });
+        cluster.start().expect("failed to start Redis cluster");
+        cluster
+            .wait_for_healthy(std::time::Duration::from_secs(10))
+            .expect("cluster not healthy");
+        cluster
+    })
+}
+
+async fn cluster_conn() -> ClusterConnection {
+    let cluster = ensure_cluster();
+    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
+    ClusterConnection::connect(&addr)
         .await
         .expect("failed to connect to cluster")
 }
@@ -29,7 +45,7 @@ fn key(test: &str, name: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn cluster_set_and_get() {
-    let mut cluster = cluster().await;
+    let mut cluster = cluster_conn().await;
     let k = key("set_get", "k");
     cluster.execute(Set::new(&k, "hello")).await.unwrap();
     let val = cluster.execute(Get::new(&k)).await.unwrap();
@@ -40,7 +56,7 @@ async fn cluster_set_and_get() {
 #[tokio::test]
 #[ignore]
 async fn cluster_routes_to_different_nodes() {
-    let mut cluster = cluster().await;
+    let mut cluster = cluster_conn().await;
     let k1 = key("routing", "foo");
     let k2 = key("routing", "bar");
 
@@ -59,7 +75,7 @@ async fn cluster_routes_to_different_nodes() {
 #[tokio::test]
 #[ignore]
 async fn cluster_hash_tag_same_slot() {
-    let mut cluster = cluster().await;
+    let mut cluster = cluster_conn().await;
     let k1 = "{user:1}:name";
     let k2 = "{user:1}:email";
 
@@ -81,7 +97,7 @@ async fn cluster_hash_tag_same_slot() {
 #[tokio::test]
 #[ignore]
 async fn cluster_ping() {
-    let mut cluster = cluster().await;
+    let mut cluster = cluster_conn().await;
     let pong = cluster.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
@@ -89,7 +105,7 @@ async fn cluster_ping() {
 #[tokio::test]
 #[ignore]
 async fn cluster_incr() {
-    let mut cluster = cluster().await;
+    let mut cluster = cluster_conn().await;
     let k = key("incr", "counter");
     cluster.execute(Del::new(&k)).await.unwrap();
     let v = cluster.execute(Incr::new(&k)).await.unwrap();
@@ -102,7 +118,7 @@ async fn cluster_incr() {
 #[tokio::test]
 #[ignore]
 async fn cluster_topology_has_three_masters() {
-    let cluster = cluster().await;
+    let cluster = cluster_conn().await;
     let topo = cluster.topology();
     assert_eq!(
         topo.master_addrs().len(),
@@ -110,4 +126,60 @@ async fn cluster_topology_has_three_masters() {
         "expected 3 master nodes, got {}",
         topo.master_addrs().len()
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_hashes() {
+    let mut cluster = cluster_conn().await;
+    let k = key("hashes", "h");
+    cluster
+        .execute(HSet::new(&k, "field1", "value1"))
+        .await
+        .unwrap();
+    let val = cluster.execute(HGet::new(&k, "field1")).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("value1")));
+    cluster.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_lists() {
+    let mut cluster = cluster_conn().await;
+    let k = key("lists", "l");
+    cluster.execute(Del::new(&k)).await.unwrap();
+    cluster.execute(RPush::new(&k, "a")).await.unwrap();
+    cluster.execute(RPush::new(&k, "b")).await.unwrap();
+    let items = cluster.execute(LRange::new(&k, 0, -1)).await.unwrap();
+    assert_eq!(items, vec![Bytes::from("a"), Bytes::from("b")]);
+    cluster.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_sets() {
+    let mut cluster = cluster_conn().await;
+    let k = key("sets", "s");
+    cluster.execute(Del::new(&k)).await.unwrap();
+    cluster
+        .execute(SAdd::members(&k, ["x", "y", "z"]))
+        .await
+        .unwrap();
+    assert_eq!(cluster.execute(SCard::new(&k)).await.unwrap(), 3);
+    cluster.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_sorted_sets() {
+    let mut cluster = cluster_conn().await;
+    let k = key("zsets", "z");
+    cluster.execute(Del::new(&k)).await.unwrap();
+    cluster
+        .execute(ZAdd::new(&k).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+    let range = cluster.execute(ZRange::new(&k, 0, -1)).await.unwrap();
+    assert_eq!(range, vec![Bytes::from("a"), Bytes::from("b")]);
+    cluster.execute(Del::new(&k)).await.unwrap();
 }

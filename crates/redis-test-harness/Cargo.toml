@@ -1,0 +1,10 @@
+[package]
+name = "redis-test-harness"
+version = "0.1.0"
+description = "Redis topology management for integration testing (cluster, sentinel)"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
