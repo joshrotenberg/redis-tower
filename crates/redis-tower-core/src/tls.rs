@@ -100,14 +100,15 @@ impl TlsConfig {
         builder.danger_accept_invalid_certs(self.accept_invalid_certs);
         builder.danger_accept_invalid_hostnames(self.accept_invalid_hostnames);
 
-        let connector = builder.build().map_err(|e| {
-            RedisError::Connection(std::io::Error::other(e))
-        })?;
+        let connector = builder
+            .build()
+            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
         let connector = tokio_native_tls::TlsConnector::from(connector);
 
-        let tls_stream = connector.connect(hostname, tcp).await.map_err(|e| {
-            RedisError::Connection(std::io::Error::other(e))
-        })?;
+        let tls_stream = connector
+            .connect(hostname, tcp)
+            .await
+            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
 
         Ok(RedisStream::NativeTls(Box::new(tls_stream)))
     }
