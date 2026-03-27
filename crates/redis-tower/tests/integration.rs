@@ -1,82 +1,60 @@
 use std::sync::OnceLock;
 
 use bytes::Bytes;
-use docker_wrapper::RedisTemplate;
-use docker_wrapper::testing::ContainerGuard;
+use redis_test_harness::standalone::{RedisStandalone, StandaloneConfig};
 use redis_tower::commands::*;
 use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
 use redis_tower::{
     Pipeline, PubSubConnection, RedisClient, RedisConnection, ResilientConnection,
     ResilientRedisClient, Transaction, TransactionResult,
 };
-use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tower::Service;
 
-/// Shared Redis address. Resolved once per test suite.
-static REDIS_ADDR: OnceLock<OnceCell<String>> = OnceLock::new();
+/// Shared Redis instance -- started once, stopped on Drop.
+static REDIS: OnceLock<RedisStandalone> = OnceLock::new();
 
-/// Container guard kept alive for the duration of the test suite.
-/// Only used when Docker provides Redis (no external Redis available).
-static REDIS_CONTAINER: OnceLock<OnceCell<ContainerGuard<RedisTemplate>>> = OnceLock::new();
-
-/// Get the Redis address.
-///
-/// Priority:
-/// 1. `REDIS_URL` env var (CI service container or external Redis)
-/// 2. Docker container via docker-wrapper (local dev)
-async fn redis_addr() -> String {
-    let cell = REDIS_ADDR.get_or_init(OnceCell::new);
-    cell.get_or_init(|| async {
-        // Check for external Redis (CI or manual).
+fn ensure_redis() -> &'static RedisStandalone {
+    REDIS.get_or_init(|| {
+        // Check for external Redis first (CI service container).
         if let Ok(url) = std::env::var("REDIS_URL") {
-            // Strip redis:// prefix if present to get host:port.
             let addr = url
                 .strip_prefix("redis://")
                 .unwrap_or(&url)
                 .trim_end_matches('/')
                 .to_string();
-            // Verify it's reachable.
-            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
-                return addr;
+            if let Some((host, port_str)) = addr.rsplit_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    // Return a "fake" standalone that points at the external Redis.
+                    // It won't start/stop anything since the server is already running.
+                    return RedisStandalone::new(StandaloneConfig {
+                        port,
+                        bind: host.to_string(),
+                        ..Default::default()
+                    });
+                }
             }
         }
 
-        // Try default localhost.
-        if tokio::net::TcpStream::connect("127.0.0.1:6379")
-            .await
-            .is_ok()
-        {
-            return "127.0.0.1:6379".to_string();
-        }
-
-        // Fall back to Docker container.
-        let container_cell = REDIS_CONTAINER.get_or_init(OnceCell::new);
-        let guard = container_cell
-            .get_or_init(|| async {
-                ContainerGuard::new(RedisTemplate::new("redis-tower-test"))
-                    .reuse_if_running(true)
-                    .start()
-                    .await
-                    .expect("failed to start Redis container (is Docker running?)")
-            })
-            .await;
-        let port = guard.host_port(6379).await.expect("failed to get port");
-        format!("127.0.0.1:{port}")
+        let standalone = RedisStandalone::with_defaults();
+        standalone.start().expect("failed to start Redis server");
+        standalone
     })
-    .await
-    .clone()
+}
+
+fn redis_addr() -> String {
+    ensure_redis().addr()
 }
 
 async fn conn() -> RedisConnection {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     RedisConnection::connect(&addr)
         .await
         .expect("failed to connect to Redis")
 }
 
 async fn client() -> RedisClient {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     RedisClient::connect(&addr)
         .await
         .expect("failed to connect to Redis")
@@ -105,7 +83,7 @@ async fn ping_with_message() {
 
 #[tokio::test]
 async fn connect_url() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let url = format!("redis://{addr}");
     let conn = RedisConnection::connect_url(&url).await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
@@ -993,7 +971,7 @@ async fn pubsub_punsubscribe() {
 
 /// Get a connection on DB 1 (isolated for destructive tests like FLUSHDB).
 async fn conn_db1() -> RedisConnection {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let url = format!("redis://{addr}/1");
     RedisConnection::connect_url(&url).await.unwrap()
 }
@@ -1094,7 +1072,7 @@ async fn transaction_len_and_empty() {
 
 #[tokio::test]
 async fn client_connect_url() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let url = format!("redis://{addr}");
     let client = RedisClient::connect_url(&url).await.unwrap();
     let pong = client.execute(Ping::new()).await.unwrap();
@@ -1418,7 +1396,7 @@ async fn lmove() {
 
 #[tokio::test]
 async fn resilient_connection_basic() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let conn = ResilientConnection::new(
         AddrConnectionFactory::new(&addr),
         ReconnectConfig::default(),
@@ -1438,7 +1416,7 @@ async fn resilient_connection_with_callbacks() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let connected = Arc::new(AtomicBool::new(false));
     let connected_clone = Arc::clone(&connected);
 
@@ -1471,7 +1449,7 @@ async fn resilient_connection_max_retries() {
 
 #[tokio::test]
 async fn resilient_client_basic() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let client = ResilientRedisClient::connect(&addr).await.unwrap();
 
     let k = key("resilient_client", "k");
@@ -1483,7 +1461,7 @@ async fn resilient_client_basic() {
 
 #[tokio::test]
 async fn resilient_client_shared_across_tasks() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let client = ResilientRedisClient::connect(&addr).await.unwrap();
     let k1 = key("resilient_shared", "t1");
     let k2 = key("resilient_shared", "t2");
@@ -1512,7 +1490,7 @@ async fn resilient_client_shared_across_tasks() {
 
 #[tokio::test]
 async fn resilient_client_connect_url() {
-    let addr = redis_addr().await;
+    let addr = redis_addr();
     let url = format!("redis://{addr}");
     let client = ResilientRedisClient::connect_url(&url).await.unwrap();
     let pong = client.execute(Ping::new()).await.unwrap();
