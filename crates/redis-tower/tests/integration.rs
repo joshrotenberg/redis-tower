@@ -1,21 +1,47 @@
+use std::sync::OnceLock;
+
 use bytes::Bytes;
+use docker_wrapper::RedisTemplate;
+use docker_wrapper::testing::ContainerGuard;
 use redis_tower::commands::*;
 use redis_tower::{
     Pipeline, PubSubConnection, RedisClient, RedisConnection, Transaction, TransactionResult,
 };
+use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tower::Service;
 
+/// Shared Redis container for all tests. Started once, reused across the suite.
+static REDIS: OnceLock<OnceCell<ContainerGuard<RedisTemplate>>> = OnceLock::new();
+
+/// Get the Redis address, starting the container if needed.
+async fn redis_addr() -> String {
+    let cell = REDIS.get_or_init(OnceCell::new);
+    let guard = cell
+        .get_or_init(|| async {
+            ContainerGuard::new(RedisTemplate::new("redis-tower-test"))
+                .reuse_if_running(true)
+                .start()
+                .await
+                .expect("failed to start Redis container")
+        })
+        .await;
+    let port = guard.host_port(6379).await.expect("failed to get port");
+    format!("127.0.0.1:{port}")
+}
+
 async fn conn() -> RedisConnection {
-    RedisConnection::connect("127.0.0.1:6379")
+    let addr = redis_addr().await;
+    RedisConnection::connect(&addr)
         .await
-        .expect("Redis must be running on localhost:6379")
+        .expect("failed to connect to Redis")
 }
 
 async fn client() -> RedisClient {
-    RedisClient::connect("127.0.0.1:6379")
+    let addr = redis_addr().await;
+    RedisClient::connect(&addr)
         .await
-        .expect("Redis must be running on localhost:6379")
+        .expect("failed to connect to Redis")
 }
 
 /// Generate a unique key prefix for test isolation.
@@ -41,9 +67,9 @@ async fn ping_with_message() {
 
 #[tokio::test]
 async fn connect_url() {
-    let conn = RedisConnection::connect_url("redis://127.0.0.1:6379")
-        .await
-        .unwrap();
+    let addr = redis_addr().await;
+    let url = format!("redis://{addr}");
+    let conn = RedisConnection::connect_url(&url).await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
