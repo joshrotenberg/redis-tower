@@ -1,0 +1,37 @@
+[package]
+name = "redis-tower-core"
+version = "0.1.0"
+description = "Core connection and Service implementation for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+tls-native-tls = ["dep:native-tls", "dep:tokio-native-tls"]
+tls-rustls = ["dep:rustls", "dep:tokio-rustls"]
+
+[dependencies]
+redis-tower-protocol = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+pin-project-lite = { workspace = true }
+bytes = { workspace = true }
+tower-service = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Optional TLS backends
+native-tls = { version = "0.2", optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
+rustls = { version = "0.23", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio-test = { workspace = true }

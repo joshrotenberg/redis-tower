@@ -1,0 +1,15 @@
+[package]
+name = "redis-tower-protocol"
+version = "0.1.0"
+description = "RESP protocol types and codec for redis-tower, backed by resp-rs"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+resp-rs = "0.1"
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }

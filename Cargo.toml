@@ -1,328 +1,45 @@
-[package]
-name = "redis-tower"
-version = "0.1.0"
-# Rust 2024 edition (requires Rust 1.85+, released Feb 2025)
-edition = "2024"
-authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
-description = "A Tower-based Redis client with strong typing, composable middleware, and 200+ commands"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/joshrotenberg/redis-tower"
-documentation = "https://docs.rs/redis-tower"
-homepage = "https://github.com/joshrotenberg/redis-tower"
-readme = "README.md"
-keywords = ["redis", "tower", "async", "client", "database"]
-categories = ["database", "asynchronous", "network-programming"]
-# MSRV: Rust 1.87 (for `usize::is_multiple_of` stabilized in 1.86, plus safety margin)
-rust-version = "1.87"
-exclude = [
-    "docs/",
-    ".github/",
-    "benches/",
-    "examples/",
+[workspace]
+resolver = "3"
+members = [
+    "crates/redis-tower-protocol",
+    "crates/redis-tower-core",
+    "crates/redis-tower-commands",
+    "crates/redis-tower",
 ]
 
-[dependencies]
-# Tower ecosystem
-tower = { version = "0.5", features = ["make", "reconnect", "timeout", "balance", "buffer", "util"] }
+[workspace.package]
+edition = "2024"
+authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/joshrotenberg/redis-tower"
+rust-version = "1.87"
+
+[workspace.dependencies]
+# Internal crates
+redis-tower-protocol = { path = "crates/redis-tower-protocol" }
+redis-tower-core = { path = "crates/redis-tower-core" }
+redis-tower-commands = { path = "crates/redis-tower-commands" }
+
+# Async runtime
+tokio = { version = "1.42", features = ["net", "rt", "macros", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio-stream = "0.1"
+futures = "0.3"
+pin-project-lite = "0.2"
+
+# Protocol
+bytes = "1.9"
+
+# Tower
+tower = { version = "0.5", features = ["util", "buffer", "timeout"] }
 tower-layer = "0.3"
 tower-service = "0.3"
 
-# Async runtime
-tokio = { version = "1.42", features = ["full"] }
-tokio-util = { version = "0.7", features = ["codec"] }
-tokio-stream = "0.1"
-
-# Core utilities
-bytes = "1.9"
-futures = "0.3"
+# Error handling
 thiserror = "2.0"
-anyhow = "1.0"
-memchr = "2.7"
-socket2 = "0.5"
 
-# Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", optional = true }
-
-# Cryptography
-sha1 = "0.10"
-
-# Logging and tracing
+# Tracing
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tower-resilience = { version = "0.3.7", features = ["full"] }
 
-# TLS support (optional)
-native-tls = { version = "0.2", optional = true }
-tokio-native-tls = { version = "0.3", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false }
-tokio-rustls = { version = "0.26", optional = true, default-features = false }
-rustls-native-certs = { version = "0.8", optional = true }
-webpki-roots = { version = "0.26", optional = true }
-tower-resilience-healthcheck = "0.1.0"
-
-# Protocol parser now integrated as internal module
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+# Testing
 tokio-test = "0.4"
-redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-fred = { version = "9.3", features = ["i-all"] }
-proptest = "1.6"
-# docker-wrapper is needed for cluster/sentinel integration tests only.
-# Uncomment and point to your local checkout to run those tests:
-# docker-wrapper = { path = "../docker-wrapper", features = ["template-redis-cluster", "template-redis-sentinel"] }
-
-[[bench]]
-name = "comparison"
-harness = false
-
-# Cluster-specific examples
-[[example]]
-name = "cluster_with_tower"
-required-features = ["cluster"]
-
-[[example]]
-name = "pipeline_cluster"
-required-features = ["cluster"]
-
-[[example]]
-name = "cluster_read_from_replica"
-required-features = ["cluster"]
-
-# Sentinel-specific examples
-[[example]]
-name = "sentinel_basic"
-required-features = ["sentinel"]
-
-# Serde JSON example
-[[example]]
-name = "serde_json"
-required-features = ["serde-json"]
-
-# Integration tests in tests/commands/
-[[test]]
-name = "test_hashes"
-path = "tests/commands/test_hashes.rs"
-
-[[test]]
-name = "test_lists"
-path = "tests/commands/test_lists.rs"
-
-[[test]]
-name = "test_sets"
-path = "tests/commands/test_sets.rs"
-
-[[test]]
-name = "test_sorted_sets"
-path = "tests/commands/test_sorted_sets.rs"
-
-[[test]]
-name = "test_strings"
-path = "tests/commands/test_strings.rs"
-
-[[test]]
-name = "test_pubsub"
-path = "tests/commands/test_pubsub.rs"
-
-[[test]]
-name = "test_transactions"
-path = "tests/commands/test_transactions.rs"
-
-# TODO: test_streams.rs needs updating to match current stream API
-# [[test]]
-# name = "test_streams"
-# path = "tests/commands/test_streams.rs"
-
-[[test]]
-name = "test_pool"
-path = "tests/commands/test_pool.rs"
-
-[[test]]
-name = "test_object_commands"
-path = "tests/commands/test_object_commands.rs"
-
-[[test]]
-name = "test_sort_wait"
-path = "tests/commands/test_sort_wait.rs"
-
-# Cluster-specific tests
-[[test]]
-name = "test_cluster"
-path = "tests/commands/test_cluster.rs"
-required-features = ["cluster"]
-
-[[test]]
-name = "test_cluster_simple"
-path = "tests/commands/test_cluster_simple.rs"
-required-features = ["cluster"]
-
-# New integration tests (Priority 2)
-[[test]]
-name = "integration_core"
-path = "tests/integration/integration_core.rs"
-
-[[test]]
-name = "integration_pubsub"
-path = "tests/integration/integration_pubsub.rs"
-
-[[test]]
-name = "integration_serde"
-path = "tests/integration/integration_serde.rs"
-required-features = ["serde-json"]
-
-[[test]]
-name = "integration_transactions"
-path = "tests/integration/integration_transactions.rs"
-
-[[test]]
-name = "integration_streams"
-path = "tests/integration/integration_streams.rs"
-
-[[test]]
-name = "integration_scripting"
-path = "tests/integration/integration_scripting.rs"
-
-[[test]]
-name = "integration_blocking"
-path = "tests/integration/integration_blocking.rs"
-
-[[test]]
-name = "integration_advanced"
-path = "tests/integration/integration_advanced.rs"
-
-# Redis Stack module tests (Priority 4)
-[[test]]
-name = "integration_bloom"
-path = "tests/integration/integration_bloom.rs"
-required-features = ["bloom"]
-
-# Cluster integration tests (requires docker-compose cluster)
-[[test]]
-name = "integration_cluster"
-path = "tests/integration/integration_cluster.rs"
-required-features = ["cluster"]
-
-# Sentinel integration tests (requires docker-compose sentinel)
-[[test]]
-name = "integration_sentinel"
-path = "tests/integration/integration_sentinel.rs"
-required-features = ["sentinel"]
-
-# New integration tests for remaining command modules
-[[test]]
-name = "integration_keys"
-path = "tests/integration/integration_keys.rs"
-
-[[test]]
-name = "integration_server"
-path = "tests/integration/integration_server.rs"
-
-[[test]]
-name = "integration_bitmap"
-path = "tests/integration/integration_bitmap.rs"
-
-[[test]]
-name = "integration_connection"
-path = "tests/integration/integration_connection.rs"
-
-[[test]]
-name = "integration_acl"
-path = "tests/integration/integration_acl.rs"
-
-[[test]]
-name = "integration_functions"
-path = "tests/integration/integration_functions.rs"
-harness = true
-
-[[test]]
-name = "integration_latency"
-path = "tests/integration/integration_latency.rs"
-
-[[test]]
-name = "integration_module"
-path = "tests/integration/integration_module.rs"
-
-[[test]]
-name = "integration_scan"
-path = "tests/integration/integration_scan.rs"
-
-# Redis Stack module integration tests (requires Redis Stack)
-[[test]]
-name = "integration_cms"
-path = "tests/integration/integration_cms.rs"
-required-features = ["modules"]
-
-[[test]]
-name = "integration_cuckoo"
-path = "tests/integration/integration_cuckoo.rs"
-required-features = ["modules"]
-
-[[test]]
-name = "integration_tdigest"
-path = "tests/integration/integration_tdigest.rs"
-required-features = ["modules"]
-
-[[test]]
-name = "integration_topk"
-path = "tests/integration/integration_topk.rs"
-required-features = ["modules"]
-
-[[test]]
-name = "integration_vector"
-path = "tests/integration/integration_vector.rs"
-required-features = ["modules"]
-
-[[test]]
-name = "integration_json"
-path = "tests/integration/integration_json.rs"
-required-features = ["json"]
-
-[[test]]
-name = "integration_graph"
-path = "tests/integration/integration_graph.rs"
-required-features = ["graph"]
-
-[[test]]
-name = "integration_search"
-path = "tests/integration/integration_search.rs"
-required-features = ["search"]
-
-[[test]]
-name = "integration_timeseries"
-path = "tests/integration/integration_timeseries.rs"
-required-features = ["timeseries"]
-
-[[test]]
-name = "integration_unix_socket"
-path = "tests/integration/integration_unix_socket.rs"
-
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1
-
-[profile.bench]
-inherits = "release"
-
-[features]
-default = []
-# Deployment topology support (feature-gated)
-cluster = []          # Redis Cluster support
-sentinel = []         # Redis Sentinel support
-# TLS support (feature-gated)
-tls-native-tls = ["dep:native-tls", "dep:tokio-native-tls"]
-tls-rustls = ["dep:rustls", "dep:tokio-rustls", "rustls/std", "dep:rustls-native-certs"]
-tls-rustls-ring = ["tls-rustls", "rustls/ring"]
-tls-rustls-webpki = ["tls-rustls", "dep:webpki-roots"]
-# Serde JSON integration (feature-gated)
-serde-json = ["dep:serde_json"]  # JSON serialization for Rust structs
-# Backwards compatibility (feature-gated)
-deprecated = []       # Include deprecated commands (GETSET, RPOPLPUSH, GEORADIUS, etc.)
-# Redis module support (feature-gated)
-modules = []
-bloom = ["modules"]
-json = ["modules"]
-search = ["modules"]
-timeseries = ["modules"]
-graph = ["modules"]

@@ -22,3 +22,6 @@ tmp/
 
 # Redis dump files
 dump.rdb
+
+# Local context
+CLAUDE.md
