@@ -1515,3 +1515,73 @@ async fn resilient_client_connect_url() {
     let pong = client.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
+
+// -- Client-side caching tests --
+
+#[tokio::test]
+async fn csc_cache_hit() {
+    let addr = redis_addr();
+    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_test:cache_hit";
+    // Write via a separate connection (bypasses cache).
+    let writer = conn().await;
+    writer.execute(Set::new(k, "hello")).await.unwrap();
+
+    // First read: cache miss, hits Redis.
+    let v1: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("hello")));
+    assert_eq!(client.cache_size().await, 1);
+
+    // Second read: cache hit, no network.
+    let v2: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
+    assert_eq!(v2, Some(Bytes::from("hello")));
+
+    // Cleanup.
+    writer.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn csc_invalidation() {
+    let addr = redis_addr();
+    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_test:invalidation";
+
+    // Write and read to populate cache.
+    let writer = conn().await;
+    writer.execute(Set::new(k, "original")).await.unwrap();
+    let _: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
+    assert_eq!(client.cache_size().await, 1);
+
+    // Modify the key from another connection.
+    writer.execute(Set::new(k, "modified")).await.unwrap();
+
+    // The invalidation push arrives during the next read from the connection.
+    // The GET below will trigger read_response which routes any push frames.
+    // After the GET, the cache will have the new value (and the old entry
+    // will have been invalidated by the push that arrived before/during the read).
+    //
+    // We need a small delay to let the server send the invalidation.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // This GET triggers the read that routes the invalidation push,
+    // then sees a cache miss and fetches the new value.
+    let v: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
+    assert_eq!(v, Some(Bytes::from("modified")));
+
+    writer.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn csc_write_not_cached() {
+    let addr = redis_addr();
+    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_test:write_not_cached";
+    // SET should not be cached.
+    client.execute(Set::new(k, "val")).await.unwrap();
+    assert_eq!(client.cache_size().await, 0);
+
+    client.execute(Del::new(k)).await.unwrap();
+}

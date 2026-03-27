@@ -32,6 +32,7 @@
 //!     .service(conn);
 //! ```
 
+pub mod caching;
 mod client;
 pub mod pipeline;
 pub mod pubsub;
@@ -39,6 +40,7 @@ pub mod reconnect;
 mod resilient;
 pub mod transaction;
 
+pub use caching::CachedClient;
 pub use client::RedisClient;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
