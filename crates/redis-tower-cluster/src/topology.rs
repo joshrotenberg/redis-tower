@@ -56,6 +56,26 @@ impl ClusterTopology {
         addrs.dedup_by(|a, b| a == b);
         addrs
     }
+
+    /// Find replica nodes for a given slot.
+    pub fn replicas_for_slot(&self, slot: u16) -> Option<&[NodeAddr]> {
+        self.slot_ranges
+            .iter()
+            .find(|r| slot >= r.start && slot <= r.end)
+            .map(|r| r.replicas.as_slice())
+    }
+
+    /// Get all unique replica addresses.
+    pub fn replica_addrs(&self) -> Vec<&NodeAddr> {
+        let mut addrs: Vec<&NodeAddr> = self
+            .slot_ranges
+            .iter()
+            .flat_map(|r| r.replicas.iter())
+            .collect();
+        addrs.sort_by_key(|a| a.addr_string());
+        addrs.dedup_by(|a, b| a == b);
+        addrs
+    }
 }
 
 /// Discover the cluster topology by sending CLUSTER SLOTS to a node.
