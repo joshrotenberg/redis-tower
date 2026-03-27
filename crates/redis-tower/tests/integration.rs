@@ -11,23 +11,59 @@ use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tower::Service;
 
-/// Shared Redis container for all tests. Started once, reused across the suite.
-static REDIS: OnceLock<OnceCell<ContainerGuard<RedisTemplate>>> = OnceLock::new();
+/// Shared Redis address. Resolved once per test suite.
+static REDIS_ADDR: OnceLock<OnceCell<String>> = OnceLock::new();
 
-/// Get the Redis address, starting the container if needed.
+/// Container guard kept alive for the duration of the test suite.
+/// Only used when Docker provides Redis (no external Redis available).
+static REDIS_CONTAINER: OnceLock<OnceCell<ContainerGuard<RedisTemplate>>> = OnceLock::new();
+
+/// Get the Redis address.
+///
+/// Priority:
+/// 1. `REDIS_URL` env var (CI service container or external Redis)
+/// 2. Docker container via docker-wrapper (local dev)
 async fn redis_addr() -> String {
-    let cell = REDIS.get_or_init(OnceCell::new);
-    let guard = cell
-        .get_or_init(|| async {
-            ContainerGuard::new(RedisTemplate::new("redis-tower-test"))
-                .reuse_if_running(true)
-                .start()
-                .await
-                .expect("failed to start Redis container")
-        })
-        .await;
-    let port = guard.host_port(6379).await.expect("failed to get port");
-    format!("127.0.0.1:{port}")
+    let cell = REDIS_ADDR.get_or_init(OnceCell::new);
+    cell.get_or_init(|| async {
+        // Check for external Redis (CI or manual).
+        if let Ok(url) = std::env::var("REDIS_URL") {
+            // Strip redis:// prefix if present to get host:port.
+            let addr = url
+                .strip_prefix("redis://")
+                .unwrap_or(&url)
+                .trim_end_matches('/')
+                .to_string();
+            // Verify it's reachable.
+            if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+                return addr;
+            }
+        }
+
+        // Try default localhost.
+        if tokio::net::TcpStream::connect("127.0.0.1:6379")
+            .await
+            .is_ok()
+        {
+            return "127.0.0.1:6379".to_string();
+        }
+
+        // Fall back to Docker container.
+        let container_cell = REDIS_CONTAINER.get_or_init(OnceCell::new);
+        let guard = container_cell
+            .get_or_init(|| async {
+                ContainerGuard::new(RedisTemplate::new("redis-tower-test"))
+                    .reuse_if_running(true)
+                    .start()
+                    .await
+                    .expect("failed to start Redis container (is Docker running?)")
+            })
+            .await;
+        let port = guard.host_port(6379).await.expect("failed to get port");
+        format!("127.0.0.1:{port}")
+    })
+    .await
+    .clone()
 }
 
 async fn conn() -> RedisConnection {
