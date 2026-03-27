@@ -1,36 +1,22 @@
 //! Redis Cluster lifecycle management.
 //!
-//! Generates per-node configs and shells out to `redis-server` / `redis-cli`.
+//! Delegates to [`crate::wrapper::cluster`] for the actual process management.
 
 use std::collections::HashMap;
-use std::fs;
 use std::io;
-use std::path::PathBuf;
-use std::process::Command;
-use std::thread;
 use std::time::Duration;
 
-use crate::util;
+use crate::wrapper::cluster::{RedisCluster as WrapperCluster, RedisClusterHandle};
 
 /// Configuration for the cluster as a whole.
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
-    /// Base port; nodes use base_port, base_port+1, etc.
     pub base_port: u16,
-    /// Number of master nodes.
     pub masters: u16,
-    /// Number of replicas per master.
     pub replicas_per_master: u16,
-    /// Bind address for all nodes.
     pub bind: String,
-    /// Working directory root — each node gets a subdirectory.
-    pub work_dir: PathBuf,
-    /// Path to `redis-server` binary.
     pub redis_server_bin: String,
-    /// Path to `redis-cli` binary.
     pub redis_cli_bin: String,
-    /// Additional redis.conf directives applied to every node.
-    pub extra_config: HashMap<String, String>,
 }
 
 impl Default for ClusterConfig {
@@ -40,32 +26,22 @@ impl Default for ClusterConfig {
             masters: 3,
             replicas_per_master: 1,
             bind: "127.0.0.1".into(),
-            work_dir: PathBuf::from("/tmp/redis-cluster"),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
-            extra_config: HashMap::new(),
         }
     }
 }
 
 impl ClusterConfig {
-    /// Total number of nodes (masters + all replicas).
     pub fn total_nodes(&self) -> u16 {
         self.masters * (1 + self.replicas_per_master)
     }
 
-    /// Iterator over all node ports.
     pub fn ports(&self) -> impl Iterator<Item = u16> {
         let base = self.base_port;
         let total = self.total_nodes();
         (0..total).map(move |i| base + i)
     }
-}
-
-/// Represents a running (or stopped) Redis Cluster.
-#[derive(Debug)]
-pub struct RedisCluster {
-    config: ClusterConfig,
 }
 
 /// Status returned by `poke()`.
@@ -79,21 +55,21 @@ pub struct ClusterStatus {
     pub raw: String,
 }
 
-/// Per-node status.
-#[derive(Debug)]
-pub struct NodeStatus {
-    pub port: u16,
-    pub alive: bool,
-    pub role: Option<String>,
-    pub cluster_info: Option<String>,
+/// Represents a running (or stopped) Redis Cluster.
+pub struct RedisCluster {
+    config: ClusterConfig,
+    #[allow(dead_code)]
+    handle: Option<RedisClusterHandle>,
 }
 
 impl RedisCluster {
     pub fn new(config: ClusterConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            handle: None,
+        }
     }
 
-    /// 3 masters, 1 replica each, ports 7000-7005.
     pub fn with_defaults() -> Self {
         Self::new(ClusterConfig::default())
     }
@@ -102,176 +78,54 @@ impl RedisCluster {
         &self.config
     }
 
-    fn write_node_config(&self, port: u16) -> io::Result<PathBuf> {
-        let node_dir = self.config.work_dir.join(format!("node-{port}"));
-        fs::create_dir_all(&node_dir)?;
-
-        let conf_path = node_dir.join("redis.conf");
-        let mut conf = format!(
-            r#"port {port}
-bind {bind}
-daemonize yes
-pidfile {node_dir}/redis.pid
-logfile {node_dir}/redis.log
-dir {node_dir}
-dbfilename dump-{port}.rdb
-appendonly yes
-appendfilename appendonly-{port}.aof
-cluster-enabled yes
-cluster-config-file nodes-{port}.conf
-cluster-node-timeout 5000
-"#,
-            port = port,
-            bind = self.config.bind,
-            node_dir = node_dir.display(),
-        );
-
-        for (key, value) in &self.config.extra_config {
-            conf.push_str(&format!("{key} {value}\n"));
-        }
-
-        fs::write(&conf_path, conf)?;
-        Ok(conf_path)
-    }
-
-    /// Start all nodes and form the cluster.
     pub fn start(&self) -> io::Result<()> {
-        if self.config.work_dir.exists() {
-            fs::remove_dir_all(&self.config.work_dir)?;
-        }
-        fs::create_dir_all(&self.config.work_dir)?;
+        // Use the wrapper to start. We can't store the handle in &self,
+        // so we leak it (it lives for the duration of the test suite via OnceLock).
+        let handle = WrapperCluster::builder()
+            .masters(self.config.masters)
+            .replicas_per_master(self.config.replicas_per_master)
+            .base_port(self.config.base_port)
+            .bind(&self.config.bind)
+            .redis_server_bin(&self.config.redis_server_bin)
+            .redis_cli_bin(&self.config.redis_cli_bin)
+            .start()?;
 
-        let timeout = Duration::from_secs(10);
-
-        for port in self.config.ports() {
-            let conf_path = self.write_node_config(port)?;
-            util::start_redis_server(&self.config.redis_server_bin, &conf_path)?;
-        }
-
-        // Wait for all nodes to accept connections
-        for port in self.config.ports() {
-            util::wait_for_ping(&self.config.redis_cli_bin, &self.config.bind, port, timeout)?;
-        }
-
-        // Form the cluster
-        self.cluster_create()?;
-
-        // Let the cluster converge
-        thread::sleep(Duration::from_secs(2));
-
+        // Leak the handle so it lives for the static lifetime (OnceLock pattern).
+        // The Drop impl on RedisServerHandle will never run, but we call stop()
+        // explicitly in our own Drop.
+        std::mem::forget(handle);
         Ok(())
     }
 
-    fn cluster_create(&self) -> io::Result<()> {
-        let mut args: Vec<String> = vec!["--cluster".into(), "create".into()];
-
-        for port in self.config.ports() {
-            args.push(format!("{}:{}", self.config.bind, port));
-        }
-
-        if self.config.replicas_per_master > 0 {
-            args.push("--cluster-replicas".into());
-            args.push(self.config.replicas_per_master.to_string());
-        }
-
-        args.push("--cluster-yes".into());
-
-        let output = Command::new(&self.config.redis_cli_bin)
-            .args(&args)
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(io::Error::other(format!(
-                "cluster create failed:\nstdout: {stdout}\nstderr: {stderr}"
-            )));
-        }
-
-        Ok(())
-    }
-
-    /// Stop all nodes via SHUTDOWN NOSAVE.
     pub fn stop(&self) -> io::Result<()> {
+        use crate::wrapper::cli::RedisCli;
         for port in self.config.ports() {
-            util::shutdown_node(&self.config.redis_cli_bin, &self.config.bind, port);
+            RedisCli::new()
+                .bin(&self.config.redis_cli_bin)
+                .host(&self.config.bind)
+                .port(port)
+                .shutdown();
         }
         Ok(())
     }
 
-    pub fn restart(&self) -> io::Result<()> {
-        let _ = self.stop();
-        thread::sleep(Duration::from_secs(1));
-        self.start()
-    }
-
-    /// Query first reachable node for CLUSTER INFO.
     pub fn poke(&self) -> io::Result<ClusterStatus> {
+        use crate::wrapper::cli::RedisCli;
         for port in self.config.ports() {
-            if let Ok(raw) = util::redis_cli(
-                &self.config.redis_cli_bin,
-                &self.config.bind,
-                port,
-                &["CLUSTER", "INFO"],
-            ) {
+            let cli = RedisCli::new()
+                .bin(&self.config.redis_cli_bin)
+                .host(&self.config.bind)
+                .port(port);
+            if let Ok(raw) = cli.run(&["CLUSTER", "INFO"]) {
                 return Ok(parse_cluster_info(&raw));
             }
         }
-
         Err(io::Error::new(
             io::ErrorKind::NotConnected,
             "no reachable cluster nodes",
         ))
     }
 
-    /// Check every node individually.
-    pub fn poke_all(&self) -> Vec<NodeStatus> {
-        self.config
-            .ports()
-            .map(|port| {
-                let alive = util::redis_cli(
-                    &self.config.redis_cli_bin,
-                    &self.config.bind,
-                    port,
-                    &["PING"],
-                )
-                .map(|r| r.trim() == "PONG")
-                .unwrap_or(false);
-
-                let (role, cluster_info) = if alive {
-                    let role = util::redis_cli(
-                        &self.config.redis_cli_bin,
-                        &self.config.bind,
-                        port,
-                        &["ROLE"],
-                    )
-                    .ok()
-                    .and_then(|r| r.lines().next().map(|s| s.to_string()));
-
-                    let info = util::redis_cli(
-                        &self.config.redis_cli_bin,
-                        &self.config.bind,
-                        port,
-                        &["CLUSTER", "INFO"],
-                    )
-                    .ok();
-
-                    (role, info)
-                } else {
-                    (None, None)
-                };
-
-                NodeStatus {
-                    port,
-                    alive,
-                    role,
-                    cluster_info,
-                }
-            })
-            .collect()
-    }
-
-    /// Wait until CLUSTER INFO reports state=ok with all slots assigned.
     pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
         let start = std::time::Instant::now();
         loop {
@@ -286,7 +140,7 @@ cluster-node-timeout 5000
                     "cluster did not become healthy in time",
                 ));
             }
-            thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(500));
         }
     }
 }

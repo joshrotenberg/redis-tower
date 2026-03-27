@@ -36,7 +36,7 @@ fn ensure_redis() -> &'static RedisStandalone {
             }
         }
 
-        let standalone = RedisStandalone::with_defaults();
+        let mut standalone = RedisStandalone::with_defaults();
         standalone.start().expect("failed to start Redis server");
         standalone
     })
