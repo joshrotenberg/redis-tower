@@ -1,7 +1,10 @@
 //! Cluster-aware Redis connection that routes commands by slot.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -375,6 +378,47 @@ impl ClusterConnection {
 
         self.topology = topology;
         Ok(())
+    }
+}
+
+// Note: Service::call routes to the correct node but does NOT handle
+// MOVED/ASK redirects. Use `execute()` for full redirect handling.
+// The Service impl enables Tower middleware composition (caching, timeouts).
+impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, cmd: Cmd) -> Self::Future {
+        let cmd_frame = cmd.to_frame();
+        let node_addr = self.route_command(&cmd_frame).to_string();
+
+        // Get the node's inner Arc (execute_pipeline takes &self, backed by Arc<Mutex<>>).
+        let node = self.nodes.get(&node_addr).map(|c| c.framed_arc());
+
+        Box::pin(async move {
+            use futures::SinkExt;
+            use tokio_stream::StreamExt;
+
+            let framed_arc = node.ok_or(RedisError::ConnectionClosed)?;
+            let mut framed = framed_arc.lock().await;
+            framed.send(cmd_frame).await.map_err(RedisError::from)?;
+            let response = framed
+                .next()
+                .await
+                .ok_or(RedisError::ConnectionClosed)?
+                .map_err(RedisError::from)?;
+
+            if let Frame::Error(ref e) = response {
+                return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+            }
+
+            cmd.parse_response(response)
+        })
     }
 }
 

@@ -14,6 +14,9 @@ redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true }
 
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
+futures = { workspace = true }
+tower-service = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
