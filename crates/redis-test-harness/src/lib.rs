@@ -30,7 +30,7 @@ pub mod cluster;
 pub mod command_tests;
 pub mod sentinel;
 pub mod standalone;
-pub(crate) mod util;
+pub mod wrapper;
 
 // Re-export the main types at crate root for convenience.
 pub use cluster::{ClusterConfig, ClusterStatus, RedisCluster};
