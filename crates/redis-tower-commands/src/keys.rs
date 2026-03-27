@@ -173,3 +173,82 @@ impl Command for Ttl {
         "TTL"
     }
 }
+
+/// RENAME key newkey
+///
+/// Renames `key` to `newkey`. Errors if `key` does not exist.
+pub struct Rename {
+    key: String,
+    new_key: String,
+}
+
+impl Rename {
+    pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            new_key: new_key.into(),
+        }
+    }
+}
+
+impl Command for Rename {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("RENAME"),
+            bulk(self.key.as_str()),
+            bulk(self.new_key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RENAME"
+    }
+}
+
+/// TYPE key
+///
+/// Returns the type of the value stored at `key` as a string
+/// (e.g., "string", "list", "set", "zset", "hash", "none").
+pub struct Type {
+    key: String,
+}
+
+impl Type {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for Type {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("TYPE"), bulk(self.key.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "simple string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "TYPE"
+    }
+}

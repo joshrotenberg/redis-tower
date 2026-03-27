@@ -236,3 +236,92 @@ impl Command for MGet {
         "MGET"
     }
 }
+
+/// APPEND key value
+///
+/// Appends `value` to the end of the string at `key`. Returns the length
+/// of the string after the append.
+pub struct Append {
+    key: String,
+    value: String,
+}
+
+impl Append {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for Append {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("APPEND"),
+            bulk(self.key.as_str()),
+            bulk(self.value.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "APPEND"
+    }
+}
+
+/// MSET key value \[key value ...\]
+///
+/// Sets multiple keys to their respective values atomically.
+pub struct MSet {
+    pairs: Vec<(String, String)>,
+}
+
+impl MSet {
+    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+        Self {
+            pairs: pairs
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+}
+
+impl Command for MSet {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("MSET")];
+        for (k, v) in &self.pairs {
+            args.push(bulk(k.as_str()));
+            args.push(bulk(v.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MSET"
+    }
+}

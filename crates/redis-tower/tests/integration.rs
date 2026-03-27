@@ -1287,3 +1287,127 @@ async fn transaction_with_redis_error() {
 
     conn.execute(Del::new(&k)).await.unwrap();
 }
+
+// -- New command tests (APPEND, MSET, RENAME, TYPE, DBSIZE, SELECT, AUTH, LMOVE) --
+
+#[tokio::test]
+async fn append() {
+    let conn = conn().await;
+    let k = key("append", "k");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(Set::new(&k, "hello")).await.unwrap();
+    let len = conn.execute(Append::new(&k, " world")).await.unwrap();
+    assert_eq!(len, 11);
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello world")));
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn append_creates_key() {
+    let conn = conn().await;
+    let k = key("append_create", "k");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let len = conn.execute(Append::new(&k, "new")).await.unwrap();
+    assert_eq!(len, 3);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn mset() {
+    let conn = conn().await;
+    let k1 = key("mset", "a");
+    let k2 = key("mset", "b");
+    conn.execute(MSet::new([(k1.as_str(), "1"), (k2.as_str(), "2")]))
+        .await
+        .unwrap();
+    let vals = conn
+        .execute(MGet::new([k1.as_str(), k2.as_str()]))
+        .await
+        .unwrap();
+    assert_eq!(vals[0], Some(Bytes::from("1")));
+    assert_eq!(vals[1], Some(Bytes::from("2")));
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn rename() {
+    let conn = conn().await;
+    let k1 = key("rename", "old");
+    let k2 = key("rename", "new");
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+    conn.execute(Set::new(&k1, "value")).await.unwrap();
+    conn.execute(Rename::new(&k1, &k2)).await.unwrap();
+    assert_eq!(conn.execute(Get::new(&k1)).await.unwrap(), None);
+    assert_eq!(
+        conn.execute(Get::new(&k2)).await.unwrap(),
+        Some(Bytes::from("value"))
+    );
+    conn.execute(Del::new(&k2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn type_command() {
+    let conn = conn().await;
+    let ks = key("type", "string");
+    let kl = key("type", "list");
+    let kh = key("type", "hash");
+    let km = key("type", "missing");
+    conn.execute(Del::keys([&ks, &kl, &kh])).await.unwrap();
+    conn.execute(Set::new(&ks, "val")).await.unwrap();
+    conn.execute(RPush::new(&kl, "a")).await.unwrap();
+    conn.execute(HSet::new(&kh, "f", "v")).await.unwrap();
+    assert_eq!(conn.execute(Type::new(&ks)).await.unwrap(), "string");
+    assert_eq!(conn.execute(Type::new(&kl)).await.unwrap(), "list");
+    assert_eq!(conn.execute(Type::new(&kh)).await.unwrap(), "hash");
+    assert_eq!(conn.execute(Type::new(&km)).await.unwrap(), "none");
+    conn.execute(Del::keys([&ks, &kl, &kh])).await.unwrap();
+}
+
+#[tokio::test]
+async fn dbsize() {
+    let conn = conn().await;
+    let k = key("dbsize", "k");
+    let before = conn.execute(DbSize::new()).await.unwrap();
+    conn.execute(Set::new(&k, "x")).await.unwrap();
+    let after = conn.execute(DbSize::new()).await.unwrap();
+    assert!(after >= before, "DBSIZE should not decrease after SET");
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn select_db() {
+    let conn = conn().await;
+    conn.execute(Select::new(2)).await.unwrap();
+    conn.execute(Set::new("select_test", "val")).await.unwrap();
+    conn.execute(Select::new(0)).await.unwrap();
+    // Clean up DB 2.
+    conn.execute(Select::new(2)).await.unwrap();
+    conn.execute(Del::new("select_test")).await.unwrap();
+}
+
+#[tokio::test]
+async fn lmove() {
+    let conn = conn().await;
+    let src = key("lmove", "src");
+    let dst = key("lmove", "dst");
+    conn.execute(Del::keys([&src, &dst])).await.unwrap();
+    conn.execute(RPush::elements(&src, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    let moved = conn
+        .execute(LMove::new(
+            &src,
+            &dst,
+            ListDirection::Left,
+            ListDirection::Right,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(moved, Some(Bytes::from("a")));
+    let src_items = conn.execute(LRange::new(&src, 0, -1)).await.unwrap();
+    assert_eq!(src_items, vec![Bytes::from("b"), Bytes::from("c")]);
+    let dst_items = conn.execute(LRange::new(&dst, 0, -1)).await.unwrap();
+    assert_eq!(dst_items, vec![Bytes::from("a")]);
+    conn.execute(Del::keys([&src, &dst])).await.unwrap();
+}
