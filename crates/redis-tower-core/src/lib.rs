@@ -13,6 +13,8 @@ mod command;
 mod connection;
 mod error;
 mod stream;
+#[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+pub mod tls;
 mod url;
 
 pub use command::Command;

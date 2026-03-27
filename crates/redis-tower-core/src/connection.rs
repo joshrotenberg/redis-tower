@@ -50,9 +50,29 @@ impl RedisConnection {
         })
     }
 
+    /// Connect over TLS using the provided configuration.
+    ///
+    /// Requires either the `tls-native-tls` or `tls-rustls` feature.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    pub async fn connect_tls(
+        addr: &str,
+        hostname: &str,
+        tls_config: &crate::tls::TlsConfig,
+    ) -> Result<Self, RedisError> {
+        let tcp = TcpStream::connect(addr).await?;
+        tcp.set_nodelay(true)?;
+        let stream = tls_config.connect(tcp, hostname).await?;
+        Ok(Self {
+            framed: Arc::new(Mutex::new(Framed::new(stream, RespCodec))),
+        })
+    }
+
     /// Connect using a Redis URL.
     ///
     /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
+    ///
+    /// For `rediss://` URLs, a TLS backend feature must be enabled.
+    /// The `tls-rustls` backend is preferred if both are enabled.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let parsed = parse_redis_url(url)?;
 
@@ -78,9 +98,24 @@ impl RedisConnection {
                 ));
             }
         } else if parsed.tls {
-            return Err(RedisError::InvalidUrl(
-                "TLS requires the tls-native-tls or tls-rustls feature".into(),
-            ));
+            #[cfg(feature = "tls-rustls")]
+            {
+                let tls_config = crate::tls::TlsConfig::default_rustls();
+                let addr = format!("{}:{}", parsed.host, parsed.port);
+                Self::connect_tls(&addr, &parsed.host, &tls_config).await?
+            }
+            #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+            {
+                let tls_config = crate::tls::TlsConfig::default_native_tls();
+                let addr = format!("{}:{}", parsed.host, parsed.port);
+                Self::connect_tls(&addr, &parsed.host, &tls_config).await?
+            }
+            #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
+            {
+                return Err(RedisError::InvalidUrl(
+                    "TLS requires the tls-native-tls or tls-rustls feature".into(),
+                ));
+            }
         } else {
             Self::connect(&format!("{}:{}", parsed.host, parsed.port)).await?
         };

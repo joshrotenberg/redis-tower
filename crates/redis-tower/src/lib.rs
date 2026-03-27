@@ -45,6 +45,10 @@ pub use transaction::{Transaction, TransactionResult};
 // Re-export core types.
 pub use redis_tower_core::{Command, Frame, RedisConnection, RedisError, RedisStream, RespCodec};
 
+// Re-export TLS config when a TLS backend is enabled.
+#[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+pub use redis_tower_core::tls::TlsConfig;
+
 // Re-export commands under a `commands` module.
 pub mod commands {
     pub use redis_tower_commands::*;
