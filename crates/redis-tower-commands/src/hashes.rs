@@ -183,8 +183,9 @@ impl Command for HExists {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "integer",
+                expected: "integer or boolean",
                 actual: format!("{other:?}"),
             }),
         }
@@ -250,8 +251,33 @@ impl Command for HGetAll {
                 }
                 Ok(pairs)
             }
+            Frame::Map(entries) => {
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (k, v) in entries {
+                    let field = match k {
+                        Frame::BulkString(Some(data)) => data,
+                        other => {
+                            return Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string",
+                                actual: format!("{other:?}"),
+                            });
+                        }
+                    };
+                    let value = match v {
+                        Frame::BulkString(Some(data)) => data,
+                        other => {
+                            return Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string",
+                                actual: format!("{other:?}"),
+                            });
+                        }
+                    };
+                    pairs.push((field, value));
+                }
+                Ok(pairs)
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or map",
                 actual: format!("{other:?}"),
             }),
         }

@@ -124,6 +124,34 @@ impl RedisConnection {
         Ok(conn)
     }
 
+    /// Connect to a Redis server and negotiate RESP3 protocol.
+    ///
+    /// Sends `HELLO 3` after connecting. The server will respond with
+    /// RESP3 frames for all subsequent commands.
+    pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
+        let conn = Self::connect(addr).await?;
+        conn.hello(3).await?;
+        Ok(conn)
+    }
+
+    /// Send HELLO to negotiate protocol version.
+    ///
+    /// `HELLO 3` switches to RESP3, `HELLO 2` switches back to RESP2.
+    pub async fn hello(&self, version: u8) -> Result<Frame, RedisError> {
+        let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
+        let mut framed = self.framed.lock().await;
+        framed.send(frame).await.map_err(RedisError::from)?;
+        let response = framed
+            .next()
+            .await
+            .ok_or(RedisError::ConnectionClosed)?
+            .map_err(RedisError::from)?;
+        if let Frame::Error(ref e) = response {
+            return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+        }
+        Ok(response)
+    }
+
     /// Wrap an existing stream in a `RedisConnection`.
     pub fn from_stream(stream: RedisStream) -> Self {
         Self {

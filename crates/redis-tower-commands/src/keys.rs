@@ -126,8 +126,9 @@ impl Command for Expire {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "integer",
+                expected: "integer or boolean",
                 actual: format!("{other:?}"),
             }),
         }

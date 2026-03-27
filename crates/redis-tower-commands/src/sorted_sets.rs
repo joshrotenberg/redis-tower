@@ -206,9 +206,10 @@ impl Command for ZScore {
                     })?;
                 Ok(Some(score))
             }
+            Frame::Double(d) => Ok(Some(d)),
             Frame::BulkString(None) | Frame::Null => Ok(None),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or null",
+                expected: "bulk string, double, or null",
                 actual: format!("{other:?}"),
             }),
         }
@@ -296,8 +297,9 @@ impl Command for ZIncrBy {
                         actual: format!("{s}"),
                     })
             }
+            Frame::Double(d) => Ok(d),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk string or double",
                 actual: format!("{other:?}"),
             }),
         }
