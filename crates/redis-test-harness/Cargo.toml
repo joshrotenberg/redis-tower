@@ -8,3 +8,8 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 publish = false
+
+[dependencies]
+redis-tower-protocol = { workspace = true }
+redis-tower-core = { workspace = true }
+bytes = { workspace = true }
