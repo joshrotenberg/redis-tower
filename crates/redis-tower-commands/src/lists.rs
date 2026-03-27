@@ -382,3 +382,74 @@ impl Command for LSet {
         "LSET"
     }
 }
+
+/// Direction for LMOVE source/destination.
+pub enum ListDirection {
+    Left,
+    Right,
+}
+
+impl ListDirection {
+    fn as_str(&self) -> &str {
+        match self {
+            ListDirection::Left => "LEFT",
+            ListDirection::Right => "RIGHT",
+        }
+    }
+}
+
+/// LMOVE source destination LEFT|RIGHT LEFT|RIGHT
+///
+/// Atomically pops an element from `source` and pushes it to `destination`.
+/// Returns the element moved.
+pub struct LMove {
+    source: String,
+    destination: String,
+    wherefrom: ListDirection,
+    whereto: ListDirection,
+}
+
+impl LMove {
+    pub fn new(
+        source: impl Into<String>,
+        destination: impl Into<String>,
+        wherefrom: ListDirection,
+        whereto: ListDirection,
+    ) -> Self {
+        Self {
+            source: source.into(),
+            destination: destination.into(),
+            wherefrom,
+            whereto,
+        }
+    }
+}
+
+impl Command for LMove {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LMOVE"),
+            bulk(self.source.as_str()),
+            bulk(self.destination.as_str()),
+            bulk(self.wherefrom.as_str()),
+            bulk(self.whereto.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LMOVE"
+    }
+}
