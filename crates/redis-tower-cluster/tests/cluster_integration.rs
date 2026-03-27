@@ -29,7 +29,7 @@ fn key(test: &str, name: &str) -> String {
 #[tokio::test]
 #[ignore]
 async fn cluster_set_and_get() {
-    let cluster = cluster().await;
+    let mut cluster = cluster().await;
     let k = key("set_get", "k");
     cluster.execute(Set::new(&k, "hello")).await.unwrap();
     let val = cluster.execute(Get::new(&k)).await.unwrap();
@@ -40,7 +40,7 @@ async fn cluster_set_and_get() {
 #[tokio::test]
 #[ignore]
 async fn cluster_routes_to_different_nodes() {
-    let cluster = cluster().await;
+    let mut cluster = cluster().await;
     let k1 = key("routing", "foo");
     let k2 = key("routing", "bar");
 
@@ -59,7 +59,7 @@ async fn cluster_routes_to_different_nodes() {
 #[tokio::test]
 #[ignore]
 async fn cluster_hash_tag_same_slot() {
-    let cluster = cluster().await;
+    let mut cluster = cluster().await;
     let k1 = "{user:1}:name";
     let k2 = "{user:1}:email";
 
@@ -81,7 +81,7 @@ async fn cluster_hash_tag_same_slot() {
 #[tokio::test]
 #[ignore]
 async fn cluster_ping() {
-    let cluster = cluster().await;
+    let mut cluster = cluster().await;
     let pong = cluster.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
@@ -89,7 +89,7 @@ async fn cluster_ping() {
 #[tokio::test]
 #[ignore]
 async fn cluster_incr() {
-    let cluster = cluster().await;
+    let mut cluster = cluster().await;
     let k = key("incr", "counter");
     cluster.execute(Del::new(&k)).await.unwrap();
     let v = cluster.execute(Incr::new(&k)).await.unwrap();
