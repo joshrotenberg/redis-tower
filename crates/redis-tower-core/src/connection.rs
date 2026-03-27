@@ -324,15 +324,16 @@ impl RedisConnection {
         Ok(mutex.into_inner())
     }
 
-    /// Get a clone of the internal framed Arc (for FrameService).
-    pub(crate) fn framed_arc(&self) -> Arc<Mutex<Framed<RedisStream, RespCodec>>> {
+    /// Get a clone of the internal framed Arc.
+    ///
+    /// Used by FrameService and cluster/sentinel Service impls to share
+    /// the underlying connection for async futures.
+    pub fn framed_arc(&self) -> Arc<Mutex<Framed<RedisStream, RespCodec>>> {
         Arc::clone(&self.framed)
     }
 
-    /// Get a clone of the push sender Arc (for FrameService).
-    pub(crate) fn push_tx_arc(
-        &self,
-    ) -> Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>> {
+    /// Get a clone of the push sender Arc.
+    pub fn push_tx_arc(&self) -> Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>> {
         Arc::clone(&self.push_tx)
     }
 
