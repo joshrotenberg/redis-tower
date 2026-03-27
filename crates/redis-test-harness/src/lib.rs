@@ -26,6 +26,8 @@
 //! ```
 
 pub mod cluster;
+#[macro_use]
+pub mod command_tests;
 pub mod sentinel;
 pub mod standalone;
 pub(crate) mod util;
