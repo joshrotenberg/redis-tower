@@ -12,3 +12,6 @@ rust-version.workspace = true
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
+
+[dev-dependencies]
+redis-test-harness = { path = "../redis-test-harness" }
