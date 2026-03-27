@@ -53,6 +53,14 @@ async fn conn() -> RedisConnection {
         .expect("failed to connect to Redis")
 }
 
+// Connection factory for the shared command test macro.
+async fn standalone_conn() -> RedisConnection {
+    conn().await
+}
+
+// Generate shared command tests for standalone.
+redis_test_harness::command_tests!(standalone_conn, "standalone_cmd");
+
 async fn client() -> RedisClient {
     let addr = redis_addr();
     RedisClient::connect(&addr)
