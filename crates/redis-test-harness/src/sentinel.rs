@@ -467,7 +467,7 @@ fn parse_sentinel_master(raw: &str, master_name: &str) -> SentinelMasterStatus {
             .cloned()
             .unwrap_or_else(|| "unknown".into()),
         num_slaves: get_u64("num-slaves"),
-        num_sentinels: get_u64("num-sentinels"),
+        num_sentinels: get_u64("num-other-sentinels") + 1,
         quorum: get_u64("quorum"),
         raw: map,
     }
@@ -522,8 +522,8 @@ flags\n\
 master\n\
 num-slaves\n\
 2\n\
-num-sentinels\n\
-3\n\
+num-other-sentinels\n\
+2\n\
 quorum\n\
 2\n\
 ";

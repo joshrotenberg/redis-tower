@@ -1,0 +1,23 @@
+[package]
+name = "redis-tower-sentinel"
+version = "0.1.0"
+description = "Redis Sentinel support for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+redis-tower-protocol = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
+
+tokio = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+redis-test-harness = { path = "../redis-test-harness" }
