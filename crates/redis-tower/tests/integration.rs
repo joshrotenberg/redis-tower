@@ -561,3 +561,305 @@ async fn pubsub_multiple_messages() {
         assert_eq!(msg.payload, Bytes::from(format!("msg-{i}")));
     }
 }
+
+// -- Hash command tests --
+
+#[tokio::test]
+async fn hset_and_hget() {
+    let conn = conn().await;
+    let k = key("hset_hget", "h");
+    let added = conn
+        .execute(HSet::new(&k, "field1", "value1").field("field2", "value2"))
+        .await
+        .unwrap();
+    assert_eq!(added, 2);
+    let val = conn.execute(HGet::new(&k, "field1")).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("value1")));
+    let missing = conn.execute(HGet::new(&k, "nope")).await.unwrap();
+    assert_eq!(missing, None);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hdel() {
+    let conn = conn().await;
+    let k = key("hdel", "h");
+    conn.execute(HSet::new(&k, "a", "1").field("b", "2").field("c", "3"))
+        .await
+        .unwrap();
+    let removed = conn.execute(HDel::fields(&k, ["a", "b"])).await.unwrap();
+    assert_eq!(removed, 2);
+    let remaining = conn.execute(HLen::new(&k)).await.unwrap();
+    assert_eq!(remaining, 1);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hexists() {
+    let conn = conn().await;
+    let k = key("hexists", "h");
+    conn.execute(HSet::new(&k, "f", "v")).await.unwrap();
+    assert!(conn.execute(HExists::new(&k, "f")).await.unwrap());
+    assert!(!conn.execute(HExists::new(&k, "nope")).await.unwrap());
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hgetall() {
+    let conn = conn().await;
+    let k = key("hgetall", "h");
+    conn.execute(HSet::new(&k, "a", "1").field("b", "2"))
+        .await
+        .unwrap();
+    let pairs = conn.execute(HGetAll::new(&k)).await.unwrap();
+    assert_eq!(pairs.len(), 2);
+    // Order is not guaranteed, so check both exist.
+    let has_a = pairs
+        .iter()
+        .any(|(f, v)| f == &Bytes::from("a") && v == &Bytes::from("1"));
+    let has_b = pairs
+        .iter()
+        .any(|(f, v)| f == &Bytes::from("b") && v == &Bytes::from("2"));
+    assert!(has_a && has_b);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hincrby() {
+    let conn = conn().await;
+    let k = key("hincrby", "h");
+    conn.execute(HSet::new(&k, "count", "10")).await.unwrap();
+    let val = conn.execute(HIncrBy::new(&k, "count", 5)).await.unwrap();
+    assert_eq!(val, 15);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hkeys_hvals_hlen() {
+    let conn = conn().await;
+    let k = key("hkeys_hvals", "h");
+    conn.execute(HSet::new(&k, "x", "1").field("y", "2"))
+        .await
+        .unwrap();
+    let len = conn.execute(HLen::new(&k)).await.unwrap();
+    assert_eq!(len, 2);
+    let keys = conn.execute(HKeys::new(&k)).await.unwrap();
+    assert_eq!(keys.len(), 2);
+    let vals = conn.execute(HVals::new(&k)).await.unwrap();
+    assert_eq!(vals.len(), 2);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// -- List command tests --
+
+#[tokio::test]
+async fn lpush_rpush_lrange() {
+    let conn = conn().await;
+    let k = key("lpush_rpush", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(RPush::new(&k, "a")).await.unwrap();
+    conn.execute(RPush::new(&k, "b")).await.unwrap();
+    let len = conn.execute(LPush::new(&k, "z")).await.unwrap();
+    assert_eq!(len, 3);
+    let items = conn.execute(LRange::new(&k, 0, -1)).await.unwrap();
+    assert_eq!(
+        items,
+        vec![Bytes::from("z"), Bytes::from("a"), Bytes::from("b")]
+    );
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn lpop_rpop() {
+    let conn = conn().await;
+    let k = key("lpop_rpop", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(RPush::elements(&k, ["1", "2", "3"]))
+        .await
+        .unwrap();
+    let left = conn.execute(LPop::new(&k)).await.unwrap();
+    assert_eq!(left, Some(Bytes::from("1")));
+    let right = conn.execute(RPop::new(&k)).await.unwrap();
+    assert_eq!(right, Some(Bytes::from("3")));
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn llen_lindex_lset() {
+    let conn = conn().await;
+    let k = key("llen_lindex", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(RPush::elements(&k, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    assert_eq!(conn.execute(LLen::new(&k)).await.unwrap(), 3);
+    assert_eq!(
+        conn.execute(LIndex::new(&k, 1)).await.unwrap(),
+        Some(Bytes::from("b"))
+    );
+    conn.execute(LSet::new(&k, 1, "B")).await.unwrap();
+    assert_eq!(
+        conn.execute(LIndex::new(&k, 1)).await.unwrap(),
+        Some(Bytes::from("B"))
+    );
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// -- Set command tests --
+
+#[tokio::test]
+async fn sadd_smembers_scard() {
+    let conn = conn().await;
+    let k = key("sadd_smembers", "s");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let added = conn
+        .execute(SAdd::members(&k, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    assert_eq!(added, 3);
+    // Adding duplicate.
+    let dup = conn.execute(SAdd::new(&k, "a")).await.unwrap();
+    assert_eq!(dup, 0);
+    assert_eq!(conn.execute(SCard::new(&k)).await.unwrap(), 3);
+    let members = conn.execute(SMembers::new(&k)).await.unwrap();
+    assert_eq!(members.len(), 3);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn srem_sismember() {
+    let conn = conn().await;
+    let k = key("srem_sismember", "s");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(SAdd::members(&k, ["x", "y", "z"]))
+        .await
+        .unwrap();
+    assert!(conn.execute(SIsMember::new(&k, "x")).await.unwrap());
+    let removed = conn.execute(SRem::new(&k, "x")).await.unwrap();
+    assert_eq!(removed, 1);
+    assert!(!conn.execute(SIsMember::new(&k, "x")).await.unwrap());
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn sinter() {
+    let conn = conn().await;
+    let k1 = key("sinter", "s1");
+    let k2 = key("sinter", "s2");
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+    conn.execute(SAdd::members(&k1, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    conn.execute(SAdd::members(&k2, ["b", "c", "d"]))
+        .await
+        .unwrap();
+    let inter = conn
+        .execute(SInter::keys([k1.as_str(), k2.as_str()]))
+        .await
+        .unwrap();
+    assert_eq!(inter.len(), 2);
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+}
+
+// -- Sorted set command tests --
+
+#[tokio::test]
+async fn zadd_zscore_zcard() {
+    let conn = conn().await;
+    let k = key("zadd_zscore", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let added = conn
+        .execute(
+            ZAdd::new(&k)
+                .member(1.0, "a")
+                .member(2.0, "b")
+                .member(3.0, "c"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(added, 3);
+    assert_eq!(conn.execute(ZCard::new(&k)).await.unwrap(), 3);
+    let score = conn.execute(ZScore::new(&k, "b")).await.unwrap();
+    assert_eq!(score, Some(2.0));
+    let missing = conn.execute(ZScore::new(&k, "nope")).await.unwrap();
+    assert_eq!(missing, None);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zrem_zrank() {
+    let conn = conn().await;
+    let k = key("zrem_zrank", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(ZAdd::new(&k).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+    assert_eq!(conn.execute(ZRank::new(&k, "b")).await.unwrap(), Some(1));
+    conn.execute(ZRem::new(&k, "a")).await.unwrap();
+    assert_eq!(conn.execute(ZRank::new(&k, "b")).await.unwrap(), Some(0));
+    assert_eq!(conn.execute(ZRank::new(&k, "nope")).await.unwrap(), None);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zrange() {
+    let conn = conn().await;
+    let k = key("zrange", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(
+        ZAdd::new(&k)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+    let range = conn.execute(ZRange::new(&k, 0, -1)).await.unwrap();
+    assert_eq!(
+        range,
+        vec![Bytes::from("a"), Bytes::from("b"), Bytes::from("c")]
+    );
+    let partial = conn.execute(ZRange::new(&k, 0, 1)).await.unwrap();
+    assert_eq!(partial, vec![Bytes::from("a"), Bytes::from("b")]);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zincrby() {
+    let conn = conn().await;
+    let k = key("zincrby", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(ZAdd::new(&k).member(10.0, "player"))
+        .await
+        .unwrap();
+    let new_score = conn.execute(ZIncrBy::new(&k, 5.5, "player")).await.unwrap();
+    assert!((new_score - 15.5).abs() < f64::EPSILON);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zrangebyscore() {
+    let conn = conn().await;
+    let k = key("zrangebyscore", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(
+        ZAdd::new(&k)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+    let range = conn
+        .execute(ZRangeByScore::new(&k, "2", "3"))
+        .await
+        .unwrap();
+    assert_eq!(range, vec![Bytes::from("b"), Bytes::from("c")]);
+    let all = conn
+        .execute(ZRangeByScore::new(&k, "-inf", "+inf"))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
