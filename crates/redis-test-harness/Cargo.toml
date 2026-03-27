@@ -12,4 +12,5 @@ publish = false
 [dependencies]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
+redis-server-wrapper = { path = "../../../redis-server-wrapper" }
 bytes = { workspace = true }
