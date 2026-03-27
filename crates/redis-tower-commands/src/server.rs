@@ -242,3 +242,102 @@ impl Command for Auth {
         "AUTH"
     }
 }
+
+/// CLIENT TRACKING ON|OFF \[REDIRECT client-id\] \[PREFIX prefix\] \[BCAST\] \[OPTIN\] \[OPTOUT\]
+///
+/// Enable or disable server-assisted client-side caching.
+pub struct ClientTracking {
+    enabled: bool,
+    bcast: bool,
+    prefixes: Vec<String>,
+    optin: bool,
+    optout: bool,
+}
+
+impl ClientTracking {
+    /// Enable client tracking.
+    pub fn on() -> Self {
+        Self {
+            enabled: true,
+            bcast: false,
+            prefixes: Vec::new(),
+            optin: false,
+            optout: false,
+        }
+    }
+
+    /// Disable client tracking.
+    pub fn off() -> Self {
+        Self {
+            enabled: false,
+            bcast: false,
+            prefixes: Vec::new(),
+            optin: false,
+            optout: false,
+        }
+    }
+
+    /// Enable broadcasting mode (invalidate all keys matching prefixes).
+    pub fn bcast(mut self) -> Self {
+        self.bcast = true;
+        self
+    }
+
+    /// Add a key prefix to track (only with BCAST mode).
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefixes.push(prefix.into());
+        self
+    }
+
+    /// Enable opt-in mode (only track keys after CLIENT CACHING YES).
+    pub fn optin(mut self) -> Self {
+        self.optin = true;
+        self
+    }
+
+    /// Enable opt-out mode (track all keys, skip after CLIENT CACHING NO).
+    pub fn optout(mut self) -> Self {
+        self.optout = true;
+        self
+    }
+}
+
+impl Command for ClientTracking {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("CLIENT"),
+            bulk("TRACKING"),
+            bulk(if self.enabled { "ON" } else { "OFF" }),
+        ];
+        if self.bcast {
+            args.push(bulk("BCAST"));
+        }
+        for prefix in &self.prefixes {
+            args.push(bulk("PREFIX"));
+            args.push(bulk(prefix.as_str()));
+        }
+        if self.optin {
+            args.push(bulk("OPTIN"));
+        }
+        if self.optout {
+            args.push(bulk("OPTOUT"));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT TRACKING"
+    }
+}
