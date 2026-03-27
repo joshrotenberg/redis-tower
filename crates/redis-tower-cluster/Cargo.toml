@@ -1,0 +1,23 @@
+[package]
+name = "redis-tower-cluster"
+version = "0.1.0"
+description = "Redis Cluster support for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+redis-tower-protocol = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
+
+tokio = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+docker-wrapper = { version = "0.11", features = ["testing", "template-redis-cluster"] }
