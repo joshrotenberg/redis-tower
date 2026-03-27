@@ -1,10 +1,6 @@
-//! Type-safe wrappers for `redis-server` and `redis-cli` CLI tools.
-//!
-//! These provide builder-pattern interfaces for starting and managing
-//! Redis server processes. No Docker, no dependencies beyond `redis-server`
-//! and `redis-cli` on PATH.
+//! Re-export from `redis-server-wrapper` crate.
 
-pub mod cli;
-pub mod cluster;
-pub mod sentinel;
-pub mod server;
+pub use redis_server_wrapper::cli;
+pub use redis_server_wrapper::cluster;
+pub use redis_server_wrapper::sentinel;
+pub use redis_server_wrapper::server;
