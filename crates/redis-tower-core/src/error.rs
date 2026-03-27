@@ -41,4 +41,11 @@ pub enum RedisError {
     /// Type mismatch when extracting a pipeline/transaction result.
     #[error("type mismatch: expected {expected}")]
     TypeMismatch { expected: &'static str },
+
+    /// Reconnection failed after exhausting all retries.
+    #[error("reconnect failed after {attempts} attempts: {last_error}")]
+    ReconnectFailed {
+        attempts: usize,
+        last_error: Box<RedisError>,
+    },
 }

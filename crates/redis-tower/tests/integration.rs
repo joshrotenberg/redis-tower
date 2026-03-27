@@ -4,8 +4,10 @@ use bytes::Bytes;
 use docker_wrapper::RedisTemplate;
 use docker_wrapper::testing::ContainerGuard;
 use redis_tower::commands::*;
+use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
 use redis_tower::{
-    Pipeline, PubSubConnection, RedisClient, RedisConnection, Transaction, TransactionResult,
+    Pipeline, PubSubConnection, RedisClient, RedisConnection, ResilientConnection,
+    ResilientRedisClient, Transaction, TransactionResult,
 };
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -1410,4 +1412,109 @@ async fn lmove() {
     let dst_items = conn.execute(LRange::new(&dst, 0, -1)).await.unwrap();
     assert_eq!(dst_items, vec![Bytes::from("a")]);
     conn.execute(Del::keys([&src, &dst])).await.unwrap();
+}
+
+// -- Resilient connection tests --
+
+#[tokio::test]
+async fn resilient_connection_basic() {
+    let addr = redis_addr().await;
+    let conn = ResilientConnection::new(
+        AddrConnectionFactory::new(&addr),
+        ReconnectConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    let k = key("resilient_basic", "k");
+    conn.execute(Set::new(&k, "hello")).await.unwrap();
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello")));
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn resilient_connection_with_callbacks() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let addr = redis_addr().await;
+    let connected = Arc::new(AtomicBool::new(false));
+    let connected_clone = Arc::clone(&connected);
+
+    let conn = ResilientConnection::new(
+        AddrConnectionFactory::new(&addr),
+        ReconnectConfig::default(),
+    )
+    .await
+    .unwrap()
+    .on_connect(move || {
+        connected_clone.store(true, Ordering::Release);
+    });
+
+    let pong = conn.execute(Ping::new()).await.unwrap();
+    assert_eq!(pong, "PONG");
+}
+
+#[tokio::test]
+async fn resilient_connection_max_retries() {
+    // Try to connect to a port where nothing is listening.
+    let result = ResilientConnection::new(
+        AddrConnectionFactory::new("127.0.0.1:1"),
+        ReconnectConfig::default().max_retries(0),
+    )
+    .await;
+    assert!(result.is_err());
+}
+
+// -- ResilientRedisClient tests --
+
+#[tokio::test]
+async fn resilient_client_basic() {
+    let addr = redis_addr().await;
+    let client = ResilientRedisClient::connect(&addr).await.unwrap();
+
+    let k = key("resilient_client", "k");
+    client.execute(Set::new(&k, "val")).await.unwrap();
+    let val = client.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("val")));
+    client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn resilient_client_shared_across_tasks() {
+    let addr = redis_addr().await;
+    let client = ResilientRedisClient::connect(&addr).await.unwrap();
+    let k1 = key("resilient_shared", "t1");
+    let k2 = key("resilient_shared", "t2");
+
+    let c1 = client.clone();
+    let k1c = k1.clone();
+    let h1 = tokio::spawn(async move {
+        c1.execute(Set::new(&k1c, "a")).await.unwrap();
+    });
+
+    let c2 = client.clone();
+    let k2c = k2.clone();
+    let h2 = tokio::spawn(async move {
+        c2.execute(Set::new(&k2c, "b")).await.unwrap();
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+
+    let v1 = client.execute(Get::new(&k1)).await.unwrap();
+    let v2 = client.execute(Get::new(&k2)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("a")));
+    assert_eq!(v2, Some(Bytes::from("b")));
+    client.execute(Del::keys([&k1, &k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn resilient_client_connect_url() {
+    let addr = redis_addr().await;
+    let url = format!("redis://{addr}");
+    let client = ResilientRedisClient::connect_url(&url).await.unwrap();
+    let pong = client.execute(Ping::new()).await.unwrap();
+    assert_eq!(pong, "PONG");
 }

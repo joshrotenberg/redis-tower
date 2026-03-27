@@ -35,11 +35,15 @@
 mod client;
 pub mod pipeline;
 pub mod pubsub;
+pub mod reconnect;
+mod resilient;
 pub mod transaction;
 
 pub use client::RedisClient;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
+pub use reconnect::ResilientConnection;
+pub use resilient::ResilientRedisClient;
 pub use transaction::{Transaction, TransactionResult};
 
 // Re-export core types.
