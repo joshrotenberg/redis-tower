@@ -1585,3 +1585,103 @@ async fn csc_write_not_cached() {
 
     client.execute(Del::new(k)).await.unwrap();
 }
+
+// -- Tower layer CSC tests --
+
+#[tokio::test]
+async fn tower_csc_cache_hit() {
+    use redis_tower::FrameService;
+    use redis_tower::cache_layer::{CacheConfig, CacheService};
+    use redis_tower::command_adapter::CommandAdapter;
+
+    let addr = redis_addr();
+    let frame_svc = FrameService::connect(&addr).await.unwrap();
+    let cache_svc = CacheService::new(frame_svc, CacheConfig::default());
+    let mut svc = CommandAdapter::new(cache_svc);
+
+    let k = "tower_csc:cache_hit";
+    // Write directly.
+    let writer = conn().await;
+    writer.execute(Set::new(k, "hello")).await.unwrap();
+
+    // First read: cache miss.
+    let v1: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("hello")));
+    assert_eq!(svc.inner_mut().cache_size().await, 1);
+
+    // Second read: cache hit.
+    let v2: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    assert_eq!(v2, Some(Bytes::from("hello")));
+
+    writer.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn tower_csc_write_bypasses_cache() {
+    use redis_tower::FrameService;
+    use redis_tower::cache_layer::{CacheConfig, CacheService};
+    use redis_tower::command_adapter::CommandAdapter;
+
+    let addr = redis_addr();
+    let frame_svc = FrameService::connect(&addr).await.unwrap();
+    let cache_svc = CacheService::new(frame_svc, CacheConfig::default());
+    let mut svc = CommandAdapter::new(cache_svc);
+
+    let k = "tower_csc:write_bypass";
+    svc.call(Set::new(k, "val")).await.unwrap();
+    assert_eq!(svc.inner_mut().cache_size().await, 0);
+
+    svc.call(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn tower_csc_with_invalidation() {
+    use futures::StreamExt;
+    use redis_tower::FrameService;
+    use redis_tower::cache_layer::{CacheConfig, CacheService, spawn_invalidation_task};
+    use redis_tower::command_adapter::CommandAdapter;
+    use redis_tower::commands::ClientTracking;
+
+    let addr = redis_addr();
+
+    // Data connection as FrameService.
+    let frame_svc = FrameService::connect(&addr).await.unwrap();
+
+    // Tracking connection for invalidation pushes.
+    let tracking_conn = RedisConnection::connect_resp3(&addr).await.unwrap();
+    tracking_conn
+        .execute(ClientTracking::on().bcast())
+        .await
+        .unwrap();
+    let tracking_framed = tracking_conn.into_framed().unwrap();
+    let (_sink, stream) = tracking_framed.split();
+
+    // Build the cached service with shared cache.
+    let cache_svc = CacheService::new(frame_svc, CacheConfig::default());
+    let cache_ref = cache_svc.cache().clone();
+    let mut svc = CommandAdapter::new(cache_svc);
+
+    // Wire up invalidation.
+    let _task = spawn_invalidation_task(cache_ref.clone(), stream);
+
+    let k = "tower_csc:invalidation";
+    let writer = conn().await;
+    writer.execute(Set::new(k, "original")).await.unwrap();
+
+    // Populate cache.
+    let _: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    assert_eq!(cache_ref.lock().await.len(), 1);
+
+    // Modify from another connection.
+    writer.execute(Set::new(k, "modified")).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Cache should be invalidated.
+    assert_eq!(cache_ref.lock().await.len(), 0);
+
+    // Fresh read gets new value.
+    let v: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    assert_eq!(v, Some(Bytes::from("modified")));
+
+    writer.execute(Del::new(k)).await.unwrap();
+}

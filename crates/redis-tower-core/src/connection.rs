@@ -324,6 +324,18 @@ impl RedisConnection {
         Ok(mutex.into_inner())
     }
 
+    /// Get a clone of the internal framed Arc (for FrameService).
+    pub(crate) fn framed_arc(&self) -> Arc<Mutex<Framed<RedisStream, RespCodec>>> {
+        Arc::clone(&self.framed)
+    }
+
+    /// Get a clone of the push sender Arc (for FrameService).
+    pub(crate) fn push_tx_arc(
+        &self,
+    ) -> Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>> {
+        Arc::clone(&self.push_tx)
+    }
+
     /// Run post-connection setup (AUTH, SELECT) based on URL parameters.
     async fn post_connect_setup(&self, url: &RedisUrl) -> Result<(), RedisError> {
         let mut framed = self.framed.lock().await;

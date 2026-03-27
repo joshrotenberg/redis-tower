@@ -32,16 +32,20 @@
 //!     .service(conn);
 //! ```
 
+pub mod cache_layer;
 pub mod caching;
 mod client;
+pub mod command_adapter;
 pub mod pipeline;
 pub mod pubsub;
 pub mod reconnect;
 mod resilient;
 pub mod transaction;
 
+pub use cache_layer::CacheService;
 pub use caching::CachedClient;
 pub use client::RedisClient;
+pub use command_adapter::CommandAdapter;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
 pub use reconnect::ResilientConnection;
@@ -49,7 +53,9 @@ pub use resilient::ResilientRedisClient;
 pub use transaction::{Transaction, TransactionResult};
 
 // Re-export core types.
-pub use redis_tower_core::{Command, Frame, RedisConnection, RedisError, RedisStream, RespCodec};
+pub use redis_tower_core::{
+    Command, Frame, FrameService, RedisConnection, RedisError, RedisStream, RespCodec,
+};
 
 // Re-export TLS config when a TLS backend is enabled.
 #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
