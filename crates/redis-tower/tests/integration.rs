@@ -889,3 +889,365 @@ async fn zrangebyscore() {
     assert_eq!(all.len(), 4);
     conn.execute(Del::new(&k)).await.unwrap();
 }
+
+// -- Additional coverage tests --
+
+// Pub/Sub: unsubscribe and multi-channel
+
+#[tokio::test]
+async fn pubsub_unsubscribe() {
+    let ch1 = key("pubsub_unsub", "ch1");
+    let ch2 = key("pubsub_unsub", "ch2");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&ch1, &ch2]).await.unwrap();
+    pubsub.unsubscribe(&[&ch1]).await.unwrap();
+
+    // Publish to ch1 (unsubscribed) and ch2 (still subscribed).
+    let pub_conn = conn().await;
+    use redis_tower_protocol::helpers::{array, bulk};
+    pub_conn
+        .execute_pipeline(vec![array(vec![
+            bulk("PUBLISH"),
+            bulk(ch2.as_str()),
+            bulk("hello"),
+        ])])
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("parse error");
+    assert_eq!(msg.channel, ch2);
+}
+
+#[tokio::test]
+async fn pubsub_punsubscribe() {
+    let prefix = key("pubsub_punsub", "");
+    let pat = format!("{prefix}*");
+    let channel = format!("{prefix}events");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.psubscribe(&[&pat]).await.unwrap();
+    pubsub.punsubscribe(&[&pat]).await.unwrap();
+
+    // After punsubscribe, publishing should not deliver.
+    let pub_conn = conn().await;
+    use redis_tower_protocol::helpers::{array, bulk};
+    pub_conn
+        .execute_pipeline(vec![array(vec![
+            bulk("PUBLISH"),
+            bulk(channel.as_str()),
+            bulk("should not arrive"),
+        ])])
+        .await
+        .unwrap();
+
+    let result = tokio::time::timeout(std::time::Duration::from_millis(200), pubsub.next()).await;
+    assert!(result.is_err(), "should timeout -- no messages expected");
+}
+
+// Server: FlushDb
+
+/// Get a connection on DB 1 (isolated for destructive tests like FLUSHDB).
+async fn conn_db1() -> RedisConnection {
+    let addr = redis_addr().await;
+    let url = format!("redis://{addr}/1");
+    RedisConnection::connect_url(&url).await.unwrap()
+}
+
+#[tokio::test]
+async fn flushdb() {
+    let conn = conn_db1().await;
+    let k = key("flushdb", "k");
+    conn.execute(Set::new(&k, "x")).await.unwrap();
+    conn.execute(FlushDb::new()).await.unwrap();
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, None);
+}
+
+#[tokio::test]
+async fn flushdb_sync_mode() {
+    let conn = conn_db1().await;
+    let k = key("flushdb_sync", "k");
+    conn.execute(Set::new(&k, "x")).await.unwrap();
+    conn.execute(FlushDb::new().sync_mode()).await.unwrap();
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, None);
+}
+
+// Pipeline: utility methods and error paths
+
+#[tokio::test]
+async fn pipeline_len_and_empty() {
+    let p = Pipeline::new();
+    assert!(p.is_empty());
+    assert_eq!(p.len(), 0);
+    let p = p.push(Ping::new()).push(Ping::new());
+    assert!(!p.is_empty());
+    assert_eq!(p.len(), 2);
+}
+
+#[tokio::test]
+async fn pipeline_type_mismatch() {
+    let conn = conn().await;
+    let k = key("pipe_mismatch", "k");
+    conn.execute(Set::new(&k, "hello")).await.unwrap();
+
+    let results = Pipeline::new()
+        .push(Get::new(&k))
+        .execute(&conn)
+        .await
+        .unwrap();
+
+    // Try to get as wrong type.
+    let err = results.get::<i64>(0);
+    assert!(err.is_err());
+
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_take_twice() {
+    let conn = conn().await;
+    let k = key("pipe_take2", "k");
+    conn.execute(Set::new(&k, "val")).await.unwrap();
+
+    let mut results = Pipeline::new()
+        .push(Get::new(&k))
+        .execute(&conn)
+        .await
+        .unwrap();
+
+    let _first: Option<Bytes> = results.take(0).unwrap();
+    let second = results.take::<Option<Bytes>>(0);
+    assert!(second.is_err(), "double take should fail");
+
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_out_of_bounds() {
+    let conn = conn().await;
+    let results = Pipeline::new()
+        .push(Ping::new())
+        .execute(&conn)
+        .await
+        .unwrap();
+    assert!(results.get::<String>(99).is_err());
+}
+
+// Transaction: utility methods
+
+#[tokio::test]
+async fn transaction_len_and_empty() {
+    let t = Transaction::new();
+    assert!(t.is_empty());
+    assert_eq!(t.len(), 0);
+    let t = t.push(Ping::new());
+    assert_eq!(t.len(), 1);
+}
+
+// Client: connect_url
+
+#[tokio::test]
+async fn client_connect_url() {
+    let addr = redis_addr().await;
+    let url = format!("redis://{addr}");
+    let client = RedisClient::connect_url(&url).await.unwrap();
+    let pong = client.execute(Ping::new()).await.unwrap();
+    assert_eq!(pong, "PONG");
+}
+
+// Strings: Set with PX and XX
+
+#[tokio::test]
+async fn set_with_px() {
+    let conn = conn().await;
+    let k = key("set_px", "k");
+    conn.execute(Set::new(&k, "value").px(10000)).await.unwrap();
+    let ttl = conn.execute(Ttl::new(&k)).await.unwrap();
+    assert!(ttl > 0 && ttl <= 10);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn set_xx_succeeds_when_exists() {
+    let conn = conn().await;
+    let k = key("set_xx_ok", "k");
+    conn.execute(Set::new(&k, "old")).await.unwrap();
+    conn.execute(Set::new(&k, "new").xx()).await.unwrap();
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("new")));
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn set_xx_fails_when_missing() {
+    let conn = conn().await;
+    let k = key("set_xx_fail", "k");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(Set::new(&k, "value").xx()).await.unwrap();
+    let val = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, None);
+}
+
+// Lists: multi-element push, pop on empty
+
+#[tokio::test]
+async fn lpush_multiple() {
+    let conn = conn().await;
+    let k = key("lpush_multi", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let len = conn
+        .execute(LPush::elements(&k, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    assert_eq!(len, 3);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn lpop_empty() {
+    let conn = conn().await;
+    let k = key("lpop_empty", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let val = conn.execute(LPop::new(&k)).await.unwrap();
+    assert_eq!(val, None);
+}
+
+#[tokio::test]
+async fn rpop_empty() {
+    let conn = conn().await;
+    let k = key("rpop_empty", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let val = conn.execute(RPop::new(&k)).await.unwrap();
+    assert_eq!(val, None);
+}
+
+#[tokio::test]
+async fn lindex_out_of_range() {
+    let conn = conn().await;
+    let k = key("lindex_oor", "l");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(RPush::new(&k, "a")).await.unwrap();
+    let val = conn.execute(LIndex::new(&k, 99)).await.unwrap();
+    assert_eq!(val, None);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// Keys: single exists
+
+#[tokio::test]
+async fn exists_single() {
+    let conn = conn().await;
+    let k = key("exists_single", "k");
+    conn.execute(Set::new(&k, "x")).await.unwrap();
+    assert_eq!(conn.execute(Exists::new(&k)).await.unwrap(), 1);
+    conn.execute(Del::new(&k)).await.unwrap();
+    assert_eq!(conn.execute(Exists::new(&k)).await.unwrap(), 0);
+}
+
+// Hashes: single field HDel
+
+#[tokio::test]
+async fn hdel_single() {
+    let conn = conn().await;
+    let k = key("hdel_single", "h");
+    conn.execute(HSet::new(&k, "f", "v")).await.unwrap();
+    let removed = conn.execute(HDel::new(&k, "f")).await.unwrap();
+    assert_eq!(removed, 1);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// Hashes: empty HGetAll
+
+#[tokio::test]
+async fn hgetall_empty() {
+    let conn = conn().await;
+    let k = key("hgetall_empty", "h");
+    conn.execute(Del::new(&k)).await.unwrap();
+    let pairs = conn.execute(HGetAll::new(&k)).await.unwrap();
+    assert!(pairs.is_empty());
+}
+
+// Sets: single SRem, multi SRem
+
+#[tokio::test]
+async fn srem_multiple() {
+    let conn = conn().await;
+    let k = key("srem_multi", "s");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(SAdd::members(&k, ["a", "b", "c"]))
+        .await
+        .unwrap();
+    let removed = conn.execute(SRem::members(&k, ["a", "b"])).await.unwrap();
+    assert_eq!(removed, 2);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// Sorted sets: multi ZRem
+
+#[tokio::test]
+async fn zrem_multiple() {
+    let conn = conn().await;
+    let k = key("zrem_multi", "z");
+    conn.execute(Del::new(&k)).await.unwrap();
+    conn.execute(
+        ZAdd::new(&k)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+    let removed = conn.execute(ZRem::members(&k, ["a", "c"])).await.unwrap();
+    assert_eq!(removed, 2);
+    assert_eq!(conn.execute(ZCard::new(&k)).await.unwrap(), 1);
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// Connection: Service::poll_ready
+
+#[tokio::test]
+async fn service_poll_ready() {
+    use std::task::Poll;
+    let mut conn = conn().await;
+    let waker = futures::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+    let ready = <RedisConnection as Service<Ping>>::poll_ready(&mut conn, &mut cx);
+    assert!(matches!(ready, Poll::Ready(Ok(()))));
+}
+
+// Transaction: error in queued command
+
+#[tokio::test]
+async fn transaction_with_redis_error() {
+    let conn = conn().await;
+    let k = key("txn_err", "k");
+    conn.execute(Set::new(&k, "not_a_number")).await.unwrap();
+
+    let result = Transaction::new()
+        .push(Incr::new(&k)) // will fail inside EXEC
+        .push(Ping::new())
+        .execute(&conn)
+        .await
+        .unwrap();
+
+    match result {
+        TransactionResult::Committed(results) => {
+            // Incr on a non-number returns error inside the transaction results.
+            assert!(results.get::<i64>(0).is_err());
+            // Ping still succeeds.
+            let pong: &String = results.get(1).unwrap();
+            assert_eq!(pong, "PONG");
+        }
+        TransactionResult::Aborted => panic!("should not abort"),
+    }
+
+    conn.execute(Del::new(&k)).await.unwrap();
+}
