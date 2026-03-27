@@ -85,25 +85,50 @@ jobs:
         run: cargo test --doc --all-features
 
   test-integration:
-    name: Integration Tests
+    name: Integration Tests (Redis ${{ matrix.redis }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        redis: ["7.4.3", "8.0.6"]
+      fail-fast: false
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Redis
-        run: sudo apt-get update && sudo apt-get install -y redis-server
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: redis-${{ matrix.redis }}-${{ runner.os }}
+
+      - name: Build Redis ${{ matrix.redis }}
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/${{ matrix.redis }}.tar.gz | tar xz
+            cd redis-${{ matrix.redis }}
+            make -j$(nproc)
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> $GITHUB_PATH
+          redis-server --version || ~/redis/bin/redis-server --version
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: integration-redis-${{ matrix.redis }}
 
       - name: Run standalone integration tests
         run: cargo test -p redis-tower --test integration --all-features
 
       - name: Run cluster integration tests
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored
+
+      - name: Run sentinel integration tests
+        run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored
 
   msrv:
     name: MSRV (1.87)
