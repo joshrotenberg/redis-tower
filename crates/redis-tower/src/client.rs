@@ -3,14 +3,22 @@ use std::sync::Arc;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 
-/// Ergonomic Redis client that can be shared across tasks.
+/// Simple shared Redis client for basic use cases.
 ///
-/// `RedisClient` wraps a [`RedisConnection`] in an `Arc<Mutex<>>` for
-/// cross-task sharing. For proper backpressure in high-throughput scenarios,
-/// wrap a `RedisConnection` with `tower::buffer::Buffer` instead.
+/// Wraps a [`RedisConnection`] in `Arc<Mutex<>>` for cross-task sharing.
+/// Good for quick prototyping and simple applications.
 ///
-/// For direct, exclusive access to a connection (no locking overhead),
-/// use [`RedisConnection`] directly.
+/// # When to use which client type
+///
+/// - **`RedisClient`** -- Simplest. Shared via Clone. No reconnection.
+///   Good for scripts and simple applications.
+/// - **`ResilientRedisClient`** -- Shared + auto-reconnection. Good for
+///   long-running applications that need to survive connection drops.
+/// - **`CommandAdapter<CacheService<ReconnectService>>`** -- Full Tower
+///   composition. Best for production services that need middleware
+///   (caching, timeouts, metrics, reconnection).
+/// - **`RedisConnection`** -- Direct, exclusive access. Implements
+///   `tower::Service`. Use with `tower::buffer::Buffer` for sharing.
 #[derive(Clone)]
 pub struct RedisClient {
     inner: Arc<Mutex<RedisConnection>>,

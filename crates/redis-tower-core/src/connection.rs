@@ -380,10 +380,11 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
 
+    /// NOTE: This implementation always returns `Poll::Ready(Ok(()))` because
+    /// the underlying connection uses `Arc<Mutex<>>`. Actual readiness is
+    /// determined by the mutex lock inside `call()`. For proper backpressure,
+    /// wrap with `tower::buffer::Buffer`.
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // The Arc<Mutex<>> design means poll_ready always returns Ready.
-        // Actual serialization happens inside call() under the lock.
-        // For proper backpressure, wrap with tower::buffer::Buffer.
         Poll::Ready(Ok(()))
     }
 

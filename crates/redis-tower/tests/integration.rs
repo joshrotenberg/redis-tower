@@ -1670,14 +1670,14 @@ async fn tower_csc_with_invalidation() {
 
     // Populate cache.
     let _: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
-    assert_eq!(cache_ref.lock().await.len(), 1);
+    assert_eq!(cache_ref.read().await.len(), 1);
 
     // Modify from another connection.
     writer.execute(Set::new(k, "modified")).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Cache should be invalidated.
-    assert_eq!(cache_ref.lock().await.len(), 0);
+    assert_eq!(cache_ref.read().await.len(), 0);
 
     // Fresh read gets new value.
     let v: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
