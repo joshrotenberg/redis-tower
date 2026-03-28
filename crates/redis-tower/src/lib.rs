@@ -39,6 +39,7 @@ pub mod command_adapter;
 pub mod pipeline;
 pub mod pubsub;
 pub mod reconnect;
+pub mod reconnect_layer;
 mod resilient;
 pub mod transaction;
 
@@ -49,6 +50,7 @@ pub use command_adapter::CommandAdapter;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
 pub use reconnect::ResilientConnection;
+pub use reconnect_layer::ReconnectService;
 pub use resilient::ResilientRedisClient;
 pub use transaction::{Transaction, TransactionResult};
 

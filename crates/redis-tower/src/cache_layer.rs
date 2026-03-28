@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use redis_tower_core::{Frame, RedisError};
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tower_service::Service;
 
 /// Configuration for the cache layer.
@@ -30,7 +30,7 @@ pub struct CacheConfig {
 /// ```
 pub struct CacheService<S> {
     inner: S,
-    cache: Arc<Mutex<HashMap<String, Frame>>>,
+    cache: Arc<RwLock<HashMap<String, Frame>>>,
     config: CacheConfig,
 }
 
@@ -39,7 +39,7 @@ impl<S> CacheService<S> {
     pub fn new(inner: S, config: CacheConfig) -> Self {
         Self {
             inner,
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
             config,
         }
     }
@@ -47,7 +47,7 @@ impl<S> CacheService<S> {
     /// Create with an existing shared cache (for invalidation integration).
     pub fn with_cache(
         inner: S,
-        cache: Arc<Mutex<HashMap<String, Frame>>>,
+        cache: Arc<RwLock<HashMap<String, Frame>>>,
         config: CacheConfig,
     ) -> Self {
         Self {
@@ -58,13 +58,13 @@ impl<S> CacheService<S> {
     }
 
     /// Get a reference to the shared cache for invalidation wiring.
-    pub fn cache(&self) -> &Arc<Mutex<HashMap<String, Frame>>> {
+    pub fn cache(&self) -> &Arc<RwLock<HashMap<String, Frame>>> {
         &self.cache
     }
 
     /// Get the number of cached entries.
     pub async fn cache_size(&self) -> usize {
-        self.cache.lock().await.len()
+        self.cache.read().await.len()
     }
 }
 
@@ -91,7 +91,7 @@ where
             // Try cache lookup.
             // We can't await inside call(), so we need to check synchronously
             // or defer to the future. Use try_lock for non-blocking check.
-            if let Ok(guard) = cache.try_lock() {
+            if let Ok(guard) = cache.try_read() {
                 if let Some(cached) = guard.get(&key_clone) {
                     let result = cached.clone();
                     return Box::pin(async move { Ok(result) });
@@ -110,7 +110,7 @@ where
             // Cache the response if this was a cacheable command.
             if let Some(key) = cache_key {
                 if !matches!(response, Frame::Error(_)) {
-                    let mut guard = cache.lock().await;
+                    let mut guard = cache.write().await;
                     // Evict oldest if at capacity (simple eviction -- not LRU).
                     if max_size > 0 && guard.len() >= max_size {
                         if let Some(first_key) = guard.keys().next().cloned() {
@@ -132,7 +132,7 @@ where
 /// Returns the `JoinHandle` for the task. The task runs until the
 /// receiver is closed (tracking connection dropped).
 pub fn spawn_invalidation_task(
-    cache: Arc<Mutex<HashMap<String, Frame>>>,
+    cache: Arc<RwLock<HashMap<String, Frame>>>,
     mut push_rx: impl futures::Stream<Item = Result<Frame, redis_tower_protocol::ProtocolError>>
     + Unpin
     + Send
@@ -142,7 +142,7 @@ pub fn spawn_invalidation_task(
     tokio::spawn(async move {
         while let Some(Ok(frame)) = push_rx.next().await {
             if let Some(keys) = parse_invalidation(&frame) {
-                let mut c = cache.lock().await;
+                let mut c = cache.write().await;
                 if keys.is_empty() {
                     c.clear();
                 } else {

@@ -145,6 +145,12 @@ pub struct ResilientConnection {
     pub(crate) factory: Arc<dyn ConnectionFactory>,
     pub(crate) config: ReconnectConfig,
     pub(crate) state: ConnState,
+    /// Shared flag set by call futures when a connection error occurs.
+    /// Checked by poll_ready on the next call cycle.
+    ///
+    /// NOTE: There is a one-request-delay between when a connection error
+    /// occurs and when reconnection begins, because the flag is only checked
+    /// in poll_ready. This is acceptable for most use cases.
     pub(crate) needs_reconnect: Arc<AtomicBool>,
     pub(crate) on_connect: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) on_reconnect: Option<Arc<dyn Fn(usize) + Send + Sync>>,
@@ -228,6 +234,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         // Check if a previous call signaled a connection error.
+        // Race window: between the flag being set in a call future and this
+        // check, one additional request may be dispatched to the broken
+        // connection. This is inherent to the AtomicBool design and is
+        // acceptable for most use cases.
         if self.needs_reconnect.swap(false, Ordering::Acquire)
             && matches!(self.state, ConnState::Connected(_))
         {
