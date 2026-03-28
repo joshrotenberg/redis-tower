@@ -1685,3 +1685,166 @@ async fn tower_csc_with_invalidation() {
 
     writer.execute(Del::new(k)).await.unwrap();
 }
+
+// -- Streams tests --
+
+#[tokio::test]
+async fn streams_xadd_xlen_xrange() {
+    let conn = conn().await;
+    let k = "streams_test:basic";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    let id1 = conn
+        .execute(XAdd::new(k).field("temp", "22").field("humidity", "65"))
+        .await
+        .unwrap();
+    assert!(!id1.is_empty());
+
+    let id2 = conn
+        .execute(XAdd::new(k).field("temp", "23"))
+        .await
+        .unwrap();
+    assert!(id2 > id1);
+
+    let len = conn.execute(XLen::new(k)).await.unwrap();
+    assert_eq!(len, 2);
+
+    let entries = conn.execute(XRange::all(k)).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].id, id1);
+    assert_eq!(entries[0].fields.len(), 2);
+    assert_eq!(entries[0].fields[0].0, "temp");
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xrevrange() {
+    let conn = conn().await;
+    let k = "streams_test:revrange";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XAdd::new(k).field("b", "2")).await.unwrap();
+
+    let entries = conn.execute(XRevRange::all(k)).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].fields[0].0, "b"); // newest first
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xdel_xtrim() {
+    let conn = conn().await;
+    let k = "streams_test:del_trim";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    let id = conn.execute(XAdd::new(k).field("x", "1")).await.unwrap();
+    conn.execute(XAdd::new(k).field("y", "2")).await.unwrap();
+    conn.execute(XAdd::new(k).field("z", "3")).await.unwrap();
+
+    let deleted = conn.execute(XDel::new(k, &id)).await.unwrap();
+    assert_eq!(deleted, 1);
+
+    let trimmed = conn.execute(XTrim::maxlen(k, 1)).await.unwrap();
+    assert!(trimmed >= 1);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xadd_maxlen() {
+    let conn = conn().await;
+    let k = "streams_test:maxlen";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    for i in 0..10 {
+        conn.execute(XAdd::new(k).maxlen(5).field("n", i.to_string()))
+            .await
+            .unwrap();
+    }
+
+    let len = conn.execute(XLen::new(k)).await.unwrap();
+    assert_eq!(len, 5);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_consumer_groups() {
+    let conn = conn().await;
+    let k = "streams_test:groups";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    // Add some entries first.
+    conn.execute(XAdd::new(k).field("msg", "hello"))
+        .await
+        .unwrap();
+    conn.execute(XAdd::new(k).field("msg", "world"))
+        .await
+        .unwrap();
+
+    // Create consumer group starting from beginning.
+    conn.execute(XGroupCreate::new(k, "mygroup", "0"))
+        .await
+        .unwrap();
+
+    // Read as consumer.
+    let result = conn
+        .execute(XReadGroup::new("mygroup", "consumer1", k).count(10))
+        .await
+        .unwrap();
+    assert_eq!(result.len(), 1); // one stream
+    assert_eq!(result[0].1.len(), 2); // two entries
+
+    // Ack the entries.
+    let entry_id = result[0].1[0].id.clone();
+    let acked = conn
+        .execute(XAck::new(k, "mygroup", &entry_id))
+        .await
+        .unwrap();
+    assert_eq!(acked, 1);
+
+    // Destroy the group.
+    conn.execute(XGroupDestroy::new(k, "mygroup"))
+        .await
+        .unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xread() {
+    let conn = conn().await;
+    let k = "streams_test:xread";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XAdd::new(k).field("b", "2")).await.unwrap();
+
+    let result = conn.execute(XRead::new(k, "0-0").count(10)).await.unwrap();
+    assert!(result.is_some());
+    let streams = result.unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].1.len(), 2);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xrange_count() {
+    let conn = conn().await;
+    let k = "streams_test:range_count";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    for i in 0..5 {
+        conn.execute(XAdd::new(k).field("n", i.to_string()))
+            .await
+            .unwrap();
+    }
+
+    let entries = conn.execute(XRange::all(k).count(2)).await.unwrap();
+    assert_eq!(entries.len(), 2);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
