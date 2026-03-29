@@ -11,6 +11,7 @@ mod sets;
 mod sorted_sets;
 mod streams;
 mod strings;
+mod vector_sets;
 
 pub use hashes::*;
 pub use keys::*;
@@ -20,3 +21,4 @@ pub use sets::*;
 pub use sorted_sets::*;
 pub use streams::*;
 pub use strings::*;
+pub use vector_sets::*;

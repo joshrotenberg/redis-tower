@@ -355,6 +355,251 @@ fn zrange_wrong_type() {
     assert!(result.is_err());
 }
 
+// -- Vector Sets --
+
+#[test]
+fn vadd_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // VADD expects integer 0/1
+    let result = mock.execute(VAdd::new("key", vec![1.0_f32, 2.0, 3.0], "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vrem_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(VRem::new("key", "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vcard_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(VCard::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vdim_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(VDim::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vemb_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VEMB expects array
+    let result = mock.execute(VEmb::new("key", "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vsim_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VSIM expects array
+    let result = mock.execute(VSim::by_element("key", "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vrandmember_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VRANDMEMBER expects array or bulk string
+    let result = mock.execute(VRandMember::new("key").count(2));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vgetattr_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VGETATTR expects bulk string or null
+    let result = mock.execute(VGetAttr::new("key", "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vsetattr_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![]))); // VSETATTR expects integer 0/1
+    let result = mock.execute(VSetAttr::new("key", "elem", "{}"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vdelattr_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(VDelAttr::new("key", "elem"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vinfo_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VINFO expects array
+    let result = mock.execute(VInfo::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn vlinks_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // VLINKS expects array
+    let result = mock.execute(VLinks::new("key", "elem"));
+    assert!(result.is_err());
+}
+
+// -- Vector Sets successful parsing --
+
+#[test]
+fn mock_vadd_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(1));
+    let result: bool = mock
+        .execute(VAdd::new("key", vec![1.0_f32, 2.0, 3.0], "elem"))
+        .unwrap();
+    assert!(result);
+}
+
+#[test]
+fn mock_vadd_already_exists() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(0));
+    let result: bool = mock
+        .execute(VAdd::new("key", vec![1.0_f32, 2.0, 3.0], "elem"))
+        .unwrap();
+    assert!(!result);
+}
+
+#[test]
+fn mock_vcard_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(5));
+    let result: i64 = mock.execute(VCard::new("key")).unwrap();
+    assert_eq!(result, 5);
+}
+
+#[test]
+fn mock_vemb_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("1.5"))),
+        Frame::BulkString(Some(Bytes::from("2.5"))),
+        Frame::BulkString(Some(Bytes::from("3.5"))),
+    ])));
+    let result: Vec<f64> = mock.execute(VEmb::new("key", "elem")).unwrap();
+    assert_eq!(result, vec![1.5, 2.5, 3.5]);
+}
+
+#[test]
+fn mock_vsim_without_scores() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("a"))),
+        Frame::BulkString(Some(Bytes::from("b"))),
+    ])));
+    let result: Vec<(Bytes, Option<f64>)> =
+        mock.execute(VSim::by_element("key", "elem")).unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].0, Bytes::from("a"));
+    assert!(result[0].1.is_none());
+}
+
+#[test]
+fn mock_vsim_with_scores() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("a"))),
+        Frame::BulkString(Some(Bytes::from("0.95"))),
+        Frame::BulkString(Some(Bytes::from("b"))),
+        Frame::BulkString(Some(Bytes::from("0.80"))),
+    ])));
+    let result: Vec<(Bytes, Option<f64>)> = mock
+        .execute(VSim::by_element("key", "elem").withscores())
+        .unwrap();
+    assert_eq!(result.len(), 2);
+    assert_eq!(result[0].0, Bytes::from("a"));
+    assert!((result[0].1.unwrap() - 0.95).abs() < f64::EPSILON);
+}
+
+#[test]
+fn mock_vsim_withscores_odd_length() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("a"))),
+        Frame::BulkString(Some(Bytes::from("0.95"))),
+        Frame::BulkString(Some(Bytes::from("orphan"))),
+    ])));
+    let result = mock.execute(VSim::by_element("key", "elem").withscores());
+    assert!(result.is_err());
+}
+
+#[test]
+fn mock_vgetattr_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from(r#"{"color":"red"}"#))));
+    let result: Option<String> = mock.execute(VGetAttr::new("key", "elem")).unwrap();
+    assert_eq!(result, Some(r#"{"color":"red"}"#.to_string()));
+}
+
+#[test]
+fn mock_vgetattr_null() {
+    let mut mock = MockConnection::new();
+    mock.enqueue_null();
+    let result: Option<String> = mock.execute(VGetAttr::new("key", "elem")).unwrap();
+    assert_eq!(result, None);
+}
+
+#[test]
+fn mock_vrandmember_single() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from("elem1"))));
+    let result: Vec<Bytes> = mock.execute(VRandMember::new("key")).unwrap();
+    assert_eq!(result, vec![Bytes::from("elem1")]);
+}
+
+#[test]
+fn mock_vinfo_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("quant-type"))),
+        Frame::BulkString(Some(Bytes::from("NOQUANT"))),
+        Frame::BulkString(Some(Bytes::from("vector-dim"))),
+        Frame::Integer(3),
+    ])));
+    let result: Vec<Frame> = mock.execute(VInfo::new("key")).unwrap();
+    assert_eq!(result.len(), 4);
+}
+
+#[test]
+fn resp3_vadd_boolean() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Boolean(true));
+    assert!(mock
+        .execute(VAdd::new("key", vec![1.0_f32], "e"))
+        .unwrap());
+
+    mock.enqueue(Frame::Boolean(false));
+    assert!(!mock
+        .execute(VAdd::new("key", vec![1.0_f32], "e"))
+        .unwrap());
+}
+
+#[test]
+fn resp3_vemb_double() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::Double(1.5),
+        Frame::Double(2.5),
+    ])));
+    let result: Vec<f64> = mock.execute(VEmb::new("key", "elem")).unwrap();
+    assert_eq!(result, vec![1.5, 2.5]);
+}
+
 // -- Redis error responses --
 
 #[test]

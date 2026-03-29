@@ -315,5 +315,86 @@ macro_rules! __command_tests_inner {
             assert!((score - 15.5).abs() < f64::EPSILON);
             c.execute(Del::new(&k)).await.unwrap();
         }
+
+        // -- Vector Sets --
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vadd_vcard_vdim() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vset_ops", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
+            c.execute(VAdd::new(&k, vec![4.0_f32, 5.0, 6.0], "b")).await.unwrap();
+            assert_eq!(c.execute(VCard::new(&k)).await.unwrap(), 2);
+            assert_eq!(c.execute(VDim::new(&k)).await.unwrap(), 3);
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vadd_vrem() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vrem", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
+            assert!(c.execute(VRem::new(&k, "a")).await.unwrap());
+            assert!(!c.execute(VRem::new(&k, "a")).await.unwrap());
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vemb() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vemb", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
+            let emb = c.execute(VEmb::new(&k, "a")).await.unwrap();
+            assert_eq!(emb.len(), 3);
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vsim() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vsim", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 0.0, 0.0], "x")).await.unwrap();
+            c.execute(VAdd::new(&k, vec![0.0_f32, 1.0, 0.0], "y")).await.unwrap();
+            c.execute(VAdd::new(&k, vec![0.9_f32, 0.1, 0.0], "close_to_x")).await.unwrap();
+            let results = c.execute(VSim::by_element(&k, "x").count(2)).await.unwrap();
+            assert!(!results.is_empty());
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vsetattr_vgetattr_vdelattr() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vattr", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
+            c.execute(VSetAttr::new(&k, "a", r#"{"color":"red"}"#)).await.unwrap();
+            let attr = c.execute(VGetAttr::new(&k, "a")).await.unwrap();
+            assert_eq!(attr, Some(r#"{"color":"red"}"#.to_string()));
+            c.execute(VDelAttr::new(&k, "a")).await.unwrap();
+            let attr = c.execute(VGetAttr::new(&k, "a")).await.unwrap();
+            assert_eq!(attr, None);
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_vinfo() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("vinfo", "v");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
+            let info = c.execute(VInfo::new(&k)).await.unwrap();
+            assert!(!info.is_empty());
+            c.execute(Del::new(&k)).await.unwrap();
+        }
     };
 }
