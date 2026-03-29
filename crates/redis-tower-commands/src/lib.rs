@@ -10,6 +10,7 @@ mod server;
 mod sets;
 mod sorted_sets;
 mod strings;
+mod vector_sets;
 
 pub use hashes::*;
 pub use keys::*;
@@ -18,3 +19,4 @@ pub use server::*;
 pub use sets::*;
 pub use sorted_sets::*;
 pub use strings::*;
+pub use vector_sets::*;
