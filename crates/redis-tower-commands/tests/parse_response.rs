@@ -608,8 +608,7 @@ fn mock_vsim_without_scores() {
         Frame::BulkString(Some(Bytes::from("a"))),
         Frame::BulkString(Some(Bytes::from("b"))),
     ])));
-    let result: Vec<(Bytes, Option<f64>)> =
-        mock.execute(VSim::by_element("key", "elem")).unwrap();
+    let result: Vec<(Bytes, Option<f64>)> = mock.execute(VSim::by_element("key", "elem")).unwrap();
     assert_eq!(result.len(), 2);
     assert_eq!(result[0].0, Bytes::from("a"));
     assert!(result[0].1.is_none());
@@ -685,14 +684,10 @@ fn mock_vinfo_success() {
 fn resp3_vadd_boolean() {
     let mut mock = MockConnection::new();
     mock.enqueue(Frame::Boolean(true));
-    assert!(mock
-        .execute(VAdd::new("key", vec![1.0_f32], "e"))
-        .unwrap());
+    assert!(mock.execute(VAdd::new("key", vec![1.0_f32], "e")).unwrap());
 
     mock.enqueue(Frame::Boolean(false));
-    assert!(!mock
-        .execute(VAdd::new("key", vec![1.0_f32], "e"))
-        .unwrap());
+    assert!(!mock.execute(VAdd::new("key", vec![1.0_f32], "e")).unwrap());
 }
 
 #[test]
@@ -848,4 +843,252 @@ fn resp3_sinter_set() {
     ]));
     let members: Vec<Bytes> = mock.execute(SInter::new("key")).unwrap();
     assert_eq!(members.len(), 2);
+}
+
+// -- Scripting --
+
+#[test]
+fn eval_returns_integer() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result: Frame = mock
+        .execute(Eval::new("return 42").key("k1").arg("a1"))
+        .unwrap();
+    assert_eq!(result, Frame::Integer(42));
+}
+
+#[test]
+fn eval_returns_bulk_string() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from("hello"))));
+    let result: Frame = mock.execute(Eval::new("return 'hello'")).unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("hello"))));
+}
+
+#[test]
+fn evalsha_returns_frame() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(10));
+    let result: Frame = mock.execute(EvalSha::new("abc123").key("k1")).unwrap();
+    assert_eq!(result, Frame::Integer(10));
+}
+
+#[test]
+fn script_load_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from(
+        "e0e1f9fabfc9d4800c877a703b823ac0578ff831",
+    ))));
+    let sha: String = mock.execute(ScriptLoad::new("return 1")).unwrap();
+    assert_eq!(sha, "e0e1f9fabfc9d4800c877a703b823ac0578ff831");
+}
+
+#[test]
+fn script_load_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(ScriptLoad::new("return 1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn script_exists_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::Integer(1),
+        Frame::Integer(0),
+    ])));
+    let result: Vec<bool> = mock
+        .execute(ScriptExists::new("sha1").sha1("sha2"))
+        .unwrap();
+    assert_eq!(result, vec![true, false]);
+}
+
+#[test]
+fn script_exists_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(ScriptExists::new("sha1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn script_flush_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.execute(ScriptFlush::new()).unwrap();
+}
+
+#[test]
+fn script_flush_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(ScriptFlush::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn script_kill_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.execute(ScriptKill::new()).unwrap();
+}
+
+#[test]
+fn script_kill_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(ScriptKill::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn fcall_returns_frame() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from("result"))));
+    let result: Frame = mock
+        .execute(FCall::new("myfunc").key("k1").arg("a1"))
+        .unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("result"))));
+}
+
+#[test]
+fn fcall_ro_returns_frame() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(99));
+    let result: Frame = mock.execute(FCallRo::new("myfunc").key("k1")).unwrap();
+    assert_eq!(result, Frame::Integer(99));
+}
+
+#[test]
+fn function_load_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from("mylib"))));
+    let name: String = mock
+        .execute(FunctionLoad::new(
+            "#!lua name=mylib\nredis.register_function('f', function() end)",
+        ))
+        .unwrap();
+    assert_eq!(name, "mylib");
+}
+
+#[test]
+fn function_load_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionLoad::new("code"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_delete_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.execute(FunctionDelete::new("mylib")).unwrap();
+}
+
+#[test]
+fn function_delete_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionDelete::new("mylib"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_list_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("library_name"))),
+        Frame::BulkString(Some(Bytes::from("mylib"))),
+    ])));
+    let result: Vec<Frame> = mock.execute(FunctionList::new()).unwrap();
+    assert_eq!(result.len(), 2);
+}
+
+#[test]
+fn function_list_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionList::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_dump_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::BulkString(Some(Bytes::from("serialized_data"))));
+    let data: Bytes = mock.execute(FunctionDump::new()).unwrap();
+    assert_eq!(data, Bytes::from("serialized_data"));
+}
+
+#[test]
+fn function_dump_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionDump::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_restore_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.execute(FunctionRestore::new(Bytes::from("payload")))
+        .unwrap();
+}
+
+#[test]
+fn function_restore_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionRestore::new(Bytes::from("payload")));
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_flush_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.execute(FunctionFlush::new()).unwrap();
+}
+
+#[test]
+fn function_flush_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionFlush::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn function_stats_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::BulkString(Some(Bytes::from("running_script"))),
+        Frame::Null,
+    ])));
+    let result: Vec<Frame> = mock.execute(FunctionStats::new()).unwrap();
+    assert_eq!(result.len(), 2);
+}
+
+#[test]
+fn function_stats_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42));
+    let result = mock.execute(FunctionStats::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn resp3_script_exists_boolean() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::Boolean(true),
+        Frame::Boolean(false),
+    ])));
+    let result: Vec<bool> = mock
+        .execute(ScriptExists::new("sha1").sha1("sha2"))
+        .unwrap();
+    assert_eq!(result, vec![true, false]);
 }
