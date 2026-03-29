@@ -229,6 +229,112 @@ fn hlen_wrong_type() {
     assert!(result.is_err());
 }
 
+// -- Hash field expiration --
+
+#[test]
+fn hexpire_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HExpire::new("key", 60, ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hexpireat_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HExpireAt::new("key", 1700000000, ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hpexpire_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HPExpire::new("key", 60000, ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hpexpireat_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HPExpireAt::new("key", 1700000000000, ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn httl_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HTtl::new("key", ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hpttl_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HPTtl::new("key", ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hpersist_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HPersist::new("key", ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn hexpiretime_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(HExpireTime::new("key", ["field"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn mock_hexpire_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::Integer(1),
+        Frame::Integer(1),
+    ])));
+    let result: Vec<i64> = mock.execute(HExpire::new("key", 60, ["f1", "f2"])).unwrap();
+    assert_eq!(result, vec![1, 1]);
+}
+
+#[test]
+fn mock_httl_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Array(Some(vec![
+        Frame::Integer(55),
+        Frame::Integer(-1),
+    ])));
+    let result: Vec<i64> = mock.execute(HTtl::new("key", ["f1", "f2"])).unwrap();
+    assert_eq!(result, vec![55, -1]);
+}
+
+// -- Pub/Sub commands --
+
+#[test]
+fn spublish_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    let result = mock.execute(SPublish::new("channel", "hello"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn mock_spublish_success() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(3));
+    let result: i64 = mock.execute(SPublish::new("channel", "hello")).unwrap();
+    assert_eq!(result, 3);
+}
+
 // -- Lists --
 
 #[test]

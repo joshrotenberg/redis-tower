@@ -6,6 +6,7 @@
 mod hashes;
 mod keys;
 mod lists;
+mod pubsub;
 mod server;
 mod sets;
 mod sorted_sets;
@@ -16,6 +17,7 @@ mod vector_sets;
 pub use hashes::*;
 pub use keys::*;
 pub use lists::*;
+pub use pubsub::*;
 pub use server::*;
 pub use sets::*;
 pub use sorted_sets::*;

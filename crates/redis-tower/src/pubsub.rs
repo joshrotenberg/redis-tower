@@ -31,6 +31,8 @@ pub enum MessageKind {
     Message,
     /// A message from a pattern subscription.
     PMessage,
+    /// A message from a sharded channel subscription.
+    SMessage,
 }
 
 /// A Redis connection in pub/sub mode.
@@ -133,6 +135,69 @@ impl PubSubConnection {
         // Read unsubscribe confirmations. If channels is empty, Redis sends
         // one confirmation per previously subscribed channel -- we read until
         // the subscription count reaches 0.
+        if channels.is_empty() {
+            loop {
+                let frame = self
+                    .framed
+                    .next()
+                    .await
+                    .ok_or(RedisError::ConnectionClosed)?
+                    .map_err(RedisError::from)?;
+                if Self::is_unsub_complete(&frame) {
+                    break;
+                }
+            }
+        } else {
+            for _ in channels {
+                let _ = self
+                    .framed
+                    .next()
+                    .await
+                    .ok_or(RedisError::ConnectionClosed)?
+                    .map_err(RedisError::from)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Subscribe to one or more shard channels.
+    pub async fn ssubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+        let mut args = vec![bulk("SSUBSCRIBE")];
+        for ch in channels {
+            args.push(bulk(*ch));
+        }
+        self.framed
+            .send(array(args))
+            .await
+            .map_err(RedisError::from)?;
+
+        for _ in channels {
+            let frame = self
+                .framed
+                .next()
+                .await
+                .ok_or(RedisError::ConnectionClosed)?
+                .map_err(RedisError::from)?;
+            Self::validate_sub_response(&frame, "ssubscribe")?;
+        }
+
+        Ok(())
+    }
+
+    /// Unsubscribe from one or more shard channels.
+    ///
+    /// If `channels` is empty, unsubscribes from all shard channels.
+    pub async fn sunsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+        let mut args = vec![bulk("SUNSUBSCRIBE")];
+        for ch in channels {
+            args.push(bulk(*ch));
+        }
+        self.framed
+            .send(array(args))
+            .await
+            .map_err(RedisError::from)?;
+
         if channels.is_empty() {
             loop {
                 let frame = self
@@ -279,8 +344,19 @@ impl PubSubConnection {
                     payload,
                 }))
             }
+            b"smessage" if items.len() == 3 => {
+                let channel = Self::extract_string(&items[1])?;
+                let payload = Self::extract_bytes(&items[2])?;
+                Ok(Some(PubSubMessage {
+                    kind: MessageKind::SMessage,
+                    channel,
+                    pattern: None,
+                    payload,
+                }))
+            }
             // Subscribe/unsubscribe confirmations -- skip.
-            b"subscribe" | b"unsubscribe" | b"psubscribe" | b"punsubscribe" => Ok(None),
+            b"subscribe" | b"unsubscribe" | b"psubscribe" | b"punsubscribe" | b"ssubscribe"
+            | b"sunsubscribe" => Ok(None),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "message or pmessage",
                 actual: format!("{}", String::from_utf8_lossy(other)),
