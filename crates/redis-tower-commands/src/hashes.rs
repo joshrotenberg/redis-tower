@@ -457,3 +457,412 @@ impl Command for HLen {
         "HLEN"
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hash field expiration commands (Redis 7.4+)
+// ---------------------------------------------------------------------------
+
+/// Parse a response that returns one integer per field (used by all hash
+/// field expiration commands).
+fn parse_per_field_response(frame: Frame) -> Result<Vec<i64>, RedisError> {
+    match frame {
+        Frame::Array(Some(frames)) => frames
+            .into_iter()
+            .map(|f| match f {
+                Frame::Integer(n) => Ok(n),
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "integer",
+                    actual: format!("{other:?}"),
+                }),
+            })
+            .collect(),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// HEXPIRE key seconds FIELDS numfields field [field ...]
+///
+/// Sets an expiration (in seconds) on the specified hash fields.
+/// Returns one status code per field.
+pub struct HExpire {
+    key: String,
+    seconds: i64,
+    fields: Vec<String>,
+}
+
+impl HExpire {
+    pub fn new(
+        key: impl Into<String>,
+        seconds: i64,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            seconds,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HExpire {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HEXPIRE"),
+            bulk(self.key.as_str()),
+            bulk(self.seconds.to_string()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HEXPIRE"
+    }
+}
+
+/// HEXPIREAT key unix-time-seconds FIELDS numfields field [field ...]
+///
+/// Sets an expiration on hash fields using an absolute Unix timestamp (seconds).
+/// Returns one status code per field.
+pub struct HExpireAt {
+    key: String,
+    timestamp: i64,
+    fields: Vec<String>,
+}
+
+impl HExpireAt {
+    pub fn new(
+        key: impl Into<String>,
+        timestamp: i64,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            timestamp,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HExpireAt {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HEXPIREAT"),
+            bulk(self.key.as_str()),
+            bulk(self.timestamp.to_string()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HEXPIREAT"
+    }
+}
+
+/// HPEXPIRE key milliseconds FIELDS numfields field [field ...]
+///
+/// Sets an expiration (in milliseconds) on the specified hash fields.
+/// Returns one status code per field.
+pub struct HPExpire {
+    key: String,
+    milliseconds: i64,
+    fields: Vec<String>,
+}
+
+impl HPExpire {
+    pub fn new(
+        key: impl Into<String>,
+        milliseconds: i64,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            milliseconds,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HPExpire {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HPEXPIRE"),
+            bulk(self.key.as_str()),
+            bulk(self.milliseconds.to_string()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HPEXPIRE"
+    }
+}
+
+/// HPEXPIREAT key unix-time-milliseconds FIELDS numfields field [field ...]
+///
+/// Sets an expiration on hash fields using an absolute Unix timestamp (milliseconds).
+/// Returns one status code per field.
+pub struct HPExpireAt {
+    key: String,
+    timestamp: i64,
+    fields: Vec<String>,
+}
+
+impl HPExpireAt {
+    pub fn new(
+        key: impl Into<String>,
+        timestamp: i64,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            timestamp,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HPExpireAt {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HPEXPIREAT"),
+            bulk(self.key.as_str()),
+            bulk(self.timestamp.to_string()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HPEXPIREAT"
+    }
+}
+
+/// HTTL key FIELDS numfields field [field ...]
+///
+/// Returns the remaining TTL (in seconds) for the specified hash fields.
+/// Returns one value per field.
+pub struct HTtl {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HTtl {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HTtl {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HTTL"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HTTL"
+    }
+}
+
+/// HPTTL key FIELDS numfields field [field ...]
+///
+/// Returns the remaining TTL (in milliseconds) for the specified hash fields.
+/// Returns one value per field.
+pub struct HPTtl {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPTtl {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HPTtl {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HPTTL"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HPTTL"
+    }
+}
+
+/// HPERSIST key FIELDS numfields field [field ...]
+///
+/// Removes the expiration from the specified hash fields.
+/// Returns one status code per field.
+pub struct HPersist {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPersist {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HPersist {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HPERSIST"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HPERSIST"
+    }
+}
+
+/// HEXPIRETIME key FIELDS numfields field [field ...]
+///
+/// Returns the absolute Unix expiration timestamp (in seconds) for the
+/// specified hash fields. Returns one value per field.
+pub struct HExpireTime {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HExpireTime {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HExpireTime {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HEXPIRETIME"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HEXPIRETIME"
+    }
+}
