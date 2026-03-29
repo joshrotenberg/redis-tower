@@ -9,6 +9,7 @@ mod lists;
 mod server;
 mod sets;
 mod sorted_sets;
+mod streams;
 mod strings;
 
 pub use hashes::*;
@@ -17,4 +18,5 @@ pub use lists::*;
 pub use server::*;
 pub use sets::*;
 pub use sorted_sets::*;
+pub use streams::*;
 pub use strings::*;
