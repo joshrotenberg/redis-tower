@@ -88,7 +88,8 @@ impl RedisCluster {
             .bind(&self.config.bind)
             .redis_server_bin(&self.config.redis_server_bin)
             .redis_cli_bin(&self.config.redis_cli_bin)
-            .start()?;
+            .start()
+            .map_err(io::Error::other)?;
 
         // Leak the handle so it lives for the static lifetime (OnceLock pattern).
         // The Drop impl on RedisServerHandle will never run, but we call stop()
