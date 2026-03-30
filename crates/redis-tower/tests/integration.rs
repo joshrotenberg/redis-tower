@@ -2068,3 +2068,137 @@ async fn streams_xinfo_consumers() {
     conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
     conn.execute(Del::new(k)).await.unwrap();
 }
+
+// -- SCAN tests --
+
+#[tokio::test]
+async fn scan_basic() {
+    let conn = conn().await;
+    let prefix = "scan_test:basic";
+    // Create some keys.
+    for i in 0..5 {
+        conn.execute(Set::new(format!("{prefix}:{i}"), "v"))
+            .await
+            .unwrap();
+    }
+
+    // Scan with pattern.
+    let mut all_keys = Vec::new();
+    let mut cursor = "0".to_string();
+    loop {
+        let result = conn
+            .execute(
+                Scan::new()
+                    .cursor(&cursor)
+                    .match_pattern(format!("{prefix}:*"))
+                    .count(2),
+            )
+            .await
+            .unwrap();
+        let finished = result.is_finished();
+        all_keys.extend(result.results);
+        if finished {
+            break;
+        }
+        cursor = result.cursor;
+    }
+    assert_eq!(all_keys.len(), 5);
+
+    // Cleanup.
+    for i in 0..5 {
+        conn.execute(Del::new(format!("{prefix}:{i}")))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn sscan_basic() {
+    let conn = conn().await;
+    let k = "scan_test:sscan";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(SAdd::members(k, ["a", "b", "c", "d", "e"]))
+        .await
+        .unwrap();
+
+    let mut all_members = Vec::new();
+    let mut cursor = "0".to_string();
+    loop {
+        let result = conn.execute(SScan::new(k).cursor(&cursor)).await.unwrap();
+        let finished = result.is_finished();
+        all_members.extend(result.results);
+        if finished {
+            break;
+        }
+        cursor = result.cursor;
+    }
+    assert_eq!(all_members.len(), 5);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn hscan_basic() {
+    let conn = conn().await;
+    let k = "scan_test:hscan";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(HSet::new(k, "f1", "v1").field("f2", "v2").field("f3", "v3"))
+        .await
+        .unwrap();
+
+    let mut all_pairs = Vec::new();
+    let mut cursor = "0".to_string();
+    loop {
+        let result = conn.execute(HScan::new(k).cursor(&cursor)).await.unwrap();
+        let finished = result.is_finished();
+        all_pairs.extend(result.results);
+        if finished {
+            break;
+        }
+        cursor = result.cursor;
+    }
+    assert_eq!(all_pairs.len(), 3);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zscan_basic() {
+    let conn = conn().await;
+    let k = "scan_test:zscan";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(
+        ZAdd::new(k)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+
+    let mut all_pairs = Vec::new();
+    let mut cursor = "0".to_string();
+    loop {
+        let result = conn.execute(ZScan::new(k).cursor(&cursor)).await.unwrap();
+        let finished = result.is_finished();
+        all_pairs.extend(result.results);
+        if finished {
+            break;
+        }
+        cursor = result.cursor;
+    }
+    assert_eq!(all_pairs.len(), 3);
+    // Verify scores.
+    assert!(
+        (all_pairs
+            .iter()
+            .find(|(m, _)| m == &Bytes::from("b"))
+            .unwrap()
+            .1
+            - 2.0)
+            .abs()
+            < f64::EPSILON
+    );
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
