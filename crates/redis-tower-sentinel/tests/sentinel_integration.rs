@@ -15,7 +15,7 @@ fn ensure_sentinel() -> &'static RedisSentinel {
     SENTINEL.get_or_init(|| {
         use redis_test_harness::sentinel::SentinelConfig;
         // Use non-default ports to avoid conflicts with other services.
-        let sentinel = RedisSentinel::new(SentinelConfig {
+        let mut sentinel = RedisSentinel::new(SentinelConfig {
             master_port: 6390,
             replica_base_port: 6391,
             sentinel_base_port: 26389,

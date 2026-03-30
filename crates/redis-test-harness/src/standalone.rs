@@ -1,12 +1,13 @@
 //! Standalone Redis server for integration testing.
 //!
-//! Thin wrapper around [`crate::wrapper::server::RedisServer`].
+//! Uses direct `std::process::Command` for process management (sync-safe for
+//! `OnceLock::get_or_init`).
 
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-
-use crate::wrapper::server::{RedisServer, RedisServerHandle};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Configuration for a standalone Redis server.
 #[derive(Debug, Clone)]
@@ -35,14 +36,14 @@ impl Default for StandaloneConfig {
 /// A running standalone Redis server.
 pub struct RedisStandalone {
     config: StandaloneConfig,
-    handle: Option<RedisServerHandle>,
+    started: bool,
 }
 
 impl RedisStandalone {
     pub fn new(config: StandaloneConfig) -> Self {
         Self {
             config,
-            handle: None,
+            started: false,
         }
     }
 
@@ -55,44 +56,110 @@ impl RedisStandalone {
     }
 
     pub fn addr(&self) -> String {
-        if let Some(ref h) = self.handle {
-            h.addr()
-        } else {
-            format!("{}:{}", self.config.bind, self.config.port)
-        }
+        format!("{}:{}", self.config.bind, self.config.port)
     }
 
+    /// Start the server (sync -- suitable for OnceLock::get_or_init).
     pub fn start(&mut self) -> io::Result<()> {
-        let mut builder = RedisServer::new()
-            .port(self.config.port)
-            .bind(&self.config.bind)
-            .dir(&self.config.work_dir)
-            .redis_server_bin(&self.config.redis_server_bin)
-            .redis_cli_bin(&self.config.redis_cli_bin);
+        let dir = &self.config.work_dir;
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::fs::create_dir_all(dir)?;
 
+        let conf_path = dir.join("redis.conf");
+        let mut conf = format!(
+            "port {port}\nbind {bind}\ndaemonize yes\n\
+             pidfile {dir}/redis.pid\nlogfile {dir}/redis.log\n\
+             dir {dir}\nsave \"\"\nprotected-mode no\n",
+            port = self.config.port,
+            bind = self.config.bind,
+            dir = dir.display(),
+        );
         for (k, v) in &self.config.extra_config {
-            builder = builder.extra(k, v);
+            conf.push_str(&format!("{k} {v}\n"));
+        }
+        std::fs::write(&conf_path, conf)?;
+
+        let status = Command::new(&self.config.redis_server_bin)
+            .arg(&conf_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+
+        if !status.success() {
+            return Err(io::Error::other("redis-server failed to start"));
         }
 
-        self.handle = Some(builder.start().map_err(io::Error::other)?);
+        // Wait for PING.
+        let start = Instant::now();
+        loop {
+            let output = Command::new(&self.config.redis_cli_bin)
+                .args([
+                    "-h",
+                    &self.config.bind,
+                    "-p",
+                    &self.config.port.to_string(),
+                    "PING",
+                ])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
+                    break;
+                }
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "redis-server did not respond in time",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        self.started = true;
         Ok(())
     }
 
     pub fn stop(&self) -> io::Result<()> {
-        if let Some(ref h) = self.handle {
-            h.stop();
+        if self.started {
+            let _ = Command::new(&self.config.redis_cli_bin)
+                .args([
+                    "-h",
+                    &self.config.bind,
+                    "-p",
+                    &self.config.port.to_string(),
+                    "SHUTDOWN",
+                    "NOSAVE",
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
         }
         Ok(())
     }
 
     pub fn is_alive(&self) -> bool {
-        self.handle.as_ref().is_some_and(|h| h.is_alive())
+        if !self.started {
+            return false;
+        }
+        Command::new(&self.config.redis_cli_bin)
+            .args([
+                "-h",
+                &self.config.bind,
+                "-p",
+                &self.config.port.to_string(),
+                "PING",
+            ])
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "PONG")
+            .unwrap_or(false)
     }
 }
 
 impl Drop for RedisStandalone {
     fn drop(&mut self) {
-        // RedisServerHandle::drop handles cleanup.
+        let _ = self.stop();
     }
 }
 

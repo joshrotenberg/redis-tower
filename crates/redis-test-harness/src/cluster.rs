@@ -1,12 +1,13 @@
 //! Redis Cluster lifecycle management.
 //!
-//! Delegates to [`crate::wrapper::cluster`] for the actual process management.
+//! Uses direct `std::process::Command` for process management (sync-safe for
+//! `OnceLock::get_or_init`).
 
 use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
-
-use crate::wrapper::cluster::{RedisCluster as WrapperCluster, RedisClusterHandle};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Configuration for the cluster as a whole.
 #[derive(Debug, Clone)]
@@ -15,6 +16,7 @@ pub struct ClusterConfig {
     pub masters: u16,
     pub replicas_per_master: u16,
     pub bind: String,
+    pub work_dir: PathBuf,
     pub redis_server_bin: String,
     pub redis_cli_bin: String,
 }
@@ -26,6 +28,7 @@ impl Default for ClusterConfig {
             masters: 3,
             replicas_per_master: 1,
             bind: "127.0.0.1".into(),
+            work_dir: PathBuf::from("/tmp/redis-cluster"),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
         }
@@ -58,15 +61,14 @@ pub struct ClusterStatus {
 /// Represents a running (or stopped) Redis Cluster.
 pub struct RedisCluster {
     config: ClusterConfig,
-    #[allow(dead_code)]
-    handle: Option<RedisClusterHandle>,
+    started: bool,
 }
 
 impl RedisCluster {
     pub fn new(config: ClusterConfig) -> Self {
         Self {
             config,
-            handle: None,
+            started: false,
         }
     }
 
@@ -78,47 +80,114 @@ impl RedisCluster {
         &self.config
     }
 
-    pub fn start(&self) -> io::Result<()> {
-        // Use the wrapper to start. We can't store the handle in &self,
-        // so we leak it (it lives for the duration of the test suite via OnceLock).
-        let handle = WrapperCluster::builder()
-            .masters(self.config.masters)
-            .replicas_per_master(self.config.replicas_per_master)
-            .base_port(self.config.base_port)
-            .bind(&self.config.bind)
-            .redis_server_bin(&self.config.redis_server_bin)
-            .redis_cli_bin(&self.config.redis_cli_bin)
-            .start()
-            .map_err(io::Error::other)?;
+    /// Start all cluster nodes and form the cluster (sync).
+    pub fn start(&mut self) -> io::Result<()> {
+        let dir = &self.config.work_dir;
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::fs::create_dir_all(dir)?;
 
-        // Leak the handle so it lives for the static lifetime (OnceLock pattern).
-        // The Drop impl on RedisServerHandle will never run, but we call stop()
-        // explicitly in our own Drop.
-        std::mem::forget(handle);
+        // Start each node.
+        for port in self.config.ports() {
+            let node_dir = dir.join(format!("node-{port}"));
+            std::fs::create_dir_all(&node_dir)?;
+
+            let conf_path = node_dir.join("redis.conf");
+            let conf = format!(
+                "port {port}\nbind {bind}\ndaemonize yes\n\
+                 pidfile {ndir}/redis.pid\nlogfile {ndir}/redis.log\n\
+                 dir {ndir}\nsave \"\"\nprotected-mode no\n\
+                 cluster-enabled yes\ncluster-config-file {ndir}/nodes.conf\n\
+                 cluster-node-timeout 5000\n",
+                bind = self.config.bind,
+                ndir = node_dir.display(),
+            );
+            std::fs::write(&conf_path, conf)?;
+
+            let status = Command::new(&self.config.redis_server_bin)
+                .arg(&conf_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+
+            if !status.success() {
+                return Err(io::Error::other(format!(
+                    "redis-server failed to start on port {port}"
+                )));
+            }
+        }
+
+        // Wait for PING on every node.
+        for port in self.config.ports() {
+            self.wait_for_ping(port, Duration::from_secs(10))?;
+        }
+
+        // Form the cluster with redis-cli --cluster create.
+        let mut endpoints: Vec<String> = self
+            .config
+            .ports()
+            .map(|p| format!("{}:{}", self.config.bind, p))
+            .collect();
+
+        let mut args = vec!["--cluster".to_string(), "create".to_string()];
+        args.append(&mut endpoints);
+        args.push("--cluster-replicas".into());
+        args.push(self.config.replicas_per_master.to_string());
+        args.push("--cluster-yes".into());
+
+        let output = Command::new(&self.config.redis_cli_bin)
+            .args(&args)
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(io::Error::other(format!(
+                "redis-cli --cluster create failed: {stderr}"
+            )));
+        }
+
+        self.started = true;
         Ok(())
     }
 
     pub fn stop(&self) -> io::Result<()> {
-        use crate::wrapper::cli::RedisCli;
-        for port in self.config.ports() {
-            RedisCli::new()
-                .bin(&self.config.redis_cli_bin)
-                .host(&self.config.bind)
-                .port(port)
-                .shutdown();
+        if self.started {
+            for port in self.config.ports() {
+                let _ = Command::new(&self.config.redis_cli_bin)
+                    .args([
+                        "-h",
+                        &self.config.bind,
+                        "-p",
+                        &port.to_string(),
+                        "SHUTDOWN",
+                        "NOSAVE",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
         Ok(())
     }
 
     pub fn poke(&self) -> io::Result<ClusterStatus> {
-        use crate::wrapper::cli::RedisCli;
         for port in self.config.ports() {
-            let cli = RedisCli::new()
-                .bin(&self.config.redis_cli_bin)
-                .host(&self.config.bind)
-                .port(port);
-            if let Ok(raw) = cli.run(&["CLUSTER", "INFO"]) {
-                return Ok(parse_cluster_info(&raw));
+            let output = Command::new(&self.config.redis_cli_bin)
+                .args([
+                    "-h",
+                    &self.config.bind,
+                    "-p",
+                    &port.to_string(),
+                    "CLUSTER",
+                    "INFO",
+                ])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let raw = String::from_utf8_lossy(&out.stdout).to_string();
+                    return Ok(parse_cluster_info(&raw));
+                }
             }
         }
         Err(io::Error::new(
@@ -128,7 +197,7 @@ impl RedisCluster {
     }
 
     pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if let Ok(status) = self.poke() {
                 if status.cluster_state == "ok" && status.cluster_slots_ok == 16384 {
@@ -142,6 +211,27 @@ impl RedisCluster {
                 ));
             }
             std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn wait_for_ping(&self, port: u16, timeout: Duration) -> io::Result<()> {
+        let start = Instant::now();
+        loop {
+            let output = Command::new(&self.config.redis_cli_bin)
+                .args(["-h", &self.config.bind, "-p", &port.to_string(), "PING"])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("redis-server on port {port} did not respond in time"),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }

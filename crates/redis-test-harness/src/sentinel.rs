@@ -1,13 +1,13 @@
 //! Redis Sentinel topology management.
 //!
-//! Delegates to [`crate::wrapper::sentinel`] for the actual process management.
+//! Uses direct `std::process::Command` for process management (sync-safe for
+//! `OnceLock::get_or_init`).
 
 use std::collections::HashMap;
 use std::io;
-use std::time::Duration;
-
-use crate::wrapper::cli::RedisCli;
-use crate::wrapper::sentinel::{RedisSentinel as WrapperSentinel, RedisSentinelHandle};
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// Configuration for the sentinel topology.
 #[derive(Debug, Clone)]
@@ -20,6 +20,7 @@ pub struct SentinelConfig {
     pub sentinel_base_port: u16,
     pub quorum: u16,
     pub bind: String,
+    pub work_dir: PathBuf,
     pub redis_server_bin: String,
     pub redis_cli_bin: String,
     pub down_after_ms: u64,
@@ -37,6 +38,7 @@ impl Default for SentinelConfig {
             sentinel_base_port: 26379,
             quorum: 2,
             bind: "127.0.0.1".into(),
+            work_dir: PathBuf::from("/tmp/redis-sentinel"),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
             down_after_ms: 5000,
@@ -82,15 +84,14 @@ pub struct SentinelMasterStatus {
 /// Manages the full sentinel topology lifecycle.
 pub struct RedisSentinel {
     config: SentinelConfig,
-    #[allow(dead_code)]
-    handle: Option<RedisSentinelHandle>,
+    started: bool,
 }
 
 impl RedisSentinel {
     pub fn new(config: SentinelConfig) -> Self {
         Self {
             config,
-            handle: None,
+            started: false,
         }
     }
 
@@ -102,47 +103,83 @@ impl RedisSentinel {
         &self.config
     }
 
-    pub fn start(&self) -> io::Result<()> {
-        let handle = WrapperSentinel::builder()
-            .master_name(&self.config.master_name)
-            .master_port(self.config.master_port)
-            .replicas(self.config.num_replicas)
-            .replica_base_port(self.config.replica_base_port)
-            .sentinels(self.config.num_sentinels)
-            .sentinel_base_port(self.config.sentinel_base_port)
-            .quorum(self.config.quorum)
-            .bind(&self.config.bind)
-            .down_after_ms(self.config.down_after_ms)
-            .failover_timeout_ms(self.config.failover_timeout_ms)
-            .redis_server_bin(&self.config.redis_server_bin)
-            .redis_cli_bin(&self.config.redis_cli_bin)
-            .start()
-            .map_err(io::Error::other)?;
+    /// Start the full sentinel topology (sync).
+    pub fn start(&mut self) -> io::Result<()> {
+        let dir = &self.config.work_dir;
+        if dir.exists() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::fs::create_dir_all(dir)?;
 
-        // Leak for OnceLock static pattern.
-        std::mem::forget(handle);
+        // 1. Start the master.
+        self.start_redis_node(self.config.master_port, None)?;
+
+        // 2. Start replicas with replicaof.
+        for port in self.config.replica_ports() {
+            self.start_redis_node(
+                port,
+                Some((self.config.bind.clone(), self.config.master_port)),
+            )?;
+        }
+
+        // 3. Wait for PING on master and all replicas.
+        self.wait_for_ping(self.config.master_port, Duration::from_secs(10))?;
+        for port in self.config.replica_ports() {
+            self.wait_for_ping(port, Duration::from_secs(10))?;
+        }
+
+        // 4. Start sentinels.
+        for port in self.config.sentinel_ports() {
+            self.start_sentinel_node(port)?;
+        }
+
+        // 5. Wait for PING on all sentinels.
+        for port in self.config.sentinel_ports() {
+            self.wait_for_ping(port, Duration::from_secs(10))?;
+        }
+
+        self.started = true;
         Ok(())
     }
 
     pub fn stop(&self) -> io::Result<()> {
-        for port in self.config.all_ports() {
-            RedisCli::new()
-                .bin(&self.config.redis_cli_bin)
-                .host(&self.config.bind)
-                .port(port)
-                .shutdown();
+        if self.started {
+            for port in self.config.all_ports() {
+                let _ = Command::new(&self.config.redis_cli_bin)
+                    .args([
+                        "-h",
+                        &self.config.bind,
+                        "-p",
+                        &port.to_string(),
+                        "SHUTDOWN",
+                        "NOSAVE",
+                    ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+            }
         }
         Ok(())
     }
 
     pub fn poke(&self) -> io::Result<SentinelMasterStatus> {
         for port in self.config.sentinel_ports() {
-            let cli = RedisCli::new()
-                .bin(&self.config.redis_cli_bin)
-                .host(&self.config.bind)
-                .port(port);
-            if let Ok(raw) = cli.run(&["SENTINEL", "MASTER", &self.config.master_name]) {
-                return Ok(parse_sentinel_master(&raw, &self.config.master_name));
+            let output = Command::new(&self.config.redis_cli_bin)
+                .args([
+                    "-h",
+                    &self.config.bind,
+                    "-p",
+                    &port.to_string(),
+                    "SENTINEL",
+                    "MASTER",
+                    &self.config.master_name,
+                ])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() {
+                    let raw = String::from_utf8_lossy(&out.stdout).to_string();
+                    return Ok(parse_sentinel_master(&raw, &self.config.master_name));
+                }
             }
         }
         Err(io::Error::new(
@@ -152,7 +189,7 @@ impl RedisSentinel {
     }
 
     pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
-        let start = std::time::Instant::now();
+        let start = Instant::now();
         loop {
             if let Ok(status) = self.poke() {
                 if status.flags == "master"
@@ -169,6 +206,97 @@ impl RedisSentinel {
                 ));
             }
             std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    /// Start a regular redis-server node (master or replica).
+    fn start_redis_node(&self, port: u16, replicaof: Option<(String, u16)>) -> io::Result<()> {
+        let node_dir = self.config.work_dir.join(format!("redis-{port}"));
+        std::fs::create_dir_all(&node_dir)?;
+
+        let conf_path = node_dir.join("redis.conf");
+        let mut conf = format!(
+            "port {port}\nbind {bind}\ndaemonize yes\n\
+             pidfile {ndir}/redis.pid\nlogfile {ndir}/redis.log\n\
+             dir {ndir}\nsave \"\"\nprotected-mode no\n",
+            bind = self.config.bind,
+            ndir = node_dir.display(),
+        );
+        if let Some((host, master_port)) = replicaof {
+            conf.push_str(&format!("replicaof {host} {master_port}\n"));
+        }
+        std::fs::write(&conf_path, &conf)?;
+
+        let status = Command::new(&self.config.redis_server_bin)
+            .arg(&conf_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "redis-server failed to start on port {port}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Write sentinel.conf and start a sentinel process.
+    fn start_sentinel_node(&self, port: u16) -> io::Result<()> {
+        let node_dir = self.config.work_dir.join(format!("sentinel-{port}"));
+        std::fs::create_dir_all(&node_dir)?;
+
+        let conf_path = node_dir.join("sentinel.conf");
+        let conf = format!(
+            "port {port}\nbind {bind}\ndaemonize yes\n\
+             pidfile {ndir}/sentinel.pid\nlogfile {ndir}/sentinel.log\n\
+             dir {ndir}\nprotected-mode no\n\
+             sentinel monitor {name} {bind} {master_port} {quorum}\n\
+             sentinel down-after-milliseconds {name} {down_after}\n\
+             sentinel failover-timeout {name} {failover_timeout}\n\
+             sentinel parallel-syncs {name} 1\n",
+            bind = self.config.bind,
+            ndir = node_dir.display(),
+            name = self.config.master_name,
+            master_port = self.config.master_port,
+            quorum = self.config.quorum,
+            down_after = self.config.down_after_ms,
+            failover_timeout = self.config.failover_timeout_ms,
+        );
+        std::fs::write(&conf_path, &conf)?;
+
+        let status = Command::new(&self.config.redis_server_bin)
+            .args([conf_path.as_os_str(), std::ffi::OsStr::new("--sentinel")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "sentinel failed to start on port {port}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn wait_for_ping(&self, port: u16, timeout: Duration) -> io::Result<()> {
+        let start = Instant::now();
+        loop {
+            let output = Command::new(&self.config.redis_cli_bin)
+                .args(["-h", &self.config.bind, "-p", &port.to_string(), "PING"])
+                .output();
+            if let Ok(out) = output {
+                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
+                    return Ok(());
+                }
+            }
+            if start.elapsed() > timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("node on port {port} did not respond in time"),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }

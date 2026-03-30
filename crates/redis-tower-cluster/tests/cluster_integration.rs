@@ -13,7 +13,7 @@ static CLUSTER: OnceLock<RedisCluster> = OnceLock::new();
 
 fn ensure_cluster() -> &'static RedisCluster {
     CLUSTER.get_or_init(|| {
-        let cluster = RedisCluster::new(ClusterConfig {
+        let mut cluster = RedisCluster::new(ClusterConfig {
             masters: 3,
             replicas_per_master: 0,
             ..Default::default()
