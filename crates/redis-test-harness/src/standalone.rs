@@ -74,7 +74,7 @@ impl RedisStandalone {
             builder = builder.extra(k, v);
         }
 
-        self.handle = Some(builder.start()?);
+        self.handle = Some(builder.start().map_err(io::Error::other)?);
         Ok(())
     }
 

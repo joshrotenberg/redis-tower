@@ -116,7 +116,8 @@ impl RedisSentinel {
             .failover_timeout_ms(self.config.failover_timeout_ms)
             .redis_server_bin(&self.config.redis_server_bin)
             .redis_cli_bin(&self.config.redis_cli_bin)
-            .start()?;
+            .start()
+            .map_err(io::Error::other)?;
 
         // Leak for OnceLock static pattern.
         std::mem::forget(handle);

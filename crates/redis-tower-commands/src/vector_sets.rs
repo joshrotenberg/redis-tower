@@ -311,10 +311,11 @@ impl Command for VEmb {
                 .map(|f| match f {
                     Frame::BulkString(Some(data)) => {
                         let s = String::from_utf8_lossy(&data);
-                        s.parse::<f64>().map_err(|_| RedisError::UnexpectedResponse {
-                            expected: "float string",
-                            actual: format!("{s}"),
-                        })
+                        s.parse::<f64>()
+                            .map_err(|_| RedisError::UnexpectedResponse {
+                                expected: "float string",
+                                actual: format!("{s}"),
+                            })
                     }
                     Frame::Double(d) => Ok(d),
                     other => Err(RedisError::UnexpectedResponse {
@@ -511,12 +512,11 @@ impl Command for VSim {
                         let score = match score_frame {
                             Frame::BulkString(Some(data)) => {
                                 let s = String::from_utf8_lossy(&data);
-                                s.parse::<f64>().map_err(|_| {
-                                    RedisError::UnexpectedResponse {
+                                s.parse::<f64>()
+                                    .map_err(|_| RedisError::UnexpectedResponse {
                                         expected: "float string",
                                         actual: format!("{s}"),
-                                    }
-                                })?
+                                    })?
                             }
                             Frame::Double(d) => d,
                             other => {
@@ -871,12 +871,11 @@ impl Command for VLinks {
                         let score = match score_frame {
                             Frame::BulkString(Some(data)) => {
                                 let s = String::from_utf8_lossy(&data);
-                                s.parse::<f64>().map_err(|_| {
-                                    RedisError::UnexpectedResponse {
+                                s.parse::<f64>()
+                                    .map_err(|_| RedisError::UnexpectedResponse {
                                         expected: "float string",
                                         actual: format!("{s}"),
-                                    }
-                                })?
+                                    })?
                             }
                             Frame::Double(d) => d,
                             other => {
