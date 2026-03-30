@@ -1848,3 +1848,223 @@ async fn streams_xrange_count() {
 
     conn.execute(Del::new(k)).await.unwrap();
 }
+
+#[tokio::test]
+async fn streams_xgroup_setid() {
+    let conn = conn().await;
+    let k = "streams_test:xgroup_setid";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    // Set the group's last-delivered ID to "$" (newest).
+    conn.execute(XGroupSetId::new(k, "g1", "$")).await.unwrap();
+
+    // Reading should return nothing since we've caught up.
+    let result = conn
+        .execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+    assert!(result.is_empty() || result[0].1.is_empty());
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xgroup_createconsumer_delconsumer() {
+    let conn = conn().await;
+    let k = "streams_test:xgroup_consumer";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    let created = conn
+        .execute(XGroupCreateConsumer::new(k, "g1", "mycons"))
+        .await
+        .unwrap();
+    assert_eq!(created, 1);
+
+    // Creating again returns 0.
+    let created2 = conn
+        .execute(XGroupCreateConsumer::new(k, "g1", "mycons"))
+        .await
+        .unwrap();
+    assert_eq!(created2, 0);
+
+    let pending = conn
+        .execute(XGroupDelConsumer::new(k, "g1", "mycons"))
+        .await
+        .unwrap();
+    assert_eq!(pending, 0); // no pending entries
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xclaim() {
+    let conn = conn().await;
+    let k = "streams_test:xclaim";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    let id = conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    // Consumer c1 reads the entry.
+    conn.execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+
+    // Consumer c2 claims it with min-idle-time 0.
+    let claimed = conn
+        .execute(XClaim::new(k, "g1", "c2", 0, [&id]))
+        .await
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(claimed[0].id, id);
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xautoclaim() {
+    let conn = conn().await;
+    let k = "streams_test:xautoclaim";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    let id = conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    // Consumer c1 reads the entry.
+    conn.execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+
+    // Consumer c2 auto-claims with min-idle-time 0.
+    let result = conn
+        .execute(XAutoClaim::new(k, "g1", "c2", 0, "0-0"))
+        .await
+        .unwrap();
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(result.entries[0].id, id);
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xpending_summary() {
+    let conn = conn().await;
+    let k = "streams_test:xpending_sum";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XAdd::new(k).field("b", "2")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    // Read as consumer to create pending entries.
+    conn.execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+
+    let summary = conn.execute(XPendingSummary::new(k, "g1")).await.unwrap();
+    assert_eq!(summary.count, 2);
+    assert!(summary.min_id.is_some());
+    assert!(summary.max_id.is_some());
+    assert_eq!(summary.consumers.len(), 1);
+    assert_eq!(summary.consumers[0].0, "c1");
+    assert_eq!(summary.consumers[0].1, 2);
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xpending_range() {
+    let conn = conn().await;
+    let k = "streams_test:xpending_range";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+    conn.execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+
+    let entries = conn
+        .execute(XPendingRange::new(k, "g1", "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].consumer, "c1");
+    assert_eq!(entries[0].delivery_count, 1);
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xinfo_stream() {
+    let conn = conn().await;
+    let k = "streams_test:xinfo_stream";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XAdd::new(k).field("b", "2")).await.unwrap();
+
+    let info = conn.execute(XInfoStream::new(k)).await.unwrap();
+    assert_eq!(info.length, 2);
+    assert!(info.first_entry.is_some());
+    assert!(info.last_entry.is_some());
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xinfo_groups() {
+    let conn = conn().await;
+    let k = "streams_test:xinfo_groups";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g2", "0")).await.unwrap();
+
+    let groups = conn.execute(XInfoGroups::new(k)).await.unwrap();
+    assert_eq!(groups.len(), 2);
+
+    let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+    assert!(names.contains(&"g1"));
+    assert!(names.contains(&"g2"));
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(XGroupDestroy::new(k, "g2")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn streams_xinfo_consumers() {
+    let conn = conn().await;
+    let k = "streams_test:xinfo_consumers";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    conn.execute(XAdd::new(k).field("a", "1")).await.unwrap();
+    conn.execute(XGroupCreate::new(k, "g1", "0")).await.unwrap();
+
+    // Read to create a consumer.
+    conn.execute(XReadGroup::new("g1", "c1", k).count(10))
+        .await
+        .unwrap();
+
+    let consumers = conn.execute(XInfoConsumers::new(k, "g1")).await.unwrap();
+    assert_eq!(consumers.len(), 1);
+    assert_eq!(consumers[0].name, "c1");
+    assert_eq!(consumers[0].pending, 1);
+
+    conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
+    conn.execute(Del::new(k)).await.unwrap();
+}

@@ -1080,6 +1080,168 @@ fn function_stats_wrong_type() {
     assert!(result.is_err());
 }
 
+// -- Streams --
+
+#[test]
+fn xadd_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XADD expects BulkString
+    let result = mock.execute(XAdd::new("key").field("f", "v"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xlen_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // XLEN expects Integer
+    let result = mock.execute(XLen::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xrange_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XRANGE expects Array
+    let result = mock.execute(XRange::all("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xdel_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // XDEL expects Integer
+    let result = mock.execute(XDel::new("key", "0-1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xtrim_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // XTRIM expects Integer
+    let result = mock.execute(XTrim::maxlen("key", 10));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xack_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // XACK expects Integer
+    let result = mock.execute(XAck::new("key", "grp", "0-1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xgroup_create_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XGROUP CREATE expects OK
+    let result = mock.execute(XGroupCreate::new("key", "grp", "0"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xgroup_destroy_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // expects Integer
+    let result = mock.execute(XGroupDestroy::new("key", "grp"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xgroup_setid_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XGROUP SETID expects OK
+    let result = mock.execute(XGroupSetId::new("key", "grp", "0"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xgroup_createconsumer_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // expects Integer
+    let result = mock.execute(XGroupCreateConsumer::new("key", "grp", "c1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xgroup_delconsumer_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // expects Integer
+    let result = mock.execute(XGroupDelConsumer::new("key", "grp", "c1"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xclaim_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XCLAIM expects Array of entries
+    let result = mock.execute(XClaim::new("key", "grp", "c1", 0, ["0-1"]));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xautoclaim_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XAutoClaim::new("key", "grp", "c1", 0, "0-0"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xpending_summary_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XPendingSummary::new("key", "grp"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xpending_range_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XPendingRange::new("key", "grp", "-", "+", 10));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xinfo_stream_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XInfoStream::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xinfo_groups_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XInfoGroups::new("key"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xinfo_consumers_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // expects array
+    let result = mock.execute(XInfoConsumers::new("key", "grp"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xread_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XREAD expects Array or Null
+    let result = mock.execute(XRead::new("key", "0-0"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn xreadgroup_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // XREADGROUP expects Array
+    let result = mock.execute(XReadGroup::new("grp", "c1", "key"));
+    assert!(result.is_err());
+}
+
 #[test]
 fn resp3_script_exists_boolean() {
     let mut mock = MockConnection::new();
