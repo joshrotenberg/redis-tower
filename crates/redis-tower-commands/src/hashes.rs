@@ -821,6 +821,174 @@ impl Command for HPersist {
     }
 }
 
+/// HSETNX key field value
+///
+/// Sets `field` in the hash stored at `key` to `value`, only if `field`
+/// does not yet exist. Returns `true` if the field was set, `false` if it
+/// already existed.
+pub struct HSetNx {
+    key: String,
+    field: String,
+    value: String,
+}
+
+impl HSetNx {
+    pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for HSetNx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("HSETNX"),
+            bulk(self.key.as_str()),
+            bulk(self.field.as_str()),
+            bulk(self.value.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or boolean",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HSETNX"
+    }
+}
+
+/// HINCRBYFLOAT key field increment
+///
+/// Increments the floating-point value of `field` in the hash stored at
+/// `key` by `increment`. Returns the new value as `f64`.
+pub struct HIncrByFloat {
+    key: String,
+    field: String,
+    increment: f64,
+}
+
+impl HIncrByFloat {
+    pub fn new(key: impl Into<String>, field: impl Into<String>, increment: f64) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+            increment,
+        }
+    }
+}
+
+impl Command for HIncrByFloat {
+    type Response = f64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("HINCRBYFLOAT"),
+            bulk(self.key.as_str()),
+            bulk(self.field.as_str()),
+            bulk(self.increment.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => {
+                let s = String::from_utf8_lossy(&data);
+                s.parse::<f64>()
+                    .map_err(|_| RedisError::UnexpectedResponse {
+                        expected: "float string",
+                        actual: format!("{s}"),
+                    })
+            }
+            Frame::Double(d) => Ok(d),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or double",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HINCRBYFLOAT"
+    }
+}
+
+/// HRANDFIELD key \[count\]
+///
+/// Returns one or more random field names from the hash stored at `key`.
+/// Without `count`, returns a single random field; with `count`, returns
+/// up to that many fields. The result is always returned as a `Vec<Bytes>`.
+pub struct HRandField {
+    key: String,
+    count: Option<i64>,
+}
+
+impl HRandField {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count: None,
+        }
+    }
+
+    /// Request `count` random fields. A negative count allows duplicates.
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for HRandField {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HRANDFIELD"), bulk(self.key.as_str())];
+        if let Some(count) = self.count {
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // Single field returned when no count argument was sent.
+            Frame::BulkString(Some(data)) => Ok(vec![data]),
+            Frame::BulkString(None) | Frame::Null => Ok(vec![]),
+            // Multiple fields returned when count argument was sent.
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HRANDFIELD"
+    }
+}
+
 /// HEXPIRETIME key FIELDS numfields field [field ...]
 ///
 /// Returns the absolute Unix expiration timestamp (in seconds) for the

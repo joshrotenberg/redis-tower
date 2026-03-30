@@ -453,3 +453,346 @@ impl Command for LMove {
         "LMOVE"
     }
 }
+
+/// LPUSHX key element
+///
+/// Prepends an element to the head of the list stored at `key`, only if `key`
+/// already exists and holds a list. Returns the length of the list after the
+/// push operation, or 0 if the key does not exist.
+pub struct LPushX {
+    key: String,
+    element: String,
+}
+
+impl LPushX {
+    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            element: element.into(),
+        }
+    }
+}
+
+impl Command for LPushX {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LPUSHX"),
+            bulk(self.key.as_str()),
+            bulk(self.element.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LPUSHX"
+    }
+}
+
+/// RPUSHX key element
+///
+/// Appends an element to the tail of the list stored at `key`, only if `key`
+/// already exists and holds a list. Returns the length of the list after the
+/// push operation, or 0 if the key does not exist.
+pub struct RPushX {
+    key: String,
+    element: String,
+}
+
+impl RPushX {
+    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            element: element.into(),
+        }
+    }
+}
+
+impl Command for RPushX {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("RPUSHX"),
+            bulk(self.key.as_str()),
+            bulk(self.element.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RPUSHX"
+    }
+}
+
+/// Position relative to a pivot element for `LINSERT`.
+pub enum ListPosition {
+    Before,
+    After,
+}
+
+impl ListPosition {
+    fn as_str(&self) -> &str {
+        match self {
+            ListPosition::Before => "BEFORE",
+            ListPosition::After => "AFTER",
+        }
+    }
+}
+
+/// LINSERT key BEFORE|AFTER pivot element
+///
+/// Inserts `element` in the list stored at `key` either before or after the
+/// reference value `pivot`. Returns the length of the list after the insert
+/// operation, or -1 when the pivot value was not found.
+pub struct LInsert {
+    key: String,
+    position: ListPosition,
+    pivot: String,
+    element: String,
+}
+
+impl LInsert {
+    pub fn new(
+        key: impl Into<String>,
+        position: ListPosition,
+        pivot: impl Into<String>,
+        element: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            position,
+            pivot: pivot.into(),
+            element: element.into(),
+        }
+    }
+}
+
+impl Command for LInsert {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LINSERT"),
+            bulk(self.key.as_str()),
+            bulk(self.position.as_str()),
+            bulk(self.pivot.as_str()),
+            bulk(self.element.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LINSERT"
+    }
+}
+
+/// LREM key count element
+///
+/// Removes the first `count` occurrences of `element` from the list stored
+/// at `key`. If `count` is positive, elements are removed from head to tail;
+/// if negative, from tail to head; if zero, all occurrences are removed.
+/// Returns the number of removed elements.
+pub struct LRem {
+    key: String,
+    count: i64,
+    element: String,
+}
+
+impl LRem {
+    pub fn new(key: impl Into<String>, count: i64, element: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            count,
+            element: element.into(),
+        }
+    }
+}
+
+impl Command for LRem {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LREM"),
+            bulk(self.key.as_str()),
+            bulk(self.count.to_string()),
+            bulk(self.element.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LREM"
+    }
+}
+
+/// LTRIM key start stop
+///
+/// Trims an existing list so that it will contain only the specified range of
+/// elements. Both `start` and `stop` are zero-based indices, with negative
+/// values counting from the end of the list.
+pub struct LTrim {
+    key: String,
+    start: i64,
+    stop: i64,
+}
+
+impl LTrim {
+    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for LTrim {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LTRIM"),
+            bulk(self.key.as_str()),
+            bulk(self.start.to_string()),
+            bulk(self.stop.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LTRIM"
+    }
+}
+
+/// LPOS key element \[RANK rank\] \[COUNT count\] \[MAXLEN maxlen\]
+///
+/// Returns the index of matching elements inside a list. By default returns
+/// the position of the first match. Use the builder methods to set optional
+/// `RANK`, `COUNT`, and `MAXLEN` sub-commands.
+pub struct LPos {
+    key: String,
+    element: String,
+    rank: Option<i64>,
+    count: Option<u64>,
+    maxlen: Option<u64>,
+}
+
+impl LPos {
+    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            element: element.into(),
+            rank: None,
+            count: None,
+            maxlen: None,
+        }
+    }
+
+    /// Set the RANK option. A positive rank skips that many matches from the
+    /// head; a negative rank searches from the tail.
+    pub fn rank(mut self, rank: i64) -> Self {
+        self.rank = Some(rank);
+        self
+    }
+
+    /// Set the COUNT option. Limits the number of returned matches (0 means
+    /// return all matches).
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Set the MAXLEN option. Limits the scan to the first `maxlen` entries.
+    pub fn maxlen(mut self, maxlen: u64) -> Self {
+        self.maxlen = Some(maxlen);
+        self
+    }
+}
+
+impl Command for LPos {
+    type Response = Option<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("LPOS"),
+            bulk(self.key.as_str()),
+            bulk(self.element.as_str()),
+        ];
+        if let Some(rank) = self.rank {
+            args.push(bulk("RANK"));
+            args.push(bulk(rank.to_string()));
+        }
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        if let Some(maxlen) = self.maxlen {
+            args.push(bulk("MAXLEN"));
+            args.push(bulk(maxlen.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(Some(n)),
+            Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LPOS"
+    }
+}
