@@ -2202,3 +2202,78 @@ async fn zscan_basic() {
 
     conn.execute(Del::new(k)).await.unwrap();
 }
+
+// -- Blocking command tests --
+
+#[tokio::test]
+async fn blpop_with_data() {
+    let conn = conn().await;
+    let k = "blocking_test:blpop";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(RPush::elements(k, ["a", "b"])).await.unwrap();
+
+    let result = conn.execute(BLPop::new(k, 1.0)).await.unwrap();
+    assert_eq!(result, Some((Bytes::from(k), Bytes::from("a"))));
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn blpop_timeout() {
+    let conn = conn().await;
+    let k = "blocking_test:blpop_timeout";
+    conn.execute(Del::new(k)).await.unwrap();
+
+    // Should timeout and return None.
+    let result = conn.execute(BLPop::new(k, 0.1)).await.unwrap();
+    assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn brpop_with_data() {
+    let conn = conn().await;
+    let k = "blocking_test:brpop";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(RPush::elements(k, ["a", "b"])).await.unwrap();
+
+    let result = conn.execute(BRPop::new(k, 1.0)).await.unwrap();
+    assert_eq!(result, Some((Bytes::from(k), Bytes::from("b"))));
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn bzpopmin_with_data() {
+    let conn = conn().await;
+    let k = "blocking_test:bzpopmin";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(ZAdd::new(k).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    let result = conn.execute(BZPopMin::new(k, 1.0)).await.unwrap();
+    let (key, member, score) = result.unwrap();
+    assert_eq!(key, Bytes::from(k));
+    assert_eq!(member, Bytes::from("a"));
+    assert!((score - 1.0).abs() < f64::EPSILON);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn bzpopmax_with_data() {
+    let conn = conn().await;
+    let k = "blocking_test:bzpopmax";
+    conn.execute(Del::new(k)).await.unwrap();
+    conn.execute(ZAdd::new(k).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+
+    let result = conn.execute(BZPopMax::new(k, 1.0)).await.unwrap();
+    let (key, member, score) = result.unwrap();
+    assert_eq!(key, Bytes::from(k));
+    assert_eq!(member, Bytes::from("b"));
+    assert!((score - 2.0).abs() < f64::EPSILON);
+
+    conn.execute(Del::new(k)).await.unwrap();
+}

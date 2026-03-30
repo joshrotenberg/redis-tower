@@ -4,6 +4,7 @@
 //! strongly-typed `Response`. Commands are organized by category.
 
 mod bitmap;
+mod blocking;
 mod geo;
 mod hashes;
 mod hyperloglog;
@@ -20,6 +21,7 @@ mod strings;
 mod vector_sets;
 
 pub use bitmap::*;
+pub use blocking::*;
 pub use geo::*;
 pub use hashes::*;
 pub use hyperloglog::*;
