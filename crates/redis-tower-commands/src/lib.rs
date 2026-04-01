@@ -5,6 +5,7 @@
 
 mod bitmap;
 mod blocking;
+mod cluster;
 mod geo;
 mod hashes;
 mod hyperloglog;
@@ -22,6 +23,7 @@ mod vector_sets;
 
 pub use bitmap::*;
 pub use blocking::*;
+pub use cluster::*;
 pub use geo::*;
 pub use hashes::*;
 pub use hyperloglog::*;
