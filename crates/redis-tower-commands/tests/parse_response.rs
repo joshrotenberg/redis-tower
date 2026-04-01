@@ -142,6 +142,78 @@ fn select_wrong_type() {
     assert!(result.is_err());
 }
 
+#[test]
+fn info_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // INFO expects BulkString
+    let result = mock.execute(Info::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn time_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // TIME expects array of two bulk strings
+    let result = mock.execute(Time::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn command_count_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // COMMAND COUNT expects Integer
+    let result = mock.execute(CommandCount::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn command_docs_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // COMMAND DOCS expects Array
+    let result = mock.execute(CommandDocs::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn command_list_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // COMMAND LIST expects Array
+    let result = mock.execute(CommandList::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn bgsave_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // BGSAVE expects SimpleString
+    let result = mock.execute(BgSave::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn bgrewriteaof_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // BGREWRITEAOF expects SimpleString
+    let result = mock.execute(BgRewriteAof::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn lastsave_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::SimpleString(Bytes::from("OK"))); // LASTSAVE expects Integer
+    let result = mock.execute(LastSave::new());
+    assert!(result.is_err());
+}
+
+#[test]
+fn swapdb_wrong_type() {
+    let mut mock = MockConnection::new();
+    mock.enqueue(Frame::Integer(42)); // SWAPDB expects OK
+    let result = mock.execute(SwapDb::new(0, 1));
+    assert!(result.is_err());
+}
+
 // -- Hashes --
 
 #[test]
