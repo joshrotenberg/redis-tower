@@ -36,22 +36,30 @@ pub mod cache_layer;
 pub mod caching;
 mod client;
 pub mod command_adapter;
+mod executor;
+pub mod metrics_layer;
 pub mod pipeline;
 pub mod pubsub;
 pub mod reconnect;
 pub mod reconnect_layer;
 mod resilient;
+pub mod script;
+pub mod tracing_layer;
 pub mod transaction;
 
 pub use cache_layer::CacheService;
 pub use caching::CachedClient;
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
+pub use executor::RedisExecutor;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
+pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use reconnect::ResilientConnection;
 pub use reconnect_layer::ReconnectService;
 pub use resilient::ResilientRedisClient;
+pub use script::Script;
+pub use tracing_layer::{TracingLayer, TracingService};
 pub use transaction::{Transaction, TransactionResult};
 
 // Re-export core types.

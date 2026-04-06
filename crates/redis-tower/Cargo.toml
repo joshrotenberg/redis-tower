@@ -29,6 +29,10 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+tracing = { workspace = true }
+sha1 = { workspace = true }
+hex = { workspace = true }
+tower-layer = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
