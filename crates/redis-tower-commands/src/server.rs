@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -1099,5 +1100,763 @@ impl Command for WaitAof {
 
     fn name(&self) -> &str {
         "WAITAOF"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CLIENT subcommands
+// ---------------------------------------------------------------------------
+
+/// CLIENT ID
+///
+/// Returns the ID of the current connection.
+pub struct ClientId;
+
+impl ClientId {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientId {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("ID")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT ID"
+    }
+}
+
+/// CLIENT GETNAME
+///
+/// Returns the name of the current connection as set by CLIENT SETNAME,
+/// or None if no name is set.
+pub struct ClientGetName;
+
+impl ClientGetName {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientGetName {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientGetName {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("GETNAME")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(Some(data)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT GETNAME"
+    }
+}
+
+/// CLIENT SETNAME connection-name
+///
+/// Set the name of the current connection.
+pub struct ClientSetName {
+    name: String,
+}
+
+impl ClientSetName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Command for ClientSetName {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("SETNAME"),
+            bulk(self.name.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT SETNAME"
+    }
+}
+
+/// Filter type for CLIENT LIST.
+pub enum ClientListType {
+    Normal,
+    Master,
+    Replica,
+    Pubsub,
+}
+
+impl ClientListType {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Normal => "normal",
+            Self::Master => "master",
+            Self::Replica => "replica",
+            Self::Pubsub => "pubsub",
+        }
+    }
+}
+
+/// CLIENT LIST \[TYPE normal|master|replica|pubsub\]
+///
+/// Returns information and statistics about client connections.
+/// The response is raw text with one client per line.
+pub struct ClientList {
+    client_type: Option<ClientListType>,
+}
+
+impl ClientList {
+    pub fn new() -> Self {
+        Self { client_type: None }
+    }
+
+    /// Filter clients by type.
+    pub fn client_type(mut self, t: ClientListType) -> Self {
+        self.client_type = Some(t);
+        self
+    }
+}
+
+impl Default for ClientList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientList {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("CLIENT"), bulk("LIST")];
+        if let Some(ref t) = self.client_type {
+            args.push(bulk("TYPE"));
+            args.push(bulk(t.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT LIST"
+    }
+}
+
+/// CLIENT KILL \[ID id\] \[ADDR addr\] \[LADDR addr\] \[USER user\] \[SKIPME yes|no\]
+///
+/// Kill client connections matching the given filters.
+/// Returns the number of clients killed.
+pub struct ClientKill {
+    id: Option<i64>,
+    addr: Option<String>,
+    laddr: Option<String>,
+    user: Option<String>,
+    skipme: Option<bool>,
+}
+
+impl ClientKill {
+    pub fn new() -> Self {
+        Self {
+            id: None,
+            addr: None,
+            laddr: None,
+            user: None,
+            skipme: None,
+        }
+    }
+
+    /// Kill client by connection ID.
+    pub fn id(mut self, id: i64) -> Self {
+        self.id = Some(id);
+        self
+    }
+
+    /// Kill client by remote address (ip:port).
+    pub fn addr(mut self, addr: impl Into<String>) -> Self {
+        self.addr = Some(addr.into());
+        self
+    }
+
+    /// Kill client by local address (ip:port).
+    pub fn laddr(mut self, laddr: impl Into<String>) -> Self {
+        self.laddr = Some(laddr.into());
+        self
+    }
+
+    /// Kill client by authenticated username.
+    pub fn user(mut self, user: impl Into<String>) -> Self {
+        self.user = Some(user.into());
+        self
+    }
+
+    /// Whether to skip the calling client (default yes).
+    pub fn skipme(mut self, skipme: bool) -> Self {
+        self.skipme = Some(skipme);
+        self
+    }
+}
+
+impl Default for ClientKill {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientKill {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("CLIENT"), bulk("KILL")];
+        if let Some(id) = self.id {
+            args.push(bulk("ID"));
+            args.push(bulk(id.to_string()));
+        }
+        if let Some(ref addr) = self.addr {
+            args.push(bulk("ADDR"));
+            args.push(bulk(addr.as_str()));
+        }
+        if let Some(ref laddr) = self.laddr {
+            args.push(bulk("LADDR"));
+            args.push(bulk(laddr.as_str()));
+        }
+        if let Some(ref user) = self.user {
+            args.push(bulk("USER"));
+            args.push(bulk(user.as_str()));
+        }
+        if let Some(skipme) = self.skipme {
+            args.push(bulk("SKIPME"));
+            args.push(bulk(if skipme { "yes" } else { "no" }));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT KILL"
+    }
+}
+
+/// CLIENT INFO
+///
+/// Returns information about the current client connection.
+pub struct ClientInfo;
+
+impl ClientInfo {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientInfo {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("INFO")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT INFO"
+    }
+}
+
+/// CLIENT NO-EVICT ON|OFF
+///
+/// Set the client eviction mode for the current connection. When enabled,
+/// the current client will not be evicted even when the maxmemory-clients
+/// threshold is reached.
+pub struct ClientNoEvict {
+    enabled: bool,
+}
+
+impl ClientNoEvict {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+}
+
+impl Command for ClientNoEvict {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("NO-EVICT"),
+            bulk(if self.enabled { "ON" } else { "OFF" }),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT NO-EVICT"
+    }
+}
+
+/// CLIENT NO-TOUCH ON|OFF
+///
+/// Control whether commands sent by the client affect LRU/LFU of accessed
+/// keys. When enabled, accessed keys will not have their idle time or
+/// frequency updated.
+pub struct ClientNoTouch {
+    enabled: bool,
+}
+
+impl ClientNoTouch {
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+}
+
+impl Command for ClientNoTouch {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("NO-TOUCH"),
+            bulk(if self.enabled { "ON" } else { "OFF" }),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT NO-TOUCH"
+    }
+}
+
+/// Pause mode for CLIENT PAUSE.
+pub enum ClientPauseMode {
+    /// Pause all client commands.
+    All,
+    /// Only pause write commands.
+    Write,
+}
+
+impl ClientPauseMode {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::All => "ALL",
+            Self::Write => "WRITE",
+        }
+    }
+}
+
+/// CLIENT PAUSE timeout \[WRITE|ALL\]
+///
+/// Suspend all clients for the specified amount of time (in milliseconds).
+pub struct ClientPause {
+    timeout: u64,
+    mode: Option<ClientPauseMode>,
+}
+
+impl ClientPause {
+    pub fn new(timeout: u64) -> Self {
+        Self {
+            timeout,
+            mode: None,
+        }
+    }
+
+    /// Set the pause mode.
+    pub fn mode(mut self, mode: ClientPauseMode) -> Self {
+        self.mode = Some(mode);
+        self
+    }
+}
+
+impl Command for ClientPause {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("CLIENT"),
+            bulk("PAUSE"),
+            bulk(self.timeout.to_string()),
+        ];
+        if let Some(ref mode) = self.mode {
+            args.push(bulk(mode.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT PAUSE"
+    }
+}
+
+/// CLIENT UNPAUSE
+///
+/// Resume clients that were paused by CLIENT PAUSE.
+pub struct ClientUnpause;
+
+impl ClientUnpause {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientUnpause {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientUnpause {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("UNPAUSE")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT UNPAUSE"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CONFIG subcommands
+// ---------------------------------------------------------------------------
+
+/// CONFIG GET pattern
+///
+/// Returns configuration parameters matching the glob-style pattern.
+/// The response is a list of key-value pairs.
+pub struct ConfigGet {
+    pattern: String,
+}
+
+impl ConfigGet {
+    pub fn new(pattern: impl Into<String>) -> Self {
+        Self {
+            pattern: pattern.into(),
+        }
+    }
+}
+
+impl Command for ConfigGet {
+    type Response = Vec<(Bytes, Bytes)>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CONFIG"),
+            bulk("GET"),
+            bulk(self.pattern.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // RESP2: flat array of alternating key, value bulk strings
+            Frame::Array(Some(frames)) => {
+                if frames.len() % 2 != 0 {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "array with even number of elements",
+                        actual: format!("array with {} elements", frames.len()),
+                    });
+                }
+                frames
+                    .chunks(2)
+                    .map(|pair| {
+                        let key = match &pair[0] {
+                            Frame::BulkString(Some(data)) => data.clone(),
+                            other => {
+                                return Err(RedisError::UnexpectedResponse {
+                                    expected: "bulk string",
+                                    actual: format!("{other:?}"),
+                                });
+                            }
+                        };
+                        let value = match &pair[1] {
+                            Frame::BulkString(Some(data)) => data.clone(),
+                            other => {
+                                return Err(RedisError::UnexpectedResponse {
+                                    expected: "bulk string",
+                                    actual: format!("{other:?}"),
+                                });
+                            }
+                        };
+                        Ok((key, value))
+                    })
+                    .collect()
+            }
+            // RESP3: Map of key-value pairs
+            Frame::Map(pairs) => pairs
+                .into_iter()
+                .map(|(k, v)| {
+                    let key = match k {
+                        Frame::BulkString(Some(data)) => data,
+                        other => {
+                            return Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string key",
+                                actual: format!("{other:?}"),
+                            });
+                        }
+                    };
+                    let value = match v {
+                        Frame::BulkString(Some(data)) => data,
+                        other => {
+                            return Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string value",
+                                actual: format!("{other:?}"),
+                            });
+                        }
+                    };
+                    Ok((key, value))
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array or map",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CONFIG GET"
+    }
+}
+
+/// CONFIG SET param value \[param value ...\]
+///
+/// Set one or more configuration parameters to the given values.
+pub struct ConfigSet {
+    pairs: Vec<(String, String)>,
+}
+
+impl ConfigSet {
+    /// Set a single configuration parameter.
+    pub fn new(param: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            pairs: vec![(param.into(), value.into())],
+        }
+    }
+
+    /// Add an additional parameter-value pair.
+    pub fn param(mut self, param: impl Into<String>, value: impl Into<String>) -> Self {
+        self.pairs.push((param.into(), value.into()));
+        self
+    }
+}
+
+impl Command for ConfigSet {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("CONFIG"), bulk("SET")];
+        for (param, value) in &self.pairs {
+            args.push(bulk(param.as_str()));
+            args.push(bulk(value.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CONFIG SET"
+    }
+}
+
+/// CONFIG RESETSTAT
+///
+/// Reset the statistics reported by the INFO command.
+pub struct ConfigResetStat;
+
+impl ConfigResetStat {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ConfigResetStat {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ConfigResetStat {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CONFIG"), bulk("RESETSTAT")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CONFIG RESETSTAT"
+    }
+}
+
+/// CONFIG REWRITE
+///
+/// Rewrite the configuration file with the in-memory configuration.
+pub struct ConfigRewrite;
+
+impl ConfigRewrite {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ConfigRewrite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ConfigRewrite {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CONFIG"), bulk("REWRITE")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CONFIG REWRITE"
     }
 }

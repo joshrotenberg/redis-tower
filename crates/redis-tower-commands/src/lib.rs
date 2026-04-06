@@ -3,9 +3,11 @@
 //! Each command is a struct implementing [`redis_tower_core::Command`] with a
 //! strongly-typed `Response`. Commands are organized by category.
 
+mod acl;
 mod bitmap;
 mod blocking;
 mod cluster;
+mod diagnostics;
 mod geo;
 mod hashes;
 mod hyperloglog;
@@ -21,9 +23,11 @@ mod streams;
 mod strings;
 mod vector_sets;
 
+pub use acl::*;
 pub use bitmap::*;
 pub use blocking::*;
 pub use cluster::*;
+pub use diagnostics::*;
 pub use geo::*;
 pub use hashes::*;
 pub use hyperloglog::*;
