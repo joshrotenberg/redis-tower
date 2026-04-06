@@ -5,7 +5,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn hsetnx() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:hash:hsetnx";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -19,7 +19,7 @@ async fn hsetnx() {
 
 #[tokio::test]
 async fn hincrbyfloat() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:hash:hincrbyfloat";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -34,7 +34,7 @@ async fn hincrbyfloat() {
 
 #[tokio::test]
 async fn hrandfield() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:hash:hrandfield";
 
     c.execute(Del::new(key)).await.unwrap();

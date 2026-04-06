@@ -43,7 +43,7 @@ pub async fn discover_replicas(
 /// Sends `SENTINEL GET-MASTER-ADDR-BY-NAME <name>` and parses the
 /// response (a two-element array: \[host, port\]).
 async fn query_master_addr(sentinel_addr: &str, master_name: &str) -> Result<String, RedisError> {
-    let conn = RedisConnection::connect(sentinel_addr).await?;
+    let mut conn = RedisConnection::connect(sentinel_addr).await?;
     let frame = array(vec![
         bulk("SENTINEL"),
         bulk("GET-MASTER-ADDR-BY-NAME"),
@@ -62,7 +62,7 @@ async fn query_master_addr(sentinel_addr: &str, master_name: &str) -> Result<Str
 ///
 /// Sends `SENTINEL REPLICAS <name>` (Redis 7+) and parses the response.
 async fn query_replicas(sentinel_addr: &str, master_name: &str) -> Result<Vec<String>, RedisError> {
-    let conn = RedisConnection::connect(sentinel_addr).await?;
+    let mut conn = RedisConnection::connect(sentinel_addr).await?;
 
     // Try SENTINEL REPLICAS first (Redis 7+), fall back to SENTINEL SLAVES.
     let frame = array(vec![bulk("SENTINEL"), bulk("REPLICAS"), bulk(master_name)]);
@@ -74,7 +74,7 @@ async fn query_replicas(sentinel_addr: &str, master_name: &str) -> Result<Vec<St
 
     // If REPLICAS fails (older Redis), try SLAVES.
     if let Frame::Error(_) = &response {
-        let conn = RedisConnection::connect(sentinel_addr).await?;
+        let mut conn = RedisConnection::connect(sentinel_addr).await?;
         let frame = array(vec![bulk("SENTINEL"), bulk("SLAVES"), bulk(master_name)]);
         let responses = conn.execute_pipeline(vec![frame]).await?;
         let response = responses

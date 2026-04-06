@@ -6,7 +6,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn geoadd_geopos() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:geo:geopos";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -35,7 +35,7 @@ async fn geoadd_geopos() {
 
 #[tokio::test]
 async fn geodist() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:geo:geodist";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -56,7 +56,7 @@ async fn geodist() {
 
 #[tokio::test]
 async fn geohash() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:geo:geohash";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -79,7 +79,7 @@ async fn geohash() {
 
 #[tokio::test]
 async fn geosearch() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:geo:geosearch";
 
     c.execute(Del::new(key)).await.unwrap();

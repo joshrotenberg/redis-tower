@@ -82,6 +82,15 @@ async fn client() -> RedisClient {
         .expect("failed to connect to Redis")
 }
 
+/// Helper: poll_ready then call, honoring the Tower contract.
+async fn call_ready<S, Req>(svc: &mut S, req: Req) -> Result<S::Response, S::Error>
+where
+    S: tower::Service<Req>,
+{
+    std::future::poll_fn(|cx| svc.poll_ready(cx)).await?;
+    svc.call(req).await
+}
+
 /// Generate a unique key prefix for test isolation.
 fn key(test: &str, name: &str) -> String {
     format!("redis_tower_test:{test}:{name}")
@@ -91,14 +100,14 @@ fn key(test: &str, name: &str) -> String {
 
 #[tokio::test]
 async fn connect_and_ping() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
 
 #[tokio::test]
 async fn ping_with_message() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let echo = conn.execute(Ping::with_message("hello")).await.unwrap();
     assert_eq!(echo, "hello");
 }
@@ -107,7 +116,7 @@ async fn ping_with_message() {
 async fn connect_url() {
     let addr = redis_addr();
     let url = format!("redis://{addr}");
-    let conn = RedisConnection::connect_url(&url).await.unwrap();
+    let mut conn = RedisConnection::connect_url(&url).await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
@@ -116,7 +125,7 @@ async fn connect_url() {
 
 #[tokio::test]
 async fn set_and_get() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_and_get", "foo");
     conn.execute(Set::new(&k, "bar")).await.unwrap();
     let val = conn.execute(Get::new(&k)).await.unwrap();
@@ -126,7 +135,7 @@ async fn set_and_get() {
 
 #[tokio::test]
 async fn get_nonexistent() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let val = conn
         .execute(Get::new(key("get_nonexistent", "x")))
         .await
@@ -136,7 +145,7 @@ async fn get_nonexistent() {
 
 #[tokio::test]
 async fn set_with_ex() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_with_ex", "k");
     conn.execute(Set::new(&k, "value").ex(10)).await.unwrap();
     let ttl = conn.execute(Ttl::new(&k)).await.unwrap();
@@ -146,7 +155,7 @@ async fn set_with_ex() {
 
 #[tokio::test]
 async fn set_nx_succeeds_when_missing() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_nx_ok", "k");
     conn.execute(Del::new(&k)).await.unwrap();
     let result = conn.execute(Set::new(&k, "value").nx()).await.unwrap();
@@ -158,7 +167,7 @@ async fn set_nx_succeeds_when_missing() {
 
 #[tokio::test]
 async fn set_nx_fails_when_exists() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_nx_fail", "k");
     conn.execute(Set::new(&k, "first")).await.unwrap();
     let result = conn.execute(Set::new(&k, "second").nx()).await.unwrap();
@@ -170,7 +179,7 @@ async fn set_nx_fails_when_exists() {
 
 #[tokio::test]
 async fn set_with_get() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_with_get", "k");
     conn.execute(Set::new(&k, "old")).await.unwrap();
     let old = conn.execute(Set::new(&k, "new").get()).await.unwrap();
@@ -180,7 +189,7 @@ async fn set_with_get() {
 
 #[tokio::test]
 async fn incr() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("incr", "counter");
     conn.execute(Set::new(&k, "10")).await.unwrap();
     let val = conn.execute(Incr::new(&k)).await.unwrap();
@@ -190,7 +199,7 @@ async fn incr() {
 
 #[tokio::test]
 async fn incr_creates_key() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("incr_create", "counter");
     conn.execute(Del::new(&k)).await.unwrap();
     let val = conn.execute(Incr::new(&k)).await.unwrap();
@@ -200,7 +209,7 @@ async fn incr_creates_key() {
 
 #[tokio::test]
 async fn mget() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let a = key("mget", "a");
     let b = key("mget", "b");
     let missing = key("mget", "missing");
@@ -221,7 +230,7 @@ async fn mget() {
 
 #[tokio::test]
 async fn del_single() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("del_single", "k");
     conn.execute(Set::new(&k, "x")).await.unwrap();
     let removed = conn.execute(Del::new(&k)).await.unwrap();
@@ -232,7 +241,7 @@ async fn del_single() {
 
 #[tokio::test]
 async fn del_multiple() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k1 = key("del_multi", "d1");
     let k2 = key("del_multi", "d2");
     let k3 = key("del_multi", "d3");
@@ -247,7 +256,7 @@ async fn del_multiple() {
 
 #[tokio::test]
 async fn exists() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("exists", "e1");
     let missing = key("exists", "missing");
     conn.execute(Set::new(&k, "x")).await.unwrap();
@@ -261,7 +270,7 @@ async fn exists() {
 
 #[tokio::test]
 async fn expire_and_ttl() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("expire_ttl", "k");
     conn.execute(Set::new(&k, "x")).await.unwrap();
 
@@ -278,14 +287,14 @@ async fn expire_and_ttl() {
 
 #[tokio::test]
 async fn ttl_nonexistent() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let ttl = conn.execute(Ttl::new(key("ttl_none", "k"))).await.unwrap();
     assert_eq!(ttl, -2);
 }
 
 #[tokio::test]
 async fn expire_nonexistent() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let set = conn
         .execute(Expire::new(key("expire_none", "k"), 60))
         .await
@@ -339,7 +348,7 @@ async fn client_shared_across_tasks() {
 
 #[tokio::test]
 async fn redis_error_on_wrong_type() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("err_wrong_type", "k");
     conn.execute(Set::new(&k, "not_a_number")).await.unwrap();
     let result = conn.execute(Incr::new(&k)).await;
@@ -356,7 +365,7 @@ async fn redis_error_on_wrong_type() {
 
 #[tokio::test]
 async fn pipeline_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k1 = key("pipe_basic", "a");
     let k2 = key("pipe_basic", "b");
 
@@ -365,7 +374,7 @@ async fn pipeline_basic() {
         .push(Set::new(&k2, "world"))
         .push(Get::new(&k1))
         .push(Get::new(&k2))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -380,14 +389,14 @@ async fn pipeline_basic() {
 
 #[tokio::test]
 async fn pipeline_with_errors() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("pipe_err", "k");
     conn.execute(Set::new(&k, "not_a_number")).await.unwrap();
 
     let results = Pipeline::new()
         .push(Incr::new(&k)) // will error
         .push(Ping::new()) // will succeed
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -402,7 +411,7 @@ async fn pipeline_with_errors() {
 
 #[tokio::test]
 async fn pipeline_incr_sequence() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("pipe_incr", "counter");
     conn.execute(Del::new(&k)).await.unwrap();
 
@@ -410,7 +419,7 @@ async fn pipeline_incr_sequence() {
         .push(Incr::new(&k))
         .push(Incr::new(&k))
         .push(Incr::new(&k))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -425,7 +434,7 @@ async fn pipeline_incr_sequence() {
 
 #[tokio::test]
 async fn transaction_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("txn_basic", "k");
     conn.execute(Del::new(&k)).await.unwrap();
 
@@ -433,7 +442,7 @@ async fn transaction_basic() {
         .push(Set::new(&k, "1"))
         .push(Incr::new(&k))
         .push(Get::new(&k))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -452,14 +461,14 @@ async fn transaction_basic() {
 
 #[tokio::test]
 async fn transaction_watch_no_conflict() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("txn_watch_ok", "k");
     conn.execute(Set::new(&k, "10")).await.unwrap();
 
     let result = Transaction::new()
         .watch([k.as_str()])
         .push(Incr::new(&k))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -477,7 +486,7 @@ async fn transaction_watch_no_conflict() {
 async fn transaction_watch_aborted() {
     let k = key("txn_watch_abort", "k");
 
-    let conn1 = conn().await;
+    let mut conn1 = conn().await;
     conn1.execute(Set::new(&k, "original")).await.unwrap();
 
     // Send WATCH manually, then modify from another connection, then MULTI/EXEC.
@@ -493,7 +502,7 @@ async fn transaction_watch_aborted() {
     assert!(matches!(frames[0], redis_tower::Frame::SimpleString(_)));
 
     // Modify the key from conn2 (breaks the WATCH).
-    let conn2 = conn().await;
+    let mut conn2 = conn().await;
     conn2.execute(Set::new(&k, "modified")).await.unwrap();
 
     // MULTI + INCR + EXEC on conn1. EXEC should return null (aborted).
@@ -517,8 +526,8 @@ async fn transaction_watch_aborted() {
 
 #[tokio::test]
 async fn transaction_empty() {
-    let conn = conn().await;
-    let result = Transaction::new().execute(&conn).await.unwrap();
+    let mut conn = conn().await;
+    let result = Transaction::new().execute(&mut conn).await.unwrap();
     match result {
         TransactionResult::Committed(results) => {
             assert_eq!(results.len(), 0);
@@ -538,7 +547,7 @@ async fn pubsub_basic() {
     pubsub.subscribe(&[&channel]).await.unwrap();
 
     // Publish from a separate connection.
-    let pub_conn = conn().await;
+    let mut pub_conn = conn().await;
     use redis_tower_protocol::helpers::{array, bulk};
     let publish_frame = array(vec![
         bulk("PUBLISH"),
@@ -572,7 +581,7 @@ async fn pubsub_pattern() {
     let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
     pubsub.psubscribe(&[&pattern]).await.unwrap();
 
-    let pub_conn = conn().await;
+    let mut pub_conn = conn().await;
     use redis_tower_protocol::helpers::{array, bulk};
     let publish_frame = array(vec![
         bulk("PUBLISH"),
@@ -604,7 +613,7 @@ async fn pubsub_multiple_messages() {
     let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
     pubsub.subscribe(&[&channel]).await.unwrap();
 
-    let pub_conn = conn().await;
+    let mut pub_conn = conn().await;
     use redis_tower_protocol::helpers::{array, bulk};
 
     for i in 0..3 {
@@ -630,7 +639,7 @@ async fn pubsub_multiple_messages() {
 
 #[tokio::test]
 async fn hset_and_hget() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hset_hget", "h");
     let added = conn
         .execute(HSet::new(&k, "field1", "value1").field("field2", "value2"))
@@ -646,7 +655,7 @@ async fn hset_and_hget() {
 
 #[tokio::test]
 async fn hdel() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hdel", "h");
     conn.execute(HSet::new(&k, "a", "1").field("b", "2").field("c", "3"))
         .await
@@ -660,7 +669,7 @@ async fn hdel() {
 
 #[tokio::test]
 async fn hexists() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hexists", "h");
     conn.execute(HSet::new(&k, "f", "v")).await.unwrap();
     assert!(conn.execute(HExists::new(&k, "f")).await.unwrap());
@@ -670,7 +679,7 @@ async fn hexists() {
 
 #[tokio::test]
 async fn hgetall() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hgetall", "h");
     conn.execute(HSet::new(&k, "a", "1").field("b", "2"))
         .await
@@ -690,7 +699,7 @@ async fn hgetall() {
 
 #[tokio::test]
 async fn hincrby() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hincrby", "h");
     conn.execute(HSet::new(&k, "count", "10")).await.unwrap();
     let val = conn.execute(HIncrBy::new(&k, "count", 5)).await.unwrap();
@@ -700,7 +709,7 @@ async fn hincrby() {
 
 #[tokio::test]
 async fn hkeys_hvals_hlen() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hkeys_hvals", "h");
     conn.execute(HSet::new(&k, "x", "1").field("y", "2"))
         .await
@@ -718,7 +727,7 @@ async fn hkeys_hvals_hlen() {
 
 #[tokio::test]
 async fn lpush_rpush_lrange() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("lpush_rpush", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(RPush::new(&k, "a")).await.unwrap();
@@ -735,7 +744,7 @@ async fn lpush_rpush_lrange() {
 
 #[tokio::test]
 async fn lpop_rpop() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("lpop_rpop", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(RPush::elements(&k, ["1", "2", "3"]))
@@ -750,7 +759,7 @@ async fn lpop_rpop() {
 
 #[tokio::test]
 async fn llen_lindex_lset() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("llen_lindex", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(RPush::elements(&k, ["a", "b", "c"]))
@@ -773,7 +782,7 @@ async fn llen_lindex_lset() {
 
 #[tokio::test]
 async fn sadd_smembers_scard() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("sadd_smembers", "s");
     conn.execute(Del::new(&k)).await.unwrap();
     let added = conn
@@ -792,7 +801,7 @@ async fn sadd_smembers_scard() {
 
 #[tokio::test]
 async fn srem_sismember() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("srem_sismember", "s");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(SAdd::members(&k, ["x", "y", "z"]))
@@ -807,7 +816,7 @@ async fn srem_sismember() {
 
 #[tokio::test]
 async fn sinter() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k1 = key("sinter", "s1");
     let k2 = key("sinter", "s2");
     conn.execute(Del::keys([&k1, &k2])).await.unwrap();
@@ -829,7 +838,7 @@ async fn sinter() {
 
 #[tokio::test]
 async fn zadd_zscore_zcard() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zadd_zscore", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     let added = conn
@@ -852,7 +861,7 @@ async fn zadd_zscore_zcard() {
 
 #[tokio::test]
 async fn zrem_zrank() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zrem_zrank", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(ZAdd::new(&k).member(1.0, "a").member(2.0, "b"))
@@ -867,7 +876,7 @@ async fn zrem_zrank() {
 
 #[tokio::test]
 async fn zrange() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zrange", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(
@@ -890,7 +899,7 @@ async fn zrange() {
 
 #[tokio::test]
 async fn zincrby() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zincrby", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(ZAdd::new(&k).member(10.0, "player"))
@@ -903,7 +912,7 @@ async fn zincrby() {
 
 #[tokio::test]
 async fn zrangebyscore() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zrangebyscore", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(
@@ -943,7 +952,7 @@ async fn pubsub_unsubscribe() {
     pubsub.unsubscribe(&[&ch1]).await.unwrap();
 
     // Publish to ch1 (unsubscribed) and ch2 (still subscribed).
-    let pub_conn = conn().await;
+    let mut pub_conn = conn().await;
     use redis_tower_protocol::helpers::{array, bulk};
     pub_conn
         .execute_pipeline(vec![array(vec![
@@ -974,7 +983,7 @@ async fn pubsub_punsubscribe() {
     pubsub.punsubscribe(&[&pat]).await.unwrap();
 
     // After punsubscribe, publishing should not deliver.
-    let pub_conn = conn().await;
+    let mut pub_conn = conn().await;
     use redis_tower_protocol::helpers::{array, bulk};
     pub_conn
         .execute_pipeline(vec![array(vec![
@@ -1000,7 +1009,7 @@ async fn conn_db1() -> RedisConnection {
 
 #[tokio::test]
 async fn flushdb() {
-    let conn = conn_db1().await;
+    let mut conn = conn_db1().await;
     let k = key("flushdb", "k");
     conn.execute(Set::new(&k, "x")).await.unwrap();
     conn.execute(FlushDb::new()).await.unwrap();
@@ -1010,7 +1019,7 @@ async fn flushdb() {
 
 #[tokio::test]
 async fn flushdb_sync_mode() {
-    let conn = conn_db1().await;
+    let mut conn = conn_db1().await;
     let k = key("flushdb_sync", "k");
     conn.execute(Set::new(&k, "x")).await.unwrap();
     conn.execute(FlushDb::new().sync_mode()).await.unwrap();
@@ -1032,13 +1041,13 @@ async fn pipeline_len_and_empty() {
 
 #[tokio::test]
 async fn pipeline_type_mismatch() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("pipe_mismatch", "k");
     conn.execute(Set::new(&k, "hello")).await.unwrap();
 
     let results = Pipeline::new()
         .push(Get::new(&k))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -1051,13 +1060,13 @@ async fn pipeline_type_mismatch() {
 
 #[tokio::test]
 async fn pipeline_take_twice() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("pipe_take2", "k");
     conn.execute(Set::new(&k, "val")).await.unwrap();
 
     let mut results = Pipeline::new()
         .push(Get::new(&k))
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -1070,10 +1079,10 @@ async fn pipeline_take_twice() {
 
 #[tokio::test]
 async fn pipeline_out_of_bounds() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let results = Pipeline::new()
         .push(Ping::new())
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
     assert!(results.get::<String>(99).is_err());
@@ -1105,7 +1114,7 @@ async fn client_connect_url() {
 
 #[tokio::test]
 async fn set_with_px() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_px", "k");
     conn.execute(Set::new(&k, "value").px(10000)).await.unwrap();
     let ttl = conn.execute(Ttl::new(&k)).await.unwrap();
@@ -1115,7 +1124,7 @@ async fn set_with_px() {
 
 #[tokio::test]
 async fn set_xx_succeeds_when_exists() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_xx_ok", "k");
     conn.execute(Set::new(&k, "old")).await.unwrap();
     conn.execute(Set::new(&k, "new").xx()).await.unwrap();
@@ -1126,7 +1135,7 @@ async fn set_xx_succeeds_when_exists() {
 
 #[tokio::test]
 async fn set_xx_fails_when_missing() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("set_xx_fail", "k");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(Set::new(&k, "value").xx()).await.unwrap();
@@ -1138,7 +1147,7 @@ async fn set_xx_fails_when_missing() {
 
 #[tokio::test]
 async fn lpush_multiple() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("lpush_multi", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     let len = conn
@@ -1151,7 +1160,7 @@ async fn lpush_multiple() {
 
 #[tokio::test]
 async fn lpop_empty() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("lpop_empty", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     let val = conn.execute(LPop::new(&k)).await.unwrap();
@@ -1160,7 +1169,7 @@ async fn lpop_empty() {
 
 #[tokio::test]
 async fn rpop_empty() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("rpop_empty", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     let val = conn.execute(RPop::new(&k)).await.unwrap();
@@ -1169,7 +1178,7 @@ async fn rpop_empty() {
 
 #[tokio::test]
 async fn lindex_out_of_range() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("lindex_oor", "l");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(RPush::new(&k, "a")).await.unwrap();
@@ -1182,7 +1191,7 @@ async fn lindex_out_of_range() {
 
 #[tokio::test]
 async fn exists_single() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("exists_single", "k");
     conn.execute(Set::new(&k, "x")).await.unwrap();
     assert_eq!(conn.execute(Exists::new(&k)).await.unwrap(), 1);
@@ -1194,7 +1203,7 @@ async fn exists_single() {
 
 #[tokio::test]
 async fn hdel_single() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hdel_single", "h");
     conn.execute(HSet::new(&k, "f", "v")).await.unwrap();
     let removed = conn.execute(HDel::new(&k, "f")).await.unwrap();
@@ -1206,7 +1215,7 @@ async fn hdel_single() {
 
 #[tokio::test]
 async fn hgetall_empty() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("hgetall_empty", "h");
     conn.execute(Del::new(&k)).await.unwrap();
     let pairs = conn.execute(HGetAll::new(&k)).await.unwrap();
@@ -1217,7 +1226,7 @@ async fn hgetall_empty() {
 
 #[tokio::test]
 async fn srem_multiple() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("srem_multi", "s");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(SAdd::members(&k, ["a", "b", "c"]))
@@ -1232,7 +1241,7 @@ async fn srem_multiple() {
 
 #[tokio::test]
 async fn zrem_multiple() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("zrem_multi", "z");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(
@@ -1265,14 +1274,14 @@ async fn service_poll_ready() {
 
 #[tokio::test]
 async fn transaction_with_redis_error() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("txn_err", "k");
     conn.execute(Set::new(&k, "not_a_number")).await.unwrap();
 
     let result = Transaction::new()
         .push(Incr::new(&k)) // will fail inside EXEC
         .push(Ping::new())
-        .execute(&conn)
+        .execute(&mut conn)
         .await
         .unwrap();
 
@@ -1294,7 +1303,7 @@ async fn transaction_with_redis_error() {
 
 #[tokio::test]
 async fn append() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("append", "k");
     conn.execute(Del::new(&k)).await.unwrap();
     conn.execute(Set::new(&k, "hello")).await.unwrap();
@@ -1307,7 +1316,7 @@ async fn append() {
 
 #[tokio::test]
 async fn append_creates_key() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = key("append_create", "k");
     conn.execute(Del::new(&k)).await.unwrap();
     let len = conn.execute(Append::new(&k, "new")).await.unwrap();
@@ -1317,7 +1326,7 @@ async fn append_creates_key() {
 
 #[tokio::test]
 async fn mset() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k1 = key("mset", "a");
     let k2 = key("mset", "b");
     conn.execute(MSet::new([(k1.as_str(), "1"), (k2.as_str(), "2")]))
@@ -1334,7 +1343,7 @@ async fn mset() {
 
 #[tokio::test]
 async fn rename() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k1 = key("rename", "old");
     let k2 = key("rename", "new");
     conn.execute(Del::keys([&k1, &k2])).await.unwrap();
@@ -1350,7 +1359,7 @@ async fn rename() {
 
 #[tokio::test]
 async fn type_command() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let ks = key("type", "string");
     let kl = key("type", "list");
     let kh = key("type", "hash");
@@ -1368,7 +1377,7 @@ async fn type_command() {
 
 #[tokio::test]
 async fn dbsize() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let size = conn.execute(DbSize::new()).await.unwrap();
     assert!(size >= 0, "DBSIZE should return non-negative");
     // Don't compare before/after -- parallel tests can change the count.
@@ -1376,7 +1385,7 @@ async fn dbsize() {
 
 #[tokio::test]
 async fn select_db() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     conn.execute(Select::new(2)).await.unwrap();
     conn.execute(Set::new("select_test", "val")).await.unwrap();
     conn.execute(Select::new(0)).await.unwrap();
@@ -1387,7 +1396,7 @@ async fn select_db() {
 
 #[tokio::test]
 async fn lmove() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let src = key("lmove", "src");
     let dst = key("lmove", "dst");
     conn.execute(Del::keys([&src, &dst])).await.unwrap();
@@ -1416,7 +1425,7 @@ async fn lmove() {
 #[tokio::test]
 async fn resilient_connection_basic() {
     let addr = redis_addr();
-    let conn = ResilientConnection::new(
+    let mut conn = ResilientConnection::new(
         AddrConnectionFactory::new(&addr),
         ReconnectConfig::default(),
     )
@@ -1439,7 +1448,7 @@ async fn resilient_connection_with_callbacks() {
     let connected = Arc::new(AtomicBool::new(false));
     let connected_clone = Arc::clone(&connected);
 
-    let conn = ResilientConnection::new(
+    let mut conn = ResilientConnection::new(
         AddrConnectionFactory::new(&addr),
         ReconnectConfig::default(),
     )
@@ -1521,11 +1530,11 @@ async fn resilient_client_connect_url() {
 #[tokio::test]
 async fn csc_cache_hit() {
     let addr = redis_addr();
-    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
 
     let k = "csc_test:cache_hit";
     // Write via a separate connection (bypasses cache).
-    let writer = conn().await;
+    let mut writer = conn().await;
     writer.execute(Set::new(k, "hello")).await.unwrap();
 
     // First read: cache miss, hits Redis.
@@ -1544,12 +1553,12 @@ async fn csc_cache_hit() {
 #[tokio::test]
 async fn csc_invalidation() {
     let addr = redis_addr();
-    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
 
     let k = "csc_test:invalidation";
 
     // Write and read to populate cache.
-    let writer = conn().await;
+    let mut writer = conn().await;
     writer.execute(Set::new(k, "original")).await.unwrap();
     let _: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
     assert_eq!(client.cache_size().await, 1);
@@ -1576,7 +1585,7 @@ async fn csc_invalidation() {
 #[tokio::test]
 async fn csc_write_not_cached() {
     let addr = redis_addr();
-    let client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
 
     let k = "csc_test:write_not_cached";
     // SET should not be cached.
@@ -1601,16 +1610,16 @@ async fn tower_csc_cache_hit() {
 
     let k = "tower_csc:cache_hit";
     // Write directly.
-    let writer = conn().await;
+    let mut writer = conn().await;
     writer.execute(Set::new(k, "hello")).await.unwrap();
 
     // First read: cache miss.
-    let v1: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    let v1: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
     assert_eq!(v1, Some(Bytes::from("hello")));
     assert_eq!(svc.inner_mut().cache_size().await, 1);
 
     // Second read: cache hit.
-    let v2: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    let v2: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
     assert_eq!(v2, Some(Bytes::from("hello")));
 
     writer.execute(Del::new(k)).await.unwrap();
@@ -1628,10 +1637,10 @@ async fn tower_csc_write_bypasses_cache() {
     let mut svc = CommandAdapter::new(cache_svc);
 
     let k = "tower_csc:write_bypass";
-    svc.call(Set::new(k, "val")).await.unwrap();
+    call_ready(&mut svc, Set::new(k, "val")).await.unwrap();
     assert_eq!(svc.inner_mut().cache_size().await, 0);
 
-    svc.call(Del::new(k)).await.unwrap();
+    call_ready(&mut svc, Del::new(k)).await.unwrap();
 }
 
 #[tokio::test]
@@ -1648,7 +1657,7 @@ async fn tower_csc_with_invalidation() {
     let frame_svc = FrameService::connect(&addr).await.unwrap();
 
     // Tracking connection for invalidation pushes.
-    let tracking_conn = RedisConnection::connect_resp3(&addr).await.unwrap();
+    let mut tracking_conn = RedisConnection::connect_resp3(&addr).await.unwrap();
     tracking_conn
         .execute(ClientTracking::on().bcast())
         .await
@@ -1665,11 +1674,11 @@ async fn tower_csc_with_invalidation() {
     let _task = spawn_invalidation_task(cache_ref.clone(), stream);
 
     let k = "tower_csc:invalidation";
-    let writer = conn().await;
+    let mut writer = conn().await;
     writer.execute(Set::new(k, "original")).await.unwrap();
 
     // Populate cache.
-    let _: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    let _: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
     assert_eq!(cache_ref.read().await.len(), 1);
 
     // Modify from another connection.
@@ -1680,7 +1689,7 @@ async fn tower_csc_with_invalidation() {
     assert_eq!(cache_ref.read().await.len(), 0);
 
     // Fresh read gets new value.
-    let v: Option<Bytes> = svc.call(Get::new(k)).await.unwrap();
+    let v: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
     assert_eq!(v, Some(Bytes::from("modified")));
 
     writer.execute(Del::new(k)).await.unwrap();
@@ -1690,7 +1699,7 @@ async fn tower_csc_with_invalidation() {
 
 #[tokio::test]
 async fn streams_xadd_xlen_xrange() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:basic";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1720,7 +1729,7 @@ async fn streams_xadd_xlen_xrange() {
 
 #[tokio::test]
 async fn streams_xrevrange() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:revrange";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1736,7 +1745,7 @@ async fn streams_xrevrange() {
 
 #[tokio::test]
 async fn streams_xdel_xtrim() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:del_trim";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1755,7 +1764,7 @@ async fn streams_xdel_xtrim() {
 
 #[tokio::test]
 async fn streams_xadd_maxlen() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:maxlen";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1773,7 +1782,7 @@ async fn streams_xadd_maxlen() {
 
 #[tokio::test]
 async fn streams_consumer_groups() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:groups";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1815,7 +1824,7 @@ async fn streams_consumer_groups() {
 
 #[tokio::test]
 async fn streams_xread() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xread";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1833,7 +1842,7 @@ async fn streams_xread() {
 
 #[tokio::test]
 async fn streams_xrange_count() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:range_count";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1851,7 +1860,7 @@ async fn streams_xrange_count() {
 
 #[tokio::test]
 async fn streams_xgroup_setid() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xgroup_setid";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1874,7 +1883,7 @@ async fn streams_xgroup_setid() {
 
 #[tokio::test]
 async fn streams_xgroup_createconsumer_delconsumer() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xgroup_consumer";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1906,7 +1915,7 @@ async fn streams_xgroup_createconsumer_delconsumer() {
 
 #[tokio::test]
 async fn streams_xclaim() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xclaim";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1932,7 +1941,7 @@ async fn streams_xclaim() {
 
 #[tokio::test]
 async fn streams_xautoclaim() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xautoclaim";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1958,7 +1967,7 @@ async fn streams_xautoclaim() {
 
 #[tokio::test]
 async fn streams_xpending_summary() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xpending_sum";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -1985,7 +1994,7 @@ async fn streams_xpending_summary() {
 
 #[tokio::test]
 async fn streams_xpending_range() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xpending_range";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -2009,7 +2018,7 @@ async fn streams_xpending_range() {
 
 #[tokio::test]
 async fn streams_xinfo_stream() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xinfo_stream";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -2026,7 +2035,7 @@ async fn streams_xinfo_stream() {
 
 #[tokio::test]
 async fn streams_xinfo_groups() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xinfo_groups";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -2048,7 +2057,7 @@ async fn streams_xinfo_groups() {
 
 #[tokio::test]
 async fn streams_xinfo_consumers() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "streams_test:xinfo_consumers";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -2073,7 +2082,7 @@ async fn streams_xinfo_consumers() {
 
 #[tokio::test]
 async fn scan_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let prefix = "scan_test:basic";
     // Create some keys.
     for i in 0..5 {
@@ -2114,7 +2123,7 @@ async fn scan_basic() {
 
 #[tokio::test]
 async fn sscan_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "scan_test:sscan";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(SAdd::members(k, ["a", "b", "c", "d", "e"]))
@@ -2139,7 +2148,7 @@ async fn sscan_basic() {
 
 #[tokio::test]
 async fn hscan_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "scan_test:hscan";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(HSet::new(k, "f1", "v1").field("f2", "v2").field("f3", "v3"))
@@ -2164,7 +2173,7 @@ async fn hscan_basic() {
 
 #[tokio::test]
 async fn zscan_basic() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "scan_test:zscan";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(
@@ -2207,7 +2216,7 @@ async fn zscan_basic() {
 
 #[tokio::test]
 async fn blpop_with_data() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "blocking_test:blpop";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(RPush::elements(k, ["a", "b"])).await.unwrap();
@@ -2220,7 +2229,7 @@ async fn blpop_with_data() {
 
 #[tokio::test]
 async fn blpop_timeout() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "blocking_test:blpop_timeout";
     conn.execute(Del::new(k)).await.unwrap();
 
@@ -2231,7 +2240,7 @@ async fn blpop_timeout() {
 
 #[tokio::test]
 async fn brpop_with_data() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "blocking_test:brpop";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(RPush::elements(k, ["a", "b"])).await.unwrap();
@@ -2244,7 +2253,7 @@ async fn brpop_with_data() {
 
 #[tokio::test]
 async fn bzpopmin_with_data() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "blocking_test:bzpopmin";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(ZAdd::new(k).member(1.0, "a").member(2.0, "b"))
@@ -2262,7 +2271,7 @@ async fn bzpopmin_with_data() {
 
 #[tokio::test]
 async fn bzpopmax_with_data() {
-    let conn = conn().await;
+    let mut conn = conn().await;
     let k = "blocking_test:bzpopmax";
     conn.execute(Del::new(k)).await.unwrap();
     conn.execute(ZAdd::new(k).member(1.0, "a").member(2.0, "b"))

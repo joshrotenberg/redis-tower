@@ -189,8 +189,8 @@ impl ResilientConnection {
     /// Execute a command through the resilient connection.
     ///
     /// For direct async usage without the Tower `Service` trait.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        match &self.state {
+    pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        match &mut self.state {
             ConnState::Connected(conn) => {
                 let result = conn.execute(cmd).await;
                 if let Err(ref e) = result {

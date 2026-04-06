@@ -5,11 +5,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures::Sink;
 use futures::SinkExt;
-use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
@@ -34,42 +34,39 @@ use redis_tower_protocol::{Frame, RespCodec};
 /// use redis_tower_protocol::helpers::{array, bulk};
 /// use tower::ServiceExt;
 ///
-/// let svc = FrameService::connect("127.0.0.1:6379").await?;
+/// let mut svc = FrameService::connect("127.0.0.1:6379").await?;
 /// let response = svc.oneshot(array(vec![bulk("PING")])).await?;
 /// ```
 pub struct FrameService {
-    framed: Arc<Mutex<Framed<RedisStream, RespCodec>>>,
-    push_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>>,
+    /// The framed transport. `None` while a `Service::call` future is in flight.
+    framed: Option<Framed<RedisStream, RespCodec>>,
+    /// Optional sender for RESP3 push messages.
+    push_tx: Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    /// Channel to reclaim the framed transport after a `Service::call` completes.
+    inflight: Option<oneshot::Receiver<Framed<RedisStream, RespCodec>>>,
 }
 
 impl FrameService {
     /// Connect to a Redis server and create a FrameService.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = crate::connection::RedisConnection::connect(addr).await?;
-        Ok(Self::from_connection(conn))
+        Self::from_connection(conn)
     }
 
-    /// Create from an existing `RedisConnection`.
-    pub fn from_connection(conn: crate::connection::RedisConnection) -> Self {
-        // We need access to the inner Arc<Mutex<Framed>> and push_tx.
-        // RedisConnection exposes these via into_framed, but that consumes it.
-        // Instead, we'll clone the Arcs.
-        //
-        // For now, create a new FrameService that shares the same internals.
-        // We need RedisConnection to expose its fields for this.
-        //
-        // Actually, let's just store the connection and delegate.
-        Self {
-            framed: conn.framed_arc(),
-            push_tx: conn.push_tx_arc(),
-        }
+    /// Create from an existing `RedisConnection`, consuming it.
+    pub fn from_connection(conn: crate::connection::RedisConnection) -> Result<Self, RedisError> {
+        let framed = conn.into_framed()?;
+        Ok(Self {
+            framed: Some(framed),
+            push_tx: None,
+            inflight: None,
+        })
     }
 
     /// Subscribe to RESP3 push messages.
-    pub async fn subscribe_pushes(&self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
+    pub fn subscribe_pushes(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut guard = self.push_tx.lock().await;
-        *guard = Some(tx);
+        self.push_tx = Some(tx);
         rx
     }
 }
@@ -79,39 +76,68 @@ impl tower_service::Service<Frame> for FrameService {
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
 
-    /// NOTE: This implementation always returns `Poll::Ready(Ok(()))` because
-    /// the underlying connection uses `Arc<Mutex<>>`. Actual readiness is
-    /// determined by the mutex lock inside `call()`. For proper backpressure,
-    /// wrap with `tower::buffer::Buffer`.
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Reclaim the transport from an in-flight future if needed.
+        if self.framed.is_none() {
+            if let Some(ref mut rx) = self.inflight {
+                match Pin::new(rx).poll(cx) {
+                    Poll::Ready(Ok(framed)) => {
+                        self.framed = Some(framed);
+                        self.inflight = None;
+                    }
+                    Poll::Ready(Err(_)) => {
+                        self.inflight = None;
+                        return Poll::Ready(Err(RedisError::ConnectionClosed));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                return Poll::Ready(Err(RedisError::ConnectionClosed));
+            }
+        }
+
+        let framed = self.framed.as_mut().unwrap();
+        Pin::new(framed).poll_ready(cx).map_err(RedisError::from)
     }
 
     fn call(&mut self, request: Frame) -> Self::Future {
-        let framed = Arc::clone(&self.framed);
-        let push_tx = Arc::clone(&self.push_tx);
+        let mut framed = self
+            .framed
+            .take()
+            .expect("call() invoked without successful poll_ready()");
+        let push_tx = self.push_tx.clone();
+
+        if let Err(e) = Pin::new(&mut framed).start_send(request) {
+            self.framed = Some(framed);
+            return Box::pin(async move { Err(RedisError::from(e)) });
+        }
+
+        let (return_tx, return_rx) = oneshot::channel();
+        self.inflight = Some(return_rx);
+
         Box::pin(async move {
-            let mut guard = framed.lock().await;
-            guard.send(request).await.map_err(RedisError::from)?;
+            framed.flush().await.map_err(RedisError::from)?;
 
             // Read response, routing push frames.
-            loop {
-                let frame = guard
+            let response = loop {
+                let frame = framed
                     .next()
                     .await
                     .ok_or(RedisError::ConnectionClosed)?
                     .map_err(RedisError::from)?;
 
                 if let Frame::Push(_) = &frame {
-                    let ptx = push_tx.lock().await;
-                    if let Some(ref tx) = *ptx {
+                    if let Some(ref tx) = push_tx {
                         let _ = tx.send(frame);
                     }
                     continue;
                 }
 
-                return Ok(frame);
-            }
+                break frame;
+            };
+
+            let _ = return_tx.send(framed);
+            Ok(response)
         })
     }
 }

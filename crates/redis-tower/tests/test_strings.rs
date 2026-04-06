@@ -6,7 +6,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn cover_getex() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:getex";
     c.execute(Set::new(k, "val")).await.unwrap();
     let v = c.execute(GetEx::new(k).ex(10)).await.unwrap();
@@ -18,7 +18,7 @@ async fn cover_getex() {
 
 #[tokio::test]
 async fn cover_getdel() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:getdel";
     c.execute(Set::new(k, "val")).await.unwrap();
     let v = c.execute(GetDel::new(k)).await.unwrap();
@@ -29,7 +29,7 @@ async fn cover_getdel() {
 
 #[tokio::test]
 async fn cover_setex() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:setex";
     c.execute(SetEx::new(k, 10, "val")).await.unwrap();
     let v = c.execute(Get::new(k)).await.unwrap();
@@ -41,7 +41,7 @@ async fn cover_setex() {
 
 #[tokio::test]
 async fn cover_psetex() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:psetex";
     c.execute(PSetEx::new(k, 10000, "val")).await.unwrap();
     let v = c.execute(Get::new(k)).await.unwrap();
@@ -51,7 +51,7 @@ async fn cover_psetex() {
 
 #[tokio::test]
 async fn cover_setnx() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:setnx";
     c.execute(Del::new(k)).await.unwrap();
     let ok = c.execute(SetNx::new(k, "val")).await.unwrap();
@@ -63,7 +63,7 @@ async fn cover_setnx() {
 
 #[tokio::test]
 async fn cover_incrbyfloat() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:incrbyfloat";
     c.execute(Set::new(k, "10.5")).await.unwrap();
     let v = c.execute(IncrByFloat::new(k, 0.5)).await.unwrap();
@@ -73,7 +73,7 @@ async fn cover_incrbyfloat() {
 
 #[tokio::test]
 async fn cover_decr() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:decr";
     c.execute(Set::new(k, "10")).await.unwrap();
     let v = c.execute(Decr::new(k)).await.unwrap();
@@ -83,7 +83,7 @@ async fn cover_decr() {
 
 #[tokio::test]
 async fn cover_decrby() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:decrby";
     c.execute(Set::new(k, "10")).await.unwrap();
     let v = c.execute(DecrBy::new(k, 3)).await.unwrap();
@@ -93,7 +93,7 @@ async fn cover_decrby() {
 
 #[tokio::test]
 async fn cover_getrange() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:getrange";
     c.execute(Set::new(k, "hello world")).await.unwrap();
     let v = c.execute(GetRange::new(k, 0, 4)).await.unwrap();
@@ -103,7 +103,7 @@ async fn cover_getrange() {
 
 #[tokio::test]
 async fn cover_setrange() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:setrange";
     c.execute(Set::new(k, "hello")).await.unwrap();
     let len = c.execute(SetRange::new(k, 6, "world")).await.unwrap();
@@ -113,7 +113,7 @@ async fn cover_setrange() {
 
 #[tokio::test]
 async fn cover_strlen() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:strings:strlen";
     c.execute(Set::new(k, "hello")).await.unwrap();
     let len = c.execute(StrLen::new(k)).await.unwrap();

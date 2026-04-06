@@ -132,8 +132,8 @@ impl ClusterConnection {
         host_override: Option<String>,
         read_preference: ReadPreference,
     ) -> Result<Self, RedisError> {
-        let seed_conn = RedisConnection::connect(seed_addr).await?;
-        let mut topology = discover_topology(&seed_conn).await?;
+        let mut seed_conn = RedisConnection::connect(seed_addr).await?;
+        let mut topology = discover_topology(&mut seed_conn).await?;
 
         if let Some(ref host) = host_override {
             remap_topology(&mut topology, host);
@@ -160,7 +160,7 @@ impl ClusterConnection {
                 let addr_str = addr.addr_string();
                 if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone())
                 {
-                    let conn = RedisConnection::connect(&addr_str).await?;
+                    let mut conn = RedisConnection::connect(&addr_str).await?;
                     // Send READONLY to enable reads on this replica.
                     conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
                         .await?;
@@ -194,7 +194,7 @@ impl ClusterConnection {
         let mut target_node = initial_node;
 
         for _ in 0..MAX_REDIRECTS {
-            let conn = self.nodes.get(&target_node).ok_or_else(|| {
+            let conn = self.nodes.get_mut(&target_node).ok_or_else(|| {
                 RedisError::Redis(format!("no connection for node {target_node}"))
             })?;
 
@@ -215,7 +215,7 @@ impl ClusterConnection {
                 Some(Redirect::Ask { addr }) => {
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
-                    let asking_conn = self.nodes.get(&addr).ok_or_else(|| {
+                    let asking_conn = self.nodes.get_mut(&addr).ok_or_else(|| {
                         RedisError::Redis(format!("no connection for ASK node {addr}"))
                     })?;
                     asking_conn
@@ -343,7 +343,7 @@ impl ClusterConnection {
     pub async fn refresh_topology(&mut self) -> Result<(), RedisError> {
         let conn = self
             .nodes
-            .values()
+            .values_mut()
             .next()
             .ok_or(RedisError::ConnectionClosed)?;
 
@@ -368,7 +368,7 @@ impl ClusterConnection {
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     self.nodes.entry(addr_str.clone())
                 {
-                    let conn = RedisConnection::connect(&addr_str).await?;
+                    let mut conn = RedisConnection::connect(&addr_str).await?;
                     conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
                         .await?;
                     e.insert(conn);
@@ -389,6 +389,9 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
 
+    /// Cluster poll_ready returns Ready because the target node is not known
+    /// until `call` inspects the command's key. Per-node readiness is checked
+    /// implicitly when the inner connection's call is invoked.
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))
     }
@@ -397,28 +400,10 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
         let cmd_frame = cmd.to_frame();
         let node_addr = self.route_command(&cmd_frame).to_string();
 
-        // Get the node's inner Arc (execute_pipeline takes &self, backed by Arc<Mutex<>>).
-        let node = self.nodes.get(&node_addr).map(|c| c.framed_arc());
-
-        Box::pin(async move {
-            use futures::SinkExt;
-            use tokio_stream::StreamExt;
-
-            let framed_arc = node.ok_or(RedisError::ConnectionClosed)?;
-            let mut framed = framed_arc.lock().await;
-            framed.send(cmd_frame).await.map_err(RedisError::from)?;
-            let response = framed
-                .next()
-                .await
-                .ok_or(RedisError::ConnectionClosed)?
-                .map_err(RedisError::from)?;
-
-            if let Frame::Error(ref e) = response {
-                return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
-            }
-
-            cmd.parse_response(response)
-        })
+        match self.nodes.get_mut(&node_addr) {
+            Some(conn) => <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd),
+            None => Box::pin(async { Err(RedisError::ConnectionClosed) }),
+        }
     }
 }
 

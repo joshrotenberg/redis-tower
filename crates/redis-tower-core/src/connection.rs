@@ -1,11 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use futures::Sink;
 use futures::SinkExt;
 use tokio::net::TcpStream;
-use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
@@ -16,6 +16,29 @@ use crate::command::Command;
 use crate::error::RedisError;
 use crate::stream::RedisStream;
 use crate::url::{RedisUrl, parse_redis_url};
+
+/// Read the next non-push response frame, routing push frames to the channel.
+async fn read_response_from(
+    framed: &mut Framed<RedisStream, RespCodec>,
+    push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+) -> Result<Frame, RedisError> {
+    loop {
+        let frame = framed
+            .next()
+            .await
+            .ok_or(RedisError::ConnectionClosed)?
+            .map_err(RedisError::from)?;
+
+        if let Frame::Push(_) = &frame {
+            if let Some(ref tx) = *push_tx {
+                let _ = tx.send(frame);
+            }
+            continue;
+        }
+
+        return Ok(frame);
+    }
+}
 
 /// A single Redis connection implementing `tower::Service<Cmd>`.
 ///
@@ -37,17 +60,21 @@ use crate::url::{RedisUrl, parse_redis_url};
 /// let response = conn.call(Get::new("my_key")).await?;
 /// ```
 pub struct RedisConnection {
-    framed: Arc<Mutex<Framed<RedisStream, RespCodec>>>,
+    /// The framed transport. `None` while a `Service::call` future is in flight.
+    framed: Option<Framed<RedisStream, RespCodec>>,
     /// Optional sender for RESP3 push messages. Set via `subscribe_pushes()`.
-    push_tx: Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>>,
+    push_tx: Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    /// Channel to reclaim the framed transport after a `Service::call` completes.
+    inflight: Option<oneshot::Receiver<Framed<RedisStream, RespCodec>>>,
 }
 
 impl RedisConnection {
     /// Create a connection from a framed stream.
     fn from_framed_inner(framed: Framed<RedisStream, RespCodec>) -> Self {
         Self {
-            framed: Arc::new(Mutex::new(framed)),
-            push_tx: Arc::new(Mutex::new(None)),
+            framed: Some(framed),
+            push_tx: None,
+            inflight: None,
         }
     }
 
@@ -85,7 +112,7 @@ impl RedisConnection {
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let parsed = parse_redis_url(url)?;
 
-        let conn = if parsed.unix {
+        let mut conn = if parsed.unix {
             #[cfg(unix)]
             {
                 let path = parsed
@@ -133,7 +160,7 @@ impl RedisConnection {
     /// Sends `HELLO 3` after connecting. The server will respond with
     /// RESP3 frames for all subsequent commands.
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
-        let conn = Self::connect(addr).await?;
+        let mut conn = Self::connect(addr).await?;
         conn.hello(3).await?;
         Ok(conn)
     }
@@ -141,11 +168,11 @@ impl RedisConnection {
     /// Send HELLO to negotiate protocol version.
     ///
     /// `HELLO 3` switches to RESP3, `HELLO 2` switches back to RESP2.
-    pub async fn hello(&self, version: u8) -> Result<Frame, RedisError> {
+    pub async fn hello(&mut self, version: u8) -> Result<Frame, RedisError> {
         let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
-        let mut framed = self.framed.lock().await;
+        let framed = self.framed.as_mut().expect("connection not in flight");
         framed.send(frame).await.map_err(RedisError::from)?;
-        let response = self.read_response(&mut framed).await?;
+        let response = read_response_from(framed, &self.push_tx).await?;
         if let Frame::Error(ref e) = response {
             return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
         }
@@ -164,51 +191,36 @@ impl RedisConnection {
     /// command execution are automatically routed to this channel.
     ///
     /// If nobody subscribes, push frames are silently discarded.
-    pub async fn subscribe_pushes(&self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
+    pub fn subscribe_pushes(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut guard = self.push_tx.lock().await;
-        *guard = Some(tx);
+        self.push_tx = Some(tx);
         rx
     }
 
-    /// Read the next non-push response frame from the stream.
-    ///
-    /// If a `Frame::Push` is received, it's routed to the push channel
-    /// (if subscribed) and the next frame is read. This ensures push
-    /// messages don't interfere with command responses.
-    async fn read_response(
-        &self,
-        framed: &mut Framed<RedisStream, RespCodec>,
-    ) -> Result<Frame, RedisError> {
-        loop {
-            let frame = framed
-                .next()
-                .await
-                .ok_or(RedisError::ConnectionClosed)?
-                .map_err(RedisError::from)?;
-
-            if let Frame::Push(_) = &frame {
-                // Route to push channel if subscribed.
-                let guard = self.push_tx.lock().await;
-                if let Some(ref tx) = *guard {
-                    let _ = tx.send(frame); // Best-effort, drop if receiver is gone.
-                }
-                continue; // Read the actual command response.
+    /// Ensure the framed transport is available, reclaiming it from an
+    /// in-flight `Service::call` future if necessary.
+    async fn ensure_framed(&mut self) -> Result<(), RedisError> {
+        if self.framed.is_none() {
+            if let Some(rx) = self.inflight.take() {
+                let framed = rx.await.map_err(|_| RedisError::ConnectionClosed)?;
+                self.framed = Some(framed);
+            } else {
+                return Err(RedisError::ConnectionClosed);
             }
-
-            return Ok(frame);
         }
+        Ok(())
     }
 
     /// Send a command and receive the response.
     ///
     /// This is the low-level method. Prefer using the `Service` trait via
     /// `tower::ServiceExt::oneshot` or `Service::call`.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+    pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        self.ensure_framed().await?;
         let frame = cmd.to_frame();
-        let mut framed = self.framed.lock().await;
+        let framed = self.framed.as_mut().unwrap();
         framed.send(frame).await.map_err(RedisError::from)?;
-        let response = self.read_response(&mut framed).await?;
+        let response = read_response_from(framed, &self.push_tx).await?;
 
         if let Frame::Error(ref e) = response {
             return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
@@ -219,11 +231,11 @@ impl RedisConnection {
 
     /// Send multiple command frames and read all responses in a single roundtrip.
     ///
-    /// Used by pipeline and transaction implementations. Holds the connection
-    /// lock for the entire batch.
-    pub async fn execute_pipeline(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
+    /// Used by pipeline and transaction implementations.
+    pub async fn execute_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
+        self.ensure_framed().await?;
         let count = frames.len();
-        let mut framed = self.framed.lock().await;
+        let framed = self.framed.as_mut().unwrap();
 
         // Send all frames, buffering writes.
         for (i, frame) in frames.into_iter().enumerate() {
@@ -237,7 +249,7 @@ impl RedisConnection {
         // Read all responses, routing push frames to the channel.
         let mut responses = Vec::with_capacity(count);
         for _ in 0..count {
-            let response = self.read_response(&mut framed).await?;
+            let response = read_response_from(framed, &self.push_tx).await?;
             responses.push(response);
         }
 
@@ -248,16 +260,17 @@ impl RedisConnection {
     ///
     /// Returns `Ok(Some(responses))` on commit, `Ok(None)` if aborted by WATCH.
     pub async fn execute_transaction(
-        &self,
+        &mut self,
         watch_frames: Vec<Frame>,
         command_frames: Vec<Frame>,
     ) -> Result<Option<Vec<Frame>>, RedisError> {
-        let mut framed = self.framed.lock().await;
+        self.ensure_framed().await?;
+        let framed = self.framed.as_mut().unwrap();
 
         // Send WATCH keys if any.
         for frame in watch_frames {
             framed.send(frame).await.map_err(RedisError::from)?;
-            let response = self.read_response(&mut framed).await?;
+            let response = read_response_from(framed, &self.push_tx).await?;
             if let Frame::Error(e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
             }
@@ -268,7 +281,7 @@ impl RedisConnection {
             .send(array(vec![bulk("MULTI")]))
             .await
             .map_err(RedisError::from)?;
-        let multi_resp = self.read_response(&mut framed).await?;
+        let multi_resp = read_response_from(framed, &self.push_tx).await?;
         if let Frame::Error(e) = multi_resp {
             return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
         }
@@ -276,7 +289,7 @@ impl RedisConnection {
         // Send each command, expect QUEUED for each.
         for frame in &command_frames {
             framed.send(frame.clone()).await.map_err(RedisError::from)?;
-            let queued_resp = self.read_response(&mut framed).await?;
+            let queued_resp = read_response_from(framed, &self.push_tx).await?;
             match queued_resp {
                 Frame::SimpleString(ref s) if &s[..] == b"QUEUED" => {}
                 Frame::Error(e) => {
@@ -301,7 +314,7 @@ impl RedisConnection {
             .send(array(vec![bulk("EXEC")]))
             .await
             .map_err(RedisError::from)?;
-        let exec_resp = self.read_response(&mut framed).await?;
+        let exec_resp = read_response_from(framed, &self.push_tx).await?;
 
         match exec_resp {
             Frame::Array(Some(results)) => Ok(Some(results)),
@@ -316,30 +329,14 @@ impl RedisConnection {
 
     /// Consume this connection and extract the underlying framed stream.
     ///
-    /// Fails if the connection's `Arc` has been cloned (e.g., by a
-    /// `Service::call` future still in flight). Use a fresh connection
-    /// for operations that require exclusive ownership (like pub/sub).
-    pub fn into_framed(self) -> Result<Framed<RedisStream, RespCodec>, RedisError> {
-        let mutex = Arc::try_unwrap(self.framed).map_err(|_| RedisError::ConnectionInUse)?;
-        Ok(mutex.into_inner())
-    }
-
-    /// Get a clone of the internal framed Arc.
-    ///
-    /// Used by FrameService and cluster/sentinel Service impls to share
-    /// the underlying connection for async futures.
-    pub fn framed_arc(&self) -> Arc<Mutex<Framed<RedisStream, RespCodec>>> {
-        Arc::clone(&self.framed)
-    }
-
-    /// Get a clone of the push sender Arc.
-    pub fn push_tx_arc(&self) -> Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<Frame>>>> {
-        Arc::clone(&self.push_tx)
+    /// Fails if a `Service::call` future is still in flight.
+    pub fn into_framed(mut self) -> Result<Framed<RedisStream, RespCodec>, RedisError> {
+        self.framed.take().ok_or(RedisError::ConnectionInUse)
     }
 
     /// Run post-connection setup (AUTH, SELECT) based on URL parameters.
-    async fn post_connect_setup(&self, url: &RedisUrl) -> Result<(), RedisError> {
-        let mut framed = self.framed.lock().await;
+    async fn post_connect_setup(&mut self, url: &RedisUrl) -> Result<(), RedisError> {
+        let framed = self.framed.as_mut().expect("connection not in flight");
 
         if let Some(ref password) = url.password {
             let mut auth_args = vec![bulk("AUTH")];
@@ -352,7 +349,7 @@ impl RedisConnection {
                 .send(array(auth_args))
                 .await
                 .map_err(RedisError::from)?;
-            let response = self.read_response(&mut framed).await?;
+            let response = read_response_from(framed, &self.push_tx).await?;
 
             if let Frame::Error(e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -364,7 +361,7 @@ impl RedisConnection {
                 .send(array(vec![bulk("SELECT"), bulk(db.to_string())]))
                 .await
                 .map_err(RedisError::from)?;
-            let response = self.read_response(&mut framed).await?;
+            let response = read_response_from(framed, &self.push_tx).await?;
 
             if let Frame::Error(e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -380,38 +377,60 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
 
-    /// NOTE: This implementation always returns `Poll::Ready(Ok(()))` because
-    /// the underlying connection uses `Arc<Mutex<>>`. Actual readiness is
-    /// determined by the mutex lock inside `call()`. For proper backpressure,
-    /// wrap with `tower::buffer::Buffer`.
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // If the framed transport was taken by a previous call(), try to reclaim it.
+        if self.framed.is_none() {
+            if let Some(ref mut rx) = self.inflight {
+                match Pin::new(rx).poll(cx) {
+                    Poll::Ready(Ok(framed)) => {
+                        self.framed = Some(framed);
+                        self.inflight = None;
+                    }
+                    Poll::Ready(Err(_)) => {
+                        self.inflight = None;
+                        return Poll::Ready(Err(RedisError::ConnectionClosed));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                }
+            } else {
+                return Poll::Ready(Err(RedisError::ConnectionClosed));
+            }
+        }
+
+        // Check that the underlying sink can accept a write.
+        let framed = self.framed.as_mut().unwrap();
+        Pin::new(framed).poll_ready(cx).map_err(RedisError::from)
     }
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {
-        let framed = Arc::clone(&self.framed);
-        let push_tx = Arc::clone(&self.push_tx);
+        // Take the framed transport out of self so the future can own it.
+        let mut framed = self
+            .framed
+            .take()
+            .expect("call() invoked without successful poll_ready()");
+        let push_tx = self.push_tx.clone();
+
+        // Enqueue the frame synchronously (valid after poll_ready returned Ready).
+        let frame = cmd.to_frame();
+        if let Err(e) = Pin::new(&mut framed).start_send(frame) {
+            // Put framed back since we failed before spawning the future.
+            self.framed = Some(framed);
+            return Box::pin(async move { Err(RedisError::from(e)) });
+        }
+
+        // Create the return channel so poll_ready can reclaim the transport.
+        let (return_tx, return_rx) = oneshot::channel();
+        self.inflight = Some(return_rx);
+
         Box::pin(async move {
-            let frame = cmd.to_frame();
-            let mut guard = framed.lock().await;
-            guard.send(frame).await.map_err(RedisError::from)?;
+            // Flush the buffered write.
+            framed.flush().await.map_err(RedisError::from)?;
 
             // Read response, routing push frames.
-            let response = loop {
-                let f = guard
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-                if let Frame::Push(_) = &f {
-                    let ptx = push_tx.lock().await;
-                    if let Some(ref tx) = *ptx {
-                        let _ = tx.send(f);
-                    }
-                    continue;
-                }
-                break f;
-            };
+            let response = read_response_from(&mut framed, &push_tx).await?;
+
+            // Return the transport for reuse.
+            let _ = return_tx.send(framed);
 
             if let Frame::Error(ref e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
