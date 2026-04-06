@@ -135,7 +135,7 @@ impl Command for MemoryStats {
 // SLOWLOG subcommands
 // ---------------------------------------------------------------------------
 
-/// SLOWLOG GET [count]
+/// SLOWLOG GET \[count\]
 ///
 /// Returns entries from the slow log. Each entry is an array containing
 /// the log id, timestamp, execution time, command array, client info, etc.

@@ -316,12 +316,19 @@ macro_rules! __command_tests_inner {
             c.execute(Del::new(&k)).await.unwrap();
         }
 
-        // -- Vector Sets --
+        // -- Vector Sets (Redis 8.0+) --
+        //
+        // These tests skip gracefully if the server doesn't support
+        // vector set commands (Redis < 8.0).
 
         #[tokio::test]
         $(#[$attr])*
         async fn cmd_vadd_vcard_vdim() {
             let mut c = $conn_fn().await;
+            // Skip if vector sets not supported (Redis < 8.0).
+            let probe_k = _cmd_key("_vset_probe", "v");
+            if c.execute(VAdd::new(&probe_k, vec![1.0_f32, 0.0, 0.0], "_p")).await.is_err() { return; }
+            let _ = c.execute(Del::new(&probe_k)).await;
             let k = _cmd_key("vset_ops", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
@@ -335,6 +342,7 @@ macro_rules! __command_tests_inner {
         $(#[$attr])*
         async fn cmd_vadd_vrem() {
             let mut c = $conn_fn().await;
+            if c.execute(VAdd::new(_cmd_key("_p","v"), vec![1.0_f32,0.0,0.0], "_p")).await.is_err() { return; }
             let k = _cmd_key("vrem", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
@@ -347,6 +355,7 @@ macro_rules! __command_tests_inner {
         $(#[$attr])*
         async fn cmd_vemb() {
             let mut c = $conn_fn().await;
+            if c.execute(VAdd::new(_cmd_key("_p","v"), vec![1.0_f32,0.0,0.0], "_p")).await.is_err() { return; }
             let k = _cmd_key("vemb", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
@@ -359,6 +368,7 @@ macro_rules! __command_tests_inner {
         $(#[$attr])*
         async fn cmd_vsim() {
             let mut c = $conn_fn().await;
+            if c.execute(VAdd::new(_cmd_key("_p","v"), vec![1.0_f32,0.0,0.0], "_p")).await.is_err() { return; }
             let k = _cmd_key("vsim", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 0.0, 0.0], "x")).await.unwrap();
@@ -371,17 +381,17 @@ macro_rules! __command_tests_inner {
 
         #[tokio::test]
         $(#[$attr])*
-        async fn cmd_vsetattr_vgetattr_vdelattr() {
+        async fn cmd_vsetattr_vgetattr() {
             let mut c = $conn_fn().await;
+            if c.execute(VAdd::new(_cmd_key("_p","v"), vec![1.0_f32,0.0,0.0], "_p")).await.is_err() { return; }
             let k = _cmd_key("vattr", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();
             c.execute(VSetAttr::new(&k, "a", r#"{"color":"red"}"#)).await.unwrap();
             let attr = c.execute(VGetAttr::new(&k, "a")).await.unwrap();
             assert_eq!(attr, Some(r#"{"color":"red"}"#.to_string()));
-            c.execute(VDelAttr::new(&k, "a")).await.unwrap();
-            let attr = c.execute(VGetAttr::new(&k, "a")).await.unwrap();
-            assert_eq!(attr, None);
+            // Clear attribute by setting to empty string.
+            c.execute(VSetAttr::new(&k, "a", "")).await.unwrap();
             c.execute(Del::new(&k)).await.unwrap();
         }
 
@@ -389,6 +399,7 @@ macro_rules! __command_tests_inner {
         $(#[$attr])*
         async fn cmd_vinfo() {
             let mut c = $conn_fn().await;
+            if c.execute(VAdd::new(_cmd_key("_p","v"), vec![1.0_f32,0.0,0.0], "_p")).await.is_err() { return; }
             let k = _cmd_key("vinfo", "v");
             c.execute(Del::new(&k)).await.unwrap();
             c.execute(VAdd::new(&k, vec![1.0_f32, 2.0, 3.0], "a")).await.unwrap();

@@ -187,7 +187,7 @@ impl Command for AclDelUser {
     }
 }
 
-/// ACL CAT [category]
+/// ACL CAT \[category\]
 ///
 /// Lists ACL categories, or the commands within a given category.
 pub struct AclCat {
@@ -450,7 +450,7 @@ impl Command for AclWhoAmI {
     }
 }
 
-/// ACL GENPASS [bits]
+/// ACL GENPASS \[bits\]
 ///
 /// Generates a random password. Optionally specify the number of bits
 /// of pseudo-random data (default 256).
