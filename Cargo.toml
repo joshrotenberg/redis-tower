@@ -7,6 +7,7 @@ members = [
     "crates/redis-tower",
     "crates/redis-tower-cluster",
     "crates/redis-tower-sentinel",
+    "crates/redis-tower-sync",
     "crates/redis-test-harness",
 ]
 
