@@ -988,3 +988,116 @@ impl Command for Failover {
         "FAILOVER"
     }
 }
+
+/// WAIT numreplicas timeout
+///
+/// Blocks the current client until all previous write commands are acknowledged
+/// by at least `numreplicas` replicas, or until the timeout (in milliseconds)
+/// expires. Returns the number of replicas that acknowledged.
+pub struct Wait {
+    numreplicas: i64,
+    timeout: i64,
+}
+
+impl Wait {
+    pub fn new(numreplicas: i64, timeout: i64) -> Self {
+        Self {
+            numreplicas,
+            timeout,
+        }
+    }
+}
+
+impl Command for Wait {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("WAIT"),
+            bulk(self.numreplicas.to_string()),
+            bulk(self.timeout.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "WAIT"
+    }
+}
+
+/// WAITAOF numlocal numreplicas timeout
+///
+/// Blocks the current client until all previous write commands are fsynced
+/// to the AOF of the local host and/or at least `numreplicas` replicas.
+/// Returns a tuple of (local, replicas) counts parsed from a two-element array.
+pub struct WaitAof {
+    numlocal: i64,
+    numreplicas: i64,
+    timeout: i64,
+}
+
+impl WaitAof {
+    pub fn new(numlocal: i64, numreplicas: i64, timeout: i64) -> Self {
+        Self {
+            numlocal,
+            numreplicas,
+            timeout,
+        }
+    }
+}
+
+impl Command for WaitAof {
+    type Response = (i64, i64);
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("WAITAOF"),
+            bulk(self.numlocal.to_string()),
+            bulk(self.numreplicas.to_string()),
+            bulk(self.timeout.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) if frames.len() == 2 => {
+                let local = match &frames[0] {
+                    Frame::Integer(n) => *n,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "integer",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let replicas = match &frames[1] {
+                    Frame::Integer(n) => *n,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "integer",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                Ok((local, replicas))
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array of two integers",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "WAITAOF"
+    }
+}

@@ -883,3 +883,268 @@ impl Command for StrLen {
         "STRLEN"
     }
 }
+
+/// INCRBY key increment
+///
+/// Increments the integer value of `key` by `increment`. Returns the new
+/// value after the increment.
+pub struct IncrBy {
+    key: String,
+    increment: i64,
+}
+
+impl IncrBy {
+    pub fn new(key: impl Into<String>, increment: i64) -> Self {
+        Self {
+            key: key.into(),
+            increment,
+        }
+    }
+}
+
+impl Command for IncrBy {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("INCRBY"),
+            bulk(self.key.as_str()),
+            bulk(self.increment.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "INCRBY"
+    }
+}
+
+/// MSETNX key value \[key value ...\]
+///
+/// Sets the given keys to their respective values, but only if none of the
+/// keys already exist. Returns `true` if all keys were set, `false` if no
+/// key was set (at least one already existed).
+pub struct MSetNx {
+    pairs: Vec<(String, String)>,
+}
+
+impl MSetNx {
+    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+        Self {
+            pairs: pairs
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
+        }
+    }
+}
+
+impl Command for MSetNx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("MSETNX")];
+        for (k, v) in &self.pairs {
+            args.push(bulk(k.as_str()));
+            args.push(bulk(v.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer 0 or 1",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MSETNX"
+    }
+}
+
+/// Mode selector for the LCS command.
+pub enum LcsMode {
+    /// Return the longest common substring as bytes.
+    String,
+    /// Return only the length of the longest common substring.
+    Len,
+    /// Return match indices. Optionally filter by minimum match length and
+    /// include match lengths.
+    Idx {
+        min_match_len: Option<u64>,
+        with_match_len: bool,
+    },
+}
+
+/// LCS key1 key2 \[LEN\] \[IDX\] \[MINMATCHLEN len\] \[WITHMATCHLEN\]
+///
+/// Returns the longest common substring between the values stored at two
+/// keys. The response type depends on the selected mode: a bulk string for
+/// the default mode, an integer for LEN mode, or a raw Frame for IDX mode
+/// (which returns a complex nested structure).
+pub struct Lcs {
+    key1: String,
+    key2: String,
+    mode: LcsMode,
+}
+
+impl Lcs {
+    /// Create a new LCS command in default (string) mode.
+    pub fn new(key1: impl Into<String>, key2: impl Into<String>) -> Self {
+        Self {
+            key1: key1.into(),
+            key2: key2.into(),
+            mode: LcsMode::String,
+        }
+    }
+
+    /// Switch to LEN mode -- returns only the length.
+    pub fn len(mut self) -> Self {
+        self.mode = LcsMode::Len;
+        self
+    }
+
+    /// Switch to IDX mode -- returns match positions.
+    pub fn idx(mut self) -> Self {
+        self.mode = LcsMode::Idx {
+            min_match_len: None,
+            with_match_len: false,
+        };
+        self
+    }
+
+    /// Set the MINMATCHLEN option (only meaningful in IDX mode).
+    pub fn min_match_len(mut self, len: u64) -> Self {
+        match &mut self.mode {
+            LcsMode::Idx { min_match_len, .. } => *min_match_len = Some(len),
+            _ => {
+                self.mode = LcsMode::Idx {
+                    min_match_len: Some(len),
+                    with_match_len: false,
+                };
+            }
+        }
+        self
+    }
+
+    /// Enable WITHMATCHLEN (only meaningful in IDX mode).
+    pub fn with_match_len(mut self) -> Self {
+        match &mut self.mode {
+            LcsMode::Idx { with_match_len, .. } => *with_match_len = true,
+            _ => {
+                self.mode = LcsMode::Idx {
+                    min_match_len: None,
+                    with_match_len: true,
+                };
+            }
+        }
+        self
+    }
+}
+
+impl Command for Lcs {
+    /// The response is a raw `Frame` because the structure varies by mode:
+    /// bulk string in default mode, integer in LEN mode, and a nested
+    /// array/map in IDX mode.
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("LCS"),
+            bulk(self.key1.as_str()),
+            bulk(self.key2.as_str()),
+        ];
+
+        match &self.mode {
+            LcsMode::String => {}
+            LcsMode::Len => {
+                args.push(bulk("LEN"));
+            }
+            LcsMode::Idx {
+                min_match_len,
+                with_match_len,
+            } => {
+                args.push(bulk("IDX"));
+                if let Some(len) = min_match_len {
+                    args.push(bulk("MINMATCHLEN"));
+                    args.push(bulk(len.to_string()));
+                }
+                if *with_match_len {
+                    args.push(bulk("WITHMATCHLEN"));
+                }
+            }
+        }
+
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "LCS"
+    }
+}
+
+/// GETSET key value
+///
+/// Atomically sets `key` to `value` and returns the old value stored at
+/// `key`. Returns `None` if the key did not exist previously.
+///
+/// Note: GETSET is deprecated in favor of `SET key value GET`, but remains
+/// widely used.
+pub struct GetSet {
+    key: String,
+    value: String,
+}
+
+impl GetSet {
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for GetSet {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("GETSET"),
+            bulk(self.key.as_str()),
+            bulk(self.value.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "GETSET"
+    }
+}
