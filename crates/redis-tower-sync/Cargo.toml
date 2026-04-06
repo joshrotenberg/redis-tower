@@ -6,12 +6,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
 keywords = ["redis", "sync", "blocking", "client"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-redis-tower = { path = "../redis-tower" }
+redis-tower = { workspace = true }
 redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

@@ -3,14 +3,15 @@ name = "redis-tower"
 version = "0.1.0"
 description = "A Tower-based Redis client with strong typing, composable middleware, and resilience"
 documentation = "https://docs.rs/redis-tower"
-homepage = "https://github.com/joshrotenberg/redis-tower"
 keywords = ["redis", "tower", "async", "client", "middleware"]
 categories = ["database", "asynchronous", "network-programming"]
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
 
 [features]
 default = ["commands-stack"]

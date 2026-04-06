@@ -6,7 +6,9 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
 keywords = ["redis", "commands", "typed", "async"]
 categories = ["database", "asynchronous", "network-programming"]
 

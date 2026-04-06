@@ -6,12 +6,14 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
 rust-version.workspace = true
+readme = "../../README.md"
 keywords = ["redis", "resp", "protocol", "codec"]
 categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
-resp-rs = "0.1"
+resp-rs = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }

@@ -1,0 +1,55 @@
+[package]
+name = "redis-tower-examples"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[dependencies]
+redis-tower = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+tower-service = { workspace = true }
+bytes = { workspace = true }
+
+[[example]]
+name = "basic"
+path = "basic.rs"
+
+[[example]]
+name = "pipeline"
+path = "pipeline.rs"
+
+[[example]]
+name = "transaction"
+path = "transaction.rs"
+
+[[example]]
+name = "pubsub"
+path = "pubsub.rs"
+
+[[example]]
+name = "tower_middleware"
+path = "tower_middleware.rs"
+
+[[example]]
+name = "reconnect"
+path = "reconnect.rs"
+
+[[example]]
+name = "shared_client"
+path = "shared_client.rs"
+
+[[example]]
+name = "streams"
+path = "streams.rs"
+
+[[example]]
+name = "script"
+path = "script.rs"
+
+[[example]]
+name = "auto_pipeline"
+path = "auto_pipeline.rs"

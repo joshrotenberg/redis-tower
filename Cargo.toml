@@ -9,6 +9,7 @@ members = [
     "crates/redis-tower-sentinel",
     "crates/redis-tower-sync",
     "crates/redis-test-harness",
+    "examples",
 ]
 
 [workspace.package]
@@ -16,10 +17,13 @@ edition = "2024"
 authors = ["Josh Rotenberg <joshrotenberg@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/redis-tower"
+homepage = "https://github.com/joshrotenberg/redis-tower"
+readme = "README.md"
 rust-version = "1.87"
 
 [workspace.dependencies]
 # Internal crates
+redis-tower = { path = "crates/redis-tower" }
 redis-tower-protocol = { path = "crates/redis-tower-protocol" }
 redis-tower-core = { path = "crates/redis-tower-core" }
 redis-tower-commands = { path = "crates/redis-tower-commands" }
@@ -33,6 +37,7 @@ futures = "0.3"
 pin-project-lite = "0.2"
 
 # Protocol
+resp-rs = "0.1"
 bytes = "1.9"
 
 # Tower
