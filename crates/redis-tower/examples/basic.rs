@@ -12,10 +12,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     conn.execute(Set::new("example:key", "hello")).await?;
 
     // GET the key and convert from Option<Bytes> to String.
-    let val: String = conn
-        .execute(Get::new("example:key"))
-        .await?
-        .parse_into()?;
+    let val: String = conn.execute(Get::new("example:key")).await?.parse_into()?;
     println!("Got: {val}");
 
     // Clean up.

@@ -18,7 +18,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let key = format!("shared:{i}");
             let val = format!("task-{i}");
             c.execute(Set::new(&key, &val)).await.unwrap();
-            let got: String = c.execute(Get::new(&key)).await.unwrap().parse_into().unwrap();
+            let got: String = c
+                .execute(Get::new(&key))
+                .await
+                .unwrap()
+                .parse_into()
+                .unwrap();
             println!("Task {i}: {got}");
             c.execute(Del::new(&key)).await.unwrap();
         }));

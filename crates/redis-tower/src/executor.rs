@@ -93,10 +93,7 @@ mod tests {
             &mut self,
             cmd: Cmd,
         ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
-            let frame = self
-                .responses
-                .pop_front()
-                .unwrap_or(Frame::Null);
+            let frame = self.responses.pop_front().unwrap_or(Frame::Null);
             async move { cmd.parse_response(frame) }
         }
     }

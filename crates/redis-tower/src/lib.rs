@@ -78,15 +78,15 @@ pub mod transaction;
 
 pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
 pub use cache_layer::CacheService;
-pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use caching::CachedClient;
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
+pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use executor::RedisExecutor;
+pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
-pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use reconnect::ResilientConnection;
 pub use reconnect_layer::ReconnectService;
 pub use resilient::ResilientRedisClient;

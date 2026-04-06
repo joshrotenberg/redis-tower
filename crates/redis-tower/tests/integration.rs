@@ -2311,12 +2311,10 @@ async fn resilient_connection_url_factory() {
     // Test UrlConnectionFactory
     let addr = redis_addr();
     let url = format!("redis://{addr}");
-    let _conn = ResilientConnection::new(
-        UrlConnectionFactory::new(&url),
-        ReconnectConfig::default(),
-    )
-    .await
-    .unwrap();
+    let _conn =
+        ResilientConnection::new(UrlConnectionFactory::new(&url), ReconnectConfig::default())
+            .await
+            .unwrap();
     // just verify it connects
 }
 
@@ -2329,12 +2327,9 @@ async fn resilient_connection_custom_config() {
         .max_retries(3)
         .base_delay(Duration::from_millis(50))
         .max_delay(Duration::from_secs(1));
-    let mut conn = ResilientConnection::new(
-        AddrConnectionFactory::new(&addr),
-        config,
-    )
-    .await
-    .unwrap();
+    let mut conn = ResilientConnection::new(AddrConnectionFactory::new(&addr), config)
+        .await
+        .unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
@@ -2557,14 +2552,8 @@ async fn pubsub_multiple_channels() {
     pubsub.subscribe(&[&ch1, &ch2]).await.unwrap();
 
     let mut pub_conn = conn().await;
-    pub_conn
-        .execute(Publish::new(&ch1, "msg1"))
-        .await
-        .unwrap();
-    pub_conn
-        .execute(Publish::new(&ch2, "msg2"))
-        .await
-        .unwrap();
+    pub_conn.execute(Publish::new(&ch1, "msg1")).await.unwrap();
+    pub_conn.execute(Publish::new(&ch2, "msg2")).await.unwrap();
 
     let m1 = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
         .await

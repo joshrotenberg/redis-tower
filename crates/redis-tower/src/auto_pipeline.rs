@@ -135,9 +135,12 @@ async fn flush_batch(conn: &mut RedisConnection, batch: Vec<PipelineRequest>) {
         Err(e) => {
             let msg = e.to_string();
             for req in batch {
-                let _ = req.response_tx.send(Err(RedisError::Connection(
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, msg.clone()),
-                )));
+                let _ = req
+                    .response_tx
+                    .send(Err(RedisError::Connection(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        msg.clone(),
+                    ))));
             }
         }
     }

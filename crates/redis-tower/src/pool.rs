@@ -33,8 +33,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::Mutex;
@@ -234,10 +234,7 @@ where
     ///
     /// This is the primary API. The pool selects a connection via the
     /// configured dispatch strategy and executes the command on it.
-    pub async fn execute<Cmd: Command>(
-        &self,
-        cmd: Cmd,
-    ) -> Result<Cmd::Response, RedisError> {
+    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
         let mut conn = self.inner.connections[idx].lock().await;
         conn.execute(cmd).await
@@ -253,9 +250,7 @@ pub trait PoolFactory: Send + Sync + 'static {
     type Connection: RedisExecutor + Send + 'static;
 
     /// Create a new connection.
-    fn create(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
 }
 
 #[cfg(test)]
@@ -321,10 +316,7 @@ mod tests {
 
     #[tokio::test]
     async fn pool_from_connections() {
-        let conns = vec![
-            MockConn::new(0, vec![]),
-            MockConn::new(1, vec![]),
-        ];
+        let conns = vec![MockConn::new(0, vec![]), MockConn::new(1, vec![])];
         let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
         assert_eq!(pool.size(), 2);
     }
@@ -341,14 +333,20 @@ mod tests {
         use redis_tower_commands::Ping;
 
         let conns = vec![
-            MockConn::new(0, vec![
-                Frame::SimpleString(Bytes::from("PONG")),
-                Frame::SimpleString(Bytes::from("PONG")),
-            ]),
-            MockConn::new(1, vec![
-                Frame::SimpleString(Bytes::from("PONG")),
-                Frame::SimpleString(Bytes::from("PONG")),
-            ]),
+            MockConn::new(
+                0,
+                vec![
+                    Frame::SimpleString(Bytes::from("PONG")),
+                    Frame::SimpleString(Bytes::from("PONG")),
+                ],
+            ),
+            MockConn::new(
+                1,
+                vec![
+                    Frame::SimpleString(Bytes::from("PONG")),
+                    Frame::SimpleString(Bytes::from("PONG")),
+                ],
+            ),
         ];
 
         let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
@@ -389,12 +387,13 @@ mod tests {
     async fn pool_clone_shares_state() {
         use redis_tower_commands::Ping;
 
-        let conns = vec![
-            MockConn::new(0, vec![
+        let conns = vec![MockConn::new(
+            0,
+            vec![
                 Frame::SimpleString(Bytes::from("PONG")),
                 Frame::SimpleString(Bytes::from("PONG")),
-            ]),
-        ];
+            ],
+        )];
 
         let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
         let pool2 = pool.clone();
@@ -412,7 +411,12 @@ mod tests {
 
         let mut conns = Vec::new();
         for i in 0..4 {
-            conns.push(MockConn::new(i, (0..10).map(|_| Frame::SimpleString(Bytes::from("PONG"))).collect()));
+            conns.push(MockConn::new(
+                i,
+                (0..10)
+                    .map(|_| Frame::SimpleString(Bytes::from("PONG")))
+                    .collect(),
+            ));
         }
 
         let pool = ConnectionPool::from_connections(conns, DispatchStrategy::Random).unwrap();

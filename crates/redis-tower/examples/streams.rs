@@ -1,7 +1,7 @@
 //! Redis Streams: add entries, read them back, check length.
 
-use redis_tower::commands::*;
 use redis_tower::RedisConnection;
+use redis_tower::commands::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
