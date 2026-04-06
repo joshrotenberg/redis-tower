@@ -68,7 +68,7 @@ impl ReconnectService {
         let factory = Arc::new(factory);
         let conn = factory.connect().await?;
         Ok(Self {
-            inner: FrameService::from_connection(conn),
+            inner: FrameService::from_connection(conn)?,
             factory,
             config,
             state: State::Ready,
@@ -120,7 +120,7 @@ impl Service<Frame> for ReconnectService {
                         let factory = Arc::clone(&self.factory);
                         let future: ReconnectFuture = Box::pin(async move {
                             let conn = factory.connect().await?;
-                            Ok(FrameService::from_connection(conn))
+                            FrameService::from_connection(conn)
                         });
                         self.state = State::Reconnecting { attempt, future };
                     }

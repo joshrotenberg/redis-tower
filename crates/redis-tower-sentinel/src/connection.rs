@@ -4,7 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_core::{Command, RedisConnection, RedisError};
 
 use crate::discovery;
 
@@ -106,46 +106,12 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        <RedisConnection as tower_service::Service<Cmd>>::poll_ready(&mut self.conn, cx)
     }
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {
-        // Delegate to the inner RedisConnection's Service impl.
-        let framed = self.conn.framed_arc();
-        let push_tx = self.conn.push_tx_arc();
-
-        Box::pin(async move {
-            use futures::SinkExt;
-            use tokio_stream::StreamExt;
-
-            let frame = cmd.to_frame();
-            let mut guard = framed.lock().await;
-            guard.send(frame).await.map_err(RedisError::from)?;
-
-            // Read response, routing push frames.
-            let response = loop {
-                let f = guard
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-                if let Frame::Push(_) = &f {
-                    let ptx = push_tx.lock().await;
-                    if let Some(ref tx) = *ptx {
-                        let _ = tx.send(f);
-                    }
-                    continue;
-                }
-                break f;
-            };
-
-            if let Frame::Error(ref e) = response {
-                return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
-            }
-
-            cmd.parse_response(response)
-        })
+        <RedisConnection as tower_service::Service<Cmd>>::call(&mut self.conn, cmd)
     }
 }
 

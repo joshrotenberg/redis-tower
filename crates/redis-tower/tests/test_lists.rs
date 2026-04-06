@@ -6,7 +6,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn cover_lpushx() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:lpushx";
     c.execute(Del::new(k)).await.unwrap();
     // On missing key, LPUSHX returns 0.
@@ -21,7 +21,7 @@ async fn cover_lpushx() {
 
 #[tokio::test]
 async fn cover_rpushx() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:rpushx";
     c.execute(Del::new(k)).await.unwrap();
     let n = c.execute(RPushX::new(k, "a")).await.unwrap();
@@ -34,7 +34,7 @@ async fn cover_rpushx() {
 
 #[tokio::test]
 async fn cover_linsert() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:linsert";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(RPush::elements(k, ["a", "b", "c"]))
@@ -60,7 +60,7 @@ async fn cover_linsert() {
 
 #[tokio::test]
 async fn cover_lrem() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:lrem";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(RPush::elements(k, ["a", "b", "a", "c", "a"]))
@@ -78,7 +78,7 @@ async fn cover_lrem() {
 
 #[tokio::test]
 async fn cover_ltrim() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:ltrim";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(RPush::elements(k, ["a", "b", "c", "d", "e"]))
@@ -95,7 +95,7 @@ async fn cover_ltrim() {
 
 #[tokio::test]
 async fn cover_lpos() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:lists:lpos";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(RPush::elements(k, ["a", "b", "c", "b", "d"]))

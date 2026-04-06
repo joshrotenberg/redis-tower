@@ -58,7 +58,7 @@ impl Pipeline {
     }
 
     /// Execute all queued commands in a single roundtrip.
-    pub async fn execute(self, conn: &RedisConnection) -> Result<PipelineResults, RedisError> {
+    pub async fn execute(self, conn: &mut RedisConnection) -> Result<PipelineResults, RedisError> {
         let frames: Vec<Frame> = self.entries.iter().map(|e| e.frame.clone()).collect();
         let responses = conn.execute_pipeline(frames).await?;
 

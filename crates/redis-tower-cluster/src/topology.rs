@@ -79,7 +79,7 @@ impl ClusterTopology {
 }
 
 /// Discover the cluster topology by sending CLUSTER SLOTS to a node.
-pub async fn discover_topology(conn: &RedisConnection) -> Result<ClusterTopology, RedisError> {
+pub async fn discover_topology(conn: &mut RedisConnection) -> Result<ClusterTopology, RedisError> {
     let frame = array(vec![bulk("CLUSTER"), bulk("SLOTS")]);
     conn.execute_pipeline(vec![frame]).await.and_then(|frames| {
         if frames.len() != 1 {

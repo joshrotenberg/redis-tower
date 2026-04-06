@@ -46,7 +46,7 @@ impl RedisClient {
 
     /// Execute a command against the Redis server.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let conn = self.inner.lock().await;
+        let mut conn = self.inner.lock().await;
         conn.execute(cmd).await
     }
 }

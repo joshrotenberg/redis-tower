@@ -8,7 +8,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn cover_unlink() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:unlink";
     c.execute(Set::new(k, "val")).await.unwrap();
     let removed = c.execute(Unlink::new(k)).await.unwrap();
@@ -19,7 +19,7 @@ async fn cover_unlink() {
 
 #[tokio::test]
 async fn cover_persist() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:persist";
     c.execute(Set::new(k, "val")).await.unwrap();
     c.execute(Expire::new(k, 60)).await.unwrap();
@@ -32,7 +32,7 @@ async fn cover_persist() {
 
 #[tokio::test]
 async fn cover_pexpire() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:pexpire";
     c.execute(Set::new(k, "val")).await.unwrap();
     let ok = c.execute(PExpire::new(k, 60000)).await.unwrap();
@@ -42,7 +42,7 @@ async fn cover_pexpire() {
 
 #[tokio::test]
 async fn cover_pexpireat() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:pexpireat";
     c.execute(Set::new(k, "val")).await.unwrap();
     let now_ms = SystemTime::now()
@@ -56,7 +56,7 @@ async fn cover_pexpireat() {
 
 #[tokio::test]
 async fn cover_copy() {
-    let c = conn().await;
+    let mut c = conn().await;
     let src = "cover:keys:copy:src";
     let dst = "cover:keys:copy:dst";
     c.execute(Del::new(dst)).await.unwrap();
@@ -71,7 +71,7 @@ async fn cover_copy() {
 
 #[tokio::test]
 async fn cover_keys_pattern() {
-    let c = conn().await;
+    let mut c = conn().await;
     let ka = "cover:keys:pattern:a";
     let kb = "cover:keys:pattern:b";
     c.execute(Set::new(ka, "1")).await.unwrap();
@@ -84,7 +84,7 @@ async fn cover_keys_pattern() {
 
 #[tokio::test]
 async fn cover_randomkey() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:randomkey";
     c.execute(Set::new(k, "val")).await.unwrap();
     let rk = c.execute(RandomKey::new()).await.unwrap();
@@ -94,7 +94,7 @@ async fn cover_randomkey() {
 
 #[tokio::test]
 async fn cover_touch() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:touch";
     c.execute(Set::new(k, "val")).await.unwrap();
     let n = c.execute(Touch::new(k)).await.unwrap();
@@ -104,7 +104,7 @@ async fn cover_touch() {
 
 #[tokio::test]
 async fn cover_expiretime() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:expiretime";
     c.execute(Set::new(k, "val")).await.unwrap();
     c.execute(Expire::new(k, 60)).await.unwrap();
@@ -115,7 +115,7 @@ async fn cover_expiretime() {
 
 #[tokio::test]
 async fn cover_pexpiretime() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:keys:pexpiretime";
     c.execute(Set::new(k, "val")).await.unwrap();
     c.execute(PExpire::new(k, 60000)).await.unwrap();

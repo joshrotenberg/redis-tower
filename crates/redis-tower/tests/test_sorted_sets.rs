@@ -6,7 +6,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn zpopmin() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zpopmin";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -27,7 +27,7 @@ async fn zpopmin() {
 
 #[tokio::test]
 async fn zpopmax() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zpopmax";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -48,7 +48,7 @@ async fn zpopmax() {
 
 #[tokio::test]
 async fn zcount() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zcount";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -67,7 +67,7 @@ async fn zcount() {
 
 #[tokio::test]
 async fn zlexcount() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zlexcount";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -86,7 +86,7 @@ async fn zlexcount() {
 
 #[tokio::test]
 async fn zrandmember() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zrandmember";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -100,7 +100,7 @@ async fn zrandmember() {
 
 #[tokio::test]
 async fn zmscore() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:zset:zmscore";
 
     c.execute(Del::new(key)).await.unwrap();

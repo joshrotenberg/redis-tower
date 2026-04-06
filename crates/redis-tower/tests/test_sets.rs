@@ -6,7 +6,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn cover_srandmember() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:sets:srandmember";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(SAdd::members(k, ["a", "b", "c"])).await.unwrap();
@@ -17,7 +17,7 @@ async fn cover_srandmember() {
 
 #[tokio::test]
 async fn cover_spop() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:sets:spop";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(SAdd::members(k, ["a", "b", "c"])).await.unwrap();
@@ -30,7 +30,7 @@ async fn cover_spop() {
 
 #[tokio::test]
 async fn cover_sdiff() {
-    let c = conn().await;
+    let mut c = conn().await;
     let s1 = "cover:sets:sdiff:s1";
     let s2 = "cover:sets:sdiff:s2";
     c.execute(Del::new(s1)).await.unwrap();
@@ -45,7 +45,7 @@ async fn cover_sdiff() {
 
 #[tokio::test]
 async fn cover_sdiffstore() {
-    let c = conn().await;
+    let mut c = conn().await;
     let s1 = "cover:sets:sdiffstore:s1";
     let s2 = "cover:sets:sdiffstore:s2";
     let dst = "cover:sets:sdiffstore:dst";
@@ -63,7 +63,7 @@ async fn cover_sdiffstore() {
 
 #[tokio::test]
 async fn cover_sunion() {
-    let c = conn().await;
+    let mut c = conn().await;
     let s1 = "cover:sets:sunion:s1";
     let s2 = "cover:sets:sunion:s2";
     c.execute(Del::new(s1)).await.unwrap();
@@ -78,7 +78,7 @@ async fn cover_sunion() {
 
 #[tokio::test]
 async fn cover_sunionstore() {
-    let c = conn().await;
+    let mut c = conn().await;
     let s1 = "cover:sets:sunionstore:s1";
     let s2 = "cover:sets:sunionstore:s2";
     let dst = "cover:sets:sunionstore:dst";
@@ -96,7 +96,7 @@ async fn cover_sunionstore() {
 
 #[tokio::test]
 async fn cover_smove() {
-    let c = conn().await;
+    let mut c = conn().await;
     let src = "cover:sets:smove:src";
     let dst = "cover:sets:smove:dst";
     c.execute(Del::new(src)).await.unwrap();
@@ -111,7 +111,7 @@ async fn cover_smove() {
 
 #[tokio::test]
 async fn cover_smismember() {
-    let c = conn().await;
+    let mut c = conn().await;
     let k = "cover:sets:smismember";
     c.execute(Del::new(k)).await.unwrap();
     c.execute(SAdd::members(k, ["a", "b", "c"])).await.unwrap();

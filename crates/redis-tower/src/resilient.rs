@@ -61,7 +61,7 @@ impl ResilientRedisClient {
 
     /// Execute a command, reconnecting if the connection is lost.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
         let result = conn.execute(cmd).await;
 
         if let Err(ref e) = result {

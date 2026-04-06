@@ -7,7 +7,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn eval_basic() {
-    let c = conn().await;
+    let mut c = conn().await;
 
     let result = c.execute(Eval::new("return 42")).await.unwrap();
     assert_eq!(result, Frame::Integer(42));
@@ -15,7 +15,7 @@ async fn eval_basic() {
 
 #[tokio::test]
 async fn eval_with_keys() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:scripting:eval_keys";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -30,7 +30,7 @@ async fn eval_with_keys() {
 
 #[tokio::test]
 async fn script_load_evalsha() {
-    let c = conn().await;
+    let mut c = conn().await;
 
     let script = "return 99";
     let sha = c.execute(ScriptLoad::new(script)).await.unwrap();

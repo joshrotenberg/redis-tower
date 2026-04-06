@@ -5,7 +5,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn setbit_getbit() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:bitmap:setbit_getbit";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -19,7 +19,7 @@ async fn setbit_getbit() {
 
 #[tokio::test]
 async fn bitcount() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:bitmap:bitcount";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -34,7 +34,7 @@ async fn bitcount() {
 
 #[tokio::test]
 async fn bitpos() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:bitmap:bitpos";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -49,7 +49,7 @@ async fn bitpos() {
 
 #[tokio::test]
 async fn bitop() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key1 = "cover2:bitmap:bitop:1";
     let key2 = "cover2:bitmap:bitop:2";
     let dest = "cover2:bitmap:bitop:dest";

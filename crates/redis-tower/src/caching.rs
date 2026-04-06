@@ -45,7 +45,7 @@ impl CachedClient {
         let conn = RedisConnection::connect_resp3(addr).await?;
 
         // Tracking connection -- BCAST mode pushes all key invalidations.
-        let tracking_conn = RedisConnection::connect_resp3(addr).await?;
+        let mut tracking_conn = RedisConnection::connect_resp3(addr).await?;
         tracking_conn.execute(ClientTracking::on().bcast()).await?;
 
         // Take ownership of the tracking connection's framed stream.
@@ -80,7 +80,7 @@ impl CachedClient {
     }
 
     /// Execute a command. Cacheable reads are served from cache if available.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+    pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let frame = cmd.to_frame();
 
         if let Some(cache_key) = extract_cache_key(&frame) {

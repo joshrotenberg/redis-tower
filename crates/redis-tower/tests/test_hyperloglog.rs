@@ -5,7 +5,7 @@ use redis_tower::commands::*;
 
 #[tokio::test]
 async fn pfadd_pfcount() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:hll:pfadd_pfcount";
 
     c.execute(Del::new(key)).await.unwrap();
@@ -22,7 +22,7 @@ async fn pfadd_pfcount() {
 
 #[tokio::test]
 async fn pfmerge() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key1 = "cover2:hll:pfmerge:1";
     let key2 = "cover2:hll:pfmerge:2";
     let dest = "cover2:hll:pfmerge:dest";
@@ -51,7 +51,7 @@ async fn pfmerge() {
 
 #[tokio::test]
 async fn pfadd_returns_bool() {
-    let c = conn().await;
+    let mut c = conn().await;
     let key = "cover2:hll:pfadd_bool";
 
     c.execute(Del::new(key)).await.unwrap();
