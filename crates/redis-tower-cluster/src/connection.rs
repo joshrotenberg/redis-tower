@@ -401,9 +401,7 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
         let node_addr = self.route_command(&cmd_frame).to_string();
 
         match self.nodes.get_mut(&node_addr) {
-            Some(conn) => {
-                <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd)
-            }
+            Some(conn) => <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd),
             None => Box::pin(async { Err(RedisError::ConnectionClosed) }),
         }
     }

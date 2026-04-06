@@ -399,9 +399,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
 
         // Check that the underlying sink can accept a write.
         let framed = self.framed.as_mut().unwrap();
-        Pin::new(framed)
-            .poll_ready(cx)
-            .map_err(RedisError::from)
+        Pin::new(framed).poll_ready(cx).map_err(RedisError::from)
     }
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {

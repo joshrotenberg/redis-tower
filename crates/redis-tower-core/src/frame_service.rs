@@ -97,9 +97,7 @@ impl tower_service::Service<Frame> for FrameService {
         }
 
         let framed = self.framed.as_mut().unwrap();
-        Pin::new(framed)
-            .poll_ready(cx)
-            .map_err(RedisError::from)
+        Pin::new(framed).poll_ready(cx).map_err(RedisError::from)
     }
 
     fn call(&mut self, request: Frame) -> Self::Future {

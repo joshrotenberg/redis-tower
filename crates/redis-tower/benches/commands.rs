@@ -192,8 +192,14 @@ fn bench_mixed_workload(c: &mut Criterion) {
 
     c.bench_function("mixed_10_ops", |b| {
         b.to_async(&rt).iter(|| async {
-            client.execute(Set::new("bench:mix:k1", "v1")).await.unwrap();
-            client.execute(Set::new("bench:mix:k2", "v2")).await.unwrap();
+            client
+                .execute(Set::new("bench:mix:k1", "v1"))
+                .await
+                .unwrap();
+            client
+                .execute(Set::new("bench:mix:k2", "v2"))
+                .await
+                .unwrap();
             client.execute(Get::new("bench:mix:k1")).await.unwrap();
             client.execute(Get::new("bench:mix:k2")).await.unwrap();
             client
@@ -210,10 +216,7 @@ fn bench_mixed_workload(c: &mut Criterion) {
                 .await
                 .unwrap();
             client.execute(LPop::new("bench:mix:l")).await.unwrap();
-            client
-                .execute(Exists::new("bench:mix:k1"))
-                .await
-                .unwrap();
+            client.execute(Exists::new("bench:mix:k1")).await.unwrap();
         });
     });
 

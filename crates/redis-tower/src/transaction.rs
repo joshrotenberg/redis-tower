@@ -87,7 +87,10 @@ impl Transaction {
     ///
     /// Sends WATCH (if any), MULTI, all queued commands, and EXEC
     /// atomically under a single connection lock.
-    pub async fn execute(self, conn: &mut RedisConnection) -> Result<TransactionResult, RedisError> {
+    pub async fn execute(
+        self,
+        conn: &mut RedisConnection,
+    ) -> Result<TransactionResult, RedisError> {
         // Build WATCH frames.
         let watch_frames: Vec<Frame> = if self.watch_keys.is_empty() {
             Vec::new()

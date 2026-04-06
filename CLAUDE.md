@@ -27,14 +27,6 @@ Workspace with four crates:
 - `Command::name()` method for observability
 - Protocol crate is a placeholder -- will swap in `resp-rs` when published
 
-## Development
-
-```bash
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --lib --all-features
-```
-
 ## Workspace Layout
 
 ```
