@@ -1034,3 +1034,286 @@ impl Command for HExpireTime {
         "HEXPIRETIME"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- HGet --
+
+    #[test]
+    fn hget_to_frame() {
+        let cmd = HGet::new("myhash", "field1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HGET"), bulk("myhash"), bulk("field1")])
+        );
+    }
+
+    #[test]
+    fn hget_parse_value() {
+        let cmd = HGet::new("h", "f");
+        let frame = Frame::BulkString(Some(Bytes::from("val")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), Some(Bytes::from("val")));
+    }
+
+    #[test]
+    fn hget_parse_null() {
+        let cmd = HGet::new("h", "f");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn hget_parse_error_on_integer() {
+        let cmd = HGet::new("h", "f");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- HSet --
+
+    #[test]
+    fn hset_single_to_frame() {
+        let cmd = HSet::new("myhash", "f1", "v1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HSET"), bulk("myhash"), bulk("f1"), bulk("v1")])
+        );
+    }
+
+    #[test]
+    fn hset_multiple_to_frame() {
+        let cmd = HSet::new("h", "f1", "v1").field("f2", "v2");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HSET"),
+                bulk("h"),
+                bulk("f1"),
+                bulk("v1"),
+                bulk("f2"),
+                bulk("v2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hset_parse_integer() {
+        let cmd = HSet::new("h", "f", "v");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- HDel --
+
+    #[test]
+    fn hdel_to_frame() {
+        let cmd = HDel::new("h", "f1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HDEL"), bulk("h"), bulk("f1")])
+        );
+    }
+
+    #[test]
+    fn hdel_multiple_to_frame() {
+        let cmd = HDel::fields("h", vec!["f1", "f2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HDEL"), bulk("h"), bulk("f1"), bulk("f2")])
+        );
+    }
+
+    // -- HExists --
+
+    #[test]
+    fn hexists_to_frame() {
+        let cmd = HExists::new("h", "f");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HEXISTS"), bulk("h"), bulk("f")])
+        );
+    }
+
+    #[test]
+    fn hexists_parse_true() {
+        let cmd = HExists::new("h", "f");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    #[test]
+    fn hexists_parse_false() {
+        let cmd = HExists::new("h", "f");
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    // -- HGetAll --
+
+    #[test]
+    fn hgetall_to_frame() {
+        let cmd = HGetAll::new("myhash");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HGETALL"), bulk("myhash")]));
+    }
+
+    #[test]
+    fn hgetall_parse_flat_array() {
+        let cmd = HGetAll::new("h");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("f1"))),
+            Frame::BulkString(Some(Bytes::from("v1"))),
+            Frame::BulkString(Some(Bytes::from("f2"))),
+            Frame::BulkString(Some(Bytes::from("v2"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                (Bytes::from("f1"), Bytes::from("v1")),
+                (Bytes::from("f2"), Bytes::from("v2")),
+            ]
+        );
+    }
+
+    #[test]
+    fn hgetall_parse_map() {
+        let cmd = HGetAll::new("h");
+        let frame = Frame::Map(vec![(
+            Frame::BulkString(Some(Bytes::from("f1"))),
+            Frame::BulkString(Some(Bytes::from("v1"))),
+        )]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![(Bytes::from("f1"), Bytes::from("v1"))]);
+    }
+
+    #[test]
+    fn hgetall_parse_odd_array_error() {
+        let cmd = HGetAll::new("h");
+        let frame = array(vec![Frame::BulkString(Some(Bytes::from("f1")))]);
+        assert!(cmd.parse_response(frame).is_err());
+    }
+
+    #[test]
+    fn hgetall_parse_error_on_integer() {
+        let cmd = HGetAll::new("h");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- HIncrBy --
+
+    #[test]
+    fn hincrby_to_frame() {
+        let cmd = HIncrBy::new("h", "f", 5);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HINCRBY"), bulk("h"), bulk("f"), bulk("5")])
+        );
+    }
+
+    // -- HIncrByFloat --
+
+    #[test]
+    fn hincrbyfloat_to_frame() {
+        let cmd = HIncrByFloat::new("h", "f", 1.5);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HINCRBYFLOAT"),
+                bulk("h"),
+                bulk("f"),
+                bulk("1.5")
+            ])
+        );
+    }
+
+    #[test]
+    fn hincrbyfloat_parse_bulk_string() {
+        let cmd = HIncrByFloat::new("h", "f", 1.0);
+        let frame = Frame::BulkString(Some(Bytes::from("3.5")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert!((result - 3.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hincrbyfloat_parse_double() {
+        let cmd = HIncrByFloat::new("h", "f", 1.0);
+        let result = cmd.parse_response(Frame::Double(3.5)).unwrap();
+        assert!((result - 3.5).abs() < f64::EPSILON);
+    }
+
+    // -- HSetNx --
+
+    #[test]
+    fn hsetnx_to_frame() {
+        let cmd = HSetNx::new("h", "f", "v");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HSETNX"), bulk("h"), bulk("f"), bulk("v")])
+        );
+    }
+
+    #[test]
+    fn hsetnx_parse_true() {
+        let cmd = HSetNx::new("h", "f", "v");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- HExpire --
+
+    #[test]
+    fn hexpire_to_frame() {
+        let cmd = HExpire::new("h", 60, vec!["f1", "f2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HEXPIRE"),
+                bulk("h"),
+                bulk("60"),
+                bulk("FIELDS"),
+                bulk("2"),
+                bulk("f1"),
+                bulk("f2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hexpire_parse_per_field() {
+        let cmd = HExpire::new("h", 60, vec!["f1", "f2"]);
+        let frame = array(vec![Frame::Integer(1), Frame::Integer(0)]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![1, 0]);
+    }
+
+    // -- HRandField --
+
+    #[test]
+    fn hrandfield_to_frame_no_count() {
+        let cmd = HRandField::new("h");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HRANDFIELD"), bulk("h")]));
+    }
+
+    #[test]
+    fn hrandfield_to_frame_with_count() {
+        let cmd = HRandField::new("h").count(3);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HRANDFIELD"), bulk("h"), bulk("3")])
+        );
+    }
+
+    #[test]
+    fn hrandfield_parse_single() {
+        let cmd = HRandField::new("h");
+        let frame = Frame::BulkString(Some(Bytes::from("field1")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("field1")]);
+    }
+
+    #[test]
+    fn hrandfield_parse_null_empty() {
+        let cmd = HRandField::new("h");
+        let result = cmd.parse_response(Frame::Null).unwrap();
+        assert!(result.is_empty());
+    }
+}

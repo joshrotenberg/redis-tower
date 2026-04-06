@@ -44,56 +44,81 @@
 //!
 //! All command structs are re-exported at the crate root for convenience.
 
+// -- Core Redis commands (always available) --
 mod acl;
 mod bitmap;
 mod blocking;
-mod bloom;
 mod cluster;
 mod diagnostics;
 mod geo;
 mod hashes;
 mod hyperloglog;
-mod json;
 mod keys;
 mod lists;
 mod pubsub;
 mod scan;
 mod scripting;
-mod search;
-mod search_util;
 mod server;
 mod sets;
-mod sketch;
 mod sorted_sets;
 mod streams;
 mod strings;
-mod tdigest;
-mod vector_sets;
-mod timeseries;
 
 pub use acl::*;
 pub use bitmap::*;
 pub use blocking::*;
-pub use bloom::*;
 pub use cluster::*;
 pub use diagnostics::*;
 pub use geo::*;
 pub use hashes::*;
 pub use hyperloglog::*;
-pub use json::*;
 pub use keys::*;
 pub use lists::*;
 pub use pubsub::*;
 pub use scan::*;
 pub use scripting::*;
-pub use search::*;
-pub use search_util::*;
 pub use server::*;
 pub use sets::*;
-pub use sketch::*;
 pub use sorted_sets::*;
 pub use streams::*;
 pub use strings::*;
+
+// -- Redis Stack module commands (feature-gated) --
+#[cfg(feature = "bloom")]
+mod bloom;
+#[cfg(feature = "bloom")]
+pub use bloom::*;
+
+#[cfg(feature = "json")]
+mod json;
+#[cfg(feature = "json")]
+pub use json::*;
+
+#[cfg(feature = "search")]
+mod search;
+#[cfg(feature = "search")]
+pub use search::*;
+#[cfg(feature = "search")]
+mod search_util;
+#[cfg(feature = "search")]
+pub use search_util::*;
+
+#[cfg(feature = "sketch")]
+mod sketch;
+#[cfg(feature = "sketch")]
+pub use sketch::*;
+
+#[cfg(feature = "tdigest")]
+mod tdigest;
+#[cfg(feature = "tdigest")]
 pub use tdigest::*;
-pub use vector_sets::*;
+
+#[cfg(feature = "timeseries")]
+mod timeseries;
+#[cfg(feature = "timeseries")]
 pub use timeseries::*;
+
+#[cfg(feature = "vector-sets")]
+mod vector_sets;
+#[cfg(feature = "vector-sets")]
+pub use vector_sets::*;

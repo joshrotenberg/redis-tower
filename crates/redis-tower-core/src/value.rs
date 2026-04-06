@@ -504,4 +504,223 @@ mod tests {
         assert_eq!(m.get("k1").unwrap(), "v1");
         assert_eq!(m.get("k2").unwrap(), "v2");
     }
+
+    // -- Edge cases: numeric bounds --
+
+    #[test]
+    fn bytes_to_i64_max() {
+        let b = Bytes::from(i64::MAX.to_string());
+        let n: i64 = FromRedisBytes::from_redis_bytes(b).unwrap();
+        assert_eq!(n, i64::MAX);
+    }
+
+    #[test]
+    fn bytes_to_i64_min() {
+        let b = Bytes::from(i64::MIN.to_string());
+        let n: i64 = FromRedisBytes::from_redis_bytes(b).unwrap();
+        assert_eq!(n, i64::MIN);
+    }
+
+    #[test]
+    fn i64_max_to_u32_fails() {
+        // i64::MAX overflows u32
+        assert!(i64::MAX.parse_into::<u32>().is_err());
+    }
+
+    #[test]
+    fn i64_max_to_i64_succeeds() {
+        let n: i64 = i64::MAX.parse_into().unwrap();
+        assert_eq!(n, i64::MAX);
+    }
+
+    #[test]
+    fn i64_min_to_i64_succeeds() {
+        let n: i64 = i64::MIN.parse_into().unwrap();
+        assert_eq!(n, i64::MIN);
+    }
+
+    #[test]
+    fn large_i64_fits_u64() {
+        // Value larger than u32::MAX but fits u64
+        let val: i64 = (u32::MAX as i64) + 1;
+        let n: u64 = val.parse_into().unwrap();
+        assert_eq!(n, (u32::MAX as u64) + 1);
+    }
+
+    // -- Edge cases: empty and special strings --
+
+    #[test]
+    fn empty_bytes_to_string_succeeds() {
+        let b = Bytes::from("");
+        let s: String = FromRedisBytes::from_redis_bytes(b).unwrap();
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn empty_bytes_to_i64_fails() {
+        let b = Bytes::from("");
+        assert!(i64::from_redis_bytes(b).is_err());
+    }
+
+    #[test]
+    fn bytes_to_bool_invalid_value() {
+        let b = Bytes::from("yes");
+        assert!(bool::from_redis_bytes(b).is_err());
+    }
+
+    #[test]
+    fn bytes_to_bool_true_uppercase() {
+        assert!(bool::from_redis_bytes(Bytes::from("TRUE")).unwrap());
+    }
+
+    #[test]
+    fn bytes_to_bool_false_uppercase() {
+        assert!(!bool::from_redis_bytes(Bytes::from("FALSE")).unwrap());
+    }
+
+    // -- Edge cases: Vec conversions --
+
+    #[test]
+    fn vec_bytes_with_invalid_utf8_fails() {
+        let v = vec![Bytes::from("valid"), Bytes::from(vec![0xff, 0xfe])];
+        let result: Result<Vec<String>, _> = v.parse_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_vec_bytes_to_vec_string() {
+        let v: Vec<Bytes> = vec![];
+        let s: Vec<String> = v.parse_into().unwrap();
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn vec_option_bytes_mixed_some_none() {
+        let v: Vec<Option<Bytes>> = vec![
+            Some(Bytes::from("hello")),
+            None,
+            Some(Bytes::from("world")),
+        ];
+        let s: Vec<Option<String>> = v.parse_into().unwrap();
+        assert_eq!(s[0], Some("hello".to_string()));
+        assert_eq!(s[1], None);
+        assert_eq!(s[2], Some("world".to_string()));
+    }
+
+    #[test]
+    fn vec_option_bytes_with_invalid_utf8_fails() {
+        let v: Vec<Option<Bytes>> = vec![Some(Bytes::from(vec![0xff]))];
+        let result: Result<Vec<Option<String>>, _> = v.parse_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn vec_pairs_with_invalid_utf8_key_fails() {
+        let v = vec![(Bytes::from(vec![0xff]), Bytes::from("v"))];
+        let result: Result<Vec<(String, String)>, _> = v.parse_into();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn vec_pairs_with_invalid_utf8_value_fails() {
+        let v = vec![(Bytes::from("k"), Bytes::from(vec![0xff]))];
+        let result: Result<Vec<(String, String)>, _> = v.parse_into();
+        assert!(result.is_err());
+    }
+
+    // -- Edge cases: i64 to other numeric types --
+
+    #[test]
+    fn i64_to_f64_preserves_value() {
+        let n: f64 = 42i64.parse_into().unwrap();
+        assert!((n - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn i64_to_f32() {
+        let n: f32 = 42i64.parse_into().unwrap();
+        assert!((n - 42.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn i64_zero_to_bool_is_false() {
+        let b: bool = 0i64.parse_into().unwrap();
+        assert!(!b);
+    }
+
+    #[test]
+    fn i64_negative_to_bool_is_true() {
+        let b: bool = (-1i64).parse_into().unwrap();
+        assert!(b);
+    }
+
+    // -- Edge cases: f64 conversions --
+
+    #[test]
+    fn f64_to_string() {
+        let s: String = 1.5f64.parse_into().unwrap();
+        assert_eq!(s, "1.5");
+    }
+
+    #[test]
+    fn f64_identity() {
+        let n: f64 = 1.5f64.parse_into().unwrap();
+        assert!((n - 1.5).abs() < f64::EPSILON);
+    }
+
+    // -- Edge cases: bool conversions --
+
+    #[test]
+    fn bool_to_i64() {
+        let n: i64 = true.parse_into().unwrap();
+        assert_eq!(n, 1);
+        let n: i64 = false.parse_into().unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn bool_to_string() {
+        let s: String = true.parse_into().unwrap();
+        assert_eq!(s, "true");
+        let s: String = false.parse_into().unwrap();
+        assert_eq!(s, "false");
+    }
+
+    #[test]
+    fn bool_identity() {
+        let b: bool = true.parse_into().unwrap();
+        assert!(b);
+    }
+
+    // -- Edge cases: Option<Bytes> with numeric parsing --
+
+    #[test]
+    fn option_bytes_none_to_option_i64() {
+        let v: Option<Bytes> = None;
+        let n: Option<i64> = v.parse_into().unwrap();
+        assert_eq!(n, None);
+    }
+
+    #[test]
+    fn option_bytes_some_to_option_i64() {
+        let v: Option<Bytes> = Some(Bytes::from("99"));
+        let n: Option<i64> = v.parse_into().unwrap();
+        assert_eq!(n, Some(99));
+    }
+
+    // -- Edge cases: Bytes direct conversions --
+
+    #[test]
+    fn bytes_direct_to_string() {
+        let b = Bytes::from("direct");
+        let s: String = b.parse_into().unwrap();
+        assert_eq!(s, "direct");
+    }
+
+    #[test]
+    fn bytes_direct_to_bytes_identity() {
+        let b = Bytes::from("data");
+        let r: Bytes = b.parse_into().unwrap();
+        assert_eq!(r, Bytes::from("data"));
+    }
 }

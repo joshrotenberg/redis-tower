@@ -1148,3 +1148,303 @@ impl Command for GetSet {
         "GETSET"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- Get --
+
+    #[test]
+    fn get_to_frame() {
+        let cmd = Get::new("mykey");
+        let frame = cmd.to_frame();
+        assert_eq!(frame, array(vec![bulk("GET"), bulk("mykey")]));
+    }
+
+    #[test]
+    fn get_parse_bulk_string() {
+        let cmd = Get::new("mykey");
+        let frame = Frame::BulkString(Some(Bytes::from("hello")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, Some(Bytes::from("hello")));
+    }
+
+    #[test]
+    fn get_parse_null() {
+        let cmd = Get::new("mykey");
+        let result = cmd.parse_response(Frame::Null).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn get_parse_error_on_integer() {
+        let cmd = Get::new("mykey");
+        assert!(cmd.parse_response(Frame::Integer(42)).is_err());
+    }
+
+    // -- Set --
+
+    #[test]
+    fn set_basic_to_frame() {
+        let cmd = Set::new("k", "v");
+        let frame = cmd.to_frame();
+        assert_eq!(frame, array(vec![bulk("SET"), bulk("k"), bulk("v")]));
+    }
+
+    #[test]
+    fn set_with_ex_nx_to_frame() {
+        let cmd = Set::new("k", "v").ex(60).nx();
+        let frame = cmd.to_frame();
+        assert_eq!(
+            frame,
+            array(vec![
+                bulk("SET"),
+                bulk("k"),
+                bulk("v"),
+                bulk("EX"),
+                bulk("60"),
+                bulk("NX"),
+            ])
+        );
+    }
+
+    #[test]
+    fn set_with_px_xx_get_to_frame() {
+        let cmd = Set::new("k", "v").px(5000).xx().get();
+        let frame = cmd.to_frame();
+        assert_eq!(
+            frame,
+            array(vec![
+                bulk("SET"),
+                bulk("k"),
+                bulk("v"),
+                bulk("PX"),
+                bulk("5000"),
+                bulk("XX"),
+                bulk("GET"),
+            ])
+        );
+    }
+
+    #[test]
+    fn set_parse_ok() {
+        let cmd = Set::new("k", "v");
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn set_parse_bulk_with_get() {
+        let cmd = Set::new("k", "v").get();
+        let frame = Frame::BulkString(Some(Bytes::from("old")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, Some(Bytes::from("old")));
+    }
+
+    #[test]
+    fn set_parse_null_nx_failure() {
+        let cmd = Set::new("k", "v").nx();
+        let result = cmd.parse_response(Frame::Null).unwrap();
+        assert_eq!(result, None);
+    }
+
+    // -- Incr --
+
+    #[test]
+    fn incr_to_frame() {
+        let cmd = Incr::new("counter");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("INCR"), bulk("counter")]));
+    }
+
+    #[test]
+    fn incr_parse_integer() {
+        let cmd = Incr::new("counter");
+        assert_eq!(cmd.parse_response(Frame::Integer(5)).unwrap(), 5);
+    }
+
+    #[test]
+    fn incr_parse_error_on_string() {
+        let cmd = Incr::new("counter");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- IncrBy --
+
+    #[test]
+    fn incrby_to_frame() {
+        let cmd = IncrBy::new("counter", 10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("INCRBY"), bulk("counter"), bulk("10")])
+        );
+    }
+
+    // -- IncrByFloat --
+
+    #[test]
+    fn incrbyfloat_to_frame() {
+        let cmd = IncrByFloat::new("key", 1.5);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("INCRBYFLOAT"), bulk("key"), bulk("1.5")])
+        );
+    }
+
+    #[test]
+    fn incrbyfloat_parse_response() {
+        let cmd = IncrByFloat::new("key", 1.5);
+        let frame = Frame::BulkString(Some(Bytes::from("11.5")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert!((result - 11.5).abs() < f64::EPSILON);
+    }
+
+    // -- MGet --
+
+    #[test]
+    fn mget_to_frame() {
+        let cmd = MGet::new(vec!["a", "b", "c"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("MGET"), bulk("a"), bulk("b"), bulk("c")])
+        );
+    }
+
+    #[test]
+    fn mget_parse_mixed_results() {
+        let cmd = MGet::new(vec!["a", "b"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("val_a"))),
+            Frame::Null,
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Some(Bytes::from("val_a")), None]);
+    }
+
+    #[test]
+    fn mget_parse_error_on_integer() {
+        let cmd = MGet::new(vec!["a"]);
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- MSet --
+
+    #[test]
+    fn mset_to_frame() {
+        let cmd = MSet::new(vec![("a", "1"), ("b", "2")]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MSET"),
+                bulk("a"),
+                bulk("1"),
+                bulk("b"),
+                bulk("2")
+            ])
+        );
+    }
+
+    #[test]
+    fn mset_parse_ok() {
+        let cmd = MSet::new(vec![("a", "1")]);
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        cmd.parse_response(frame).unwrap();
+    }
+
+    // -- SetNx --
+
+    #[test]
+    fn setnx_parse_true() {
+        let cmd = SetNx::new("k", "v");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    #[test]
+    fn setnx_parse_false() {
+        let cmd = SetNx::new("k", "v");
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    // -- GetEx --
+
+    #[test]
+    fn getex_with_persist_to_frame() {
+        let cmd = GetEx::new("mykey").persist();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("GETEX"), bulk("mykey"), bulk("PERSIST")])
+        );
+    }
+
+    #[test]
+    fn getex_with_exat_to_frame() {
+        let cmd = GetEx::new("mykey").exat(1000);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("GETEX"),
+                bulk("mykey"),
+                bulk("EXAT"),
+                bulk("1000")
+            ])
+        );
+    }
+
+    // -- Append --
+
+    #[test]
+    fn append_to_frame() {
+        let cmd = Append::new("mykey", "world");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("APPEND"), bulk("mykey"), bulk("world")])
+        );
+    }
+
+    #[test]
+    fn append_parse_integer() {
+        let cmd = Append::new("mykey", "world");
+        assert_eq!(cmd.parse_response(Frame::Integer(10)).unwrap(), 10);
+    }
+
+    // -- MSetNx --
+
+    #[test]
+    fn msetnx_to_frame() {
+        let cmd = MSetNx::new(vec![("a", "1"), ("b", "2")]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MSETNX"),
+                bulk("a"),
+                bulk("1"),
+                bulk("b"),
+                bulk("2")
+            ])
+        );
+    }
+
+    #[test]
+    fn msetnx_parse_true() {
+        let cmd = MSetNx::new(vec![("a", "1")]);
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- Lcs --
+
+    #[test]
+    fn lcs_len_to_frame() {
+        let cmd = Lcs::new("k1", "k2").len();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LCS"), bulk("k1"), bulk("k2"), bulk("LEN")])
+        );
+    }
+}

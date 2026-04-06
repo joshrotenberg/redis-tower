@@ -1089,11 +1089,7 @@ impl Command for ObjectFreq {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("OBJECT"),
-            bulk("FREQ"),
-            bulk(self.key.as_str()),
-        ])
+        array(vec![bulk("OBJECT"), bulk("FREQ"), bulk(self.key.as_str())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1235,5 +1231,262 @@ impl Command for ObjectRefCount {
 
     fn name(&self) -> &str {
         "OBJECT REFCOUNT"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- Del --
+
+    #[test]
+    fn del_single_to_frame() {
+        let cmd = Del::new("mykey");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("DEL"), bulk("mykey")]));
+    }
+
+    #[test]
+    fn del_multiple_to_frame() {
+        let cmd = Del::keys(vec!["a", "b", "c"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("DEL"), bulk("a"), bulk("b"), bulk("c")])
+        );
+    }
+
+    #[test]
+    fn del_parse_integer() {
+        let cmd = Del::new("mykey");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn del_parse_error_on_string() {
+        let cmd = Del::new("mykey");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- Exists --
+
+    #[test]
+    fn exists_to_frame() {
+        let cmd = Exists::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("EXISTS"), bulk("k")]));
+    }
+
+    #[test]
+    fn exists_multiple_to_frame() {
+        let cmd = Exists::keys(vec!["a", "b"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("EXISTS"), bulk("a"), bulk("b")])
+        );
+    }
+
+    #[test]
+    fn exists_parse_integer() {
+        let cmd = Exists::new("k");
+        assert_eq!(cmd.parse_response(Frame::Integer(2)).unwrap(), 2);
+    }
+
+    // -- Expire --
+
+    #[test]
+    fn expire_to_frame() {
+        let cmd = Expire::new("k", 60);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("EXPIRE"), bulk("k"), bulk("60")])
+        );
+    }
+
+    #[test]
+    fn expire_parse_true() {
+        let cmd = Expire::new("k", 60);
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    #[test]
+    fn expire_parse_false() {
+        let cmd = Expire::new("k", 60);
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    #[test]
+    fn expire_parse_boolean() {
+        let cmd = Expire::new("k", 60);
+        assert!(cmd.parse_response(Frame::Boolean(true)).unwrap());
+    }
+
+    // -- Ttl --
+
+    #[test]
+    fn ttl_to_frame() {
+        let cmd = Ttl::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("TTL"), bulk("k")]));
+    }
+
+    #[test]
+    fn ttl_parse_integer() {
+        let cmd = Ttl::new("k");
+        assert_eq!(cmd.parse_response(Frame::Integer(-2)).unwrap(), -2);
+    }
+
+    // -- Type --
+
+    #[test]
+    fn type_to_frame() {
+        let cmd = Type::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("TYPE"), bulk("k")]));
+    }
+
+    #[test]
+    fn type_parse_simple_string() {
+        let cmd = Type::new("k");
+        let frame = Frame::SimpleString(Bytes::from("string"));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "string");
+    }
+
+    #[test]
+    fn type_parse_error_on_integer() {
+        let cmd = Type::new("k");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- Rename --
+
+    #[test]
+    fn rename_to_frame() {
+        let cmd = Rename::new("old", "new");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("RENAME"), bulk("old"), bulk("new")])
+        );
+    }
+
+    #[test]
+    fn rename_parse_ok() {
+        let cmd = Rename::new("old", "new");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    // -- Copy --
+
+    #[test]
+    fn copy_to_frame() {
+        let cmd = Copy::new("src", "dst");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("COPY"), bulk("src"), bulk("dst")])
+        );
+    }
+
+    #[test]
+    fn copy_replace_to_frame() {
+        let cmd = Copy::new("src", "dst").replace();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("COPY"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("REPLACE")
+            ])
+        );
+    }
+
+    #[test]
+    fn copy_parse_true() {
+        let cmd = Copy::new("src", "dst");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- Keys --
+
+    #[test]
+    fn keys_to_frame() {
+        let cmd = Keys::new("user:*");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("KEYS"), bulk("user:*")]));
+    }
+
+    #[test]
+    fn keys_parse_array() {
+        let cmd = Keys::new("*");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("k1"))),
+            Frame::BulkString(Some(Bytes::from("k2"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("k1"), Bytes::from("k2")]);
+    }
+
+    // -- Sort --
+
+    #[test]
+    fn sort_with_options_to_frame() {
+        let cmd = Sort::new("mylist")
+            .by("weight_*")
+            .limit(0, 10)
+            .order(SortOrder::Desc)
+            .alpha();
+        match cmd.to_frame() {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("SORT"));
+                assert_eq!(args[1], bulk("mylist"));
+                assert_eq!(args[2], bulk("BY"));
+                assert_eq!(args[3], bulk("weight_*"));
+                assert!(args.contains(&bulk("DESC")));
+                assert!(args.contains(&bulk("ALPHA")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    // -- ObjectEncoding --
+
+    #[test]
+    fn object_encoding_to_frame() {
+        let cmd = ObjectEncoding::new("mykey");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("OBJECT"), bulk("ENCODING"), bulk("mykey")])
+        );
+    }
+
+    #[test]
+    fn object_encoding_parse_response() {
+        let cmd = ObjectEncoding::new("mykey");
+        let frame = Frame::BulkString(Some(Bytes::from("ziplist")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "ziplist");
+    }
+
+    // -- Persist --
+
+    #[test]
+    fn persist_to_frame() {
+        let cmd = Persist::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PERSIST"), bulk("k")]));
+    }
+
+    // -- RandomKey --
+
+    #[test]
+    fn randomkey_to_frame() {
+        let cmd = RandomKey::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("RANDOMKEY")]));
+    }
+
+    #[test]
+    fn randomkey_parse_null() {
+        let cmd = RandomKey::new();
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
     }
 }

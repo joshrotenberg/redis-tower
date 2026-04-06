@@ -1540,3 +1540,278 @@ impl Command for ZRevRank {
         "ZREVRANK"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- ZAdd --
+
+    #[test]
+    fn zadd_to_frame() {
+        let cmd = ZAdd::new("myzset").member(1.0, "a").member(2.0, "b");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZADD"),
+                bulk("myzset"),
+                bulk("1"),
+                bulk("a"),
+                bulk("2"),
+                bulk("b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zadd_parse_integer() {
+        let cmd = ZAdd::new("myzset").member(1.0, "a");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn zadd_parse_error_on_string() {
+        let cmd = ZAdd::new("myzset").member(1.0, "a");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- ZRem --
+
+    #[test]
+    fn zrem_to_frame() {
+        let cmd = ZRem::new("myzset", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZREM"), bulk("myzset"), bulk("a")])
+        );
+    }
+
+    // -- ZRange --
+
+    #[test]
+    fn zrange_to_frame() {
+        let cmd = ZRange::new("myzset", 0, -1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZRANGE"), bulk("myzset"), bulk("0"), bulk("-1"),])
+        );
+    }
+
+    #[test]
+    fn zrange_parse_array() {
+        let cmd = ZRange::new("myzset", 0, -1);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn zrange_parse_error_on_integer() {
+        let cmd = ZRange::new("myzset", 0, -1);
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- ZScore --
+
+    #[test]
+    fn zscore_to_frame() {
+        let cmd = ZScore::new("myzset", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZSCORE"), bulk("myzset"), bulk("a")])
+        );
+    }
+
+    #[test]
+    fn zscore_parse_bulk_string() {
+        let cmd = ZScore::new("myzset", "a");
+        let frame = Frame::BulkString(Some(Bytes::from("1.5")));
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert!((result - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zscore_parse_double() {
+        let cmd = ZScore::new("myzset", "a");
+        let result = cmd.parse_response(Frame::Double(2.5)).unwrap().unwrap();
+        assert!((result - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zscore_parse_null() {
+        let cmd = ZScore::new("myzset", "missing");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn zscore_parse_error_on_integer() {
+        let cmd = ZScore::new("myzset", "a");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- ZCard --
+
+    #[test]
+    fn zcard_to_frame() {
+        let cmd = ZCard::new("myzset");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ZCARD"), bulk("myzset")]));
+    }
+
+    // -- ZIncrBy --
+
+    #[test]
+    fn zincrby_to_frame() {
+        let cmd = ZIncrBy::new("myzset", 2.0, "member");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZINCRBY"),
+                bulk("myzset"),
+                bulk("2"),
+                bulk("member"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zincrby_parse_bulk_string() {
+        let cmd = ZIncrBy::new("myzset", 2.0, "m");
+        let frame = Frame::BulkString(Some(Bytes::from("5.0")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert!((result - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zincrby_parse_double() {
+        let cmd = ZIncrBy::new("myzset", 2.0, "m");
+        assert!((cmd.parse_response(Frame::Double(5.0)).unwrap() - 5.0).abs() < f64::EPSILON);
+    }
+
+    // -- ZRank --
+
+    #[test]
+    fn zrank_to_frame() {
+        let cmd = ZRank::new("myzset", "member");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZRANK"), bulk("myzset"), bulk("member")])
+        );
+    }
+
+    #[test]
+    fn zrank_parse_integer() {
+        let cmd = ZRank::new("myzset", "m");
+        assert_eq!(cmd.parse_response(Frame::Integer(0)).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn zrank_parse_null() {
+        let cmd = ZRank::new("myzset", "m");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- ZPopMin --
+
+    #[test]
+    fn zpopmin_to_frame() {
+        let cmd = ZPopMin::new("myzset").count(2);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZPOPMIN"), bulk("myzset"), bulk("2")])
+        );
+    }
+
+    #[test]
+    fn zpopmin_parse_pairs() {
+        let cmd = ZPopMin::new("myzset");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("1.0"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::BulkString(Some(Bytes::from("2.0"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, Bytes::from("a"));
+        assert!((result[0].1 - 1.0).abs() < f64::EPSILON);
+        assert_eq!(result[1].0, Bytes::from("b"));
+    }
+
+    #[test]
+    fn zpopmin_parse_empty() {
+        let cmd = ZPopMin::new("myzset");
+        let result = cmd.parse_response(Frame::Array(None)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // -- ZInterStore --
+
+    #[test]
+    fn zinterstore_to_frame() {
+        let cmd = ZInterStore::new("dest", vec!["s1", "s2"])
+            .weights(vec![1.0, 2.0])
+            .aggregate(Aggregate::Max);
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("ZINTERSTORE"));
+                assert_eq!(args[1], bulk("dest"));
+                assert_eq!(args[2], bulk("2"));
+                assert_eq!(args[3], bulk("s1"));
+                assert_eq!(args[4], bulk("s2"));
+                assert!(args.contains(&bulk("WEIGHTS")));
+                assert!(args.contains(&bulk("AGGREGATE")));
+                assert!(args.contains(&bulk("MAX")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    // -- ZMScore --
+
+    #[test]
+    fn zmscore_to_frame() {
+        let cmd = ZMScore::members("myzset", vec!["a", "b"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZMSCORE"), bulk("myzset"), bulk("a"), bulk("b"),])
+        );
+    }
+
+    #[test]
+    fn zmscore_parse_mixed() {
+        let cmd = ZMScore::members("myzset", vec!["a", "b"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("1.5"))),
+            Frame::Null,
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert!((result[0].unwrap() - 1.5).abs() < f64::EPSILON);
+        assert_eq!(result[1], None);
+    }
+
+    // -- ZRangeByScore --
+
+    #[test]
+    fn zrangebyscore_to_frame() {
+        let cmd = ZRangeByScore::new("myzset", "-inf", "+inf");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZRANGEBYSCORE"),
+                bulk("myzset"),
+                bulk("-inf"),
+                bulk("+inf"),
+            ])
+        );
+    }
+}
