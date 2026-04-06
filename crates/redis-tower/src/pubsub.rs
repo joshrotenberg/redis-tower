@@ -1,3 +1,26 @@
+//! Redis Pub/Sub support.
+//!
+//! Provides [`PubSubConnection`], which consumes a [`RedisConnection`] and
+//! exposes an async [`Stream`] of [`PubSubMessage`] values.
+//! Supports channel subscriptions, pattern subscriptions, and shard
+//! subscriptions (Redis 7+).
+//!
+//! # Example
+//!
+//! ```ignore
+//! use redis_tower::{PubSubConnection, RedisConnection};
+//! use tokio_stream::StreamExt;
+//!
+//! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut pubsub = PubSubConnection::from_connection(conn)?;
+//! pubsub.subscribe(&["events"]).await?;
+//!
+//! while let Some(msg) = pubsub.next().await {
+//!     let msg = msg?;
+//!     println!("{}: {:?}", msg.channel, msg.payload);
+//! }
+//! ```
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 

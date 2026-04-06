@@ -1,3 +1,25 @@
+//! Redis command pipelining.
+//!
+//! [`Pipeline`] batches multiple commands into a single network roundtrip,
+//! reducing latency for bulk operations. Each command's typed response is
+//! preserved and can be extracted from [`PipelineResults`] by index.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use redis_tower::{Pipeline, RedisConnection, commands::*};
+//!
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let results = Pipeline::new()
+//!     .push(Set::new("a", "1"))
+//!     .push(Set::new("b", "2"))
+//!     .push(Get::new("a"))
+//!     .execute(&mut conn)
+//!     .await?;
+//!
+//! let val: &Option<bytes::Bytes> = results.get(2)?;
+//! ```
+
 use std::any::Any;
 
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
@@ -38,6 +60,7 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
+    /// Create a new empty pipeline.
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),

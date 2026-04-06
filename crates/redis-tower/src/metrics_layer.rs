@@ -30,7 +30,9 @@ use std::time::{Duration, Instant};
 use redis_tower_core::{Frame, RedisError};
 use tower_service::Service;
 
-/// Receives metric events. Users implement this for their metrics framework.
+/// Receives metric events for each Redis command. Users implement this
+/// trait to integrate with their metrics framework (prometheus, metrics
+/// crate, OpenTelemetry, etc.).
 pub trait MetricsRecorder: Send + Sync + 'static {
     /// Called after each command completes.
     ///
@@ -42,6 +44,22 @@ pub trait MetricsRecorder: Send + Sync + 'static {
 }
 
 /// Tower `Layer` that produces [`MetricsService`] wrappers.
+///
+/// Wraps each inner service with a [`MetricsService`] that records
+/// per-command latency and success/failure via the provided
+/// [`MetricsRecorder`].
+///
+/// # Example
+///
+/// ```ignore
+/// use tower::ServiceBuilder;
+/// use redis_tower::metrics_layer::{MetricsLayer, MetricsRecorder};
+///
+/// let layer = MetricsLayer::new(MyRecorder);
+/// let svc = ServiceBuilder::new()
+///     .layer(layer)
+///     .service(frame_service);
+/// ```
 pub struct MetricsLayer<R> {
     recorder: Arc<R>,
 }
@@ -67,6 +85,11 @@ impl<R: MetricsRecorder, S> tower_layer::Layer<S> for MetricsLayer<R> {
 }
 
 /// Tower `Service` that records per-command metrics via a [`MetricsRecorder`].
+///
+/// Created by [`MetricsLayer`] or directly via [`MetricsService::new`].
+/// Extracts the command name from each request frame and reports the
+/// command name, wall-clock duration, and success/failure status after
+/// each call completes.
 pub struct MetricsService<S, R> {
     inner: S,
     recorder: Arc<R>,

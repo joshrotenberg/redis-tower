@@ -28,6 +28,27 @@ use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 
 /// A Redis client with local caching and automatic invalidation.
+///
+/// Uses two RESP3 connections internally: one for data commands and one
+/// for receiving invalidation push messages via `CLIENT TRACKING ON BCAST`.
+/// Cacheable read commands (GET, HGET, HGETALL, etc.) are served from
+/// the local cache when available, and invalidated automatically when
+/// the server notifies that keys have changed.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::caching::CachedClient;
+/// use redis_tower::commands::*;
+///
+/// let mut client = CachedClient::connect("127.0.0.1:6379").await?;
+///
+/// // First call hits Redis.
+/// let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+///
+/// // Second call returns cached value (no roundtrip).
+/// let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+/// ```
 pub struct CachedClient {
     conn: RedisConnection,
     cache: Arc<Mutex<HashMap<String, Frame>>>,

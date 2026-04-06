@@ -64,6 +64,10 @@ impl FrameService {
     }
 
     /// Subscribe to RESP3 push messages.
+    ///
+    /// Returns a receiver for out-of-band push frames (e.g., invalidation
+    /// messages from CLIENT TRACKING). Push frames received during normal
+    /// command execution are automatically routed to this channel.
     pub fn subscribe_pushes(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.push_tx = Some(tx);

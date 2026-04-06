@@ -39,7 +39,15 @@ pub struct StreamMessage {
     pub fields: Vec<(String, Bytes)>,
 }
 
-/// Configuration for the stream consumer.
+/// Configuration for the [`StreamConsumer`].
+///
+/// # Defaults
+///
+/// - `batch_size`: 10
+/// - `block_ms`: `Some(5000)` (5 seconds)
+/// - `auto_ack`: `true`
+/// - `claim_idle_ms`: `None`
+/// - `create_group`: `true`
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     /// Max messages per XREADGROUP call (COUNT). Default: 10.

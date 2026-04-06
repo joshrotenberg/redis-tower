@@ -12,13 +12,34 @@ use tower_service::Service;
 
 /// Wraps a `Service<Frame>` to provide `Service<Cmd>` for typed commands.
 ///
-/// Converts `Cmd -> Frame` via `to_frame()`, calls the inner service,
-/// then converts `Frame -> Cmd::Response` via `parse_response()`.
+/// Converts `Cmd -> Frame` via [`Command::to_frame`], calls the inner
+/// service, then converts `Frame -> Cmd::Response` via
+/// [`Command::parse_response`]. This is the bridge between Frame-level
+/// Tower middleware and typed command dispatch.
+///
+/// # Example
+///
+/// ```ignore
+/// use tower::ServiceBuilder;
+/// use redis_tower::{CommandAdapter, FrameService};
+/// use redis_tower::tracing_layer::TracingLayer;
+/// use redis_tower::commands::*;
+/// use tower::ServiceExt;
+///
+/// let frame_svc = FrameService::connect("127.0.0.1:6379").await?;
+/// let mut svc = CommandAdapter::new(
+///     ServiceBuilder::new()
+///         .layer(TracingLayer::new())
+///         .service(frame_svc),
+/// );
+/// let val: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
+/// ```
 pub struct CommandAdapter<S> {
     inner: S,
 }
 
 impl<S> CommandAdapter<S> {
+    /// Create a new `CommandAdapter` wrapping the given Frame-level service.
     pub fn new(inner: S) -> Self {
         Self { inner }
     }

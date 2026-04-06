@@ -13,21 +13,32 @@ use redis_tower_core::{Frame, RedisError};
 use tokio::sync::RwLock;
 use tower_service::Service;
 
-/// Configuration for the cache layer.
+/// Configuration for the [`CacheService`] layer.
+///
+/// # Defaults
+///
+/// - `max_size`: 0 (unlimited)
 #[derive(Default)]
 pub struct CacheConfig {
     /// Maximum number of cached entries. 0 means unlimited.
     pub max_size: usize,
 }
 
-/// Tower `Service` that caches Frame responses for cacheable commands.
+/// Tower `Service` that caches Frame responses for cacheable read commands.
 ///
-/// Sits between `CommandAdapter` and `FrameService` in the service stack:
+/// Caches responses for GET, HGET, HGETALL, LRANGE, SMEMBERS, ZRANGE,
+/// TYPE, and TTL. Write commands bypass the cache entirely.
+///
+/// Sits between [`CommandAdapter`](crate::CommandAdapter) and
+/// [`FrameService`](crate::FrameService) in the service stack:
 ///
 /// ```text
 /// CommandAdapter<CacheService<FrameService>>
 ///       Cmd -> Frame -> (cache check) -> Frame -> Cmd::Response
 /// ```
+///
+/// For automatic invalidation via Redis server-assisted client caching,
+/// use [`spawn_invalidation_task`] with a push message stream.
 pub struct CacheService<S> {
     inner: S,
     cache: Arc<RwLock<HashMap<String, Frame>>>,

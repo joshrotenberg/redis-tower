@@ -1,3 +1,24 @@
+//! Redis transactions (MULTI/EXEC) with optional WATCH support.
+//!
+//! [`Transaction`] builds a sequence of commands that are executed atomically
+//! via MULTI/EXEC. For optimistic locking, use [`Transaction::watch`] to
+//! observe keys before the transaction; if any watched key is modified by
+//! another client, the transaction is aborted and
+//! [`TransactionResult::Aborted`] is returned.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use redis_tower::{Transaction, RedisConnection, commands::*};
+//!
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let result = Transaction::new()
+//!     .push(Set::new("x", "1"))
+//!     .push(Incr::new("x"))
+//!     .execute(&mut conn)
+//!     .await?;
+//! ```
+
 use std::any::Any;
 
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
@@ -54,6 +75,7 @@ pub enum TransactionResult {
 }
 
 impl Transaction {
+    /// Create a new empty transaction.
     pub fn new() -> Self {
         Self {
             watch_keys: Vec::new(),
