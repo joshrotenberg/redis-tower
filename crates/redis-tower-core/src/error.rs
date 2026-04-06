@@ -49,3 +49,28 @@ pub enum RedisError {
         last_error: Box<RedisError>,
     },
 }
+
+impl RedisError {
+    /// Returns true if this error is transient and the operation is worth retrying.
+    ///
+    /// Connection and protocol errors are retryable. Redis command errors
+    /// (WRONGTYPE, NOSCRIPT, etc.) are not -- they will fail the same way
+    /// on retry.
+    ///
+    /// Note: `TransactionAborted` is retryable at the transaction level
+    /// (rebuild and re-execute) but not at the command level.
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            RedisError::Connection(_) | RedisError::ConnectionClosed | RedisError::Protocol(_)
+        )
+    }
+
+    /// Returns true if the connection is broken and needs to be replaced.
+    pub fn is_connection_error(&self) -> bool {
+        matches!(
+            self,
+            RedisError::Connection(_) | RedisError::ConnectionClosed
+        )
+    }
+}

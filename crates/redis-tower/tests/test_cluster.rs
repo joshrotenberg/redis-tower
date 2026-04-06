@@ -9,7 +9,7 @@ use redis_tower::commands::*;
 #[tokio::test]
 #[ignore = "requires cluster-enabled Redis"]
 async fn cluster_info() {
-    let c = conn().await;
+    let mut c = conn().await;
     let info = c.execute(ClusterInfo::new()).await.unwrap();
     assert!(info.contains("cluster_enabled"));
 }
@@ -17,7 +17,7 @@ async fn cluster_info() {
 #[tokio::test]
 #[ignore = "requires cluster-enabled Redis"]
 async fn cluster_myid() {
-    let c = conn().await;
+    let mut c = conn().await;
     let id = c.execute(ClusterMyId::new()).await.unwrap();
     // Node ID is a 40-character hex string.
     assert_eq!(id.len(), 40);
@@ -27,7 +27,7 @@ async fn cluster_myid() {
 #[tokio::test]
 #[ignore = "requires cluster-enabled Redis"]
 async fn cluster_keyslot() {
-    let c = conn().await;
+    let mut c = conn().await;
     let slot = c.execute(ClusterKeySlot::new("foo")).await.unwrap();
     assert!((0..=16383).contains(&slot));
 

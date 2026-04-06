@@ -65,7 +65,7 @@ impl ResilientRedisClient {
         let result = conn.execute(cmd).await;
 
         if let Err(ref e) = result {
-            if crate::reconnect::is_connection_error(e) {
+            if e.is_connection_error() {
                 drop(conn);
                 self.reconnect().await;
             }
