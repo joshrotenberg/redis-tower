@@ -44,5 +44,9 @@ thiserror = "2.0"
 # Tracing
 tracing = "0.1"
 
+# Hashing
+sha1 = "0.10"
+hex = "0.4"
+
 # Testing
 tokio-test = "0.4"
