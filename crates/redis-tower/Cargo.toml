@@ -21,6 +21,7 @@ tls-rustls = ["redis-tower-core/tls-rustls"]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true }
+async-stream = { workspace = true }
 
 tower-service = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }

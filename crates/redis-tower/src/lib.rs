@@ -32,10 +32,12 @@
 //!     .service(conn);
 //! ```
 
+pub mod auto_pipeline;
 pub mod cache_layer;
 pub mod caching;
 mod client;
 pub mod command_adapter;
+pub mod consumer;
 mod executor;
 pub mod metrics_layer;
 pub mod pipeline;
@@ -47,7 +49,9 @@ pub mod script;
 pub mod tracing_layer;
 pub mod transaction;
 
+pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
 pub use cache_layer::CacheService;
+pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use caching::CachedClient;
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;

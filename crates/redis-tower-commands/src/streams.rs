@@ -606,6 +606,17 @@ impl XReadGroup {
         self.block = Some(ms);
         self
     }
+
+    /// Override the ID for all streams already added.
+    ///
+    /// Use `"0"` to read pending entries or `">"` for new entries.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        let id = id.into();
+        for stream in &mut self.streams {
+            stream.1 = id.clone();
+        }
+        self
+    }
 }
 
 impl Command for XReadGroup {
@@ -637,7 +648,11 @@ impl Command for XReadGroup {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        parse_xread_response(&frame)
+        match &frame {
+            // BLOCK timeout or no pending entries returns Null.
+            Frame::Null | Frame::Array(None) | Frame::BulkString(None) => Ok(Vec::new()),
+            _ => parse_xread_response(&frame),
+        }
     }
 
     fn name(&self) -> &str {
