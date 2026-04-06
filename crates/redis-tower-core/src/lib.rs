@@ -17,6 +17,7 @@ mod stream;
 #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 pub mod tls;
 mod url;
+pub mod value;
 
 pub use command::Command;
 pub use connection::RedisConnection;
@@ -24,5 +25,7 @@ pub use error::RedisError;
 pub use frame_service::FrameService;
 pub use stream::RedisStream;
 pub use url::{RedisUrl, parse_redis_url};
+
+pub use value::{FromRedisBytes, RedisConvert, RedisValueExt};
 
 pub use redis_tower_protocol::{Frame, RespCodec};
