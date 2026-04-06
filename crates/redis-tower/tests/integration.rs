@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use bytes::Bytes;
 use redis_test_harness::standalone::{RedisStandalone, StandaloneConfig};
 use redis_tower::commands::*;
-use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
+use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
     Pipeline, PubSubConnection, RedisClient, RedisConnection, ResilientConnection,
     ResilientRedisClient, Transaction, TransactionResult,
@@ -2285,4 +2285,324 @@ async fn bzpopmax_with_data() {
     assert!((score - 2.0).abs() < f64::EPSILON);
 
     conn.execute(Del::new(k)).await.unwrap();
+}
+
+// -- Reconnection / resilience tests (#154) --
+
+#[tokio::test]
+async fn resilient_connection_service_call() {
+    // Test ResilientConnection via Service trait (poll_ready + call)
+    let addr = redis_addr();
+    let mut conn = ResilientConnection::new(
+        AddrConnectionFactory::new(&addr),
+        ReconnectConfig::default(),
+    )
+    .await
+    .unwrap();
+    let k = key("resilient_svc", "k");
+    conn.execute(Set::new(&k, "via_service")).await.unwrap();
+    let val: Option<Bytes> = conn.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("via_service")));
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn resilient_connection_url_factory() {
+    // Test UrlConnectionFactory
+    let addr = redis_addr();
+    let url = format!("redis://{addr}");
+    let _conn = ResilientConnection::new(
+        UrlConnectionFactory::new(&url),
+        ReconnectConfig::default(),
+    )
+    .await
+    .unwrap();
+    // just verify it connects
+}
+
+#[tokio::test]
+async fn resilient_connection_custom_config() {
+    // Test custom backoff config
+    use std::time::Duration;
+    let addr = redis_addr();
+    let config = ReconnectConfig::default()
+        .max_retries(3)
+        .base_delay(Duration::from_millis(50))
+        .max_delay(Duration::from_secs(1));
+    let mut conn = ResilientConnection::new(
+        AddrConnectionFactory::new(&addr),
+        config,
+    )
+    .await
+    .unwrap();
+    let pong = conn.execute(Ping::new()).await.unwrap();
+    assert_eq!(pong, "PONG");
+}
+
+// -- Pipeline / transaction edge case tests (#159) --
+
+#[tokio::test]
+async fn pipeline_mixed_types() {
+    let mut conn = conn().await;
+    let k1 = key("pipe_mixed", "str");
+    let k2 = key("pipe_mixed", "num");
+    conn.execute(Set::new(&k1, "hello")).await.unwrap();
+    conn.execute(Set::new(&k2, "0")).await.unwrap();
+
+    let results = Pipeline::new()
+        .push(Get::new(&k1))
+        .push(Incr::new(&k2))
+        .push(Exists::new(&k1))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    let s: &Option<Bytes> = results.get(0).unwrap();
+    assert_eq!(s.as_ref().unwrap(), &Bytes::from("hello"));
+    let n: &i64 = results.get(1).unwrap();
+    assert_eq!(*n, 1);
+    let e: &i64 = results.get(2).unwrap();
+    assert_eq!(*e, 1);
+
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_with_redis_error_partial() {
+    // One command errors but others succeed
+    let mut conn = conn().await;
+    let k = key("pipe_err", "k");
+    conn.execute(Set::new(&k, "not_a_list")).await.unwrap();
+
+    let results = Pipeline::new()
+        .push(Ping::new())
+        .push(LPush::new(&k, "item")) // WRONGTYPE error
+        .push(Ping::new())
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    // First and third succeed
+    assert!(results.get::<String>(0).is_ok());
+    // Second is a Redis error
+    assert!(results.get::<i64>(1).is_err());
+    // Third still succeeds
+    assert!(results.get::<String>(2).is_ok());
+
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn pipeline_large() {
+    let mut conn = conn().await;
+    let mut pipeline = Pipeline::new();
+    for i in 0..200 {
+        pipeline = pipeline.push(Set::new(format!("pipe_large:{i}"), format!("v{i}")));
+    }
+    let results = pipeline.execute(&mut conn).await.unwrap();
+    assert_eq!(results.len(), 200);
+
+    // Cleanup
+    for i in 0..200 {
+        conn.execute(Del::new(format!("pipe_large:{i}")))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn transaction_multiple_watch_keys() {
+    let mut conn = conn().await;
+    let k1 = key("txn_multi_watch", "k1");
+    let k2 = key("txn_multi_watch", "k2");
+    conn.execute(Set::new(&k1, "a")).await.unwrap();
+    conn.execute(Set::new(&k2, "b")).await.unwrap();
+
+    let result = Transaction::new()
+        .watch([&k1, &k2])
+        .push(Set::new(&k1, "x"))
+        .push(Set::new(&k2, "y"))
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    assert!(matches!(result, TransactionResult::Committed(_)));
+
+    conn.execute(Del::keys([&k1, &k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_with_error_aborts_cleanly() {
+    // A command that will error inside MULTI should not leave connection dirty
+    let mut conn = conn().await;
+    let k = key("txn_err_clean", "k");
+    conn.execute(Set::new(&k, "not_a_list")).await.unwrap();
+
+    // This should return an error because LPUSH on a string key
+    // errors during EXEC
+    let _result = Transaction::new()
+        .push(LPush::new(&k, "item"))
+        .execute(&mut conn)
+        .await;
+
+    // Connection should still be usable
+    let pong = conn.execute(Ping::new()).await.unwrap();
+    assert_eq!(pong, "PONG");
+
+    conn.execute(Del::new(&k)).await.unwrap();
+}
+
+// -- Additional CSC edge-case tests (#155) --
+
+#[tokio::test]
+async fn csc_multiple_keys_cached() {
+    let addr = redis_addr();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k1 = "csc_multi:k1";
+    let k2 = "csc_multi:k2";
+    let mut writer = conn().await;
+    writer.execute(Set::new(k1, "v1")).await.unwrap();
+    writer.execute(Set::new(k2, "v2")).await.unwrap();
+
+    let _: Option<Bytes> = client.execute(Get::new(k1)).await.unwrap();
+    let _: Option<Bytes> = client.execute(Get::new(k2)).await.unwrap();
+    assert_eq!(client.cache_size().await, 2);
+
+    writer.execute(Del::keys([k1, k2])).await.unwrap();
+    client.clear_cache().await;
+}
+
+#[tokio::test]
+async fn csc_clear_cache() {
+    let addr = redis_addr();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_clear:k";
+    let mut writer = conn().await;
+    writer.execute(Set::new(k, "val")).await.unwrap();
+
+    let _: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
+    assert_eq!(client.cache_size().await, 1);
+
+    client.clear_cache().await;
+    assert_eq!(client.cache_size().await, 0);
+
+    writer.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn csc_set_bypasses_cache() {
+    let addr = redis_addr();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_set_bypass:k";
+    client.execute(Set::new(k, "val")).await.unwrap();
+    assert_eq!(client.cache_size().await, 0);
+
+    client.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn csc_hgetall_cached() {
+    let addr = redis_addr();
+    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+
+    let k = "csc_hgetall:k";
+    let mut writer = conn().await;
+    writer.execute(HSet::new(k, "f1", "v1")).await.unwrap();
+
+    let _: Vec<(Bytes, Bytes)> = client.execute(HGetAll::new(k)).await.unwrap();
+    assert!(client.cache_size().await >= 1);
+
+    writer.execute(Del::new(k)).await.unwrap();
+    client.clear_cache().await;
+}
+
+// -- Additional PubSub edge-case tests (#156) --
+
+#[tokio::test]
+async fn pubsub_message_fields() {
+    let channel = key("pubsub_fields", "ch");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&channel]).await.unwrap();
+
+    let mut pub_conn = conn().await;
+    pub_conn
+        .execute(Publish::new(&channel, "test_payload"))
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout waiting for message")
+        .expect("stream ended")
+        .expect("parse error");
+
+    assert_eq!(msg.channel, channel);
+    assert_eq!(msg.payload, Bytes::from("test_payload"));
+    assert_eq!(msg.kind, redis_tower::MessageKind::Message);
+    assert!(msg.pattern.is_none());
+}
+
+#[tokio::test]
+async fn pubsub_multiple_channels() {
+    let ch1 = key("pubsub_multi_ch", "ch1");
+    let ch2 = key("pubsub_multi_ch", "ch2");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&ch1, &ch2]).await.unwrap();
+
+    let mut pub_conn = conn().await;
+    pub_conn
+        .execute(Publish::new(&ch1, "msg1"))
+        .await
+        .unwrap();
+    pub_conn
+        .execute(Publish::new(&ch2, "msg2"))
+        .await
+        .unwrap();
+
+    let m1 = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("parse error");
+    let m2 = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("parse error");
+
+    let payloads: Vec<&[u8]> = vec![m1.payload.as_ref(), m2.payload.as_ref()];
+    assert!(payloads.contains(&b"msg1".as_ref()));
+    assert!(payloads.contains(&b"msg2".as_ref()));
+}
+
+#[tokio::test]
+async fn pubsub_subscribe_after_unsubscribe() {
+    let ch = key("pubsub_resub", "ch");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&ch]).await.unwrap();
+    pubsub.unsubscribe(&[&ch]).await.unwrap();
+    pubsub.subscribe(&[&ch]).await.unwrap();
+
+    let mut pub_conn = conn().await;
+    pub_conn
+        .execute(Publish::new(&ch, "after_resub"))
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout waiting for message")
+        .expect("stream ended")
+        .expect("parse error");
+
+    assert_eq!(msg.payload, Bytes::from("after_resub"));
 }
