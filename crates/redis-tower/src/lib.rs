@@ -56,7 +56,8 @@ pub use transaction::{Transaction, TransactionResult};
 
 // Re-export core types.
 pub use redis_tower_core::{
-    Command, Frame, FrameService, RedisConnection, RedisError, RedisStream, RespCodec,
+    Command, Frame, FrameService, FromRedisBytes, RedisConnection, RedisConvert, RedisError,
+    RedisStream, RedisValueExt, RespCodec,
 };
 
 // Re-export TLS config when a TLS backend is enabled.
