@@ -206,9 +206,7 @@ where
     fn next_index(&self) -> usize {
         let len = self.inner.connections.len();
         match self.inner.dispatch {
-            DispatchStrategy::RoundRobin => {
-                self.inner.index.fetch_add(1, Ordering::Relaxed) % len
-            }
+            DispatchStrategy::RoundRobin => self.inner.index.fetch_add(1, Ordering::Relaxed) % len,
             DispatchStrategy::Random => {
                 // Simple xorshift-based pseudo-random from the atomic counter.
                 // Not cryptographic, but good enough for load distribution.
