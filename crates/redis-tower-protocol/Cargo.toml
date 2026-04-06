@@ -7,6 +7,8 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["redis", "resp", "protocol", "codec"]
+categories = ["database", "asynchronous", "network-programming"]
 
 [dependencies]
 resp-rs = "0.1"

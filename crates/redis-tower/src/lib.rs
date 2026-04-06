@@ -31,6 +31,32 @@
 //!     .layer(TimeoutLayer::new(Duration::from_secs(5)))
 //!     .service(conn);
 //! ```
+//!
+//! # Features
+//!
+//! - **Typed commands** -- every Redis command is a struct with compile-time
+//!   type safety for both request encoding and response parsing (see
+//!   [`commands`]).
+//! - **Pipelines and transactions** -- batch commands with [`Pipeline`] or
+//!   wrap them in MULTI/EXEC with [`Transaction`].
+//! - **Pub/Sub** -- dedicated [`PubSubConnection`] for subscribe/publish
+//!   workflows.
+//! - **Scripting** -- [`Script`] handles EVALSHA with automatic EVAL fallback
+//!   and script loading.
+//! - **Auto-pipelining** -- [`AutoPipelineService`] transparently batches
+//!   concurrent requests into Redis pipelines.
+//! - **Resilience layers** -- [`ReconnectService`] for automatic reconnection,
+//!   [`MetricsLayer`] and [`TracingLayer`] for observability, and
+//!   [`CacheService`] for client-side caching.
+//! - **TLS** -- enable `tls-native-tls` or `tls-rustls` features for
+//!   encrypted connections.
+//!
+//! # Crate Structure
+//!
+//! This is the facade crate. It re-exports types from:
+//! - `redis-tower-protocol` -- RESP3 frame types and codec
+//! - `redis-tower-core` -- [`Command`] trait, [`RedisConnection`], transport
+//! - `redis-tower-commands` -- typed command implementations (via [`commands`])
 
 pub mod auto_pipeline;
 pub mod cache_layer;
