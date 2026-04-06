@@ -826,3 +826,717 @@ impl Command for ZMScore {
         "ZMSCORE"
     }
 }
+
+/// Aggregation function used by ZINTERSTORE, ZUNIONSTORE, and similar commands.
+#[derive(Debug, Clone, Copy)]
+pub enum Aggregate {
+    Sum,
+    Min,
+    Max,
+}
+
+impl Aggregate {
+    fn as_str(&self) -> &str {
+        match self {
+            Aggregate::Sum => "SUM",
+            Aggregate::Min => "MIN",
+            Aggregate::Max => "MAX",
+        }
+    }
+}
+
+/// ZINTERSTORE destination numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\]
+///
+/// Computes the intersection of the sorted sets given by the specified keys,
+/// and stores the result in `destination`. Returns the number of elements in
+/// the resulting sorted set.
+pub struct ZInterStore {
+    destination: String,
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZInterStore {
+    pub fn new(
+        destination: impl Into<String>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            destination: destination.into(),
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZInterStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZINTERSTORE"),
+            bulk(self.destination.as_str()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZINTERSTORE"
+    }
+}
+
+/// ZUNIONSTORE destination numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\]
+///
+/// Computes the union of the sorted sets given by the specified keys, and
+/// stores the result in `destination`. Returns the number of elements in
+/// the resulting sorted set.
+pub struct ZUnionStore {
+    destination: String,
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZUnionStore {
+    pub fn new(
+        destination: impl Into<String>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            destination: destination.into(),
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZUnionStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZUNIONSTORE"),
+            bulk(self.destination.as_str()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZUNIONSTORE"
+    }
+}
+
+/// ZDIFFSTORE destination numkeys key \[key ...\]
+///
+/// Computes the difference between the first sorted set and all successive
+/// sorted sets given by the specified keys, and stores the result in
+/// `destination`. Returns the number of elements in the resulting sorted set.
+pub struct ZDiffStore {
+    destination: String,
+    keys: Vec<String>,
+}
+
+impl ZDiffStore {
+    pub fn new(
+        destination: impl Into<String>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            destination: destination.into(),
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for ZDiffStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZDIFFSTORE"),
+            bulk(self.destination.as_str()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZDIFFSTORE"
+    }
+}
+
+/// ZINTERCARD numkeys key \[key ...\] \[LIMIT limit\]
+///
+/// Returns the cardinality of the intersection of the sorted sets given by
+/// the specified keys. The optional `LIMIT` argument caps the work done
+/// when the intersection cardinality reaches the limit.
+pub struct ZInterCard {
+    keys: Vec<String>,
+    limit: Option<i64>,
+}
+
+impl ZInterCard {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            limit: None,
+        }
+    }
+
+    /// Sets the upper bound for the returned cardinality.
+    pub fn limit(mut self, limit: i64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+impl Command for ZInterCard {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZINTERCARD"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(limit) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(limit.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZINTERCARD"
+    }
+}
+
+/// ZRANGESTORE dst src min max \[BYSCORE|BYLEX\] \[REV\] \[LIMIT offset count\]
+///
+/// Stores the specified range of members from the sorted set at `src` into
+/// `dst`. Returns the number of elements in the resulting sorted set.
+pub struct ZRangeStore {
+    dst: String,
+    src: String,
+    min: String,
+    max: String,
+    by_score: bool,
+    by_lex: bool,
+    rev: bool,
+    limit: Option<(i64, i64)>,
+}
+
+impl ZRangeStore {
+    pub fn new(
+        dst: impl Into<String>,
+        src: impl Into<String>,
+        min: impl Into<String>,
+        max: impl Into<String>,
+    ) -> Self {
+        Self {
+            dst: dst.into(),
+            src: src.into(),
+            min: min.into(),
+            max: max.into(),
+            by_score: false,
+            by_lex: false,
+            rev: false,
+            limit: None,
+        }
+    }
+
+    /// Uses score-based range interpretation.
+    pub fn by_score(mut self) -> Self {
+        self.by_score = true;
+        self.by_lex = false;
+        self
+    }
+
+    /// Uses lexicographic range interpretation.
+    pub fn by_lex(mut self) -> Self {
+        self.by_lex = true;
+        self.by_score = false;
+        self
+    }
+
+    /// Reverses the sort order.
+    pub fn rev(mut self) -> Self {
+        self.rev = true;
+        self
+    }
+
+    /// Limits the results to `count` elements starting at `offset`.
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRangeStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZRANGESTORE"),
+            bulk(self.dst.as_str()),
+            bulk(self.src.as_str()),
+            bulk(self.min.as_str()),
+            bulk(self.max.as_str()),
+        ];
+        if self.by_score {
+            args.push(bulk("BYSCORE"));
+        } else if self.by_lex {
+            args.push(bulk("BYLEX"));
+        }
+        if self.rev {
+            args.push(bulk("REV"));
+        }
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZRANGESTORE"
+    }
+}
+
+/// The direction argument for ZMPOP.
+#[derive(Debug, Clone, Copy)]
+pub enum ZMPopDirection {
+    Min,
+    Max,
+}
+
+impl ZMPopDirection {
+    fn as_str(&self) -> &str {
+        match self {
+            ZMPopDirection::Min => "MIN",
+            ZMPopDirection::Max => "MAX",
+        }
+    }
+}
+
+/// ZMPOP numkeys key \[key ...\] MIN|MAX \[COUNT count\]
+///
+/// Pops one or more members with the lowest or highest scores from the first
+/// non-empty sorted set among the specified keys. Returns `None` when no
+/// elements could be popped from any of the sorted sets, or
+/// `Some((key, members))` where `key` is the name of the sorted set and
+/// `members` is a list of `(member, score)` pairs.
+pub struct ZMPop {
+    keys: Vec<String>,
+    direction: ZMPopDirection,
+    count: Option<i64>,
+}
+
+impl ZMPop {
+    pub fn new(
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        direction: ZMPopDirection,
+    ) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            direction,
+            count: None,
+        }
+    }
+
+    /// Sets the number of members to pop.
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for ZMPop {
+    type Response = Option<(Bytes, Vec<(Bytes, f64)>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZMPOP"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        args.push(bulk(self.direction.as_str()));
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) if frames.len() == 2 => {
+                let key = match &frames[0] {
+                    Frame::BulkString(Some(data)) => data.clone(),
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "bulk string (key name)",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let members = match &frames[1] {
+                    Frame::Array(Some(pairs)) => pairs
+                        .iter()
+                        .map(|pair| match pair {
+                            Frame::Array(Some(inner)) if inner.len() == 2 => {
+                                let member = match &inner[0] {
+                                    Frame::BulkString(Some(data)) => data.clone(),
+                                    other => {
+                                        return Err(RedisError::UnexpectedResponse {
+                                            expected: "bulk string (member)",
+                                            actual: format!("{other:?}"),
+                                        });
+                                    }
+                                };
+                                let score = match &inner[1] {
+                                    Frame::BulkString(Some(data)) => {
+                                        let s = String::from_utf8_lossy(data);
+                                        s.parse::<f64>().map_err(|_| {
+                                            RedisError::UnexpectedResponse {
+                                                expected: "float string",
+                                                actual: format!("{s}"),
+                                            }
+                                        })?
+                                    }
+                                    Frame::Double(d) => *d,
+                                    other => {
+                                        return Err(RedisError::UnexpectedResponse {
+                                            expected: "bulk string or double (score)",
+                                            actual: format!("{other:?}"),
+                                        });
+                                    }
+                                };
+                                Ok((member, score))
+                            }
+                            other => Err(RedisError::UnexpectedResponse {
+                                expected: "array of [member, score]",
+                                actual: format!("{other:?}"),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "array of member/score pairs",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                Ok(Some((key, members)))
+            }
+            Frame::Array(None) | Frame::Null | Frame::BulkString(None) => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "two-element array or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZMPOP"
+    }
+}
+
+/// ZREMRANGEBYRANK key start stop
+///
+/// Removes all members in the sorted set stored at `key` with rank between
+/// `start` and `stop` (inclusive, zero-based). Returns the number of members
+/// removed.
+pub struct ZRemRangeByRank {
+    key: String,
+    start: i64,
+    stop: i64,
+}
+
+impl ZRemRangeByRank {
+    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for ZRemRangeByRank {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREMRANGEBYRANK"),
+            bulk(self.key.as_str()),
+            bulk(self.start.to_string()),
+            bulk(self.stop.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZREMRANGEBYRANK"
+    }
+}
+
+/// ZREMRANGEBYSCORE key min max
+///
+/// Removes all members in the sorted set stored at `key` with a score between
+/// `min` and `max` (inclusive). The `min` and `max` arguments can be `"-inf"`,
+/// `"+inf"`, or numeric strings (prefix with `"("` for exclusive bounds).
+/// Returns the number of members removed.
+pub struct ZRemRangeByScore {
+    key: String,
+    min: String,
+    max: String,
+}
+
+impl ZRemRangeByScore {
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+        }
+    }
+}
+
+impl Command for ZRemRangeByScore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREMRANGEBYSCORE"),
+            bulk(self.key.as_str()),
+            bulk(self.min.as_str()),
+            bulk(self.max.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZREMRANGEBYSCORE"
+    }
+}
+
+/// ZREMRANGEBYLEX key min max
+///
+/// Removes all members in the sorted set stored at `key` between the
+/// lexicographical range specified by `min` and `max`. Valid values for
+/// `min` and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
+/// (exclusive). Returns the number of members removed.
+pub struct ZRemRangeByLex {
+    key: String,
+    min: String,
+    max: String,
+}
+
+impl ZRemRangeByLex {
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+        }
+    }
+}
+
+impl Command for ZRemRangeByLex {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREMRANGEBYLEX"),
+            bulk(self.key.as_str()),
+            bulk(self.min.as_str()),
+            bulk(self.max.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZREMRANGEBYLEX"
+    }
+}
+
+/// ZREVRANK key member
+///
+/// Returns the rank of `member` in the sorted set at `key` with scores
+/// ordered from high to low (zero-based, highest score = rank 0), or `None`
+/// if the member or key does not exist.
+pub struct ZRevRank {
+    key: String,
+    member: String,
+}
+
+impl ZRevRank {
+    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            member: member.into(),
+        }
+    }
+}
+
+impl Command for ZRevRank {
+    type Response = Option<i64>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREVRANK"),
+            bulk(self.key.as_str()),
+            bulk(self.member.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(Some(n)),
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANK"
+    }
+}

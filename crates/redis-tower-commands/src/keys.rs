@@ -689,3 +689,551 @@ impl Command for PExpireTime {
         "PEXPIRETIME"
     }
 }
+
+/// DUMP key
+///
+/// Returns a serialized version of the value stored at the specified key.
+/// Returns `None` if the key does not exist.
+pub struct Dump {
+    key: String,
+}
+
+impl Dump {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for Dump {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("DUMP"), bulk(self.key.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "DUMP"
+    }
+}
+
+/// RESTORE key ttl serialized-value \[REPLACE\] \[ABSTTL\] \[IDLETIME seconds\] \[FREQ frequency\]
+///
+/// Deserializes a previously-dumped value and associates it with a key.
+/// The `ttl_ms` argument sets the time-to-live in milliseconds (0 for no expiry).
+pub struct Restore {
+    key: String,
+    ttl_ms: u64,
+    serialized_value: Bytes,
+    replace: bool,
+    absttl: bool,
+    idletime: Option<u64>,
+    freq: Option<u64>,
+}
+
+impl Restore {
+    pub fn new(key: impl Into<String>, ttl_ms: u64, serialized_value: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            ttl_ms,
+            serialized_value: serialized_value.into(),
+            replace: false,
+            absttl: false,
+            idletime: None,
+            freq: None,
+        }
+    }
+
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+
+    pub fn absttl(mut self) -> Self {
+        self.absttl = true;
+        self
+    }
+
+    pub fn idletime(mut self, seconds: u64) -> Self {
+        self.idletime = Some(seconds);
+        self
+    }
+
+    pub fn freq(mut self, frequency: u64) -> Self {
+        self.freq = Some(frequency);
+        self
+    }
+}
+
+impl Command for Restore {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("RESTORE"),
+            bulk(self.key.as_str()),
+            bulk(self.ttl_ms.to_string()),
+            bulk(&self.serialized_value),
+        ];
+        if self.replace {
+            args.push(bulk("REPLACE"));
+        }
+        if self.absttl {
+            args.push(bulk("ABSTTL"));
+        }
+        if let Some(idle) = self.idletime {
+            args.push(bulk("IDLETIME"));
+            args.push(bulk(idle.to_string()));
+        }
+        if let Some(f) = self.freq {
+            args.push(bulk("FREQ"));
+            args.push(bulk(f.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RESTORE"
+    }
+}
+
+/// Sort order for SORT and SORT_RO commands.
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+/// SORT key \[BY pattern\] \[GET pattern ...\] \[LIMIT offset count\] \[ASC|DESC\] \[ALPHA\] \[STORE destination\]
+///
+/// Sorts the elements in a list, set, or sorted set. When STORE is used, the
+/// response is an integer (number of elements stored); otherwise it is an array
+/// of bulk strings. The response type is `Frame` to accommodate both cases.
+pub struct Sort {
+    key: String,
+    by: Option<String>,
+    get: Vec<String>,
+    limit: Option<(i64, i64)>,
+    order: Option<SortOrder>,
+    alpha: bool,
+    store: Option<String>,
+}
+
+impl Sort {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            by: None,
+            get: Vec::new(),
+            limit: None,
+            order: None,
+            alpha: false,
+            store: None,
+        }
+    }
+
+    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+        self.by = Some(pattern.into());
+        self
+    }
+
+    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+        self.get.push(pattern.into());
+        self
+    }
+
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+
+    pub fn order(mut self, order: SortOrder) -> Self {
+        self.order = Some(order);
+        self
+    }
+
+    pub fn alpha(mut self) -> Self {
+        self.alpha = true;
+        self
+    }
+
+    pub fn store(mut self, destination: impl Into<String>) -> Self {
+        self.store = Some(destination.into());
+        self
+    }
+}
+
+impl Command for Sort {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("SORT"), bulk(self.key.as_str())];
+        if let Some(ref pattern) = self.by {
+            args.push(bulk("BY"));
+            args.push(bulk(pattern.as_str()));
+        }
+        for pattern in &self.get {
+            args.push(bulk("GET"));
+            args.push(bulk(pattern.as_str()));
+        }
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        if let Some(ref order) = self.order {
+            match order {
+                SortOrder::Asc => args.push(bulk("ASC")),
+                SortOrder::Desc => args.push(bulk("DESC")),
+            }
+        }
+        if self.alpha {
+            args.push(bulk("ALPHA"));
+        }
+        if let Some(ref dest) = self.store {
+            args.push(bulk("STORE"));
+            args.push(bulk(dest.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "SORT"
+    }
+}
+
+/// SORT_RO key \[BY pattern\] \[GET pattern ...\] \[LIMIT offset count\] \[ASC|DESC\] \[ALPHA\]
+///
+/// Read-only variant of SORT. Returns the sorted elements without the STORE
+/// option. Each element is returned as an `Option<Bytes>` (nil for missing
+/// GET references).
+pub struct SortRo {
+    key: String,
+    by: Option<String>,
+    get: Vec<String>,
+    limit: Option<(i64, i64)>,
+    order: Option<SortOrder>,
+    alpha: bool,
+}
+
+impl SortRo {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            by: None,
+            get: Vec::new(),
+            limit: None,
+            order: None,
+            alpha: false,
+        }
+    }
+
+    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+        self.by = Some(pattern.into());
+        self
+    }
+
+    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+        self.get.push(pattern.into());
+        self
+    }
+
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+
+    pub fn order(mut self, order: SortOrder) -> Self {
+        self.order = Some(order);
+        self
+    }
+
+    pub fn alpha(mut self) -> Self {
+        self.alpha = true;
+        self
+    }
+}
+
+impl Command for SortRo {
+    type Response = Vec<Option<Bytes>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("SORT_RO"), bulk(self.key.as_str())];
+        if let Some(ref pattern) = self.by {
+            args.push(bulk("BY"));
+            args.push(bulk(pattern.as_str()));
+        }
+        for pattern in &self.get {
+            args.push(bulk("GET"));
+            args.push(bulk(pattern.as_str()));
+        }
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        if let Some(ref order) = self.order {
+            match order {
+                SortOrder::Asc => args.push(bulk("ASC")),
+                SortOrder::Desc => args.push(bulk("DESC")),
+            }
+        }
+        if self.alpha {
+            args.push(bulk("ALPHA"));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(data) => Ok(data),
+                    Frame::Null => Ok(None),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string or null",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SORT_RO"
+    }
+}
+
+/// OBJECT ENCODING key
+///
+/// Returns the internal encoding of the Redis object stored at the key.
+pub struct ObjectEncoding {
+    key: String,
+}
+
+impl ObjectEncoding {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectEncoding {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("OBJECT"),
+            bulk("ENCODING"),
+            bulk(self.key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(s)) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OBJECT ENCODING"
+    }
+}
+
+/// OBJECT FREQ key
+///
+/// Returns the logarithmic access frequency counter of a key (requires
+/// maxmemory-policy to be set to an LFU policy).
+pub struct ObjectFreq {
+    key: String,
+}
+
+impl ObjectFreq {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectFreq {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("OBJECT"),
+            bulk("FREQ"),
+            bulk(self.key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OBJECT FREQ"
+    }
+}
+
+/// OBJECT HELP
+///
+/// Returns helpful text about the OBJECT subcommands.
+pub struct ObjectHelp;
+
+impl ObjectHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ObjectHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ObjectHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("OBJECT"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OBJECT HELP"
+    }
+}
+
+/// OBJECT IDLETIME key
+///
+/// Returns the number of seconds since the object stored at the key is idle
+/// (not accessed by read or write operations).
+pub struct ObjectIdleTime {
+    key: String,
+}
+
+impl ObjectIdleTime {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectIdleTime {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("OBJECT"),
+            bulk("IDLETIME"),
+            bulk(self.key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OBJECT IDLETIME"
+    }
+}
+
+/// OBJECT REFCOUNT key
+///
+/// Returns the number of references of the object stored at the key.
+pub struct ObjectRefCount {
+    key: String,
+}
+
+impl ObjectRefCount {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for ObjectRefCount {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("OBJECT"),
+            bulk("REFCOUNT"),
+            bulk(self.key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "OBJECT REFCOUNT"
+    }
+}

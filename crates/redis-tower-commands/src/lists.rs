@@ -796,3 +796,96 @@ impl Command for LPos {
         "LPOS"
     }
 }
+
+/// LMPOP numkeys key \[key ...\] LEFT|RIGHT \[COUNT count\]
+///
+/// Pops one or more elements from the first non-empty list among the
+/// specified keys. Returns the key name and the popped elements as
+/// `Some((key, elements))`, or `None` if all lists are empty.
+pub struct LMPop {
+    keys: Vec<String>,
+    direction: ListDirection,
+    count: Option<u64>,
+}
+
+impl LMPop {
+    pub fn new(
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        direction: ListDirection,
+    ) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            direction,
+            count: None,
+        }
+    }
+
+    /// Set the COUNT option to pop multiple elements.
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for LMPop {
+    type Response = Option<(Bytes, Vec<Bytes>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("LMPOP"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        args.push(bulk(self.direction.as_str()));
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Null => Ok(None),
+            Frame::Array(None) => Ok(None),
+            Frame::Array(Some(frames)) if frames.len() == 2 => {
+                let mut iter = frames.into_iter();
+                let key = match iter.next().unwrap() {
+                    Frame::BulkString(Some(data)) => data,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "bulk string (key name)",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let elements = match iter.next().unwrap() {
+                    Frame::Array(Some(elems)) => elems
+                        .into_iter()
+                        .map(|f| match f {
+                            Frame::BulkString(Some(data)) => Ok(data),
+                            other => Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string",
+                                actual: format!("{other:?}"),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "array of bulk strings",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                Ok(Some((key, elements)))
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "null or two-element array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LMPOP"
+    }
+}

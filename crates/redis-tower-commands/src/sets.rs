@@ -779,3 +779,106 @@ impl Command for SMisMember {
         "SMISMEMBER"
     }
 }
+
+/// SINTERSTORE destination key \[key ...\]
+///
+/// Stores the members of the set resulting from the intersection of all the
+/// given sets into `destination`. Returns the number of elements in the
+/// resulting set.
+pub struct SInterStore {
+    destination: String,
+    keys: Vec<String>,
+}
+
+impl SInterStore {
+    pub fn new(
+        destination: impl Into<String>,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            destination: destination.into(),
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for SInterStore {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("SINTERSTORE"), bulk(self.destination.as_str())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SINTERSTORE"
+    }
+}
+
+/// SINTERCARD numkeys key \[key ...\] \[LIMIT limit\]
+///
+/// Returns the cardinality of the intersection of the given sets, without
+/// actually computing the full intersection. An optional `LIMIT` caps the
+/// work done when the cardinality reaches the specified value.
+pub struct SInterCard {
+    keys: Vec<String>,
+    limit: Option<u64>,
+}
+
+impl SInterCard {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            limit: None,
+        }
+    }
+
+    /// Set the LIMIT option to cap computation early.
+    pub fn limit(mut self, limit: u64) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+}
+
+impl Command for SInterCard {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("SINTERCARD"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(limit) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(limit.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SINTERCARD"
+    }
+}
