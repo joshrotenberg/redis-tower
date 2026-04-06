@@ -1,0 +1,20 @@
+[package]
+name = "redis-tower-sync"
+version = "0.1.0"
+description = "Synchronous (blocking) wrapper for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["redis", "sync", "blocking", "client"]
+categories = ["database", "network-programming"]
+
+[dependencies]
+redis-tower = { path = "../redis-tower" }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+bytes = { workspace = true }
