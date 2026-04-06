@@ -352,7 +352,7 @@ pub enum TsTimestamp {
 }
 
 impl TsTimestamp {
-    fn to_bulk(&self) -> Frame {
+    fn to_bulk(self) -> Frame {
         match self {
             TsTimestamp::Auto => bulk("*"),
             TsTimestamp::Value(ts) => bulk(ts.to_string()),

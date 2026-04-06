@@ -6,8 +6,8 @@
 //! - Sentinel: `cargo test --test test_infrastructure sentinel -- --ignored` (needs sentinel setup)
 
 use bytes::Bytes;
-use redis_tower::commands::*;
 use redis_tower::RedisConnection;
+use redis_tower::commands::*;
 
 // ---------------------------------------------------------------------------
 // TLS tests (#153)
@@ -58,8 +58,8 @@ async fn tls_set_get_roundtrip() {
 #[tokio::test]
 #[ignore = "requires 3-node Redis cluster or REDIS_CLUSTER_ADDR"]
 async fn cluster_connect_and_ping() {
-    let _addr = std::env::var("REDIS_CLUSTER_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:7000".to_string());
+    let _addr =
+        std::env::var("REDIS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
     // TODO(#157): use ClusterConnection::connect(&addr) once the crate exists
     todo!("cluster support not yet implemented");
 }
@@ -67,8 +67,8 @@ async fn cluster_connect_and_ping() {
 #[tokio::test]
 #[ignore = "requires 3-node Redis cluster or REDIS_CLUSTER_ADDR"]
 async fn cluster_cross_slot_routing() {
-    let _addr = std::env::var("REDIS_CLUSTER_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:7000".to_string());
+    let _addr =
+        std::env::var("REDIS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
     // TODO(#157): verify commands to keys in different slots are routed correctly
     // cluster.execute(Set::new("cluster_test:a", "1")).await.unwrap();
     // cluster.execute(Set::new("cluster_test:b", "2")).await.unwrap();
@@ -78,8 +78,8 @@ async fn cluster_cross_slot_routing() {
 #[tokio::test]
 #[ignore = "requires 3-node Redis cluster or REDIS_CLUSTER_ADDR"]
 async fn cluster_hash_tag_same_slot() {
-    let _addr = std::env::var("REDIS_CLUSTER_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:7000".to_string());
+    let _addr =
+        std::env::var("REDIS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
     // TODO(#157): verify hash tags {tag}.k1 and {tag}.k2 land on the same slot
     todo!("cluster support not yet implemented");
 }
@@ -87,8 +87,8 @@ async fn cluster_hash_tag_same_slot() {
 #[tokio::test]
 #[ignore = "requires 3-node Redis cluster or REDIS_CLUSTER_ADDR"]
 async fn cluster_topology_info() {
-    let _addr = std::env::var("REDIS_CLUSTER_ADDR")
-        .unwrap_or_else(|_| "127.0.0.1:7000".to_string());
+    let _addr =
+        std::env::var("REDIS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7000".to_string());
     // TODO(#157): verify we can read cluster topology / slot ranges
     todo!("cluster support not yet implemented");
 }

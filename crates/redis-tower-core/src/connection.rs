@@ -372,88 +372,6 @@ impl RedisConnection {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn from_framed_inner_sets_framed_some() {
-        // We cannot easily construct a real Framed without a socket,
-        // but we can test into_framed on a connection that has no framed.
-        let conn = RedisConnection {
-            framed: None,
-            push_tx: None,
-            inflight: None,
-        };
-        let result = conn.into_framed();
-        // Verify it is ConnectionInUse
-        match result {
-            Err(RedisError::ConnectionInUse) => {}
-            Err(other) => panic!("expected ConnectionInUse, got: {other}"),
-            Ok(_) => panic!("expected Err(ConnectionInUse), got Ok"),
-        }
-    }
-
-    #[test]
-    fn into_framed_returns_error_when_in_flight() {
-        // Simulate a connection where framed was taken (in-flight state).
-        let conn = RedisConnection {
-            framed: None,
-            push_tx: None,
-            inflight: None,
-        };
-        match conn.into_framed() {
-            Err(RedisError::ConnectionInUse) => {}
-            Err(other) => panic!("expected ConnectionInUse, got: {other}"),
-            Ok(_) => panic!("expected Err(ConnectionInUse), got Ok"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ensure_framed_returns_error_when_no_framed_and_no_inflight() {
-        let mut conn = RedisConnection {
-            framed: None,
-            push_tx: None,
-            inflight: None,
-        };
-        let result = conn.ensure_framed().await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RedisError::ConnectionClosed => {}
-            other => panic!("expected ConnectionClosed, got: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn ensure_framed_returns_error_when_inflight_sender_dropped() {
-        let (tx, rx) = oneshot::channel::<Framed<RedisStream, RespCodec>>();
-        drop(tx); // sender dropped without sending
-
-        let mut conn = RedisConnection {
-            framed: None,
-            push_tx: None,
-            inflight: Some(rx),
-        };
-        let result = conn.ensure_framed().await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            RedisError::ConnectionClosed => {}
-            other => panic!("expected ConnectionClosed, got: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn subscribe_pushes_returns_receiver() {
-        let mut conn = RedisConnection {
-            framed: None,
-            push_tx: None,
-            inflight: None,
-        };
-        let _rx = conn.subscribe_pushes();
-        assert!(conn.push_tx.is_some());
-    }
-}
-
 impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
     type Response = Cmd::Response;
     type Error = RedisError;
@@ -520,5 +438,64 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
 
             cmd.parse_response(response)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn into_framed_returns_error_when_none() {
+        let conn = RedisConnection {
+            framed: None,
+            push_tx: None,
+            inflight: None,
+        };
+        match conn.into_framed() {
+            Err(RedisError::ConnectionInUse) => {}
+            Err(other) => panic!("expected ConnectionInUse, got: {other}"),
+            Ok(_) => panic!("expected Err(ConnectionInUse), got Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_framed_returns_error_when_no_framed_and_no_inflight() {
+        let mut conn = RedisConnection {
+            framed: None,
+            push_tx: None,
+            inflight: None,
+        };
+        match conn.ensure_framed().await {
+            Err(RedisError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_framed_returns_error_when_inflight_sender_dropped() {
+        let (tx, rx) = oneshot::channel::<Framed<RedisStream, RespCodec>>();
+        drop(tx);
+
+        let mut conn = RedisConnection {
+            framed: None,
+            push_tx: None,
+            inflight: Some(rx),
+        };
+        match conn.ensure_framed().await {
+            Err(RedisError::ConnectionClosed) => {}
+            other => panic!("expected ConnectionClosed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn subscribe_pushes_returns_receiver() {
+        let mut conn = RedisConnection {
+            framed: None,
+            push_tx: None,
+            inflight: None,
+        };
+        let _rx = conn.subscribe_pushes();
+        assert!(conn.push_tx.is_some());
     }
 }

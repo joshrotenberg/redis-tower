@@ -219,7 +219,6 @@ impl ResilientConnection {
     }
 }
 
-
 impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
     type Response = Cmd::Response;
     type Error = RedisError;

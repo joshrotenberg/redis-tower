@@ -114,4 +114,3 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
         <RedisConnection as tower_service::Service<Cmd>>::call(&mut self.conn, cmd)
     }
 }
-

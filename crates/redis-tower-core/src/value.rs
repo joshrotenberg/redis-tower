@@ -204,7 +204,9 @@ macro_rules! impl_redis_convert_from_i64 {
     };
 }
 
-impl_redis_convert_from_i64!(i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, isize, usize);
+impl_redis_convert_from_i64!(
+    i8, i16, i32, i64, i128, u8, u16, u32, u64, u128, isize, usize
+);
 
 impl RedisConvert<i64> for f64 {
     fn redis_convert(value: i64) -> Result<Self, RedisError> {
@@ -596,11 +598,8 @@ mod tests {
 
     #[test]
     fn vec_option_bytes_mixed_some_none() {
-        let v: Vec<Option<Bytes>> = vec![
-            Some(Bytes::from("hello")),
-            None,
-            Some(Bytes::from("world")),
-        ];
+        let v: Vec<Option<Bytes>> =
+            vec![Some(Bytes::from("hello")), None, Some(Bytes::from("world"))];
         let s: Vec<Option<String>> = v.parse_into().unwrap();
         assert_eq!(s[0], Some("hello".to_string()));
         assert_eq!(s[1], None);

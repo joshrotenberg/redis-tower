@@ -334,6 +334,12 @@ impl FtList {
     }
 }
 
+impl Default for FtList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Command for FtList {
     type Response = Vec<Bytes>;
 
