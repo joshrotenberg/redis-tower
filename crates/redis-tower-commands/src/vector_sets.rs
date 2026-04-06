@@ -792,8 +792,17 @@ impl Command for VInfo {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Array(Some(frames)) => Ok(frames),
+            // RESP3 returns a Map -- flatten key-value pairs into a flat array.
+            Frame::Map(pairs) => {
+                let mut frames = Vec::with_capacity(pairs.len() * 2);
+                for (k, v) in pairs {
+                    frames.push(k);
+                    frames.push(v);
+                }
+                Ok(frames)
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or map",
                 actual: format!("{other:?}"),
             }),
         }

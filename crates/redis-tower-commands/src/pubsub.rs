@@ -90,7 +90,7 @@ impl Command for SPublish {
     }
 }
 
-/// PUBSUB CHANNELS [pattern]
+/// PUBSUB CHANNELS \[pattern\]
 ///
 /// Lists the currently active channels. An active channel is a Pub/Sub
 /// channel with one or more subscribers (excluding clients subscribed
@@ -313,7 +313,7 @@ impl Command for PubSubNumPat {
     }
 }
 
-/// PUBSUB SHARDCHANNELS [pattern]
+/// PUBSUB SHARDCHANNELS \[pattern\]
 ///
 /// Lists the currently active shard channels. An active shard channel
 /// is a Pub/Sub shard channel with one or more subscribers. If no
