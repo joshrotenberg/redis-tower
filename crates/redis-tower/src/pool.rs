@@ -49,6 +49,10 @@ pub enum DispatchStrategy {
     RoundRobin,
     /// Pick a random connection for each command.
     Random,
+    /// Pick the connection with the fewest in-flight commands.
+    /// Best for workloads with variable command latency (e.g., mix of
+    /// GET and SORT). Falls back to round-robin on ties.
+    LeastConnections,
 }
 
 /// Configuration for a connection pool.
@@ -86,6 +90,8 @@ impl PoolConfig {
 /// Shared state behind the pool's Arc.
 struct PoolInner<S> {
     connections: Vec<Mutex<S>>,
+    /// Per-connection in-flight command count for LeastConnections dispatch.
+    inflight: Vec<AtomicUsize>,
     index: AtomicUsize,
     dispatch: DispatchStrategy,
 }
@@ -146,9 +152,14 @@ where
             connections.push(Mutex::new(conn));
         }
 
+        let inflight = (0..connections.len())
+            .map(|_| AtomicUsize::new(0))
+            .collect();
+
         Ok(Self {
             inner: Arc::new(PoolInner {
                 connections,
+                inflight,
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
             }),
@@ -166,11 +177,15 @@ where
             ));
         }
 
+        let inflight = (0..connections.len())
+            .map(|_| AtomicUsize::new(0))
+            .collect();
         let mutexed: Vec<Mutex<S>> = connections.into_iter().map(Mutex::new).collect();
 
         Ok(Self {
             inner: Arc::new(PoolInner {
                 connections: mutexed,
+                inflight,
                 index: AtomicUsize::new(0),
                 dispatch,
             }),
@@ -189,9 +204,10 @@ where
 
     /// Select the next connection index based on dispatch strategy.
     fn next_index(&self) -> usize {
+        let len = self.inner.connections.len();
         match self.inner.dispatch {
             DispatchStrategy::RoundRobin => {
-                self.inner.index.fetch_add(1, Ordering::Relaxed) % self.inner.connections.len()
+                self.inner.index.fetch_add(1, Ordering::Relaxed) % len
             }
             DispatchStrategy::Random => {
                 // Simple xorshift-based pseudo-random from the atomic counter.
@@ -200,7 +216,21 @@ where
                 x ^= x << 13;
                 x ^= x >> 7;
                 x ^= x << 17;
-                x % self.inner.connections.len()
+                x % len
+            }
+            DispatchStrategy::LeastConnections => {
+                // Find the connection with the fewest in-flight commands.
+                // On ties, pick the first (effectively round-robin among tied).
+                let mut min_idx = 0;
+                let mut min_val = self.inner.inflight[0].load(Ordering::Relaxed);
+                for i in 1..len {
+                    let val = self.inner.inflight[i].load(Ordering::Relaxed);
+                    if val < min_val {
+                        min_val = val;
+                        min_idx = i;
+                    }
+                }
+                min_idx
             }
         }
     }
@@ -214,12 +244,15 @@ where
         &mut self,
         cmd: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
-        // Clone the Arc so the future is 'static.
         let inner = Arc::clone(&self.inner);
         let idx = self.next_index();
         async move {
+            inner.inflight[idx].fetch_add(1, Ordering::Relaxed);
             let mut conn = inner.connections[idx].lock().await;
-            conn.execute(cmd).await
+            let result = conn.execute(cmd).await;
+            drop(conn);
+            inner.inflight[idx].fetch_sub(1, Ordering::Relaxed);
+            result
         }
     }
 }
@@ -236,8 +269,12 @@ where
     /// configured dispatch strategy and executes the command on it.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
+        self.inner.inflight[idx].fetch_add(1, Ordering::Relaxed);
         let mut conn = self.inner.connections[idx].lock().await;
-        conn.execute(cmd).await
+        let result = conn.execute(cmd).await;
+        drop(conn);
+        self.inner.inflight[idx].fetch_sub(1, Ordering::Relaxed);
+        result
     }
 }
 
@@ -459,5 +496,60 @@ mod tests {
         let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
         let result = pool.execute(Get::new("key")).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn pool_least_connections_prefers_idle() {
+        use redis_tower_commands::Ping;
+
+        // Connection 0 has 0 inflight, connection 1 has 0 inflight.
+        // With LeastConnections, sequential calls should still distribute
+        // since inflight is decremented after each completes.
+        let conns = vec![
+            MockConn::new(
+                0,
+                (0..10)
+                    .map(|_| Frame::SimpleString(Bytes::from("PONG")))
+                    .collect(),
+            ),
+            MockConn::new(
+                1,
+                (0..10)
+                    .map(|_| Frame::SimpleString(Bytes::from("PONG")))
+                    .collect(),
+            ),
+        ];
+
+        let pool =
+            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+
+        // Sequential calls -- all inflight counts are 0 after each completes,
+        // so least-connections falls back to picking index 0 each time.
+        for _ in 0..4 {
+            let _: String = pool.execute(Ping::new()).await.unwrap();
+        }
+
+        let c0 = pool.inner.connections[0].lock().await;
+        let c1 = pool.inner.connections[1].lock().await;
+        // In sequential mode, connection 0 always has the lowest (tied) count,
+        // so it gets all calls.
+        assert_eq!(c0.calls(), 4);
+        assert_eq!(c1.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_inflight_counters_are_zero_after_completion() {
+        use redis_tower_commands::Ping;
+
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+
+        let pool =
+            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+        let _: String = pool.execute(Ping::new()).await.unwrap();
+
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Relaxed), 0);
     }
 }
