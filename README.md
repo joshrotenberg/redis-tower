@@ -276,10 +276,7 @@ conn.execute(Set::new("key", "value")).await?;
 ## Resilience
 
 `ResilientRedisClient` provides shared, auto-reconnecting access with
-exponential backoff. For advanced use, compose `ReconnectService` as a
-Tower layer, or combine with
-[tower-resilience](https://crates.io/crates/tower-resilience) for circuit
-breaking and hedged requests:
+exponential backoff:
 
 ```rust,ignore
 use redis_tower::ResilientRedisClient;
@@ -292,6 +289,48 @@ tokio::spawn(async move {
     c.execute(Set::new("key", "value")).await.unwrap();
 });
 ```
+
+### tower-resilience integration
+
+For production-grade fault tolerance, compose with
+[tower-resilience](https://crates.io/crates/tower-resilience) -- circuit
+breaker, retry with backoff, rate limiting, and bulkhead isolation as
+stackable Tower layers:
+
+```rust,ignore
+use tower::ServiceBuilder;
+use tower_resilience_circuitbreaker::circuit_breaker_builder;
+use tower_resilience_retry::RetryLayer;
+use redis_tower::{FrameService, CommandAdapter, TracingLayer};
+
+// Circuit breaker: trip at 50% failure rate, 30s recovery window
+let cb_layer = circuit_breaker_builder()
+    .failure_rate_threshold(50.0)
+    .sliding_window_size(10)
+    .wait_duration_in_open(Duration::from_secs(30))
+    .minimum_number_of_calls(5)
+    .build();
+
+// Retry: 3 attempts with exponential backoff, only retry connection errors
+let retry_layer = RetryLayer::<Frame, Frame, RedisError>::builder()
+    .max_attempts(3)
+    .exponential_backoff(Duration::from_millis(100))
+    .retry_on(|err: &RedisError| err.is_retryable())
+    .build();
+
+// Compose: retry -> circuit breaker -> tracing -> connection
+let svc = CommandAdapter::new(
+    ServiceBuilder::new()
+        .layer(retry_layer)
+        .layer(cb_layer)
+        .layer(TracingLayer::new())
+        .service(FrameService::connect("127.0.0.1:6379").await?)
+);
+```
+
+The `is_retryable()` method on `RedisError` distinguishes connection errors
+(worth retrying) from command errors like WRONGTYPE (not worth retrying).
+See `examples/resilience.rs` for the full pattern.
 
 ## TLS
 
