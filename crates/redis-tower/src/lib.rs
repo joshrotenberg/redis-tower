@@ -64,6 +64,7 @@ pub mod caching;
 mod client;
 pub mod command_adapter;
 pub mod consumer;
+pub mod credentials;
 mod executor;
 pub mod metrics_layer;
 pub mod pipeline;
@@ -87,6 +88,9 @@ pub use caching::CachedClient;
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
+pub use credentials::{
+    AuthenticatedConnection, CredentialProvider, Credentials, StaticCredentials,
+};
 pub use executor::RedisExecutor;
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use pipeline::{Pipeline, PipelineResults};
