@@ -1,6 +1,12 @@
 use redis_tower_protocol::ProtocolError;
 
-/// Errors returned by redis-tower-core operations.
+/// Errors returned by redis-tower operations.
+///
+/// Covers the full error surface: transport I/O, protocol framing, Redis
+/// server errors, type conversion mismatches, and reconnection failures.
+/// Use [`is_retryable`](RedisError::is_retryable) and
+/// [`is_connection_error`](RedisError::is_connection_error) to classify
+/// errors for retry and reconnection logic.
 #[derive(Debug, thiserror::Error)]
 pub enum RedisError {
     /// Connection-level I/O error.

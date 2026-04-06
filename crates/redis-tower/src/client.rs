@@ -17,21 +17,37 @@ use tokio::sync::Mutex;
 /// - **`CommandAdapter<CacheService<ReconnectService>>`** -- Full Tower
 ///   composition. Best for production services that need middleware
 ///   (caching, timeouts, metrics, reconnection).
-/// - **`RedisConnection`** -- Direct, exclusive access. Implements
+/// - **[`RedisConnection`]** -- Direct, exclusive access. Implements
 ///   `tower::Service`. Use with `tower::buffer::Buffer` for sharing.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::{RedisClient, commands::*};
+///
+/// let client = RedisClient::connect("127.0.0.1:6379").await?;
+///
+/// // Clone for multi-task use.
+/// let c = client.clone();
+/// tokio::spawn(async move {
+///     c.execute(Set::new("key", "value")).await.unwrap();
+/// });
+///
+/// let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+/// ```
 #[derive(Clone)]
 pub struct RedisClient {
     inner: Arc<Mutex<RedisConnection>>,
 }
 
 impl RedisClient {
-    /// Connect to a Redis server.
+    /// Connect to a Redis server at `host:port`.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect(addr).await?;
         Ok(Self::from_connection(conn))
     }
 
-    /// Connect using a Redis URL.
+    /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
         Ok(Self::from_connection(conn))

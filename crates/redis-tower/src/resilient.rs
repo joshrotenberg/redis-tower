@@ -1,4 +1,9 @@
 //! Batteries-included resilient Redis client.
+//!
+//! [`ResilientRedisClient`] combines shared access (`Arc<Mutex<>>`) with
+//! automatic reconnection on connection loss. It is the recommended
+//! client for long-running applications that need to survive transient
+//! network failures without manual intervention.
 
 use std::sync::Arc;
 

@@ -9,8 +9,9 @@ use tokio::net::UnixStream;
 
 /// Transport abstraction over TCP, Unix, and TLS connections.
 ///
-/// Implements `AsyncRead + AsyncWrite` so it can be used with
-/// `tokio_util::codec::Framed`.
+/// Implements [`AsyncRead`] + [`AsyncWrite`] so it can be used with
+/// `tokio_util::codec::Framed`. The active variant is determined at
+/// connection time based on the URL scheme or connect method used.
 pub enum RedisStream {
     /// Plain TCP connection.
     Tcp(TcpStream),

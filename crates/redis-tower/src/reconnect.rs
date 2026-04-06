@@ -1,4 +1,24 @@
 //! Auto-reconnecting connection wrapper.
+//!
+//! Provides [`ResilientConnection`], a Redis connection that automatically
+//! reconnects with configurable exponential backoff when the underlying
+//! TCP connection drops. Implements `tower::Service<Cmd>` so it can be
+//! used as a drop-in replacement for [`RedisConnection`].
+//!
+//! # Example
+//!
+//! ```ignore
+//! use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, ResilientConnection};
+//! use redis_tower::commands::*;
+//!
+//! let mut conn = ResilientConnection::new(
+//!     AddrConnectionFactory::new("127.0.0.1:6379"),
+//!     ReconnectConfig::default(),
+//! ).await?;
+//!
+//! // Transparently reconnects after connection loss.
+//! let val: Option<bytes::Bytes> = conn.execute(Get::new("key")).await?;
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;
@@ -10,8 +30,15 @@ use std::time::Duration;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 
 /// Factory for creating new Redis connections.
+///
+/// Used by [`ResilientConnection`] and [`ResilientRedisClient`](crate::ResilientRedisClient)
+/// to establish fresh connections during initial setup and reconnection.
+///
+/// A blanket implementation is provided for any `Fn() -> Future<Output = Result<RedisConnection, RedisError>>`,
+/// so closures work out of the box. For named factories, see
+/// [`AddrConnectionFactory`] and [`UrlConnectionFactory`].
 pub trait ConnectionFactory: Send + Sync + 'static {
-    /// Create a new connection.
+    /// Create a new [`RedisConnection`].
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>>;
 }
 
@@ -25,12 +52,15 @@ where
     }
 }
 
-/// A connection factory that connects via a URL string.
+/// A [`ConnectionFactory`] that connects via a Redis URL string.
+///
+/// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
 pub struct UrlConnectionFactory {
     url: String,
 }
 
 impl UrlConnectionFactory {
+    /// Create a new factory from the given Redis URL.
     pub fn new(url: impl Into<String>) -> Self {
         Self { url: url.into() }
     }
@@ -43,12 +73,13 @@ impl ConnectionFactory for UrlConnectionFactory {
     }
 }
 
-/// A connection factory that connects via an address string.
+/// A [`ConnectionFactory`] that connects via a `host:port` address string.
 pub struct AddrConnectionFactory {
     addr: String,
 }
 
 impl AddrConnectionFactory {
+    /// Create a new factory from the given `host:port` address.
     pub fn new(addr: impl Into<String>) -> Self {
         Self { addr: addr.into() }
     }
@@ -62,6 +93,15 @@ impl ConnectionFactory for AddrConnectionFactory {
 }
 
 /// Configuration for reconnection behavior.
+///
+/// Controls the exponential backoff strategy used by [`ResilientConnection`]
+/// and [`ResilientRedisClient`](crate::ResilientRedisClient).
+///
+/// # Defaults
+///
+/// - `max_retries`: `None` (infinite)
+/// - `base_delay`: 100ms
+/// - `max_delay`: 5s
 #[derive(Debug, Clone)]
 pub struct ReconnectConfig {
     /// Maximum number of reconnection attempts. `None` means infinite.
@@ -83,16 +123,21 @@ impl Default for ReconnectConfig {
 }
 
 impl ReconnectConfig {
+    /// Set the maximum number of reconnection attempts.
     pub fn max_retries(mut self, n: usize) -> Self {
         self.max_retries = Some(n);
         self
     }
 
+    /// Set the initial delay before the first reconnection attempt.
     pub fn base_delay(mut self, d: Duration) -> Self {
         self.base_delay = d;
         self
     }
 
+    /// Set the maximum delay between reconnection attempts.
+    ///
+    /// Caps the exponential backoff so delays do not grow unbounded.
     pub fn max_delay(mut self, d: Duration) -> Self {
         self.max_delay = d;
         self

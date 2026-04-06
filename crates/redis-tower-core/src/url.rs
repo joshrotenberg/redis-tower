@@ -1,6 +1,20 @@
 use crate::error::RedisError;
 
 /// Parsed Redis connection URL.
+///
+/// Produced by [`parse_redis_url`]. Contains all fields needed to establish
+/// and authenticate a Redis connection.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower_core::parse_redis_url;
+///
+/// let url = parse_redis_url("redis://user:pass@myhost:6380/2")?;
+/// assert_eq!(url.host, "myhost");
+/// assert_eq!(url.port, 6380);
+/// assert_eq!(url.database, Some(2));
+/// ```
 #[derive(Debug, Clone)]
 pub struct RedisUrl {
     /// Host to connect to.

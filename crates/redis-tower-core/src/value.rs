@@ -32,14 +32,48 @@ use crate::error::RedisError;
 ///
 /// Implement this trait for your own types to enable `.parse_into::<T>()`
 /// on command responses that return `Option<Bytes>` or `Bytes`.
+///
+/// # Example
+///
+/// ```ignore
+/// use bytes::Bytes;
+/// use redis_tower_core::{FromRedisBytes, RedisError};
+///
+/// struct UserId(u64);
+///
+/// impl FromRedisBytes for UserId {
+///     fn from_redis_bytes(bytes: Bytes) -> Result<Self, RedisError> {
+///         let s = std::str::from_utf8(&bytes).map_err(|_| RedisError::TypeMismatch {
+///             expected: "valid UTF-8 for UserId",
+///         })?;
+///         let id = s.parse::<u64>().map_err(|_| RedisError::TypeMismatch {
+///             expected: "u64 for UserId",
+///         })?;
+///         Ok(UserId(id))
+///     }
+/// }
+/// ```
 pub trait FromRedisBytes: Sized {
+    /// Parse raw bytes from a Redis bulk string into this type.
     fn from_redis_bytes(bytes: Bytes) -> Result<Self, RedisError>;
 }
 
 /// Extension trait for converting Redis response values to typed results.
 ///
-/// Provides `.parse_into::<T>()` on common response types.
+/// Provides `.parse_into::<T>()` on common response types like
+/// `Option<Bytes>`, `i64`, `f64`, `bool`, `Vec<Bytes>`, and more.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::{RedisConnection, RedisValueExt, commands::*};
+///
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+/// conn.execute(Set::new("counter", "42")).await?;
+/// let count: u32 = conn.execute(Get::new("counter")).await?.parse_into()?;
+/// ```
 pub trait RedisValueExt<T> {
+    /// Convert this Redis response value into the target type `U`.
     fn parse_into<U>(self) -> Result<U, RedisError>
     where
         U: RedisConvert<T>;
@@ -47,9 +81,12 @@ pub trait RedisValueExt<T> {
 
 /// Trait for converting from a Redis response type to a user type.
 ///
-/// This is the core conversion trait. `T` is the response type from a command
-/// (`Option<Bytes>`, `i64`, `f64`, `Bytes`, `Vec<Bytes>`, etc.).
+/// This is the core conversion trait. `From` is the response type produced by
+/// a command (`Option<Bytes>`, `i64`, `f64`, `Bytes`, `Vec<Bytes>`, etc.)
+/// and `Self` is the target Rust type. Blanket implementations are provided
+/// for common conversions; implement this trait for custom conversions.
 pub trait RedisConvert<From>: Sized {
+    /// Perform the conversion from a Redis response value to this type.
     fn redis_convert(value: From) -> Result<Self, RedisError>;
 }
 
