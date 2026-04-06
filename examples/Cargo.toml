@@ -5,9 +5,9 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-redis-tower = { path = "../crates/redis-tower" }
-redis-tower-core = { path = "../crates/redis-tower-core" }
-redis-tower-commands = { path = "../crates/redis-tower-commands" }
+redis-tower = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-commands = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
