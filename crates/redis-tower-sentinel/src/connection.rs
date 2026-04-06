@@ -69,7 +69,7 @@ impl SentinelConnection {
 
         let result = self.conn.execute(cmd).await;
         if let Err(ref e) = result {
-            if is_connection_error(e) {
+            if e.is_connection_error() {
                 self.needs_rediscovery = true;
             }
         }
@@ -115,9 +115,3 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
     }
 }
 
-fn is_connection_error(err: &RedisError) -> bool {
-    matches!(
-        err,
-        RedisError::Connection(_) | RedisError::ConnectionClosed
-    )
-}

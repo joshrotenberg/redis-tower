@@ -149,18 +149,11 @@ impl Service<Frame> for ReconnectService {
         Box::pin(async move {
             let result = future.await;
             if let Err(ref e) = result {
-                if is_connection_error(e) {
+                if e.is_connection_error() {
                     needs_reconnect.store(true, Ordering::Release);
                 }
             }
             result
         })
     }
-}
-
-fn is_connection_error(err: &RedisError) -> bool {
-    matches!(
-        err,
-        RedisError::Connection(_) | RedisError::ConnectionClosed
-    )
 }

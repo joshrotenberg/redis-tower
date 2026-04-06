@@ -194,7 +194,7 @@ impl ResilientConnection {
             ConnState::Connected(conn) => {
                 let result = conn.execute(cmd).await;
                 if let Err(ref e) = result {
-                    if is_connection_error(e) {
+                    if e.is_connection_error() {
                         self.needs_reconnect.store(true, Ordering::Release);
                     }
                 }
@@ -219,13 +219,6 @@ impl ResilientConnection {
     }
 }
 
-/// Returns true if the error indicates a lost connection.
-pub fn is_connection_error(err: &RedisError) -> bool {
-    matches!(
-        err,
-        RedisError::Connection(_) | RedisError::ConnectionClosed
-    )
-}
 
 impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
     type Response = Cmd::Response;
@@ -297,7 +290,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
         Box::pin(async move {
             let result = future.await;
             if let Err(ref e) = result {
-                if is_connection_error(e) {
+                if e.is_connection_error() {
                     needs_reconnect.store(true, Ordering::Release);
                 }
             }
