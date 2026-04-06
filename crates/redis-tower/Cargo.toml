@@ -25,8 +25,11 @@ commands-sketch = ["redis-tower-commands/sketch"]
 commands-tdigest = ["redis-tower-commands/tdigest"]
 commands-timeseries = ["redis-tower-commands/timeseries"]
 commands-vector-sets = ["redis-tower-commands/vector-sets"]
+serde = ["dep:serde", "dep:serde_json", "commands-json"]
 
 [dependencies]
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true }

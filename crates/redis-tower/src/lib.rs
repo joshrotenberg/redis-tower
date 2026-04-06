@@ -76,6 +76,11 @@ pub mod script;
 pub mod tracing_layer;
 pub mod transaction;
 
+#[cfg(feature = "serde")]
+pub mod json_api;
+#[cfg(feature = "serde")]
+pub mod search_api;
+
 pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
 pub use cache_layer::CacheService;
 pub use caching::CachedClient;
@@ -93,6 +98,11 @@ pub use resilient::ResilientRedisClient;
 pub use script::Script;
 pub use tracing_layer::{TracingLayer, TracingService};
 pub use transaction::{Transaction, TransactionResult};
+
+#[cfg(feature = "serde")]
+pub use json_api::Json;
+#[cfg(feature = "serde")]
+pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 
 // Re-export core types.
 pub use redis_tower_core::{
