@@ -74,3 +74,156 @@ impl RedisError {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- is_retryable tests --
+
+    #[test]
+    fn connection_error_is_retryable() {
+        let err = RedisError::Connection(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn connection_closed_is_retryable() {
+        assert!(RedisError::ConnectionClosed.is_retryable());
+    }
+
+    #[test]
+    fn protocol_error_is_retryable() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+        let err = RedisError::Protocol(ProtocolError::Io(io_err));
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn redis_error_not_retryable() {
+        let err = RedisError::Redis("WRONGTYPE".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn transaction_aborted_not_retryable() {
+        assert!(!RedisError::TransactionAborted.is_retryable());
+    }
+
+    #[test]
+    fn type_mismatch_not_retryable() {
+        let err = RedisError::TypeMismatch { expected: "string" };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn invalid_url_not_retryable() {
+        let err = RedisError::InvalidUrl("bad".into());
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn unexpected_response_not_retryable() {
+        let err = RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: "string".into(),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn connection_in_use_not_retryable() {
+        assert!(!RedisError::ConnectionInUse.is_retryable());
+    }
+
+    #[test]
+    fn reconnect_failed_not_retryable() {
+        let err = RedisError::ReconnectFailed {
+            attempts: 3,
+            last_error: Box::new(RedisError::ConnectionClosed),
+        };
+        assert!(!err.is_retryable());
+    }
+
+    // -- is_connection_error tests --
+
+    #[test]
+    fn connection_io_error_is_connection_error() {
+        let err = RedisError::Connection(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(err.is_connection_error());
+    }
+
+    #[test]
+    fn connection_closed_is_connection_error() {
+        assert!(RedisError::ConnectionClosed.is_connection_error());
+    }
+
+    #[test]
+    fn protocol_error_not_connection_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "eof");
+        let err = RedisError::Protocol(ProtocolError::Io(io_err));
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn redis_error_not_connection_error() {
+        let err = RedisError::Redis("ERR unknown command".into());
+        assert!(!err.is_connection_error());
+    }
+
+    #[test]
+    fn reconnect_failed_not_connection_error() {
+        let err = RedisError::ReconnectFailed {
+            attempts: 5,
+            last_error: Box::new(RedisError::ConnectionClosed),
+        };
+        assert!(!err.is_connection_error());
+    }
+
+    // -- Display tests --
+
+    #[test]
+    fn display_connection_error() {
+        let err = RedisError::Connection(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "refused",
+        ));
+        assert!(err.to_string().contains("connection error"));
+    }
+
+    #[test]
+    fn display_reconnect_failed_includes_attempts() {
+        let err = RedisError::ReconnectFailed {
+            attempts: 3,
+            last_error: Box::new(RedisError::ConnectionClosed),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("3"));
+        assert!(msg.contains("reconnect failed"));
+    }
+
+    #[test]
+    fn display_unexpected_response() {
+        let err = RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: "string".into(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("array"));
+        assert!(msg.contains("string"));
+    }
+
+    #[test]
+    fn display_type_mismatch() {
+        let err = RedisError::TypeMismatch {
+            expected: "integer",
+        };
+        assert!(err.to_string().contains("integer"));
+    }
+}

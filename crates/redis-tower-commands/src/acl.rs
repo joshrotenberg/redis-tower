@@ -118,11 +118,7 @@ impl Command for AclSetUser {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("ACL"),
-            bulk("SETUSER"),
-            bulk(self.username.as_str()),
-        ];
+        let mut args = vec![bulk("ACL"), bulk("SETUSER"), bulk(self.username.as_str())];
         for rule in &self.rules {
             args.push(bulk(rule.as_str()));
         }

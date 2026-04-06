@@ -10,6 +10,17 @@ rust-version.workspace = true
 keywords = ["redis", "commands", "typed", "async"]
 categories = ["database", "asynchronous", "network-programming"]
 
+[features]
+default = ["stack"]
+stack = ["json", "search", "bloom", "sketch", "tdigest", "timeseries", "vector-sets"]
+json = []
+search = []
+bloom = []
+sketch = []
+tdigest = []
+timeseries = []
+vector-sets = []
+
 [dependencies]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }

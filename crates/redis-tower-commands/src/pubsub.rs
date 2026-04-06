@@ -567,10 +567,7 @@ mod tests {
     #[test]
     fn pubsub_numsub_no_channels() {
         let cmd = PubSubNumSub::new();
-        assert_eq!(
-            cmd.to_frame(),
-            array(vec![bulk("PUBSUB"), bulk("NUMSUB")])
-        );
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PUBSUB"), bulk("NUMSUB")]));
         assert_eq!(cmd.name(), "PUBSUB NUMSUB");
     }
 
@@ -598,10 +595,7 @@ mod tests {
             Frame::Integer(0),
         ]));
         let resp = cmd.parse_response(frame).unwrap();
-        assert_eq!(
-            resp,
-            vec![(Bytes::from("ch1"), 5), (Bytes::from("ch2"), 0)]
-        );
+        assert_eq!(resp, vec![(Bytes::from("ch1"), 5), (Bytes::from("ch2"), 0)]);
     }
 
     #[test]
@@ -625,10 +619,7 @@ mod tests {
     #[test]
     fn pubsub_numpat_frame() {
         let cmd = PubSubNumPat::new();
-        assert_eq!(
-            cmd.to_frame(),
-            array(vec![bulk("PUBSUB"), bulk("NUMPAT")])
-        );
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PUBSUB"), bulk("NUMPAT")]));
         assert_eq!(cmd.name(), "PUBSUB NUMPAT");
     }
 
@@ -654,11 +645,7 @@ mod tests {
         let cmd = PubSubShardChannels::with_pattern("shard.*");
         assert_eq!(
             cmd.to_frame(),
-            array(vec![
-                bulk("PUBSUB"),
-                bulk("SHARDCHANNELS"),
-                bulk("shard.*"),
-            ])
+            array(vec![bulk("PUBSUB"), bulk("SHARDCHANNELS"), bulk("shard.*"),])
         );
     }
 

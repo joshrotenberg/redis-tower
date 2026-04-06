@@ -186,4 +186,109 @@ mod tests {
     fn parse_invalid_scheme() {
         assert!(parse_redis_url("http://localhost").is_err());
     }
+
+    // -- Edge cases --
+
+    #[test]
+    fn parse_empty_url() {
+        assert!(parse_redis_url("").is_err());
+    }
+
+    #[test]
+    fn parse_host_only_no_port_defaults_6379() {
+        let url = parse_redis_url("redis://myhost").unwrap();
+        assert_eq!(url.host, "myhost");
+        assert_eq!(url.port, 6379);
+    }
+
+    #[test]
+    fn parse_password_with_special_characters() {
+        let url = parse_redis_url("redis://:p%40ss:w0rd@localhost").unwrap();
+        // The parser does not percent-decode, so it preserves the raw value.
+        assert_eq!(url.password.as_deref(), Some("p%40ss:w0rd"));
+        assert!(url.username.is_none());
+    }
+
+    #[test]
+    fn parse_rediss_sets_tls_flag() {
+        let url = parse_redis_url("rediss://secure.host:6380/1").unwrap();
+        assert!(url.tls);
+        assert_eq!(url.host, "secure.host");
+        assert_eq!(url.port, 6380);
+        assert_eq!(url.database, Some(1));
+    }
+
+    #[test]
+    fn parse_unix_with_db_parameter() {
+        let url = parse_redis_url("unix:///tmp/redis.sock?db=5").unwrap();
+        assert!(url.unix);
+        assert_eq!(url.path.as_deref(), Some("/tmp/redis.sock"));
+        assert_eq!(url.database, Some(5));
+    }
+
+    #[test]
+    fn parse_unix_without_db() {
+        let url = parse_redis_url("unix:///tmp/redis.sock").unwrap();
+        assert!(url.unix);
+        assert_eq!(url.path.as_deref(), Some("/tmp/redis.sock"));
+        assert_eq!(url.database, None);
+    }
+
+    #[test]
+    fn parse_unix_with_invalid_db_ignored() {
+        let url = parse_redis_url("unix:///tmp/redis.sock?db=notanumber").unwrap();
+        assert!(url.unix);
+        assert_eq!(url.database, None);
+    }
+
+    #[test]
+    fn parse_with_database_zero() {
+        let url = parse_redis_url("redis://localhost/0").unwrap();
+        assert_eq!(url.database, Some(0));
+    }
+
+    #[test]
+    fn parse_trailing_slash_no_database() {
+        let url = parse_redis_url("redis://localhost/").unwrap();
+        assert_eq!(url.database, None);
+    }
+
+    #[test]
+    fn parse_invalid_port() {
+        assert!(parse_redis_url("redis://localhost:notaport").is_err());
+    }
+
+    #[test]
+    fn parse_invalid_database() {
+        assert!(parse_redis_url("redis://localhost/notadb").is_err());
+    }
+
+    #[test]
+    fn parse_with_username_and_password() {
+        let url = parse_redis_url("redis://admin:secret@localhost:6379/3").unwrap();
+        assert_eq!(url.username.as_deref(), Some("admin"));
+        assert_eq!(url.password.as_deref(), Some("secret"));
+        assert_eq!(url.database, Some(3));
+    }
+
+    #[test]
+    fn parse_auth_token_without_colon() {
+        // redis://token@host -- treated as password-only (no colon separator)
+        let url = parse_redis_url("redis://mytoken@localhost").unwrap();
+        assert!(url.username.is_none());
+        assert_eq!(url.password.as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn default_redis_url() {
+        let url = RedisUrl::default();
+        assert_eq!(url.host, "127.0.0.1");
+        assert_eq!(url.port, 6379);
+        assert!(!url.tls);
+        assert!(!url.unix);
+        assert!(url.username.is_none());
+        assert!(url.password.is_none());
+        assert!(url.database.is_none());
+        assert!(url.path.is_none());
+    }
 }

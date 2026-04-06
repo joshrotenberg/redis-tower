@@ -1894,3 +1894,328 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
 
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- XAdd --
+
+    #[test]
+    fn xadd_basic_to_frame() {
+        let cmd = XAdd::new("mystream")
+            .field("name", "John")
+            .field("age", "30");
+        let frame = cmd.to_frame();
+        assert_eq!(
+            frame,
+            array(vec![
+                bulk("XADD"),
+                bulk("mystream"),
+                bulk("*"),
+                bulk("name"),
+                bulk("John"),
+                bulk("age"),
+                bulk("30"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xadd_with_options_to_frame() {
+        let cmd = XAdd::new("mystream")
+            .nomkstream()
+            .maxlen_approx(1000)
+            .field("k", "v");
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("XADD"));
+                assert_eq!(args[1], bulk("mystream"));
+                assert_eq!(args[2], bulk("NOMKSTREAM"));
+                assert_eq!(args[3], bulk("MAXLEN"));
+                assert_eq!(args[4], bulk("~"));
+                assert_eq!(args[5], bulk("1000"));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn xadd_with_specific_id() {
+        let cmd = XAdd::new("mystream").id("1-1").field("k", "v");
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(Some(args)) => {
+                assert!(args.contains(&bulk("1-1")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn xadd_parse_response() {
+        let cmd = XAdd::new("mystream").field("k", "v");
+        let frame = Frame::BulkString(Some(Bytes::from("1526919030474-55")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, "1526919030474-55");
+    }
+
+    #[test]
+    fn xadd_parse_error_on_integer() {
+        let cmd = XAdd::new("mystream").field("k", "v");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- XLen --
+
+    #[test]
+    fn xlen_to_frame() {
+        let cmd = XLen::new("mystream");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("XLEN"), bulk("mystream")]));
+    }
+
+    #[test]
+    fn xlen_parse_integer() {
+        let cmd = XLen::new("mystream");
+        assert_eq!(cmd.parse_response(Frame::Integer(42)).unwrap(), 42);
+    }
+
+    // -- XRange --
+
+    #[test]
+    fn xrange_all_to_frame() {
+        let cmd = XRange::all("mystream");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("XRANGE"), bulk("mystream"), bulk("-"), bulk("+"),])
+        );
+    }
+
+    #[test]
+    fn xrange_with_count_to_frame() {
+        let cmd = XRange::all("mystream").count(10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XRANGE"),
+                bulk("mystream"),
+                bulk("-"),
+                bulk("+"),
+                bulk("COUNT"),
+                bulk("10"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xrange_parse_entries() {
+        let cmd = XRange::all("mystream");
+        let entry = array(vec![
+            Frame::BulkString(Some(Bytes::from("1-0"))),
+            array(vec![
+                Frame::BulkString(Some(Bytes::from("name"))),
+                Frame::BulkString(Some(Bytes::from("Alice"))),
+            ]),
+        ]);
+        let frame = array(vec![entry]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "1-0");
+        assert_eq!(result[0].fields.len(), 1);
+        assert_eq!(result[0].fields[0].0, "name");
+        assert_eq!(result[0].fields[0].1, Bytes::from("Alice"));
+    }
+
+    #[test]
+    fn xrange_parse_empty() {
+        let cmd = XRange::all("mystream");
+        let frame = Frame::Array(None);
+        let result = cmd.parse_response(frame).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // -- XDel --
+
+    #[test]
+    fn xdel_to_frame() {
+        let cmd = XDel::new("mystream", "1-0");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("XDEL"), bulk("mystream"), bulk("1-0")])
+        );
+    }
+
+    #[test]
+    fn xdel_parse_integer() {
+        let cmd = XDel::new("mystream", "1-0");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- XTrim --
+
+    #[test]
+    fn xtrim_maxlen_to_frame() {
+        let cmd = XTrim::maxlen("mystream", 100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XTRIM"),
+                bulk("mystream"),
+                bulk("MAXLEN"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xtrim_maxlen_approx_to_frame() {
+        let cmd = XTrim::maxlen_approx("mystream", 100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XTRIM"),
+                bulk("mystream"),
+                bulk("MAXLEN"),
+                bulk("~"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    // -- XAck --
+
+    #[test]
+    fn xack_to_frame() {
+        let cmd = XAck::new("mystream", "mygroup", "1-0");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XACK"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("1-0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xack_multiple_to_frame() {
+        let cmd = XAck::ids("mystream", "mygroup", vec!["1-0", "2-0"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XACK"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("1-0"),
+                bulk("2-0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xack_parse_integer() {
+        let cmd = XAck::new("mystream", "mygroup", "1-0");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- XGroupCreate --
+
+    #[test]
+    fn xgroup_create_to_frame() {
+        let cmd = XGroupCreate::new("mystream", "mygroup", "$");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XGROUP"),
+                bulk("CREATE"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("$"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xgroup_create_mkstream_to_frame() {
+        let cmd = XGroupCreate::new("mystream", "mygroup", "0").mkstream();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XGROUP"),
+                bulk("CREATE"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("0"),
+                bulk("MKSTREAM"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xgroup_create_parse_ok() {
+        let cmd = XGroupCreate::new("mystream", "mygroup", "$");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    // -- XRead --
+
+    #[test]
+    fn xread_to_frame() {
+        let cmd = XRead::new("mystream", "0").count(10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XREAD"),
+                bulk("COUNT"),
+                bulk("10"),
+                bulk("STREAMS"),
+                bulk("mystream"),
+                bulk("0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xread_parse_null() {
+        let cmd = XRead::new("mystream", "$");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- XGroupDestroy --
+
+    #[test]
+    fn xgroup_destroy_to_frame() {
+        let cmd = XGroupDestroy::new("mystream", "mygroup");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XGROUP"),
+                bulk("DESTROY"),
+                bulk("mystream"),
+                bulk("mygroup"),
+            ])
+        );
+    }
+
+    // -- XRevRange --
+
+    #[test]
+    fn xrevrange_to_frame() {
+        let cmd = XRevRange::all("mystream");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XREVRANGE"),
+                bulk("mystream"),
+                bulk("+"),
+                bulk("-"),
+            ])
+        );
+    }
+}

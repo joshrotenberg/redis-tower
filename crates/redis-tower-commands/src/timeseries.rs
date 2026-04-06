@@ -842,11 +842,7 @@ pub struct TsRange {
 impl TsRange {
     /// Create a range query. `from` and `to` are timestamp strings
     /// (use "-" for minimum, "+" for maximum, or a millisecond timestamp).
-    pub fn new(
-        key: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             opts: TsRangeOptions {
                 key: key.into(),
@@ -951,11 +947,7 @@ pub struct TsRevRange {
 impl TsRevRange {
     /// Create a reverse range query. `from` and `to` are timestamp strings
     /// (use "-" for minimum, "+" for maximum, or a millisecond timestamp).
-    pub fn new(
-        key: impl Into<String>,
-        from: impl Into<String>,
-        to: impl Into<String>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             opts: TsRangeOptions {
                 key: key.into(),
@@ -1083,11 +1075,7 @@ pub struct TsMRange {
 
 impl TsMRange {
     /// Create a multi-key range query.
-    pub fn new(
-        from: impl Into<String>,
-        to: impl Into<String>,
-        filter: impl Into<String>,
-    ) -> Self {
+    pub fn new(from: impl Into<String>, to: impl Into<String>, filter: impl Into<String>) -> Self {
         Self {
             opts: TsMRangeOptions {
                 from: from.into(),
@@ -1176,11 +1164,7 @@ pub struct TsMRevRange {
 
 impl TsMRevRange {
     /// Create a multi-key reverse range query.
-    pub fn new(
-        from: impl Into<String>,
-        to: impl Into<String>,
-        filter: impl Into<String>,
-    ) -> Self {
+    pub fn new(from: impl Into<String>, to: impl Into<String>, filter: impl Into<String>) -> Self {
         Self {
             opts: TsMRangeOptions {
                 from: from.into(),

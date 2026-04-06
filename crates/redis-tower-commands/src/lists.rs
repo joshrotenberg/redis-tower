@@ -889,3 +889,304 @@ impl Command for LMPop {
         "LMPOP"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- LPush --
+
+    #[test]
+    fn lpush_single_to_frame() {
+        let cmd = LPush::new("mylist", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LPUSH"), bulk("mylist"), bulk("a")])
+        );
+    }
+
+    #[test]
+    fn lpush_multiple_to_frame() {
+        let cmd = LPush::elements("mylist", vec!["a", "b", "c"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LPUSH"),
+                bulk("mylist"),
+                bulk("a"),
+                bulk("b"),
+                bulk("c"),
+            ])
+        );
+    }
+
+    #[test]
+    fn lpush_parse_integer() {
+        let cmd = LPush::new("mylist", "a");
+        assert_eq!(cmd.parse_response(Frame::Integer(3)).unwrap(), 3);
+    }
+
+    #[test]
+    fn lpush_parse_error_on_string() {
+        let cmd = LPush::new("mylist", "a");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- RPush --
+
+    #[test]
+    fn rpush_to_frame() {
+        let cmd = RPush::new("mylist", "x");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("RPUSH"), bulk("mylist"), bulk("x")])
+        );
+    }
+
+    // -- LPop --
+
+    #[test]
+    fn lpop_to_frame() {
+        let cmd = LPop::new("mylist");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("LPOP"), bulk("mylist")]));
+    }
+
+    #[test]
+    fn lpop_parse_value() {
+        let cmd = LPop::new("mylist");
+        let frame = Frame::BulkString(Some(Bytes::from("first")));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            Some(Bytes::from("first"))
+        );
+    }
+
+    #[test]
+    fn lpop_parse_null() {
+        let cmd = LPop::new("mylist");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- RPop --
+
+    #[test]
+    fn rpop_to_frame() {
+        let cmd = RPop::new("mylist");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("RPOP"), bulk("mylist")]));
+    }
+
+    // -- LRange --
+
+    #[test]
+    fn lrange_to_frame() {
+        let cmd = LRange::new("mylist", 0, -1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LRANGE"), bulk("mylist"), bulk("0"), bulk("-1")])
+        );
+    }
+
+    #[test]
+    fn lrange_parse_array() {
+        let cmd = LRange::new("mylist", 0, -1);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn lrange_parse_empty() {
+        let cmd = LRange::new("mylist", 0, -1);
+        let frame = Frame::Array(None);
+        let result = cmd.parse_response(frame).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // -- LLen --
+
+    #[test]
+    fn llen_to_frame() {
+        let cmd = LLen::new("mylist");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("LLEN"), bulk("mylist")]));
+    }
+
+    // -- LIndex --
+
+    #[test]
+    fn lindex_to_frame() {
+        let cmd = LIndex::new("mylist", 0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LINDEX"), bulk("mylist"), bulk("0")])
+        );
+    }
+
+    #[test]
+    fn lindex_parse_null() {
+        let cmd = LIndex::new("mylist", 99);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- LSet --
+
+    #[test]
+    fn lset_to_frame() {
+        let cmd = LSet::new("mylist", 0, "newval");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LSET"),
+                bulk("mylist"),
+                bulk("0"),
+                bulk("newval")
+            ])
+        );
+    }
+
+    #[test]
+    fn lset_parse_ok() {
+        let cmd = LSet::new("mylist", 0, "v");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    // -- LMove --
+
+    #[test]
+    fn lmove_to_frame() {
+        let cmd = LMove::new("src", "dst", ListDirection::Left, ListDirection::Right);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LMOVE"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("LEFT"),
+                bulk("RIGHT"),
+            ])
+        );
+    }
+
+    // -- LMPop --
+
+    #[test]
+    fn lmpop_to_frame() {
+        let cmd = LMPop::new(vec!["k1", "k2"], ListDirection::Left).count(3);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LMPOP"),
+                bulk("2"),
+                bulk("k1"),
+                bulk("k2"),
+                bulk("LEFT"),
+                bulk("COUNT"),
+                bulk("3"),
+            ])
+        );
+    }
+
+    #[test]
+    fn lmpop_parse_null() {
+        let cmd = LMPop::new(vec!["k1"], ListDirection::Left);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn lmpop_parse_result() {
+        let cmd = LMPop::new(vec!["k1"], ListDirection::Left);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("k1"))),
+            array(vec![Frame::BulkString(Some(Bytes::from("elem")))]),
+        ]);
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert_eq!(result.0, Bytes::from("k1"));
+        assert_eq!(result.1, vec![Bytes::from("elem")]);
+    }
+
+    // -- LPos --
+
+    #[test]
+    fn lpos_to_frame() {
+        let cmd = LPos::new("mylist", "val");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LPOS"), bulk("mylist"), bulk("val")])
+        );
+    }
+
+    #[test]
+    fn lpos_with_options_to_frame() {
+        let cmd = LPos::new("mylist", "val").rank(2).count(0).maxlen(100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LPOS"),
+                bulk("mylist"),
+                bulk("val"),
+                bulk("RANK"),
+                bulk("2"),
+                bulk("COUNT"),
+                bulk("0"),
+                bulk("MAXLEN"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    #[test]
+    fn lpos_parse_integer() {
+        let cmd = LPos::new("mylist", "val");
+        assert_eq!(cmd.parse_response(Frame::Integer(3)).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn lpos_parse_null() {
+        let cmd = LPos::new("mylist", "val");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- LInsert --
+
+    #[test]
+    fn linsert_to_frame() {
+        let cmd = LInsert::new("mylist", ListPosition::Before, "pivot", "elem");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LINSERT"),
+                bulk("mylist"),
+                bulk("BEFORE"),
+                bulk("pivot"),
+                bulk("elem"),
+            ])
+        );
+    }
+
+    // -- LTrim --
+
+    #[test]
+    fn ltrim_to_frame() {
+        let cmd = LTrim::new("mylist", 1, -1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LTRIM"), bulk("mylist"), bulk("1"), bulk("-1")])
+        );
+    }
+
+    #[test]
+    fn ltrim_parse_ok() {
+        let cmd = LTrim::new("mylist", 0, 99);
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+}

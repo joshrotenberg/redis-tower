@@ -13,9 +13,18 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = []
+default = ["commands-stack"]
 tls-native-tls = ["redis-tower-core/tls-native-tls"]
 tls-rustls = ["redis-tower-core/tls-rustls"]
+# Redis Stack module commands (requires Redis Stack server)
+commands-stack = ["commands-json", "commands-search", "commands-bloom", "commands-sketch", "commands-tdigest", "commands-timeseries", "commands-vector-sets"]
+commands-json = ["redis-tower-commands/json"]
+commands-search = ["redis-tower-commands/search"]
+commands-bloom = ["redis-tower-commands/bloom"]
+commands-sketch = ["redis-tower-commands/sketch"]
+commands-tdigest = ["redis-tower-commands/tdigest"]
+commands-timeseries = ["redis-tower-commands/timeseries"]
+commands-vector-sets = ["redis-tower-commands/vector-sets"]
 
 [dependencies]
 redis-tower-protocol = { workspace = true }

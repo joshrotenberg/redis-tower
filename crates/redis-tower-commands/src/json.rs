@@ -22,11 +22,7 @@ pub struct JsonSet {
 }
 
 impl JsonSet {
-    pub fn new(
-        key: impl Into<String>,
-        path: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -543,11 +539,7 @@ pub struct JsonArrIndex {
 }
 
 impl JsonArrIndex {
-    pub fn new(
-        key: impl Into<String>,
-        path: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             path: path.into(),

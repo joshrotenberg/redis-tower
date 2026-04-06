@@ -344,9 +344,7 @@ pub struct LatencyReset {
 impl LatencyReset {
     /// Reset all latency events.
     pub fn new() -> Self {
-        Self {
-            events: Vec::new(),
-        }
+        Self { events: Vec::new() }
     }
 
     /// Reset a specific latency event.

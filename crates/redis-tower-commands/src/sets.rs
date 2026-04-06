@@ -882,3 +882,265 @@ impl Command for SInterCard {
         "SINTERCARD"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- SAdd --
+
+    #[test]
+    fn sadd_single_to_frame() {
+        let cmd = SAdd::new("myset", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SADD"), bulk("myset"), bulk("a")])
+        );
+    }
+
+    #[test]
+    fn sadd_multiple_to_frame() {
+        let cmd = SAdd::members("myset", vec!["a", "b", "c"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SADD"),
+                bulk("myset"),
+                bulk("a"),
+                bulk("b"),
+                bulk("c"),
+            ])
+        );
+    }
+
+    #[test]
+    fn sadd_parse_integer() {
+        let cmd = SAdd::new("myset", "a");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn sadd_parse_error_on_string() {
+        let cmd = SAdd::new("myset", "a");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- SRem --
+
+    #[test]
+    fn srem_to_frame() {
+        let cmd = SRem::new("myset", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SREM"), bulk("myset"), bulk("a")])
+        );
+    }
+
+    // -- SMembers --
+
+    #[test]
+    fn smembers_to_frame() {
+        let cmd = SMembers::new("myset");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SMEMBERS"), bulk("myset")]));
+    }
+
+    #[test]
+    fn smembers_parse_array() {
+        let cmd = SMembers::new("myset");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn smembers_parse_set_frame() {
+        let cmd = SMembers::new("myset");
+        let frame = Frame::Set(vec![Frame::BulkString(Some(Bytes::from("x")))]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("x")]);
+    }
+
+    #[test]
+    fn smembers_parse_error_on_integer() {
+        let cmd = SMembers::new("myset");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- SIsMember --
+
+    #[test]
+    fn sismember_to_frame() {
+        let cmd = SIsMember::new("myset", "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SISMEMBER"), bulk("myset"), bulk("a")])
+        );
+    }
+
+    #[test]
+    fn sismember_parse_true() {
+        let cmd = SIsMember::new("myset", "a");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    #[test]
+    fn sismember_parse_false() {
+        let cmd = SIsMember::new("myset", "a");
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    #[test]
+    fn sismember_parse_boolean() {
+        let cmd = SIsMember::new("myset", "a");
+        assert!(cmd.parse_response(Frame::Boolean(true)).unwrap());
+    }
+
+    // -- SCard --
+
+    #[test]
+    fn scard_to_frame() {
+        let cmd = SCard::new("myset");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SCARD"), bulk("myset")]));
+    }
+
+    // -- SInterStore --
+
+    #[test]
+    fn sinterstore_to_frame() {
+        let cmd = SInterStore::new("dest", vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SINTERSTORE"),
+                bulk("dest"),
+                bulk("s1"),
+                bulk("s2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn sinterstore_parse_integer() {
+        let cmd = SInterStore::new("dest", vec!["s1"]);
+        assert_eq!(cmd.parse_response(Frame::Integer(3)).unwrap(), 3);
+    }
+
+    // -- SMisMember --
+
+    #[test]
+    fn smismember_to_frame() {
+        let cmd = SMisMember::members("myset", vec!["a", "b"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SMISMEMBER"),
+                bulk("myset"),
+                bulk("a"),
+                bulk("b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn smismember_parse_response() {
+        let cmd = SMisMember::members("myset", vec!["a", "b"]);
+        let frame = array(vec![Frame::Integer(1), Frame::Integer(0)]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![true, false]);
+    }
+
+    // -- SMove --
+
+    #[test]
+    fn smove_to_frame() {
+        let cmd = SMove::new("src", "dst", "member");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SMOVE"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("member"),
+            ])
+        );
+    }
+
+    #[test]
+    fn smove_parse_true() {
+        let cmd = SMove::new("src", "dst", "m");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- SInterCard --
+
+    #[test]
+    fn sintercard_to_frame() {
+        let cmd = SInterCard::new(vec!["s1", "s2"]).limit(10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SINTERCARD"),
+                bulk("2"),
+                bulk("s1"),
+                bulk("s2"),
+                bulk("LIMIT"),
+                bulk("10"),
+            ])
+        );
+    }
+
+    // -- SDiff --
+
+    #[test]
+    fn sdiff_to_frame() {
+        let cmd = SDiff::keys(vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SDIFF"), bulk("s1"), bulk("s2")])
+        );
+    }
+
+    // -- SUnion --
+
+    #[test]
+    fn sunion_to_frame() {
+        let cmd = SUnion::keys(vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SUNION"), bulk("s1"), bulk("s2")])
+        );
+    }
+
+    // -- SPop --
+
+    #[test]
+    fn spop_to_frame_no_count() {
+        let cmd = SPop::new("myset");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SPOP"), bulk("myset")]));
+    }
+
+    #[test]
+    fn spop_parse_single() {
+        let cmd = SPop::new("myset");
+        let frame = Frame::BulkString(Some(Bytes::from("member")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("member")]);
+    }
+
+    #[test]
+    fn spop_parse_empty() {
+        let cmd = SPop::new("myset");
+        let frame = Frame::BulkString(None);
+        let result = cmd.parse_response(frame).unwrap();
+        assert!(result.is_empty());
+    }
+}

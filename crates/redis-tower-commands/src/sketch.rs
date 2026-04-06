@@ -489,10 +489,7 @@ pub struct TopkQuery {
 }
 
 impl TopkQuery {
-    pub fn new(
-        key: impl Into<String>,
-        items: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -529,10 +526,7 @@ pub struct TopkCount {
 }
 
 impl TopkCount {
-    pub fn new(
-        key: impl Into<String>,
-        items: impl IntoIterator<Item = impl Into<String>>,
-    ) -> Self {
+    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),

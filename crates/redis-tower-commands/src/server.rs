@@ -1860,3 +1860,295 @@ impl Command for ConfigRewrite {
         "CONFIG REWRITE"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- Ping --
+
+    #[test]
+    fn ping_no_message_to_frame() {
+        let cmd = Ping::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PING")]));
+    }
+
+    #[test]
+    fn ping_with_message_to_frame() {
+        let cmd = Ping::with_message("hello");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PING"), bulk("hello")]));
+    }
+
+    #[test]
+    fn ping_parse_pong() {
+        let cmd = Ping::new();
+        let frame = Frame::SimpleString(Bytes::from("PONG"));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "PONG");
+    }
+
+    #[test]
+    fn ping_parse_bulk_string() {
+        let cmd = Ping::with_message("hello");
+        let frame = Frame::BulkString(Some(Bytes::from("hello")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "hello");
+    }
+
+    #[test]
+    fn ping_parse_error_on_integer() {
+        let cmd = Ping::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- FlushDb --
+
+    #[test]
+    fn flushdb_to_frame() {
+        let cmd = FlushDb::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FLUSHDB")]));
+    }
+
+    #[test]
+    fn flushdb_async_to_frame() {
+        let cmd = FlushDb::new().async_mode();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FLUSHDB"), bulk("ASYNC")]));
+    }
+
+    #[test]
+    fn flushdb_sync_to_frame() {
+        let cmd = FlushDb::new().sync_mode();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FLUSHDB"), bulk("SYNC")]));
+    }
+
+    #[test]
+    fn flushdb_parse_ok() {
+        let cmd = FlushDb::new();
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    #[test]
+    fn flushdb_parse_error_on_integer() {
+        let cmd = FlushDb::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- DbSize --
+
+    #[test]
+    fn dbsize_to_frame() {
+        let cmd = DbSize::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("DBSIZE")]));
+    }
+
+    #[test]
+    fn dbsize_parse_integer() {
+        let cmd = DbSize::new();
+        assert_eq!(cmd.parse_response(Frame::Integer(42)).unwrap(), 42);
+    }
+
+    // -- Select --
+
+    #[test]
+    fn select_to_frame() {
+        let cmd = Select::new(3);
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SELECT"), bulk("3")]));
+    }
+
+    // -- Auth --
+
+    #[test]
+    fn auth_password_to_frame() {
+        let cmd = Auth::password("secret");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("AUTH"), bulk("secret")]));
+    }
+
+    #[test]
+    fn auth_credentials_to_frame() {
+        let cmd = Auth::credentials("user", "pass");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("AUTH"), bulk("user"), bulk("pass")])
+        );
+    }
+
+    // -- Info --
+
+    #[test]
+    fn info_no_section_to_frame() {
+        let cmd = Info::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("INFO")]));
+    }
+
+    #[test]
+    fn info_with_section_to_frame() {
+        let cmd = Info::new().section("memory");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("INFO"), bulk("memory")]));
+    }
+
+    #[test]
+    fn info_parse_bulk_string() {
+        let cmd = Info::new();
+        let frame = Frame::BulkString(Some(Bytes::from("# Server\nredis_version:7.0\n")));
+        let result = cmd.parse_response(frame).unwrap();
+        assert!(result.contains("redis_version"));
+    }
+
+    #[test]
+    fn info_parse_error_on_integer() {
+        let cmd = Info::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- ClientId --
+
+    #[test]
+    fn client_id_to_frame() {
+        let cmd = ClientId::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("CLIENT"), bulk("ID")]));
+    }
+
+    #[test]
+    fn client_id_parse_integer() {
+        let cmd = ClientId::new();
+        assert_eq!(cmd.parse_response(Frame::Integer(42)).unwrap(), 42);
+    }
+
+    // -- ClientGetName --
+
+    #[test]
+    fn client_getname_to_frame() {
+        let cmd = ClientGetName::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("CLIENT"), bulk("GETNAME")]));
+    }
+
+    #[test]
+    fn client_getname_parse_name() {
+        let cmd = ClientGetName::new();
+        let frame = Frame::BulkString(Some(Bytes::from("myconn")));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            Some(Bytes::from("myconn"))
+        );
+    }
+
+    #[test]
+    fn client_getname_parse_null() {
+        let cmd = ClientGetName::new();
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- ClientSetName --
+
+    #[test]
+    fn client_setname_to_frame() {
+        let cmd = ClientSetName::new("myconn");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("SETNAME"), bulk("myconn")])
+        );
+    }
+
+    // -- ConfigGet --
+
+    #[test]
+    fn config_get_to_frame() {
+        let cmd = ConfigGet::new("maxmemory");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CONFIG"), bulk("GET"), bulk("maxmemory")])
+        );
+    }
+
+    #[test]
+    fn config_get_parse_flat_array() {
+        let cmd = ConfigGet::new("maxmemory");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("maxmemory"))),
+            Frame::BulkString(Some(Bytes::from("0"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![(Bytes::from("maxmemory"), Bytes::from("0"))]);
+    }
+
+    #[test]
+    fn config_get_parse_error_on_odd_array() {
+        let cmd = ConfigGet::new("*");
+        let frame = array(vec![Frame::BulkString(Some(Bytes::from("only_one")))]);
+        assert!(cmd.parse_response(frame).is_err());
+    }
+
+    // -- ConfigSet --
+
+    #[test]
+    fn config_set_to_frame() {
+        let cmd = ConfigSet::new("hz", "100");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CONFIG"), bulk("SET"), bulk("hz"), bulk("100")])
+        );
+    }
+
+    #[test]
+    fn config_set_parse_ok() {
+        let cmd = ConfigSet::new("hz", "100");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    // -- Time --
+
+    #[test]
+    fn time_to_frame() {
+        let cmd = Time::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("TIME")]));
+    }
+
+    #[test]
+    fn time_parse_response() {
+        let cmd = Time::new();
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("1700000000"))),
+            Frame::BulkString(Some(Bytes::from("123456"))),
+        ]);
+        let (secs, micros) = cmd.parse_response(frame).unwrap();
+        assert_eq!(secs, 1700000000);
+        assert_eq!(micros, 123456);
+    }
+
+    #[test]
+    fn time_parse_error_on_wrong_length() {
+        let cmd = Time::new();
+        let frame = array(vec![Frame::BulkString(Some(Bytes::from("123")))]);
+        assert!(cmd.parse_response(frame).is_err());
+    }
+
+    // -- CommandCount --
+
+    #[test]
+    fn command_count_to_frame() {
+        let cmd = CommandCount::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("COMMAND"), bulk("COUNT")]));
+    }
+
+    // -- ClientTracking --
+
+    #[test]
+    fn client_tracking_on_bcast_to_frame() {
+        let cmd = ClientTracking::on().bcast().prefix("user:");
+        let frame = cmd.to_frame();
+        match frame {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("CLIENT"));
+                assert_eq!(args[1], bulk("TRACKING"));
+                assert_eq!(args[2], bulk("ON"));
+                assert!(args.contains(&bulk("BCAST")));
+                assert!(args.contains(&bulk("PREFIX")));
+                assert!(args.contains(&bulk("user:")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+}
