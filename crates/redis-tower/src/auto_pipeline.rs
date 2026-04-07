@@ -132,15 +132,9 @@ async fn flush_batch(conn: &mut RedisConnection, batch: Vec<PipelineRequest>) {
                 let _ = req.response_tx.send(Ok(resp));
             }
         }
-        Err(e) => {
-            let msg = e.to_string();
+        Err(_) => {
             for req in batch {
-                let _ = req
-                    .response_tx
-                    .send(Err(RedisError::Connection(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        msg.clone(),
-                    ))));
+                let _ = req.response_tx.send(Err(RedisError::ConnectionClosed));
             }
         }
     }
@@ -202,6 +196,22 @@ mod tests {
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
+    }
+
+    #[tokio::test]
+    async fn closed_channel_error_is_retryable() {
+        // When the background worker is gone (connection death), the error
+        // must be retryable so upstream retry layers can reconnect.
+        let (tx, rx) = mpsc::channel::<PipelineRequest>(1);
+        drop(rx);
+        let mut svc = AutoPipelineService {
+            tx,
+            _worker: Arc::new(tokio::spawn(async {})),
+        };
+
+        let frame = Frame::SimpleString(b"PING"[..].into());
+        let err = svc.call(frame).await.unwrap_err();
+        assert!(err.is_retryable());
     }
 
     #[tokio::test]

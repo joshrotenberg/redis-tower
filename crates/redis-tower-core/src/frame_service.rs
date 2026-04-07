@@ -75,6 +75,25 @@ impl FrameService {
     }
 }
 
+/// Guard that returns the framed transport via the oneshot channel on drop.
+///
+/// This ensures the transport is not leaked when a `Service::call` future is
+/// cancelled (e.g., by `tokio::time::timeout`, `select!`, or task abort).
+/// On the success path the future takes the fields out of the guard before
+/// it is dropped, so the `Drop` impl becomes a no-op.
+struct FrameGuardFs {
+    framed: Option<Framed<RedisStream, RespCodec>>,
+    return_tx: Option<oneshot::Sender<Framed<RedisStream, RespCodec>>>,
+}
+
+impl Drop for FrameGuardFs {
+    fn drop(&mut self) {
+        if let (Some(framed), Some(tx)) = (self.framed.take(), self.return_tx.take()) {
+            let _ = tx.send(framed);
+        }
+    }
+}
+
 impl tower_service::Service<Frame> for FrameService {
     type Response = Frame;
     type Error = RedisError;
@@ -119,7 +138,16 @@ impl tower_service::Service<Frame> for FrameService {
         let (return_tx, return_rx) = oneshot::channel();
         self.inflight = Some(return_rx);
 
+        // Use a guard to ensure the framed transport is returned even if the
+        // future is dropped (e.g., timeout, select!, task cancellation).
+        let mut guard = FrameGuardFs {
+            framed: Some(framed),
+            return_tx: Some(return_tx),
+        };
+
         Box::pin(async move {
+            let framed = guard.framed.as_mut().unwrap();
+
             framed.flush().await.map_err(RedisError::from)?;
 
             // Read response, routing push frames.
@@ -140,7 +168,12 @@ impl tower_service::Service<Frame> for FrameService {
                 break frame;
             };
 
-            let _ = return_tx.send(framed);
+            // Explicitly return the transport on success (disarms the guard).
+            let _ = guard
+                .return_tx
+                .take()
+                .unwrap()
+                .send(guard.framed.take().unwrap());
             Ok(response)
         })
     }
