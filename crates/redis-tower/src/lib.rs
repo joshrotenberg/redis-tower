@@ -274,6 +274,7 @@ pub mod consumer;
 pub mod credentials;
 mod executor;
 pub mod metrics_layer;
+pub mod multiplexed;
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
@@ -301,6 +302,7 @@ pub use credentials::{
 };
 pub use executor::RedisExecutor;
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
+pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};

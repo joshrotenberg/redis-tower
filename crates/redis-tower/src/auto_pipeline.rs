@@ -32,7 +32,11 @@ use tower_service::Service;
 pub struct AutoPipelineConfig {
     /// Maximum commands to batch before sending. Default: 100.
     pub max_batch_size: usize,
-    /// Time to wait for more commands before flushing. Default: 1ms.
+    /// Time to wait for more commands after draining the immediate queue.
+    ///
+    /// Default: 0 (no wait -- flushes immediately, only batches requests
+    /// that arrive concurrently). Set to 1-2ms for write-heavy workloads
+    /// where batching reduces round-trips.
     pub batch_window: Duration,
 }
 
@@ -40,7 +44,7 @@ impl Default for AutoPipelineConfig {
     fn default() -> Self {
         Self {
             max_batch_size: 100,
-            batch_window: Duration::from_millis(1),
+            batch_window: Duration::ZERO,
         }
     }
 }
@@ -94,7 +98,7 @@ async fn pipeline_worker(
     config: AutoPipelineConfig,
 ) {
     loop {
-        // Wait for the first request.
+        // Wait for the first request (blocks until one arrives).
         let first = match rx.recv().await {
             Some(req) => req,
             None => break, // channel closed, all senders dropped
@@ -102,20 +106,33 @@ async fn pipeline_worker(
 
         let mut batch = vec![first];
 
-        // Collect more requests within the batch window.
-        let deadline = tokio::time::Instant::now() + config.batch_window;
-        loop {
-            if batch.len() >= config.max_batch_size {
-                break;
+        // Drain any immediately-available requests without waiting.
+        // This handles the high-concurrency case where multiple requests
+        // arrive between flushes.
+        while batch.len() < config.max_batch_size {
+            match rx.try_recv() {
+                Ok(req) => batch.push(req),
+                Err(_) => break,
             }
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Some(req)) => batch.push(req),
-                Ok(None) => {
-                    // Channel closed -- flush remaining batch and exit.
-                    flush_batch(&mut conn, batch).await;
-                    return;
+        }
+
+        // If we haven't filled the batch and the window is non-zero,
+        // wait briefly for more requests to arrive.
+        if batch.len() < config.max_batch_size && !config.batch_window.is_zero() {
+            let deadline = tokio::time::Instant::now() + config.batch_window;
+            loop {
+                if batch.len() >= config.max_batch_size {
+                    break;
                 }
-                Err(_) => break, // timeout reached
+                match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Ok(Some(req)) => batch.push(req),
+                    Ok(None) => {
+                        // Channel closed -- flush remaining and exit.
+                        flush_batch(&mut conn, batch).await;
+                        return;
+                    }
+                    Err(_) => break, // timeout
+                }
             }
         }
 
@@ -185,7 +202,7 @@ mod tests {
     fn config_defaults() {
         let config = AutoPipelineConfig::default();
         assert_eq!(config.max_batch_size, 100);
-        assert_eq!(config.batch_window, Duration::from_millis(1));
+        assert_eq!(config.batch_window, Duration::ZERO);
     }
 
     #[test]
