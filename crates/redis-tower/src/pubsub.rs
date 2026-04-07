@@ -21,6 +21,7 @@
 //! }
 //! ```
 
+use std::collections::{HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -81,6 +82,10 @@ pub enum MessageKind {
 /// ```
 pub struct PubSubConnection {
     framed: Framed<RedisStream, RespCodec>,
+    /// Buffer for frames read while searching for specific confirmations.
+    /// This prevents confirmations from one subscribe call being silently
+    /// consumed by another's confirmation loop.
+    buffered_frames: VecDeque<Frame>,
 }
 
 impl PubSubConnection {
@@ -90,7 +95,10 @@ impl PubSubConnection {
     /// internal Arc). Use a fresh connection for pub/sub.
     pub fn from_connection(conn: RedisConnection) -> Result<Self, RedisError> {
         let framed = conn.into_framed()?;
-        Ok(Self { framed })
+        Ok(Self {
+            framed,
+            buffered_frames: VecDeque::new(),
+        })
     }
 
     /// Subscribe to one or more channels.
@@ -104,18 +112,7 @@ impl PubSubConnection {
             .await
             .map_err(RedisError::from)?;
 
-        // Read and discard subscribe confirmation messages (one per channel).
-        for _ in channels {
-            let frame = self
-                .framed
-                .next()
-                .await
-                .ok_or(RedisError::ConnectionClosed)?
-                .map_err(RedisError::from)?;
-            Self::validate_sub_response(&frame, "subscribe")?;
-        }
-
-        Ok(())
+        self.await_confirmations(channels, "subscribe").await
     }
 
     /// Subscribe to one or more patterns.
@@ -129,17 +126,7 @@ impl PubSubConnection {
             .await
             .map_err(RedisError::from)?;
 
-        for _ in patterns {
-            let frame = self
-                .framed
-                .next()
-                .await
-                .ok_or(RedisError::ConnectionClosed)?
-                .map_err(RedisError::from)?;
-            Self::validate_sub_response(&frame, "psubscribe")?;
-        }
-
-        Ok(())
+        self.await_confirmations(patterns, "psubscribe").await
     }
 
     /// Unsubscribe from one or more channels.
@@ -195,17 +182,7 @@ impl PubSubConnection {
             .await
             .map_err(RedisError::from)?;
 
-        for _ in channels {
-            let frame = self
-                .framed
-                .next()
-                .await
-                .ok_or(RedisError::ConnectionClosed)?
-                .map_err(RedisError::from)?;
-            Self::validate_sub_response(&frame, "ssubscribe")?;
-        }
-
-        Ok(())
+        self.await_confirmations(channels, "ssubscribe").await
     }
 
     /// Unsubscribe from one or more shard channels.
@@ -284,33 +261,94 @@ impl PubSubConnection {
         Ok(())
     }
 
-    /// Validate a subscribe/psubscribe confirmation response.
-    fn validate_sub_response(frame: &Frame, expected_kind: &str) -> Result<(), RedisError> {
-        // RESP2: ["subscribe", channel, count] as Array
-        // RESP3: same but may arrive as Push
-        let items = match frame {
-            Frame::Array(Some(items)) | Frame::Push(items) => items,
-            Frame::Error(e) => {
-                return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
-            }
-            other => {
-                return Err(RedisError::UnexpectedResponse {
-                    expected: "subscribe confirmation array",
-                    actual: format!("{other:?}"),
-                });
-            }
-        };
+    /// Read the next frame, draining the buffer first.
+    async fn next_frame(&mut self) -> Result<Frame, RedisError> {
+        if let Some(frame) = self.buffered_frames.pop_front() {
+            return Ok(frame);
+        }
+        self.framed
+            .next()
+            .await
+            .ok_or(RedisError::ConnectionClosed)?
+            .map_err(RedisError::from)
+    }
 
-        if let Some(Frame::BulkString(Some(kind))) = items.first() {
-            if kind.as_ref() == expected_kind.as_bytes() {
-                return Ok(());
+    /// Wait for subscribe/psubscribe/ssubscribe confirmations, matching each
+    /// confirmation's channel name against the expected set.
+    ///
+    /// Frames that are valid confirmations for the right `kind` but whose
+    /// channel name does not match any expected channel are buffered so they
+    /// can be consumed by a subsequent confirmation loop or the message stream.
+    async fn await_confirmations(
+        &mut self,
+        names: &[&str],
+        expected_kind: &str,
+    ) -> Result<(), RedisError> {
+        let mut pending: HashSet<&str> = names.iter().copied().collect();
+
+        while !pending.is_empty() {
+            let frame = self.next_frame().await?;
+
+            match Self::extract_confirmation_channel(&frame, expected_kind) {
+                Some(Ok(channel)) => {
+                    if pending.remove(channel.as_str()) {
+                        // Matched an expected channel -- continue.
+                        continue;
+                    }
+                    // Confirmation for a channel we did not request in this call.
+                    // Buffer it so the caller that IS waiting for it can consume it.
+                    self.buffered_frames.push_back(frame);
+                }
+                Some(Err(e)) => return Err(e),
+                None => {
+                    // Not a confirmation of the expected kind at all. Buffer it.
+                    self.buffered_frames.push_back(frame);
+                }
             }
         }
 
-        Err(RedisError::UnexpectedResponse {
-            expected: "subscribe confirmation",
-            actual: format!("{frame:?}"),
-        })
+        Ok(())
+    }
+
+    /// Try to extract the channel name from a subscribe confirmation frame.
+    ///
+    /// Returns `Some(Ok(channel))` if the frame is a confirmation of the
+    /// expected kind, `Some(Err(_))` if the frame is an error, or `None`
+    /// if it is not a confirmation of the expected kind.
+    fn extract_confirmation_channel(
+        frame: &Frame,
+        expected_kind: &str,
+    ) -> Option<Result<String, RedisError>> {
+        let items = match frame {
+            Frame::Array(Some(items)) | Frame::Push(items) => items,
+            Frame::Error(e) => {
+                return Some(Err(RedisError::Redis(
+                    String::from_utf8_lossy(e).into_owned(),
+                )));
+            }
+            _ => return None,
+        };
+
+        // items[0] = kind, items[1] = channel, items[2] = subscription count
+        if items.len() < 3 {
+            return None;
+        }
+
+        let kind = match &items[0] {
+            Frame::BulkString(Some(b)) => b,
+            _ => return None,
+        };
+
+        if kind.as_ref() != expected_kind.as_bytes() {
+            return None;
+        }
+
+        // Extract channel name from items[1].
+        match &items[1] {
+            Frame::BulkString(Some(b)) => Some(Ok(String::from_utf8_lossy(b).into_owned())),
+            Frame::SimpleString(b) => Some(Ok(String::from_utf8_lossy(b).into_owned())),
+            _ => None,
+        }
     }
 
     /// Check if an unsubscribe confirmation indicates zero remaining subscriptions.
@@ -415,13 +453,18 @@ impl Stream for PubSubConnection {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            let frame = match Pin::new(&mut self.framed).poll_next(cx) {
-                Poll::Ready(Some(Ok(frame))) => frame,
-                Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(RedisError::from(e))));
+            // Drain any buffered frames before reading from the transport.
+            let frame = if let Some(frame) = self.buffered_frames.pop_front() {
+                frame
+            } else {
+                match Pin::new(&mut self.framed).poll_next(cx) {
+                    Poll::Ready(Some(Ok(frame))) => frame,
+                    Poll::Ready(Some(Err(e))) => {
+                        return Poll::Ready(Some(Err(RedisError::from(e))));
+                    }
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
                 }
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Pending => return Poll::Pending,
             };
 
             match Self::parse_message(frame) {
@@ -430,5 +473,95 @@ impl Stream for PubSubConnection {
                 Err(e) => return Poll::Ready(Some(Err(e))),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    /// Helper to build a subscribe confirmation frame.
+    fn sub_confirmation(kind: &str, channel: &str, count: i64) -> Frame {
+        array(vec![bulk(kind), bulk(channel), Frame::Integer(count)])
+    }
+
+    #[test]
+    fn extract_confirmation_channel_matches_expected_kind() {
+        let frame = sub_confirmation("subscribe", "events", 1);
+        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().unwrap(), "events");
+    }
+
+    #[test]
+    fn extract_confirmation_channel_returns_none_for_wrong_kind() {
+        let frame = sub_confirmation("psubscribe", "events.*", 1);
+        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_confirmation_channel_returns_err_for_error_frame() {
+        let frame = Frame::Error(b"ERR something"[..].into());
+        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn extract_confirmation_channel_returns_none_for_message_frame() {
+        let frame = array(vec![bulk("message"), bulk("events"), bulk("hello")]);
+        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_confirmation_channel_returns_none_for_short_array() {
+        let frame = array(vec![bulk("subscribe")]);
+        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn parse_message_returns_channel_message() {
+        let frame = array(vec![bulk("message"), bulk("events"), bulk("payload")]);
+        let msg = PubSubConnection::parse_message(frame).unwrap().unwrap();
+        assert_eq!(msg.kind, MessageKind::Message);
+        assert_eq!(msg.channel, "events");
+        assert_eq!(msg.payload.as_ref(), b"payload");
+        assert!(msg.pattern.is_none());
+    }
+
+    #[test]
+    fn parse_message_returns_pmessage() {
+        let frame = array(vec![
+            bulk("pmessage"),
+            bulk("ev*"),
+            bulk("events"),
+            bulk("data"),
+        ]);
+        let msg = PubSubConnection::parse_message(frame).unwrap().unwrap();
+        assert_eq!(msg.kind, MessageKind::PMessage);
+        assert_eq!(msg.channel, "events");
+        assert_eq!(msg.pattern, Some("ev*".to_string()));
+    }
+
+    #[test]
+    fn parse_message_skips_subscribe_confirmation() {
+        let frame = sub_confirmation("subscribe", "ch1", 1);
+        assert!(PubSubConnection::parse_message(frame).unwrap().is_none());
+    }
+
+    #[test]
+    fn is_unsub_complete_detects_zero_count() {
+        let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(0)]);
+        assert!(PubSubConnection::is_unsub_complete(&frame));
+    }
+
+    #[test]
+    fn is_unsub_complete_returns_false_for_nonzero_count() {
+        let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(2)]);
+        assert!(!PubSubConnection::is_unsub_complete(&frame));
     }
 }

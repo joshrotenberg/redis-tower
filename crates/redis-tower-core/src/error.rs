@@ -72,6 +72,49 @@ impl RedisError {
         )
     }
 
+    /// Returns true if this is a WRONGTYPE error.
+    pub fn is_wrongtype(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("WRONGTYPE"))
+    }
+
+    /// Returns true if this is a NOSCRIPT error.
+    pub fn is_noscript(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("NOSCRIPT"))
+    }
+
+    /// Returns true if this is a MOVED redirect (cluster).
+    pub fn is_moved(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("MOVED"))
+    }
+
+    /// Returns true if this is an ASK redirect (cluster).
+    pub fn is_ask(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("ASK"))
+    }
+
+    /// Returns true if this is a BUSY error (script in progress).
+    pub fn is_busy(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("BUSY"))
+    }
+
+    /// Returns true if this is an OOM error.
+    pub fn is_oom(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("OOM"))
+    }
+
+    /// Returns true if this is a READONLY error (writing to replica).
+    pub fn is_readonly(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("READONLY"))
+    }
+
+    /// Returns the Redis error prefix (e.g., "WRONGTYPE", "NOSCRIPT", "ERR").
+    pub fn server_error_prefix(&self) -> Option<&str> {
+        match self {
+            RedisError::Redis(msg) => msg.split_whitespace().next(),
+            _ => None,
+        }
+    }
+
     /// Returns true if the connection is broken and needs to be replaced.
     pub fn is_connection_error(&self) -> bool {
         matches!(
@@ -231,5 +274,89 @@ mod tests {
             expected: "integer",
         };
         assert!(err.to_string().contains("integer"));
+    }
+
+    // -- server error classification tests --
+
+    #[test]
+    fn is_wrongtype_matches() {
+        let err = RedisError::Redis(
+            "WRONGTYPE Operation against a key holding the wrong kind of value".into(),
+        );
+        assert!(err.is_wrongtype());
+    }
+
+    #[test]
+    fn is_wrongtype_rejects_other() {
+        let err = RedisError::Redis("ERR unknown command".into());
+        assert!(!err.is_wrongtype());
+    }
+
+    #[test]
+    fn is_noscript_matches() {
+        let err = RedisError::Redis("NOSCRIPT No matching script".into());
+        assert!(err.is_noscript());
+    }
+
+    #[test]
+    fn is_moved_matches() {
+        let err = RedisError::Redis("MOVED 3999 127.0.0.1:6381".into());
+        assert!(err.is_moved());
+    }
+
+    #[test]
+    fn is_ask_matches() {
+        let err = RedisError::Redis("ASK 3999 127.0.0.1:6381".into());
+        assert!(err.is_ask());
+    }
+
+    #[test]
+    fn is_busy_matches() {
+        let err =
+            RedisError::Redis("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.".into());
+        assert!(err.is_busy());
+    }
+
+    #[test]
+    fn is_oom_matches() {
+        let err =
+            RedisError::Redis("OOM command not allowed when used memory > 'maxmemory'".into());
+        assert!(err.is_oom());
+    }
+
+    #[test]
+    fn is_readonly_matches() {
+        let err = RedisError::Redis("READONLY You can't write against a read only replica.".into());
+        assert!(err.is_readonly());
+    }
+
+    #[test]
+    fn server_error_prefix_extracts_prefix() {
+        let err = RedisError::Redis("WRONGTYPE Operation against a key".into());
+        assert_eq!(err.server_error_prefix(), Some("WRONGTYPE"));
+    }
+
+    #[test]
+    fn server_error_prefix_returns_err() {
+        let err = RedisError::Redis("ERR unknown command 'foo'".into());
+        assert_eq!(err.server_error_prefix(), Some("ERR"));
+    }
+
+    #[test]
+    fn server_error_prefix_none_for_non_redis() {
+        let err = RedisError::ConnectionClosed;
+        assert_eq!(err.server_error_prefix(), None);
+    }
+
+    #[test]
+    fn classification_methods_reject_non_redis_errors() {
+        let err = RedisError::ConnectionClosed;
+        assert!(!err.is_wrongtype());
+        assert!(!err.is_noscript());
+        assert!(!err.is_moved());
+        assert!(!err.is_ask());
+        assert!(!err.is_busy());
+        assert!(!err.is_oom());
+        assert!(!err.is_readonly());
     }
 }
