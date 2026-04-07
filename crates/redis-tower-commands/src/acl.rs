@@ -566,3 +566,202 @@ impl Command for AclDryRun {
         "ACL DRYRUN"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- AclWhoAmI --
+
+    #[test]
+    fn acl_whoami_to_frame() {
+        let cmd = AclWhoAmI::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("WHOAMI")]));
+    }
+
+    #[test]
+    fn acl_whoami_parse_response() {
+        let cmd = AclWhoAmI::new();
+        let frame = Frame::BulkString(Some(Bytes::from("default")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "default");
+    }
+
+    #[test]
+    fn acl_whoami_parse_error_on_integer() {
+        let cmd = AclWhoAmI::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- AclCat --
+
+    #[test]
+    fn acl_cat_to_frame_no_category() {
+        let cmd = AclCat::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("CAT")]));
+    }
+
+    #[test]
+    fn acl_cat_to_frame_with_category() {
+        let cmd = AclCat::category("string");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ACL"), bulk("CAT"), bulk("string")])
+        );
+    }
+
+    #[test]
+    fn acl_cat_parse_response() {
+        let cmd = AclCat::new();
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("string"))),
+            Frame::BulkString(Some(Bytes::from("list"))),
+        ]));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("string"), Bytes::from("list")]);
+    }
+
+    #[test]
+    fn acl_cat_parse_error_on_integer() {
+        let cmd = AclCat::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- AclGenPass --
+
+    #[test]
+    fn acl_genpass_to_frame_default() {
+        let cmd = AclGenPass::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("GENPASS")]));
+    }
+
+    #[test]
+    fn acl_genpass_to_frame_with_bits() {
+        let cmd = AclGenPass::bits(128);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ACL"), bulk("GENPASS"), bulk("128")])
+        );
+    }
+
+    #[test]
+    fn acl_genpass_parse_response() {
+        let cmd = AclGenPass::new();
+        let frame = Frame::BulkString(Some(Bytes::from("abcdef1234567890")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "abcdef1234567890");
+    }
+
+    // -- AclList --
+
+    #[test]
+    fn acl_list_to_frame() {
+        let cmd = AclList::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("LIST")]));
+    }
+
+    #[test]
+    fn acl_list_parse_response() {
+        let cmd = AclList::new();
+        let frame = Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from(
+            "user default on ~* +@all",
+        )))]));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("user default on ~* +@all")]);
+    }
+
+    // -- AclSetUser --
+
+    #[test]
+    fn acl_setuser_to_frame() {
+        let cmd = AclSetUser::new("testuser")
+            .rule("on")
+            .rule("+@all")
+            .rule("~*");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ACL"),
+                bulk("SETUSER"),
+                bulk("testuser"),
+                bulk("on"),
+                bulk("+@all"),
+                bulk("~*"),
+            ])
+        );
+    }
+
+    #[test]
+    fn acl_setuser_parse_ok() {
+        let cmd = AclSetUser::new("testuser");
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        cmd.parse_response(frame).unwrap();
+    }
+
+    // -- AclDelUser --
+
+    #[test]
+    fn acl_deluser_to_frame() {
+        let cmd = AclDelUser::new("testuser");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ACL"), bulk("DELUSER"), bulk("testuser")])
+        );
+    }
+
+    #[test]
+    fn acl_deluser_parse_response() {
+        let cmd = AclDelUser::new("testuser");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- AclDryRun --
+
+    #[test]
+    fn acl_dryrun_to_frame() {
+        let cmd = AclDryRun::new("default", "GET").arg("mykey");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ACL"),
+                bulk("DRYRUN"),
+                bulk("default"),
+                bulk("GET"),
+                bulk("mykey"),
+            ])
+        );
+    }
+
+    #[test]
+    fn acl_dryrun_parse_simple_string() {
+        let cmd = AclDryRun::new("default", "GET");
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "OK");
+    }
+
+    #[test]
+    fn acl_dryrun_parse_bulk_string() {
+        let cmd = AclDryRun::new("default", "GET");
+        let frame = Frame::BulkString(Some(Bytes::from("OK")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "OK");
+    }
+
+    // -- AclLogReset --
+
+    #[test]
+    fn acl_log_reset_to_frame() {
+        let cmd = AclLogReset::new();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ACL"), bulk("LOG"), bulk("RESET")])
+        );
+    }
+
+    #[test]
+    fn acl_log_reset_parse_ok() {
+        let cmd = AclLogReset::new();
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        cmd.parse_response(frame).unwrap();
+    }
+}

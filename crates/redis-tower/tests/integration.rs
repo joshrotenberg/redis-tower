@@ -2595,3 +2595,95 @@ async fn pubsub_subscribe_after_unsubscribe() {
 
     assert_eq!(msg.payload, Bytes::from("after_resub"));
 }
+
+// -- Auto-pipeline integration tests (#222) --
+
+#[tokio::test]
+async fn auto_pipeline_basic() {
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService, CommandAdapter};
+
+    let conn = conn().await;
+    let svc = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+    let mut svc = CommandAdapter::new(svc);
+
+    let k = key("auto_pipe", "k");
+    call_ready(&mut svc, Set::new(&k, "hello")).await.unwrap();
+    let val: Option<Bytes> = call_ready(&mut svc, Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello")));
+    call_ready(&mut svc, Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_pipeline_sequential_commands() {
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService, CommandAdapter};
+
+    let c = conn().await;
+    let svc = AutoPipelineService::new(c, AutoPipelineConfig::default());
+    let mut svc = CommandAdapter::new(svc);
+
+    // Multiple sequential commands through auto-pipeline.
+    for i in 0..5 {
+        let k = format!("auto_pipe_seq:{i}");
+        call_ready(&mut svc, Set::new(&k, format!("v{i}")))
+            .await
+            .unwrap();
+    }
+
+    // Verify all were set.
+    let mut verify = conn().await;
+    for i in 0..5 {
+        let k = format!("auto_pipe_seq:{i}");
+        let val: Option<Bytes> = verify.execute(Get::new(&k)).await.unwrap();
+        assert_eq!(val, Some(Bytes::from(format!("v{i}"))));
+        verify.execute(Del::new(&k)).await.unwrap();
+    }
+}
+
+// -- Connection pool integration tests (#222) --
+
+#[tokio::test]
+async fn pool_basic() {
+    use redis_tower::pool::ConnectionPool;
+
+    let addr = redis_addr();
+    let pool = ConnectionPool::connect(2, || {
+        let a = addr.clone();
+        async move { RedisConnection::connect(&a).await }
+    })
+    .await
+    .unwrap();
+
+    let k = key("pool_basic", "k");
+    pool.execute(Set::new(&k, "pooled")).await.unwrap();
+    let val: Option<Bytes> = pool.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("pooled")));
+    pool.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn pool_concurrent_tasks() {
+    use redis_tower::pool::ConnectionPool;
+
+    let addr = redis_addr();
+    let pool = ConnectionPool::connect(4, || {
+        let a = addr.clone();
+        async move { RedisConnection::connect(&a).await }
+    })
+    .await
+    .unwrap();
+
+    let mut handles = Vec::new();
+    for i in 0..20 {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = format!("pool_conc:{i}");
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let val: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(val, Some(Bytes::from(format!("v{i}"))));
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}

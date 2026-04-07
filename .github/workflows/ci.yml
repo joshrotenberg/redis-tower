@@ -130,6 +130,22 @@ jobs:
       - name: Run sentinel integration tests
         run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored
 
+  features:
+    name: Feature Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check no-default-features
+        run: cargo check -p redis-tower --no-default-features
+      - name: Check individual features
+        run: |
+          cargo check -p redis-tower-commands --no-default-features
+          cargo check -p redis-tower-commands --no-default-features --features json
+          cargo check -p redis-tower-commands --no-default-features --features search
+          cargo check -p redis-tower-commands --no-default-features --features bloom
+          cargo check -p redis-tower --no-default-features --features serde
+
   msrv:
     name: MSRV (1.87)
     runs-on: ubuntu-latest

@@ -59,6 +59,9 @@ pub struct ClusterConnection {
     default_node: String,
     /// Host override for Docker/proxy environments.
     host_override: Option<String>,
+    /// Per-address mapping for NAT/Kubernetes environments.
+    /// Keys are "internal_host:port", values are "external_host:port".
+    address_map: Option<HashMap<String, String>>,
     /// Read routing preference.
     read_preference: ReadPreference,
     /// Round-robin counter for distributing reads across replicas.
@@ -69,6 +72,7 @@ pub struct ClusterConnection {
 pub struct ClusterConnectionBuilder {
     seed_addr: String,
     host_override: Option<String>,
+    address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
 }
 
@@ -76,6 +80,20 @@ impl ClusterConnectionBuilder {
     /// Set the host override for Docker/proxy environments.
     pub fn host_override(mut self, host: impl Into<String>) -> Self {
         self.host_override = Some(host.into());
+        self
+    }
+
+    /// Map internal cluster addresses to external addresses.
+    ///
+    /// In NAT/Kubernetes environments, cluster nodes report internal IPs
+    /// that aren't reachable from the client. This mapping translates
+    /// internal addresses to external ones.
+    ///
+    /// Keys are `"internal_host:port"` and values are `"external_host:port"`.
+    /// The address map is checked before `host_override`, so explicit
+    /// per-address mappings take priority.
+    pub fn address_map(mut self, map: HashMap<String, String>) -> Self {
+        self.address_map = Some(map);
         self
     }
 
@@ -87,8 +105,13 @@ impl ClusterConnectionBuilder {
 
     /// Connect to the cluster.
     pub async fn connect(self) -> Result<ClusterConnection, RedisError> {
-        ClusterConnection::connect_inner(&self.seed_addr, self.host_override, self.read_preference)
-            .await
+        ClusterConnection::connect_inner(
+            &self.seed_addr,
+            self.host_override,
+            self.address_map,
+            self.read_preference,
+        )
+        .await
     }
 }
 
@@ -102,7 +125,7 @@ enum Redirect {
 impl ClusterConnection {
     /// Connect to a cluster using a seed node address.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
-        Self::connect_inner(seed_addr, None, ReadPreference::Master).await
+        Self::connect_inner(seed_addr, None, None, ReadPreference::Master).await
     }
 
     /// Connect to a cluster, remapping all node hosts to `host_override`.
@@ -113,6 +136,7 @@ impl ClusterConnection {
         Self::connect_inner(
             seed_addr,
             Some(host_override.to_string()),
+            None,
             ReadPreference::Master,
         )
         .await
@@ -123,6 +147,7 @@ impl ClusterConnection {
         ClusterConnectionBuilder {
             seed_addr: seed_addr.into(),
             host_override: None,
+            address_map: None,
             read_preference: ReadPreference::Master,
         }
     }
@@ -130,11 +155,15 @@ impl ClusterConnection {
     async fn connect_inner(
         seed_addr: &str,
         host_override: Option<String>,
+        address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
     ) -> Result<Self, RedisError> {
         let mut seed_conn = RedisConnection::connect(seed_addr).await?;
         let mut topology = discover_topology(&mut seed_conn).await?;
 
+        if let Some(ref map) = address_map {
+            remap_topology_with_map(&mut topology, map);
+        }
         if let Some(ref host) = host_override {
             remap_topology(&mut topology, host);
         }
@@ -179,6 +208,7 @@ impl ClusterConnection {
             topology,
             default_node,
             host_override,
+            address_map,
             read_preference,
             replica_counter: AtomicUsize::new(0),
         })
@@ -293,8 +323,17 @@ impl ClusterConnection {
             .map(|v| v.as_str())
     }
 
-    /// Remap an address using the host override if set.
+    /// Remap an address using the address map or host override.
+    ///
+    /// The address map is checked first for an exact match. If no match
+    /// is found, the host override is applied (replacing the host but
+    /// keeping the port).
     fn remap_addr(&self, addr: &str) -> String {
+        if let Some(ref map) = self.address_map {
+            if let Some(mapped) = map.get(addr) {
+                return mapped.clone();
+            }
+        }
         if let Some(ref host) = self.host_override {
             if let Some((_old_host, port)) = addr.rsplit_once(':') {
                 return format!("{host}:{port}");
@@ -349,6 +388,9 @@ impl ClusterConnection {
 
         let mut topology = discover_topology(conn).await?;
 
+        if let Some(ref map) = self.address_map {
+            remap_topology_with_map(&mut topology, map);
+        }
         if let Some(ref host) = self.host_override {
             remap_topology(&mut topology, host);
         }
@@ -440,6 +482,32 @@ fn remap_topology(topology: &mut ClusterTopology, host: &str) {
         range.master.host = host.to_string();
         for replica in &mut range.replicas {
             replica.host = host.to_string();
+        }
+    }
+}
+
+/// Remap node addresses in a topology using an address map.
+///
+/// Each key in `map` is `"internal_host:port"` and the value is
+/// `"external_host:port"`. Only matching addresses are remapped.
+fn remap_topology_with_map(topology: &mut ClusterTopology, map: &HashMap<String, String>) {
+    for range in &mut topology.slot_ranges {
+        remap_node_addr(&mut range.master, map);
+        for replica in &mut range.replicas {
+            remap_node_addr(replica, map);
+        }
+    }
+}
+
+/// Remap a single `NodeAddr` if it matches an entry in the address map.
+fn remap_node_addr(node: &mut NodeAddr, map: &HashMap<String, String>) {
+    let key = node.addr_string();
+    if let Some(mapped) = map.get(&key) {
+        if let Some((host, port_str)) = mapped.rsplit_once(':') {
+            if let Ok(port) = port_str.parse::<u16>() {
+                node.host = host.to_string();
+                node.port = port;
+            }
         }
     }
 }
@@ -564,6 +632,7 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             host_override: Some("127.0.0.1".to_string()),
+            address_map: None,
             read_preference: ReadPreference::Master,
             replica_counter: AtomicUsize::new(0),
         };
@@ -577,10 +646,90 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             host_override: None,
+            address_map: None,
             read_preference: ReadPreference::Master,
             replica_counter: AtomicUsize::new(0),
         };
         assert_eq!(conn.remap_addr("10.0.0.1:7000"), "10.0.0.1:7000");
+    }
+
+    #[test]
+    fn remap_addr_with_address_map() {
+        let mut map = HashMap::new();
+        map.insert(
+            "10.0.0.1:7000".to_string(),
+            "ext1.example.com:17000".to_string(),
+        );
+        map.insert(
+            "10.0.0.2:7001".to_string(),
+            "ext2.example.com:17001".to_string(),
+        );
+
+        let conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: String::new(),
+            host_override: None,
+            address_map: Some(map),
+            read_preference: ReadPreference::Master,
+            replica_counter: AtomicUsize::new(0),
+        };
+
+        // Mapped address returns the external address.
+        assert_eq!(conn.remap_addr("10.0.0.1:7000"), "ext1.example.com:17000");
+        assert_eq!(conn.remap_addr("10.0.0.2:7001"), "ext2.example.com:17001");
+        // Unmapped address is returned as-is.
+        assert_eq!(conn.remap_addr("10.0.0.3:7002"), "10.0.0.3:7002");
+    }
+
+    #[test]
+    fn remap_addr_address_map_takes_priority_over_host_override() {
+        let mut map = HashMap::new();
+        map.insert(
+            "10.0.0.1:7000".to_string(),
+            "ext1.example.com:17000".to_string(),
+        );
+
+        let conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: String::new(),
+            host_override: Some("127.0.0.1".to_string()),
+            address_map: Some(map),
+            read_preference: ReadPreference::Master,
+            replica_counter: AtomicUsize::new(0),
+        };
+
+        // Address in the map uses the map (takes priority).
+        assert_eq!(conn.remap_addr("10.0.0.1:7000"), "ext1.example.com:17000");
+        // Address not in the map falls back to host_override.
+        assert_eq!(conn.remap_addr("10.0.0.2:7001"), "127.0.0.1:7001");
+    }
+
+    #[test]
+    fn remap_topology_with_map_changes_matched_addresses() {
+        let mut topo = make_topology();
+        let mut map = HashMap::new();
+        map.insert(
+            "10.0.0.1:7000".to_string(),
+            "ext1.example.com:17000".to_string(),
+        );
+        map.insert(
+            "10.0.0.4:7003".to_string(),
+            "ext4.example.com:17003".to_string(),
+        );
+
+        remap_topology_with_map(&mut topo, &map);
+
+        // Matched master is remapped.
+        assert_eq!(topo.slot_ranges[0].master.host, "ext1.example.com");
+        assert_eq!(topo.slot_ranges[0].master.port, 17000);
+        // Matched replica is remapped.
+        assert_eq!(topo.slot_ranges[0].replicas[0].host, "ext4.example.com");
+        assert_eq!(topo.slot_ranges[0].replicas[0].port, 17003);
+        // Unmatched addresses are unchanged.
+        assert_eq!(topo.slot_ranges[1].master.host, "10.0.0.2");
+        assert_eq!(topo.slot_ranges[1].master.port, 7001);
     }
 
     // -- route_command tests --
@@ -633,6 +782,7 @@ mod tests {
             topology: make_topology(),
             default_node: "10.0.0.1:7000".to_string(),
             host_override: None,
+            address_map: None,
             read_preference: ReadPreference::Master,
             replica_counter: AtomicUsize::new(0),
         };

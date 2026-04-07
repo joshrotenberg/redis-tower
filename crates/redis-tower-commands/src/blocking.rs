@@ -328,3 +328,185 @@ fn extract_bytes(frame: &Frame) -> Result<Bytes, RedisError> {
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- BLPop --
+
+    #[test]
+    fn blpop_single_key_to_frame() {
+        let cmd = BLPop::new("mylist", 5.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("BLPOP"), bulk("mylist"), bulk("5")])
+        );
+    }
+
+    #[test]
+    fn blpop_multiple_keys_to_frame() {
+        let cmd = BLPop::keys(vec!["list1", "list2"], 0.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("BLPOP"), bulk("list1"), bulk("list2"), bulk("0")])
+        );
+    }
+
+    #[test]
+    fn blpop_parse_key_value_array() {
+        let cmd = BLPop::new("mylist", 5.0);
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("mylist"))),
+            Frame::BulkString(Some(Bytes::from("value1"))),
+        ]));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, Some((Bytes::from("mylist"), Bytes::from("value1"))));
+    }
+
+    #[test]
+    fn blpop_parse_null_on_timeout() {
+        let cmd = BLPop::new("mylist", 1.0);
+        let result = cmd.parse_response(Frame::Null).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn blpop_parse_null_array() {
+        let cmd = BLPop::new("mylist", 1.0);
+        let result = cmd.parse_response(Frame::Array(None)).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn blpop_parse_error_on_wrong_array_size() {
+        let cmd = BLPop::new("mylist", 1.0);
+        let frame = Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from("only_one")))]));
+        assert!(cmd.parse_response(frame).is_err());
+    }
+
+    // -- BRPop --
+
+    #[test]
+    fn brpop_to_frame() {
+        let cmd = BRPop::new("mylist", 10.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("BRPOP"), bulk("mylist"), bulk("10")])
+        );
+    }
+
+    #[test]
+    fn brpop_parse_key_value_array() {
+        let cmd = BRPop::new("mylist", 5.0);
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("mylist"))),
+            Frame::BulkString(Some(Bytes::from("tail"))),
+        ]));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, Some((Bytes::from("mylist"), Bytes::from("tail"))));
+    }
+
+    #[test]
+    fn brpop_parse_null_on_timeout() {
+        let cmd = BRPop::new("mylist", 1.0);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- BLMove --
+
+    #[test]
+    fn blmove_to_frame() {
+        let cmd = BLMove::new("src", "dst", ListDir::Left, ListDir::Right, 3.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("BLMOVE"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("LEFT"),
+                bulk("RIGHT"),
+                bulk("3"),
+            ])
+        );
+    }
+
+    #[test]
+    fn blmove_parse_value() {
+        let cmd = BLMove::new("src", "dst", ListDir::Left, ListDir::Right, 1.0);
+        let frame = Frame::BulkString(Some(Bytes::from("moved")));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            Some(Bytes::from("moved"))
+        );
+    }
+
+    #[test]
+    fn blmove_parse_null_on_timeout() {
+        let cmd = BLMove::new("src", "dst", ListDir::Left, ListDir::Right, 1.0);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- BZPopMin --
+
+    #[test]
+    fn bzpopmin_to_frame() {
+        let cmd = BZPopMin::new("myzset", 0.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("BZPOPMIN"), bulk("myzset"), bulk("0")])
+        );
+    }
+
+    #[test]
+    fn bzpopmin_parse_key_member_score() {
+        let cmd = BZPopMin::new("myzset", 0.0);
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("myzset"))),
+            Frame::BulkString(Some(Bytes::from("member1"))),
+            Frame::BulkString(Some(Bytes::from("1.5"))),
+        ]));
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert_eq!(result.0, Bytes::from("myzset"));
+        assert_eq!(result.1, Bytes::from("member1"));
+        assert!((result.2 - 1.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn bzpopmin_parse_null_on_timeout() {
+        let cmd = BZPopMin::new("myzset", 1.0);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn bzpopmin_parse_double_score() {
+        let cmd = BZPopMin::new("myzset", 0.0);
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("myzset"))),
+            Frame::BulkString(Some(Bytes::from("member1"))),
+            Frame::Double(2.5),
+        ]));
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert!((result.2 - 2.5).abs() < f64::EPSILON);
+    }
+
+    // -- BZPopMax --
+
+    #[test]
+    fn bzpopmax_to_frame() {
+        let cmd = BZPopMax::keys(vec!["zs1", "zs2"], 5.0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("BZPOPMAX"), bulk("zs1"), bulk("zs2"), bulk("5"),])
+        );
+    }
+
+    #[test]
+    fn bzpopmax_parse_null_on_timeout() {
+        let cmd = BZPopMax::new("myzset", 1.0);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+}

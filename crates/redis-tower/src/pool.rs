@@ -34,8 +34,10 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
+use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::Mutex;
 
@@ -62,6 +64,12 @@ pub struct PoolConfig {
     pub size: usize,
     /// How to select which connection handles each command.
     pub dispatch: DispatchStrategy,
+    /// If set, connections idle longer than this duration are PINGed before use.
+    ///
+    /// This provides lazy health checking: when a connection has been idle
+    /// beyond this interval, a PING is sent before dispatching the actual
+    /// command. If the PING fails, the error is returned to the caller.
+    pub health_check_interval: Option<Duration>,
 }
 
 impl Default for PoolConfig {
@@ -69,6 +77,7 @@ impl Default for PoolConfig {
         Self {
             size: 4,
             dispatch: DispatchStrategy::RoundRobin,
+            health_check_interval: None,
         }
     }
 }
@@ -85,6 +94,23 @@ impl PoolConfig {
         self.dispatch = strategy;
         self
     }
+
+    /// Set the health check interval.
+    ///
+    /// If set, connections idle longer than this are PINGed before use
+    /// to verify they are still alive.
+    pub fn health_check_interval(mut self, interval: Duration) -> Self {
+        self.health_check_interval = Some(interval);
+        self
+    }
+}
+
+/// Return the current epoch time in milliseconds.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 /// Shared state behind the pool's Arc.
@@ -92,8 +118,12 @@ struct PoolInner<S> {
     connections: Vec<Mutex<S>>,
     /// Per-connection in-flight command count for LeastConnections dispatch.
     inflight: Vec<AtomicUsize>,
+    /// Per-connection last-use timestamp (epoch millis).
+    last_used: Vec<AtomicU64>,
     index: AtomicUsize,
     dispatch: DispatchStrategy,
+    /// Health check interval in milliseconds, or 0 if disabled.
+    health_check_interval_ms: u64,
 }
 
 /// A pool of Redis connections that dispatches commands across them.
@@ -152,16 +182,26 @@ where
             connections.push(Mutex::new(conn));
         }
 
+        let now = now_millis();
         let inflight = (0..connections.len())
             .map(|_| AtomicUsize::new(0))
             .collect();
+        let last_used = (0..connections.len())
+            .map(|_| AtomicU64::new(now))
+            .collect();
+        let health_check_interval_ms = config
+            .health_check_interval
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
 
         Ok(Self {
             inner: Arc::new(PoolInner {
                 connections,
                 inflight,
+                last_used,
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
+                health_check_interval_ms,
             }),
         })
     }
@@ -171,23 +211,41 @@ where
         connections: Vec<S>,
         dispatch: DispatchStrategy,
     ) -> Result<Self, RedisError> {
+        Self::from_connections_with_config(connections, dispatch, None)
+    }
+
+    /// Build a pool from pre-created connections with a health check interval.
+    pub fn from_connections_with_config(
+        connections: Vec<S>,
+        dispatch: DispatchStrategy,
+        health_check_interval: Option<Duration>,
+    ) -> Result<Self, RedisError> {
         if connections.is_empty() {
             return Err(RedisError::InvalidUrl(
                 "pool requires at least one connection".into(),
             ));
         }
 
+        let now = now_millis();
         let inflight = (0..connections.len())
             .map(|_| AtomicUsize::new(0))
             .collect();
+        let last_used = (0..connections.len())
+            .map(|_| AtomicU64::new(now))
+            .collect();
+        let health_check_interval_ms = health_check_interval
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let mutexed: Vec<Mutex<S>> = connections.into_iter().map(Mutex::new).collect();
 
         Ok(Self {
             inner: Arc::new(PoolInner {
                 connections: mutexed,
                 inflight,
+                last_used,
                 index: AtomicUsize::new(0),
                 dispatch,
+                health_check_interval_ms,
             }),
         })
     }
@@ -256,7 +314,18 @@ where
         async move {
             // inflight already incremented by next_index()
             let mut conn = inner.connections[idx].lock().await;
+
+            // Lazy health check: PING if idle beyond the threshold.
+            if inner.health_check_interval_ms > 0 {
+                let last = inner.last_used[idx].load(Ordering::Acquire);
+                let now = now_millis();
+                if now.saturating_sub(last) >= inner.health_check_interval_ms {
+                    let _: String = conn.execute(Ping::new()).await?;
+                }
+            }
+
             let result = conn.execute(cmd).await;
+            inner.last_used[idx].store(now_millis(), Ordering::Release);
             drop(conn);
             inner.inflight[idx].fetch_sub(1, Ordering::Release);
             result
@@ -274,11 +343,26 @@ where
     ///
     /// This is the primary API. The pool selects a connection via the
     /// configured dispatch strategy and executes the command on it.
+    ///
+    /// If `health_check_interval` is configured and the selected connection
+    /// has been idle longer than the interval, a PING is sent first to
+    /// verify the connection is alive.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
         // inflight already incremented by next_index()
         let mut conn = self.inner.connections[idx].lock().await;
+
+        // Lazy health check: PING if idle beyond the threshold.
+        if self.inner.health_check_interval_ms > 0 {
+            let last = self.inner.last_used[idx].load(Ordering::Acquire);
+            let now = now_millis();
+            if now.saturating_sub(last) >= self.inner.health_check_interval_ms {
+                let _: String = conn.execute(Ping::new()).await?;
+            }
+        }
+
         let result = conn.execute(cmd).await;
+        self.inner.last_used[idx].store(now_millis(), Ordering::Release);
         drop(conn);
         self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result
@@ -596,5 +680,90 @@ mod tests {
         let _: String = pool.execute(Ping::new()).await.unwrap();
 
         assert_eq!(pool.inner.inflight[0].load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_health_check_config() {
+        let config = PoolConfig::default().health_check_interval(Duration::from_secs(30));
+        assert_eq!(config.health_check_interval, Some(Duration::from_secs(30)));
+    }
+
+    #[tokio::test]
+    async fn pool_health_check_pings_stale_connection() {
+        use redis_tower_commands::Ping;
+
+        // Provide 2 PONG responses: one for the health check PING, one for the actual command.
+        let conns = vec![MockConn::new(
+            0,
+            vec![
+                Frame::SimpleString(Bytes::from("PONG")),
+                Frame::SimpleString(Bytes::from("PONG")),
+            ],
+        )];
+
+        // Use a very short health check interval (1 ms) so it always triggers.
+        let pool = ConnectionPool::from_connections_with_config(
+            conns,
+            DispatchStrategy::RoundRobin,
+            Some(Duration::from_millis(1)),
+        )
+        .unwrap();
+
+        // Set last_used to 0 (epoch) so the connection appears stale.
+        pool.inner.last_used[0].store(0, Ordering::Release);
+
+        let _: String = pool.execute(Ping::new()).await.unwrap();
+
+        // The connection should have received 2 calls: the health check PING + the actual PING.
+        let c0 = pool.inner.connections[0].lock().await;
+        assert_eq!(c0.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn pool_health_check_skips_fresh_connection() {
+        use redis_tower_commands::Ping;
+
+        // Only provide 1 PONG response -- health check should NOT trigger.
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+
+        // Use a very long health check interval so it never triggers.
+        let pool = ConnectionPool::from_connections_with_config(
+            conns,
+            DispatchStrategy::RoundRobin,
+            Some(Duration::from_secs(3600)),
+        )
+        .unwrap();
+
+        let _: String = pool.execute(Ping::new()).await.unwrap();
+
+        // Only 1 call -- no health check PING was sent.
+        let c0 = pool.inner.connections[0].lock().await;
+        assert_eq!(c0.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn pool_no_health_check_when_disabled() {
+        use redis_tower_commands::Ping;
+
+        // Only 1 PONG response available.
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+
+        // No health check interval set (default).
+        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+
+        // Set last_used to 0 so connection appears stale.
+        pool.inner.last_used[0].store(0, Ordering::Release);
+
+        let _: String = pool.execute(Ping::new()).await.unwrap();
+
+        // Only 1 call -- health check is disabled.
+        let c0 = pool.inner.connections[0].lock().await;
+        assert_eq!(c0.calls(), 1);
     }
 }

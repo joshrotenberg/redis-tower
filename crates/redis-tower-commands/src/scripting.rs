@@ -847,3 +847,222 @@ impl Command for FunctionStats {
         "FUNCTION STATS"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    // -- Eval --
+
+    #[test]
+    fn eval_simple_to_frame() {
+        let cmd = Eval::new("return 1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("EVAL"), bulk("return 1"), bulk("0")])
+        );
+    }
+
+    #[test]
+    fn eval_with_keys_and_args_to_frame() {
+        let cmd = Eval::new("return redis.call('GET', KEYS[1])")
+            .key("mykey")
+            .arg("extra");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVAL"),
+                bulk("return redis.call('GET', KEYS[1])"),
+                bulk("1"),
+                bulk("mykey"),
+                bulk("extra"),
+            ])
+        );
+    }
+
+    #[test]
+    fn eval_parse_response_passthrough() {
+        let cmd = Eval::new("return 42");
+        let frame = Frame::Integer(42);
+        assert_eq!(cmd.parse_response(frame).unwrap(), Frame::Integer(42));
+    }
+
+    // -- EvalSha --
+
+    #[test]
+    fn evalsha_to_frame() {
+        let cmd = EvalSha::new("abc123").key("k1").key("k2").arg("a1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVALSHA"),
+                bulk("abc123"),
+                bulk("2"),
+                bulk("k1"),
+                bulk("k2"),
+                bulk("a1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn evalsha_parse_response() {
+        let cmd = EvalSha::new("abc123");
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            Frame::SimpleString(Bytes::from("OK"))
+        );
+    }
+
+    // -- FCall --
+
+    #[test]
+    fn fcall_to_frame() {
+        let cmd = FCall::new("myfunc").key("k1").arg("a1").arg("a2");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FCALL"),
+                bulk("myfunc"),
+                bulk("1"),
+                bulk("k1"),
+                bulk("a1"),
+                bulk("a2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn fcall_no_keys_to_frame() {
+        let cmd = FCall::new("noop");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("FCALL"), bulk("noop"), bulk("0")])
+        );
+    }
+
+    #[test]
+    fn fcall_parse_response() {
+        let cmd = FCall::new("myfunc");
+        let frame = Frame::BulkString(Some(Bytes::from("result")));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            Frame::BulkString(Some(Bytes::from("result")))
+        );
+    }
+
+    // -- FCallRo --
+
+    #[test]
+    fn fcall_ro_to_frame() {
+        let cmd = FCallRo::new("readonly_fn").key("k1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FCALL_RO"),
+                bulk("readonly_fn"),
+                bulk("1"),
+                bulk("k1")
+            ])
+        );
+    }
+
+    // -- ScriptLoad --
+
+    #[test]
+    fn script_load_to_frame() {
+        let cmd = ScriptLoad::new("return 1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("LOAD"), bulk("return 1")])
+        );
+    }
+
+    #[test]
+    fn script_load_parse_response() {
+        let cmd = ScriptLoad::new("return 1");
+        let frame = Frame::BulkString(Some(Bytes::from(
+            "e0e1f9fabfc9d4800c877a703b823ac0578ff831",
+        )));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            "e0e1f9fabfc9d4800c877a703b823ac0578ff831"
+        );
+    }
+
+    // -- ScriptExists --
+
+    #[test]
+    fn script_exists_to_frame() {
+        let cmd = ScriptExists::new("sha1").sha1("sha2");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SCRIPT"),
+                bulk("EXISTS"),
+                bulk("sha1"),
+                bulk("sha2")
+            ])
+        );
+    }
+
+    #[test]
+    fn script_exists_parse_response() {
+        let cmd = ScriptExists::new("sha1").sha1("sha2");
+        let frame = Frame::Array(Some(vec![Frame::Integer(1), Frame::Integer(0)]));
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![true, false]);
+    }
+
+    // -- ScriptFlush --
+
+    #[test]
+    fn script_flush_to_frame() {
+        let cmd = ScriptFlush::new().mode(FlushMode::Async);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("FLUSH"), bulk("ASYNC")])
+        );
+    }
+
+    // -- FunctionLoad --
+
+    #[test]
+    fn function_load_to_frame() {
+        let cmd = FunctionLoad::new(
+            "#!lua name=mylib\nredis.register_function('myfunc', function() return 1 end)",
+        )
+        .replace();
+        let frame = cmd.to_frame();
+        if let Frame::Array(Some(parts)) = &frame {
+            assert_eq!(parts[0], Frame::BulkString(Some(Bytes::from("FUNCTION"))));
+            assert_eq!(parts[1], Frame::BulkString(Some(Bytes::from("LOAD"))));
+            assert_eq!(parts[2], Frame::BulkString(Some(Bytes::from("REPLACE"))));
+            assert_eq!(parts.len(), 4);
+        } else {
+            panic!("expected array frame");
+        }
+    }
+
+    // -- FunctionDelete --
+
+    #[test]
+    fn function_delete_to_frame() {
+        let cmd = FunctionDelete::new("mylib");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("FUNCTION"), bulk("DELETE"), bulk("mylib")])
+        );
+    }
+
+    #[test]
+    fn function_delete_parse_ok() {
+        let cmd = FunctionDelete::new("mylib");
+        let frame = Frame::SimpleString(Bytes::from("OK"));
+        cmd.parse_response(frame).unwrap();
+    }
+}
