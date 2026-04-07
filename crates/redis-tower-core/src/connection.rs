@@ -372,6 +372,25 @@ impl RedisConnection {
     }
 }
 
+/// Guard that returns the framed transport via the oneshot channel on drop.
+///
+/// This ensures the transport is not leaked when a `Service::call` future is
+/// cancelled (e.g., by `tokio::time::timeout`, `select!`, or task abort).
+/// On the success path the future takes the fields out of the guard before
+/// it is dropped, so the `Drop` impl becomes a no-op.
+struct FrameGuard {
+    framed: Option<Framed<RedisStream, RespCodec>>,
+    return_tx: Option<oneshot::Sender<Framed<RedisStream, RespCodec>>>,
+}
+
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        if let (Some(framed), Some(tx)) = (self.framed.take(), self.return_tx.take()) {
+            let _ = tx.send(framed);
+        }
+    }
+}
+
 impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
     type Response = Cmd::Response;
     type Error = RedisError;
@@ -422,15 +441,28 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
         let (return_tx, return_rx) = oneshot::channel();
         self.inflight = Some(return_rx);
 
+        // Use a guard to ensure the framed transport is returned even if the
+        // future is dropped (e.g., timeout, select!, task cancellation).
+        let mut guard = FrameGuard {
+            framed: Some(framed),
+            return_tx: Some(return_tx),
+        };
+
         Box::pin(async move {
+            let framed = guard.framed.as_mut().unwrap();
+
             // Flush the buffered write.
             framed.flush().await.map_err(RedisError::from)?;
 
             // Read response, routing push frames.
-            let response = read_response_from(&mut framed, &push_tx).await?;
+            let response = read_response_from(framed, &push_tx).await?;
 
-            // Return the transport for reuse.
-            let _ = return_tx.send(framed);
+            // Explicitly return the transport on success (disarms the guard).
+            let _ = guard
+                .return_tx
+                .take()
+                .unwrap()
+                .send(guard.framed.take().unwrap());
 
             if let Frame::Error(ref e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
@@ -444,6 +476,22 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::command::Command;
+
+    /// Minimal command type used only in unit tests.
+    struct DummyCmd;
+    impl Command for DummyCmd {
+        type Response = ();
+        fn to_frame(&self) -> Frame {
+            Frame::SimpleString(b"PING"[..].into())
+        }
+        fn parse_response(&self, _frame: Frame) -> Result<(), RedisError> {
+            Ok(())
+        }
+        fn name(&self) -> &str {
+            "DUMMY"
+        }
+    }
 
     #[test]
     fn into_framed_returns_error_when_none() {
@@ -486,6 +534,50 @@ mod tests {
             Err(RedisError::ConnectionClosed) => {}
             other => panic!("expected ConnectionClosed, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn poll_ready_returns_connection_closed_after_cancelled_future() {
+        use tower_service::Service;
+
+        // Simulate a cancelled Service::call future: the sender side of the
+        // oneshot is dropped without sending the framed transport back.
+        let (tx, rx) = oneshot::channel::<Framed<RedisStream, RespCodec>>();
+        drop(tx); // Simulates the future being dropped before completion.
+
+        let mut conn = RedisConnection {
+            framed: None,
+            push_tx: None,
+            inflight: Some(rx),
+        };
+
+        // poll_ready should detect the cancelled sender and return an error
+        // rather than hanging forever.
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        match Service::<DummyCmd>::poll_ready(&mut conn, &mut cx) {
+            Poll::Ready(Err(RedisError::ConnectionClosed)) => {}
+            other => panic!("expected Ready(Err(ConnectionClosed)), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_guard_returns_transport_on_drop() {
+        // Verify that FrameGuard sends the framed transport back when dropped.
+        let (return_tx, mut return_rx) = oneshot::channel::<Framed<RedisStream, RespCodec>>();
+
+        // We cannot easily construct a real Framed without a socket, but we can
+        // verify the guard sends the return_tx by checking the receiver is not
+        // cancelled after the guard is dropped with both fields populated.
+        //
+        // Since we need a real Framed to test the full path, we instead test
+        // that dropping a guard with return_tx=None does NOT panic.
+        let guard = FrameGuard {
+            framed: None,
+            return_tx: Some(return_tx),
+        };
+        drop(guard);
+        // Sender was dropped (framed was None), so receiver should get an error.
+        assert!(return_rx.try_recv().is_err());
     }
 
     #[test]

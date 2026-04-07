@@ -203,9 +203,12 @@ where
     }
 
     /// Select the next connection index based on dispatch strategy.
+    ///
+    /// This also increments the inflight counter for the chosen connection.
+    /// The caller is responsible for decrementing after the command completes.
     fn next_index(&self) -> usize {
         let len = self.inner.connections.len();
-        match self.inner.dispatch {
+        let idx = match self.inner.dispatch {
             DispatchStrategy::RoundRobin => self.inner.index.fetch_add(1, Ordering::Relaxed) % len,
             DispatchStrategy::Random => {
                 // Simple xorshift-based pseudo-random from the atomic counter.
@@ -220,9 +223,9 @@ where
                 // Find the connection with the fewest in-flight commands.
                 // On ties, pick the first (effectively round-robin among tied).
                 let mut min_idx = 0;
-                let mut min_val = self.inner.inflight[0].load(Ordering::Relaxed);
+                let mut min_val = self.inner.inflight[0].load(Ordering::Acquire);
                 for i in 1..len {
-                    let val = self.inner.inflight[i].load(Ordering::Relaxed);
+                    let val = self.inner.inflight[i].load(Ordering::Acquire);
                     if val < min_val {
                         min_val = val;
                         min_idx = i;
@@ -230,7 +233,13 @@ where
                 }
                 min_idx
             }
-        }
+        };
+        // Increment atomically with selection so concurrent callers
+        // see each other's choices for LeastConnections dispatch.
+        // For other strategies the counter is maintained for consistency
+        // and potential observability.
+        self.inner.inflight[idx].fetch_add(1, Ordering::Release);
+        idx
     }
 }
 
@@ -245,11 +254,11 @@ where
         let inner = Arc::clone(&self.inner);
         let idx = self.next_index();
         async move {
-            inner.inflight[idx].fetch_add(1, Ordering::Relaxed);
+            // inflight already incremented by next_index()
             let mut conn = inner.connections[idx].lock().await;
             let result = conn.execute(cmd).await;
             drop(conn);
-            inner.inflight[idx].fetch_sub(1, Ordering::Relaxed);
+            inner.inflight[idx].fetch_sub(1, Ordering::Release);
             result
         }
     }
@@ -267,11 +276,11 @@ where
     /// configured dispatch strategy and executes the command on it.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
-        self.inner.inflight[idx].fetch_add(1, Ordering::Relaxed);
+        // inflight already incremented by next_index()
         let mut conn = self.inner.connections[idx].lock().await;
         let result = conn.execute(cmd).await;
         drop(conn);
-        self.inner.inflight[idx].fetch_sub(1, Ordering::Relaxed);
+        self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result
     }
 }
@@ -533,6 +542,44 @@ mod tests {
         // so it gets all calls.
         assert_eq!(c0.calls(), 4);
         assert_eq!(c1.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_least_connections_inflight_incremented_by_next_index() {
+        // Verify that next_index() atomically increments the inflight counter
+        // so concurrent callers cannot all pick the same connection.
+        let conns = vec![
+            MockConn::new(
+                0,
+                (0..10)
+                    .map(|_| Frame::SimpleString(Bytes::from("PONG")))
+                    .collect(),
+            ),
+            MockConn::new(
+                1,
+                (0..10)
+                    .map(|_| Frame::SimpleString(Bytes::from("PONG")))
+                    .collect(),
+            ),
+        ];
+
+        let pool =
+            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+
+        // Both start at 0. First next_index() picks 0 and increments it.
+        let idx0 = pool.next_index();
+        assert_eq!(idx0, 0);
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 1);
+        assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 0);
+
+        // Second call should now pick connection 1 (inflight 0 < 1).
+        let idx1 = pool.next_index();
+        assert_eq!(idx1, 1);
+        assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 1);
+
+        // Clean up the counters so other assertions don't break.
+        pool.inner.inflight[0].fetch_sub(1, Ordering::Release);
+        pool.inner.inflight[1].fetch_sub(1, Ordering::Release);
     }
 
     #[tokio::test]

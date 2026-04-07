@@ -5,6 +5,16 @@
 //! TCP connection drops. Implements `tower::Service<Cmd>` so it can be
 //! used as a drop-in replacement for [`RedisConnection`].
 //!
+//! # Factories
+//!
+//! Different factories determine what negotiation happens on each reconnect:
+//!
+//! - [`AddrConnectionFactory`] -- plain TCP, RESP2, no auth
+//! - [`UrlConnectionFactory`] -- AUTH + SELECT from URL parameters, RESP2
+//! - [`Resp3AddrConnectionFactory`] -- plain TCP, RESP3 via `HELLO 3`, no auth
+//!
+//! For RESP3 with authentication, implement [`ConnectionFactory`] yourself.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -55,6 +65,12 @@ where
 /// A [`ConnectionFactory`] that connects via a Redis URL string.
 ///
 /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
+///
+/// This factory calls [`RedisConnection::connect_url`], which runs
+/// `post_connect_setup` internally. This means AUTH and SELECT are
+/// replayed on every reconnection based on the URL parameters. Use
+/// this factory (not [`AddrConnectionFactory`]) when your Redis server
+/// requires authentication or a non-default database.
 pub struct UrlConnectionFactory {
     url: String,
 }
@@ -74,6 +90,11 @@ impl ConnectionFactory for UrlConnectionFactory {
 }
 
 /// A [`ConnectionFactory`] that connects via a `host:port` address string.
+///
+/// This factory creates plain TCP connections using RESP2 with no
+/// authentication or database selection. If you need AUTH, SELECT, or
+/// RESP3 negotiation on reconnect, use [`UrlConnectionFactory`] or
+/// [`Resp3AddrConnectionFactory`] instead.
 pub struct AddrConnectionFactory {
     addr: String,
 }
@@ -89,6 +110,31 @@ impl ConnectionFactory for AddrConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let addr = self.addr.clone();
         Box::pin(async move { RedisConnection::connect(&addr).await })
+    }
+}
+
+/// A [`ConnectionFactory`] that connects via a `host:port` address and
+/// negotiates RESP3 using `HELLO 3`.
+///
+/// Use this when you need RESP3 protocol without URL-based AUTH/SELECT.
+/// For RESP3 with authentication, use [`UrlConnectionFactory`] with a
+/// `redis://` URL (which handles AUTH and SELECT) and then upgrade the
+/// protocol yourself, or implement [`ConnectionFactory`] directly.
+pub struct Resp3AddrConnectionFactory {
+    addr: String,
+}
+
+impl Resp3AddrConnectionFactory {
+    /// Create a new factory from the given `host:port` address.
+    pub fn new(addr: impl Into<String>) -> Self {
+        Self { addr: addr.into() }
+    }
+}
+
+impl ConnectionFactory for Resp3AddrConnectionFactory {
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
+        let addr = self.addr.clone();
+        Box::pin(async move { RedisConnection::connect_resp3(&addr).await })
     }
 }
 
@@ -172,6 +218,32 @@ pub(crate) enum ConnState {
 /// command fails with a connection error, the next `poll_ready` triggers
 /// reconnection with configurable exponential backoff.
 ///
+/// # Factory Selection
+///
+/// The factory you choose determines what happens on reconnect:
+///
+/// | Factory | AUTH | SELECT | RESP3 |
+/// |---------|------|--------|-------|
+/// | [`AddrConnectionFactory`] | No | No | No |
+/// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | No |
+/// | [`Resp3AddrConnectionFactory`] | No | No | Yes |
+///
+/// For RESP3 with authentication, implement [`ConnectionFactory`] yourself
+/// or use a closure factory.
+///
+/// # Behavior During Reconnection
+///
+/// The [`execute`](Self::execute) method and the `tower::Service` trait
+/// behave differently when the connection is down:
+///
+/// - **`execute()`** -- returns [`RedisError::ConnectionClosed`] immediately
+///   (fail-fast). Callers must handle the error or retry themselves.
+/// - **`Service::poll_ready()`** -- drives the reconnection state machine
+///   and returns `Poll::Pending` until a new connection is established.
+///   Callers using the Tower `Service` trait (including via
+///   `tower::buffer::Buffer`) will wait for reconnection to complete.
+///   The in-flight queue is bounded by the caller's `Buffer` capacity.
+///
 /// # Example
 ///
 /// ```ignore
@@ -234,6 +306,11 @@ impl ResilientConnection {
     /// Execute a command through the resilient connection.
     ///
     /// For direct async usage without the Tower `Service` trait.
+    ///
+    /// Unlike `Service::call()`, this method **fails fast**: if the connection
+    /// is not in the `Connected` state (e.g., during reconnection), it returns
+    /// [`RedisError::ConnectionClosed`] immediately rather than waiting for
+    /// reconnection to complete.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         match &mut self.state {
             ConnState::Connected(conn) => {

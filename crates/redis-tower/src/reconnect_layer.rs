@@ -51,6 +51,14 @@ enum State {
 /// Wraps a `FrameService` directly. When a connection error is detected,
 /// `poll_ready` drives the reconnection state machine with configurable
 /// exponential backoff.
+///
+/// # Factory Selection
+///
+/// The [`ConnectionFactory`] you provide determines what negotiation
+/// happens on each reconnect. Use [`UrlConnectionFactory`](crate::reconnect::UrlConnectionFactory)
+/// if your server requires AUTH or a specific database, so those are
+/// replayed on every new connection. See the [`reconnect`](crate::reconnect)
+/// module docs for the full factory comparison table.
 pub struct ReconnectService {
     inner: FrameService,
     factory: Arc<dyn ConnectionFactory>,
