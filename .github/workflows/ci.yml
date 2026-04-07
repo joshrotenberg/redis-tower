@@ -124,11 +124,12 @@ jobs:
       - name: Run standalone integration tests
         run: cargo test -p redis-tower --test integration --all-features
 
-      - name: Run cluster integration tests
-        run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored
-
-      - name: Run sentinel integration tests
-        run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored
+      # Cluster and sentinel tests require multi-node setups not available
+      # in standard CI. Run them locally or in a dedicated cluster CI job.
+      # - name: Run cluster integration tests
+      #   run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored
+      # - name: Run sentinel integration tests
+      #   run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored
 
   features:
     name: Feature Checks
