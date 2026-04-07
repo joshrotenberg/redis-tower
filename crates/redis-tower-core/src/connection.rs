@@ -191,6 +191,41 @@ impl RedisConnection {
     /// command execution are automatically routed to this channel.
     ///
     /// If nobody subscribes, push frames are silently discarded.
+    ///
+    /// # Reconnection Warning
+    ///
+    /// Push subscriptions do **not** survive reconnection. If the underlying
+    /// TCP connection drops and a new connection is established (e.g., via
+    /// [`ResilientConnection`](https://docs.rs/redis-tower) or manual
+    /// reconnection), any server-side state such as `CLIENT TRACKING`
+    /// registrations is lost. The push receiver will stop receiving
+    /// messages until the tracking is re-enabled on the new connection.
+    ///
+    /// To handle this, implement [`ConnectionFactory`](https://docs.rs/redis-tower)
+    /// yourself and replay setup commands (e.g., `CLIENT TRACKING ON`) inside
+    /// `connect()`. This ensures the setup runs on every fresh connection,
+    /// including reconnections. For example:
+    ///
+    /// ```ignore
+    /// use redis_tower::reconnect::{ConnectionFactory, ResilientConnection, ReconnectConfig};
+    /// use redis_tower_core::{RedisConnection, RedisError};
+    ///
+    /// struct TrackingFactory {
+    ///     addr: String,
+    /// }
+    ///
+    /// impl ConnectionFactory for TrackingFactory {
+    ///     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
+    ///         let addr = self.addr.clone();
+    ///         Box::pin(async move {
+    ///             let mut conn = RedisConnection::connect_resp3(&addr).await?;
+    ///             // Replay CLIENT TRACKING on every new connection.
+    ///             conn.execute(ClientTracking::on()).await?;
+    ///             Ok(conn)
+    ///         })
+    ///     }
+    /// }
+    /// ```
     pub fn subscribe_pushes(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         self.push_tx = Some(tx);

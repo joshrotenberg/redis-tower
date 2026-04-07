@@ -44,6 +44,11 @@ use redis_tower_core::{Command, RedisConnection, RedisError};
 /// Used by [`ResilientConnection`] and [`ResilientRedisClient`](crate::ResilientRedisClient)
 /// to establish fresh connections during initial setup and reconnection.
 ///
+/// The `connect()` method is called on every new connection, including
+/// reconnections after connection loss. This makes it the right place to
+/// replay any session-level setup such as `CLIENT TRACKING ON`, `SELECT`,
+/// or `AUTH` that must be re-established after a reconnect.
+///
 /// A blanket implementation is provided for any `Fn() -> Future<Output = Result<RedisConnection, RedisError>>`,
 /// so closures work out of the box. For named factories, see
 /// [`AddrConnectionFactory`] and [`UrlConnectionFactory`].
@@ -230,6 +235,56 @@ pub(crate) enum ConnState {
 ///
 /// For RESP3 with authentication, implement [`ConnectionFactory`] yourself
 /// or use a closure factory.
+///
+/// # Custom Setup on Reconnect
+///
+/// Server-side state such as `CLIENT TRACKING`, pub/sub subscriptions, or
+/// other session-level configuration is **not** automatically replayed on
+/// reconnection. Only the setup performed inside [`ConnectionFactory::connect`]
+/// runs on each new connection.
+///
+/// To replay custom commands after every (re)connection, implement
+/// [`ConnectionFactory`] and issue the setup commands in `connect()`:
+///
+/// ```ignore
+/// use redis_tower::reconnect::{ConnectionFactory, ResilientConnection, ReconnectConfig};
+/// use redis_tower_core::{RedisConnection, RedisError};
+/// use std::future::Future;
+/// use std::pin::Pin;
+///
+/// struct TrackingFactory {
+///     addr: String,
+/// }
+///
+/// impl ConnectionFactory for TrackingFactory {
+///     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
+///         let addr = self.addr.clone();
+///         Box::pin(async move {
+///             let mut conn = RedisConnection::connect_resp3(&addr).await?;
+///             // CLIENT TRACKING, SELECT, or any other setup runs on every connection.
+///             conn.execute(ClientTracking::on()).await?;
+///             Ok(conn)
+///         })
+///     }
+/// }
+/// ```
+///
+/// Alternatively, use a closure factory for simple cases:
+///
+/// ```ignore
+/// let addr = "127.0.0.1:6379".to_string();
+/// let mut conn = ResilientConnection::new(
+///     move || {
+///         let addr = addr.clone();
+///         async move {
+///             let mut c = RedisConnection::connect_resp3(&addr).await?;
+///             c.execute(ClientTracking::on()).await?;
+///             Ok(c)
+///         }
+///     },
+///     ReconnectConfig::default(),
+/// ).await?;
+/// ```
 ///
 /// # Behavior During Reconnection
 ///
