@@ -27,3 +27,4 @@ dump.rdb
 CLAUDE.md
 comparisons/*/target/
 comparisons/*/Cargo.lock
+comparisons/
