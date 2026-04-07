@@ -82,10 +82,9 @@ impl RedisConnection {
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
-        Ok(Self::from_framed_inner(Framed::new(
-            RedisStream::Tcp(stream),
-            RespCodec,
-        )))
+        let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
+        conn.identify_client().await;
+        Ok(conn)
     }
 
     /// Connect over TLS using the provided configuration.
@@ -100,7 +99,9 @@ impl RedisConnection {
         let tcp = TcpStream::connect(addr).await?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
-        Ok(Self::from_framed_inner(Framed::new(stream, RespCodec)))
+        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
+        conn.identify_client().await;
+        Ok(conn)
     }
 
     /// Connect using a Redis URL.
@@ -160,6 +161,7 @@ impl RedisConnection {
     /// Sends `HELLO 3` after connecting. The server will respond with
     /// RESP3 frames for all subsequent commands.
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
+        // connect() already sends CLIENT SETINFO, then we upgrade to RESP3.
         let mut conn = Self::connect(addr).await?;
         conn.hello(3).await?;
         Ok(conn)
@@ -376,6 +378,34 @@ impl RedisConnection {
     /// Fails if a `Service::call` future is still in flight.
     pub fn into_framed(mut self) -> Result<Framed<RedisStream, RespCodec>, RedisError> {
         self.framed.take().ok_or(RedisError::ConnectionInUse)
+    }
+
+    /// Send CLIENT SETINFO to identify the client library.
+    ///
+    /// This is best-effort: errors are silently ignored because older
+    /// Redis versions do not support the command.
+    async fn identify_client(&mut self) {
+        let framed = self.framed.as_mut().unwrap();
+        // CLIENT SETINFO LIB-NAME redis-tower
+        let _ = framed
+            .send(array(vec![
+                bulk("CLIENT"),
+                bulk("SETINFO"),
+                bulk("LIB-NAME"),
+                bulk("redis-tower"),
+            ]))
+            .await;
+        let _ = read_response_from(framed, &self.push_tx).await;
+        // CLIENT SETINFO LIB-VER <version>
+        let _ = framed
+            .send(array(vec![
+                bulk("CLIENT"),
+                bulk("SETINFO"),
+                bulk("LIB-VER"),
+                bulk(env!("CARGO_PKG_VERSION")),
+            ]))
+            .await;
+        let _ = read_response_from(framed, &self.push_tx).await;
     }
 
     /// Run post-connection setup (AUTH, SELECT) based on URL parameters.

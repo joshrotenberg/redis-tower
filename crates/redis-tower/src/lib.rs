@@ -298,7 +298,7 @@ pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
-    AuthenticatedConnection, CredentialProvider, Credentials, StaticCredentials,
+    AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
 };
 pub use executor::RedisExecutor;
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
