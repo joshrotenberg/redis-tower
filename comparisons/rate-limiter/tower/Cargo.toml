@@ -1,0 +1,11 @@
+[package]
+name = "rate-limiter-tower"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+redis-tower = { path = "../../../crates/redis-tower", default-features = false }
+redis-tower-core = { path = "../../../crates/redis-tower-core" }
+redis-tower-commands = { path = "../../../crates/redis-tower-commands" }
+redis-tower-protocol = { path = "../../../crates/redis-tower-protocol" }
+tokio = { version = "1", features = ["full"] }

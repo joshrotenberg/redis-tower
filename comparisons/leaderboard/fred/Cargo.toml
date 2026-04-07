@@ -1,0 +1,9 @@
+[package]
+name = "leaderboard-fred"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fred = "10"
+tokio = { version = "1", features = ["full"] }
+rand = { version = "0.9", features = ["small_rng"] }

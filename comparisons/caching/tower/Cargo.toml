@@ -1,0 +1,15 @@
+[package]
+name = "caching-tower"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+redis-tower = { path = "../../../crates/redis-tower" }
+redis-tower-core = { path = "../../../crates/redis-tower-core" }
+redis-tower-commands = { path = "../../../crates/redis-tower-commands" }
+redis-tower-protocol = { path = "../../../crates/redis-tower-protocol" }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+tower-service = "0.3"
+bytes = "1"
+rand = "0.9"

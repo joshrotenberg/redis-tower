@@ -1,0 +1,3 @@
+[workspace]
+members = ["tower", "redis-rs", "fred"]
+resolver = "2"
