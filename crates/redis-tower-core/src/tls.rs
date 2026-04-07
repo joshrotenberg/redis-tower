@@ -34,8 +34,12 @@ pub struct TlsConfig {
 pub(crate) enum TlsBackend {
     #[cfg(feature = "tls-native-tls")]
     NativeTls,
+    #[cfg(feature = "tls-native-tls")]
+    NativeTlsCustom(native_tls::TlsConnector),
     #[cfg(feature = "tls-rustls")]
     Rustls,
+    #[cfg(feature = "tls-rustls")]
+    RustlsCustom(std::sync::Arc<rustls::ClientConfig>),
 }
 
 impl TlsConfig {
@@ -54,6 +58,38 @@ impl TlsConfig {
     pub fn default_rustls() -> Self {
         Self {
             backend: TlsBackend::Rustls,
+            accept_invalid_certs: false,
+            accept_invalid_hostnames: false,
+        }
+    }
+
+    /// Create from a pre-built rustls `ClientConfig`.
+    ///
+    /// This allows full control over the TLS configuration (custom root
+    /// certs, client certificates, protocol versions, etc.). The
+    /// `danger_accept_invalid_certs` and `danger_accept_invalid_hostnames`
+    /// settings are ignored when using a custom config since the caller
+    /// controls verification through the provided `ClientConfig`.
+    #[cfg(feature = "tls-rustls")]
+    pub fn from_rustls_config(config: std::sync::Arc<rustls::ClientConfig>) -> Self {
+        Self {
+            backend: TlsBackend::RustlsCustom(config),
+            accept_invalid_certs: false,
+            accept_invalid_hostnames: false,
+        }
+    }
+
+    /// Create from a pre-built native-tls `TlsConnector`.
+    ///
+    /// This allows full control over the TLS configuration (custom root
+    /// certs, client certificates, protocol versions, etc.). The
+    /// `danger_accept_invalid_certs` and `danger_accept_invalid_hostnames`
+    /// settings are ignored when using a custom connector since the caller
+    /// controls verification through the provided `TlsConnector`.
+    #[cfg(feature = "tls-native-tls")]
+    pub fn from_native_tls_connector(connector: native_tls::TlsConnector) -> Self {
+        Self {
+            backend: TlsBackend::NativeTlsCustom(connector),
             accept_invalid_certs: false,
             accept_invalid_hostnames: false,
         }
@@ -85,8 +121,16 @@ impl TlsConfig {
         match &self.backend {
             #[cfg(feature = "tls-native-tls")]
             TlsBackend::NativeTls => self.connect_native_tls(tcp, hostname).await,
+            #[cfg(feature = "tls-native-tls")]
+            TlsBackend::NativeTlsCustom(connector) => {
+                Self::connect_native_tls_custom(connector.clone(), tcp, hostname).await
+            }
             #[cfg(feature = "tls-rustls")]
             TlsBackend::Rustls => self.connect_rustls(tcp, hostname).await,
+            #[cfg(feature = "tls-rustls")]
+            TlsBackend::RustlsCustom(config) => {
+                Self::connect_rustls_custom(config.clone(), tcp, hostname).await
+            }
         }
     }
 
@@ -103,6 +147,22 @@ impl TlsConfig {
         let connector = builder
             .build()
             .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+        let connector = tokio_native_tls::TlsConnector::from(connector);
+
+        let tls_stream = connector
+            .connect(hostname, tcp)
+            .await
+            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+
+        Ok(RedisStream::NativeTls(Box::new(tls_stream)))
+    }
+
+    #[cfg(feature = "tls-native-tls")]
+    async fn connect_native_tls_custom(
+        connector: native_tls::TlsConnector,
+        tcp: TcpStream,
+        hostname: &str,
+    ) -> Result<RedisStream, RedisError> {
         let connector = tokio_native_tls::TlsConnector::from(connector);
 
         let tls_stream = connector
@@ -143,6 +203,26 @@ impl TlsConfig {
         };
 
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let server_name =
+            rustls::pki_types::ServerName::try_from(hostname.to_string()).map_err(|e| {
+                RedisError::Connection(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            })?;
+
+        let tls_stream = connector
+            .connect(server_name, tcp)
+            .await
+            .map_err(RedisError::Connection)?;
+
+        Ok(RedisStream::Rustls(Box::new(tls_stream)))
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    async fn connect_rustls_custom(
+        config: std::sync::Arc<rustls::ClientConfig>,
+        tcp: TcpStream,
+        hostname: &str,
+    ) -> Result<RedisStream, RedisError> {
+        let connector = tokio_rustls::TlsConnector::from(config);
         let server_name =
             rustls::pki_types::ServerName::try_from(hostname.to_string()).map_err(|e| {
                 RedisError::Connection(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))

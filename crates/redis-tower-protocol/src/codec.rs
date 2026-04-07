@@ -119,6 +119,109 @@ mod tests {
         assert_eq!(&buf[..], b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n");
     }
 
+    // -- RESP3 types --
+
+    #[test]
+    fn decode_double() {
+        let mut buf = BytesMut::from(",2.72\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Double(2.72));
+    }
+
+    #[test]
+    fn decode_boolean_true() {
+        let mut buf = BytesMut::from("#t\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Boolean(true));
+    }
+
+    #[test]
+    fn decode_boolean_false() {
+        let mut buf = BytesMut::from("#f\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Boolean(false));
+    }
+
+    #[test]
+    fn decode_null() {
+        let mut buf = BytesMut::from("_\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Null);
+    }
+
+    #[test]
+    fn decode_map() {
+        let mut buf = BytesMut::from("%2\r\n+key1\r\n:1\r\n+key2\r\n:2\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            frame,
+            Frame::Map(vec![
+                (Frame::SimpleString(Bytes::from("key1")), Frame::Integer(1)),
+                (Frame::SimpleString(Bytes::from("key2")), Frame::Integer(2)),
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_set() {
+        let mut buf = BytesMut::from("~2\r\n+a\r\n+b\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            frame,
+            Frame::Set(vec![
+                Frame::SimpleString(Bytes::from("a")),
+                Frame::SimpleString(Bytes::from("b")),
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_push() {
+        let mut buf = BytesMut::from(">2\r\n+invalidate\r\n*1\r\n+key\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            frame,
+            Frame::Push(vec![
+                Frame::SimpleString(Bytes::from("invalidate")),
+                Frame::Array(Some(vec![Frame::SimpleString(Bytes::from("key"))])),
+            ])
+        );
+    }
+
+    #[test]
+    fn decode_blob_error() {
+        let mut buf = BytesMut::from("!12\r\nSYNTAX error\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::BlobError(Bytes::from("SYNTAX error")));
+    }
+
+    #[test]
+    fn decode_big_number() {
+        let mut buf = BytesMut::from("(12345678901234567890\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::BigNumber(Bytes::from("12345678901234567890")));
+    }
+
+    #[test]
+    fn decode_verbatim_string() {
+        let mut buf = BytesMut::from("=15\r\ntxt:hello world\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            frame,
+            Frame::VerbatimString(Bytes::from("txt"), Bytes::from("hello world"))
+        );
+    }
+
     #[test]
     fn roundtrip() {
         let original = Frame::Array(Some(vec![

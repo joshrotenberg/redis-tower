@@ -250,6 +250,15 @@ impl RedisConnection {
     ///
     /// This is the low-level method. Prefer using the `Service` trait via
     /// `tower::ServiceExt::oneshot` or `Service::call`.
+    ///
+    /// # Large values
+    ///
+    /// For values approaching 10MB or larger, the sequential send-then-read
+    /// pattern can cause TCP backpressure issues on some managed Redis
+    /// services (e.g., ElastiCache) if the write buffer fills before the
+    /// response starts being read. Consider using `AutoPipelineService`
+    /// for large-value workloads, or splitting large values across
+    /// multiple keys.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         self.ensure_framed().await?;
         let frame = cmd.to_frame();
