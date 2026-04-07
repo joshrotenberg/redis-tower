@@ -38,6 +38,14 @@ pub struct CommandAdapter<S> {
     inner: S,
 }
 
+impl<S: Clone> Clone for CommandAdapter<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 impl<S> CommandAdapter<S> {
     /// Create a new `CommandAdapter` wrapping the given Frame-level service.
     pub fn new(inner: S) -> Self {
