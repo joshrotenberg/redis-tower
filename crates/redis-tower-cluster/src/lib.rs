@@ -29,6 +29,14 @@
 //!
 //! [`ReadPreference`] controls whether read-only commands are routed to
 //! masters, replicas, or replicas with a master fallback.
+//!
+//! # Read Routing Strategy
+//!
+//! When reads are directed to replicas, the [`ReadRoutingStrategy`] trait
+//! determines which replica is selected. Built-in strategies include
+//! [`RoundRobinRouting`] (default), [`RandomRouting`], and
+//! [`FirstReplicaRouting`]. Custom strategies can be provided via the
+//! builder's [`ClusterConnectionBuilder::read_routing`] method.
 
 mod client;
 mod connection;
@@ -37,6 +45,9 @@ pub mod slot;
 pub mod topology;
 
 pub use client::ClusterClient;
-pub use connection::{ClusterConnection, ClusterConnectionBuilder, ReadPreference};
+pub use connection::{
+    ClusterConnection, ClusterConnectionBuilder, FirstReplicaRouting, RandomRouting,
+    ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
+};
 pub use slot::{SLOT_COUNT, extract_hash_tag, slot_for_key};
 pub use topology::{ClusterTopology, NodeAddr, SlotRange};

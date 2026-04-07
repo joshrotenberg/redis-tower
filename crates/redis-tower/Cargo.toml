@@ -37,7 +37,7 @@ redis-tower-commands = { workspace = true }
 async-stream = { workspace = true }
 
 tower-service = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }

@@ -1861,6 +1861,90 @@ impl Command for ConfigRewrite {
     }
 }
 
+/// CLIENT SETINFO LIB-NAME name
+///
+/// Set the client library name. Sent automatically on connection to
+/// identify the client library to the Redis server.
+pub struct ClientSetInfoLibName {
+    name: String,
+}
+
+impl ClientSetInfoLibName {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into() }
+    }
+}
+
+impl Command for ClientSetInfoLibName {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("SETINFO"),
+            bulk("LIB-NAME"),
+            bulk(self.name.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT SETINFO"
+    }
+}
+
+/// CLIENT SETINFO LIB-VER version
+///
+/// Set the client library version. Sent automatically on connection to
+/// identify the client library version to the Redis server.
+pub struct ClientSetInfoLibVer {
+    version: String,
+}
+
+impl ClientSetInfoLibVer {
+    pub fn new(version: impl Into<String>) -> Self {
+        Self {
+            version: version.into(),
+        }
+    }
+}
+
+impl Command for ClientSetInfoLibVer {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("SETINFO"),
+            bulk("LIB-VER"),
+            bulk(self.version.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT SETINFO"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2131,6 +2215,78 @@ mod tests {
     fn command_count_to_frame() {
         let cmd = CommandCount::new();
         assert_eq!(cmd.to_frame(), array(vec![bulk("COMMAND"), bulk("COUNT")]));
+    }
+
+    // -- ClientTracking --
+
+    // -- ClientSetInfoLibName --
+
+    #[test]
+    fn client_setinfo_lib_name_to_frame() {
+        let cmd = ClientSetInfoLibName::new("redis-tower");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("SETINFO"),
+                bulk("LIB-NAME"),
+                bulk("redis-tower"),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_setinfo_lib_name_parse_ok() {
+        let cmd = ClientSetInfoLibName::new("redis-tower");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    #[test]
+    fn client_setinfo_lib_name_parse_error_on_integer() {
+        let cmd = ClientSetInfoLibName::new("redis-tower");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn client_setinfo_lib_name_name() {
+        let cmd = ClientSetInfoLibName::new("redis-tower");
+        assert_eq!(cmd.name(), "CLIENT SETINFO");
+    }
+
+    // -- ClientSetInfoLibVer --
+
+    #[test]
+    fn client_setinfo_lib_ver_to_frame() {
+        let cmd = ClientSetInfoLibVer::new("0.1.0");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("SETINFO"),
+                bulk("LIB-VER"),
+                bulk("0.1.0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_setinfo_lib_ver_parse_ok() {
+        let cmd = ClientSetInfoLibVer::new("0.1.0");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    #[test]
+    fn client_setinfo_lib_ver_parse_error_on_integer() {
+        let cmd = ClientSetInfoLibVer::new("0.1.0");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn client_setinfo_lib_ver_name() {
+        let cmd = ClientSetInfoLibVer::new("0.1.0");
+        assert_eq!(cmd.name(), "CLIENT SETINFO");
     }
 
     // -- ClientTracking --

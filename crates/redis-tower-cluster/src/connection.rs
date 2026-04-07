@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
@@ -12,6 +13,104 @@ use redis_tower_protocol::helpers::{array, bulk};
 use crate::key_extractor;
 use crate::slot::slot_for_key;
 use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+
+/// Strategy for selecting which replica to read from.
+///
+/// Implement this trait to provide custom replica selection logic.
+/// Built-in implementations include [`RoundRobinRouting`], [`RandomRouting`],
+/// and [`FirstReplicaRouting`].
+pub trait ReadRoutingStrategy: Send + Sync + 'static {
+    /// Select a replica address for the given slot.
+    ///
+    /// `replicas` is the list of available replica addresses for the slot.
+    /// Return the selected address, or `None` to fall back to the master.
+    fn select_replica<'a>(&self, slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr>;
+}
+
+/// Round-robin across replicas (default).
+///
+/// Distributes reads evenly across all available replicas for a slot
+/// by cycling through them in order.
+pub struct RoundRobinRouting {
+    counter: AtomicUsize,
+}
+
+impl RoundRobinRouting {
+    /// Create a new round-robin routing strategy.
+    pub fn new() -> Self {
+        Self {
+            counter: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl Default for RoundRobinRouting {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReadRoutingStrategy for RoundRobinRouting {
+    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+        if replicas.is_empty() {
+            return None;
+        }
+        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % replicas.len();
+        Some(&replicas[idx])
+    }
+}
+
+/// Pseudo-random replica selection.
+///
+/// Uses an atomic counter with a time-based seed to approximate random
+/// distribution without requiring an external RNG dependency.
+pub struct RandomRouting {
+    counter: AtomicUsize,
+}
+
+impl RandomRouting {
+    /// Create a new random routing strategy.
+    pub fn new() -> Self {
+        // Seed from the current time for a pseudo-random starting point.
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as usize)
+            .unwrap_or(0);
+        Self {
+            counter: AtomicUsize::new(seed),
+        }
+    }
+}
+
+impl Default for RandomRouting {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReadRoutingStrategy for RandomRouting {
+    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+        if replicas.is_empty() {
+            return None;
+        }
+        // Mix the counter value to spread selections across replicas.
+        let val = self.counter.fetch_add(7919, Ordering::Relaxed);
+        let idx = val % replicas.len();
+        Some(&replicas[idx])
+    }
+}
+
+/// Always pick the first replica.
+///
+/// Useful for testing or when replicas are ordered by preference
+/// (e.g., closest datacenter first).
+pub struct FirstReplicaRouting;
+
+impl ReadRoutingStrategy for FirstReplicaRouting {
+    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+        replicas.first()
+    }
+}
 
 /// Maximum number of redirects before giving up.
 const MAX_REDIRECTS: usize = 5;
@@ -64,8 +163,8 @@ pub struct ClusterConnection {
     address_map: Option<HashMap<String, String>>,
     /// Read routing preference.
     read_preference: ReadPreference,
-    /// Round-robin counter for distributing reads across replicas.
-    replica_counter: AtomicUsize,
+    /// Strategy for selecting which replica to read from.
+    read_routing: Arc<dyn ReadRoutingStrategy>,
 }
 
 /// Builder for configuring a `ClusterConnection`.
@@ -74,6 +173,7 @@ pub struct ClusterConnectionBuilder {
     host_override: Option<String>,
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
+    read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
 }
 
 impl ClusterConnectionBuilder {
@@ -103,6 +203,16 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Set a custom read routing strategy for replica selection.
+    ///
+    /// When a read-only command is routed to a replica (based on
+    /// [`ReadPreference`]), this strategy determines which replica to use.
+    /// If not set, defaults to [`RoundRobinRouting`].
+    pub fn read_routing(mut self, strategy: impl ReadRoutingStrategy) -> Self {
+        self.read_routing = Some(Arc::new(strategy));
+        self
+    }
+
     /// Connect to the cluster.
     pub async fn connect(self) -> Result<ClusterConnection, RedisError> {
         ClusterConnection::connect_inner(
@@ -110,6 +220,7 @@ impl ClusterConnectionBuilder {
             self.host_override,
             self.address_map,
             self.read_preference,
+            self.read_routing,
         )
         .await
     }
@@ -125,7 +236,7 @@ enum Redirect {
 impl ClusterConnection {
     /// Connect to a cluster using a seed node address.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
-        Self::connect_inner(seed_addr, None, None, ReadPreference::Master).await
+        Self::connect_inner(seed_addr, None, None, ReadPreference::Master, None).await
     }
 
     /// Connect to a cluster, remapping all node hosts to `host_override`.
@@ -138,6 +249,7 @@ impl ClusterConnection {
             Some(host_override.to_string()),
             None,
             ReadPreference::Master,
+            None,
         )
         .await
     }
@@ -149,6 +261,7 @@ impl ClusterConnection {
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
+            read_routing: None,
         }
     }
 
@@ -157,6 +270,7 @@ impl ClusterConnection {
         host_override: Option<String>,
         address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
+        read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     ) -> Result<Self, RedisError> {
         let mut seed_conn = RedisConnection::connect(seed_addr).await?;
         let mut topology = discover_topology(&mut seed_conn).await?;
@@ -203,6 +317,8 @@ impl ClusterConnection {
             default_node = seed_addr.to_string();
         }
 
+        let read_routing = read_routing.unwrap_or_else(|| Arc::new(RoundRobinRouting::new()));
+
         Ok(Self {
             nodes,
             topology,
@@ -210,7 +326,7 @@ impl ClusterConnection {
             host_override,
             address_map,
             read_preference,
-            replica_counter: AtomicUsize::new(0),
+            read_routing,
         })
     }
 
@@ -309,14 +425,14 @@ impl ClusterConnection {
         &self.default_node
     }
 
-    /// Pick a replica for a given slot, round-robin across available replicas.
+    /// Pick a replica for a given slot using the configured read routing strategy.
     fn pick_replica(&self, slot: u16) -> Option<&str> {
         let replicas = self.topology.replicas_for_slot(slot)?;
         if replicas.is_empty() {
             return None;
         }
-        let idx = self.replica_counter.fetch_add(1, Ordering::Relaxed) % replicas.len();
-        let addr_str = replicas[idx].addr_string();
+        let selected = self.read_routing.select_replica(slot, replicas)?;
+        let addr_str = selected.addr_string();
         self.nodes
             .keys()
             .find(|k| **k == addr_str)
@@ -634,7 +750,7 @@ mod tests {
             host_override: Some("127.0.0.1".to_string()),
             address_map: None,
             read_preference: ReadPreference::Master,
-            replica_counter: AtomicUsize::new(0),
+            read_routing: Arc::new(RoundRobinRouting::new()),
         };
         assert_eq!(conn.remap_addr("10.0.0.1:7000"), "127.0.0.1:7000");
     }
@@ -648,7 +764,7 @@ mod tests {
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
-            replica_counter: AtomicUsize::new(0),
+            read_routing: Arc::new(RoundRobinRouting::new()),
         };
         assert_eq!(conn.remap_addr("10.0.0.1:7000"), "10.0.0.1:7000");
     }
@@ -672,7 +788,7 @@ mod tests {
             host_override: None,
             address_map: Some(map),
             read_preference: ReadPreference::Master,
-            replica_counter: AtomicUsize::new(0),
+            read_routing: Arc::new(RoundRobinRouting::new()),
         };
 
         // Mapped address returns the external address.
@@ -697,7 +813,7 @@ mod tests {
             host_override: Some("127.0.0.1".to_string()),
             address_map: Some(map),
             read_preference: ReadPreference::Master,
-            replica_counter: AtomicUsize::new(0),
+            read_routing: Arc::new(RoundRobinRouting::new()),
         };
 
         // Address in the map uses the map (takes priority).
@@ -784,7 +900,7 @@ mod tests {
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
-            replica_counter: AtomicUsize::new(0),
+            read_routing: Arc::new(RoundRobinRouting::new()),
         };
 
         // Slot 100 is in range 0-5460, owned by 10.0.0.1:7000.
@@ -828,5 +944,123 @@ mod tests {
         assert_ne!(ReadPreference::Master, ReadPreference::Replica);
         assert_ne!(ReadPreference::Replica, ReadPreference::PreferReplica);
         assert_ne!(ReadPreference::Master, ReadPreference::PreferReplica);
+    }
+
+    // -- ReadRoutingStrategy tests --
+
+    fn make_replicas() -> Vec<NodeAddr> {
+        vec![
+            NodeAddr {
+                host: "10.0.0.1".to_string(),
+                port: 7001,
+            },
+            NodeAddr {
+                host: "10.0.0.2".to_string(),
+                port: 7002,
+            },
+            NodeAddr {
+                host: "10.0.0.3".to_string(),
+                port: 7003,
+            },
+        ]
+    }
+
+    #[test]
+    fn round_robin_distributes_across_replicas() {
+        let strategy = RoundRobinRouting::new();
+        let replicas = make_replicas();
+
+        let first = strategy.select_replica(0, &replicas).unwrap();
+        let second = strategy.select_replica(0, &replicas).unwrap();
+        let third = strategy.select_replica(0, &replicas).unwrap();
+        let fourth = strategy.select_replica(0, &replicas).unwrap();
+
+        assert_eq!(first.port, 7001);
+        assert_eq!(second.port, 7002);
+        assert_eq!(third.port, 7003);
+        // Wraps around.
+        assert_eq!(fourth.port, 7001);
+    }
+
+    #[test]
+    fn round_robin_returns_none_for_empty_replicas() {
+        let strategy = RoundRobinRouting::new();
+        assert!(strategy.select_replica(0, &[]).is_none());
+    }
+
+    #[test]
+    fn random_routing_returns_valid_replica() {
+        let strategy = RandomRouting::new();
+        let replicas = make_replicas();
+
+        // Call many times and verify all results are valid replicas.
+        for _ in 0..100 {
+            let selected = strategy.select_replica(0, &replicas).unwrap();
+            assert!(
+                replicas.contains(selected),
+                "selected replica not in list: {selected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn random_routing_returns_none_for_empty_replicas() {
+        let strategy = RandomRouting::new();
+        assert!(strategy.select_replica(0, &[]).is_none());
+    }
+
+    #[test]
+    fn first_replica_always_returns_first() {
+        let strategy = FirstReplicaRouting;
+        let replicas = make_replicas();
+
+        for _ in 0..10 {
+            let selected = strategy.select_replica(0, &replicas).unwrap();
+            assert_eq!(selected.port, 7001);
+            assert_eq!(selected.host, "10.0.0.1");
+        }
+    }
+
+    #[test]
+    fn first_replica_returns_none_for_empty_replicas() {
+        let strategy = FirstReplicaRouting;
+        assert!(strategy.select_replica(0, &[]).is_none());
+    }
+
+    #[test]
+    fn builder_accepts_custom_strategy() {
+        // Verify the builder compiles and stores a custom strategy.
+        let builder = ClusterConnection::builder("127.0.0.1:7000")
+            .read_preference(ReadPreference::PreferReplica)
+            .read_routing(FirstReplicaRouting);
+
+        assert!(builder.read_routing.is_some());
+        assert_eq!(builder.read_preference, ReadPreference::PreferReplica);
+    }
+
+    #[test]
+    fn builder_defaults_to_no_custom_strategy() {
+        let builder = ClusterConnection::builder("127.0.0.1:7000");
+
+        assert!(builder.read_routing.is_none());
+        assert_eq!(builder.read_preference, ReadPreference::Master);
+    }
+
+    /// A custom strategy for testing that always returns the last replica.
+    struct LastReplicaRouting;
+
+    impl ReadRoutingStrategy for LastReplicaRouting {
+        fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+            replicas.last()
+        }
+    }
+
+    #[test]
+    fn custom_strategy_is_usable() {
+        let strategy = LastReplicaRouting;
+        let replicas = make_replicas();
+
+        let selected = strategy.select_replica(0, &replicas).unwrap();
+        assert_eq!(selected.port, 7003);
     }
 }
