@@ -27,6 +27,7 @@ redis-tower = { path = "crates/redis-tower" }
 redis-tower-protocol = { path = "crates/redis-tower-protocol" }
 redis-tower-core = { path = "crates/redis-tower-core" }
 redis-tower-commands = { path = "crates/redis-tower-commands" }
+redis-tower-cluster = { path = "crates/redis-tower-cluster" }
 
 # Async runtime
 async-stream = "0.3"

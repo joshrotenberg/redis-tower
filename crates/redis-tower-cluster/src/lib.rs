@@ -41,6 +41,7 @@
 mod client;
 mod connection;
 pub mod key_extractor;
+mod multiplexed;
 pub mod slot;
 pub mod topology;
 
@@ -49,5 +50,6 @@ pub use connection::{
     ClusterConnection, ClusterConnectionBuilder, FirstReplicaRouting, RandomRouting,
     ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
 };
+pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
 pub use slot::{SLOT_COUNT, extract_hash_tag, slot_for_key};
 pub use topology::{ClusterTopology, NodeAddr, SlotRange};

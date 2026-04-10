@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 
 use bytes::Bytes;
 use redis_test_harness::cluster::{ClusterConfig, RedisCluster};
-use redis_tower_cluster::ClusterConnection;
+use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient};
 use redis_tower_commands::*;
 
 static CLUSTER: OnceLock<RedisCluster> = OnceLock::new();
@@ -37,8 +37,22 @@ async fn cluster_conn() -> ClusterConnection {
         .expect("failed to connect to cluster")
 }
 
+async fn mux_cluster_conn() -> MultiplexedClusterClient {
+    let cluster = ensure_cluster();
+    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
+    MultiplexedClusterClient::connect(&addr)
+        .await
+        .expect("failed to connect to multiplexed cluster")
+}
+
 // Generate the shared command tests for cluster.
 redis_test_harness::command_tests!(cluster_conn, "cluster_cmd", ignored);
+
+// Replay the shared command tests against the multiplexed cluster client.
+mod multiplexed {
+    use super::*;
+    redis_test_harness::command_tests!(mux_cluster_conn, "mux_cluster_cmd", ignored);
+}
 
 // -- Cluster-specific tests --
 
@@ -89,4 +103,49 @@ async fn cluster_hash_tag_same_slot() {
 
     cluster.execute(Del::new(k1)).await.unwrap();
     cluster.execute(Del::new(k2)).await.unwrap();
+}
+
+// -- MultiplexedClusterClient-specific tests --
+
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_topology_has_three_masters() {
+    let cluster = mux_cluster_conn().await;
+    let topo = cluster.topology().await;
+    assert_eq!(topo.master_addrs().len(), 3);
+}
+
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_concurrent_writes_from_many_tasks() {
+    // With the multiplexed client, dozens of tasks should share the per-node
+    // workers and all make progress. This exercises the "clone the client,
+    // spawn many tasks" usage that justified the whole design.
+    let cluster = mux_cluster_conn().await;
+    let mut handles = Vec::new();
+    for i in 0..64 {
+        let c = cluster.clone();
+        handles.push(tokio::spawn(async move {
+            let k = format!("mux_cluster_concurrent:{i}");
+            c.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v = c.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+            c.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_refresh_topology() {
+    let cluster = mux_cluster_conn().await;
+    cluster
+        .refresh_topology()
+        .await
+        .expect("refresh should succeed on a healthy cluster");
+    let topo = cluster.topology().await;
+    assert_eq!(topo.master_addrs().len(), 3);
 }
