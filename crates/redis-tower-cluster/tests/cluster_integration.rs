@@ -13,9 +13,16 @@ static CLUSTER: OnceLock<RedisCluster> = OnceLock::new();
 
 fn ensure_cluster() -> &'static RedisCluster {
     CLUSTER.get_or_init(|| {
+        // Use 17200..17202 instead of the harness default 7000..7002 to
+        // avoid conflicts with macOS Control Center, which opportunistically
+        // binds port 7000 as "afs3-fileserver" and makes local cluster
+        // tests flaky. Kept distinct from cluster-bench (17000..) and the
+        // credentials test (7100..) to allow parallel runs.
         let mut cluster = RedisCluster::new(ClusterConfig {
             masters: 3,
             replicas_per_master: 0,
+            base_port: 17200,
+            work_dir: std::path::PathBuf::from("/tmp/redis-cluster-integration"),
             ..Default::default()
         });
         // Stop any leftover nodes from a previous run.
@@ -165,7 +172,7 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
     let mut cluster = RedisCluster::new(ClusterConfig {
         masters: 3,
         replicas_per_master: 0,
-        base_port: 7100,
+        base_port: 17300,
         work_dir: std::path::PathBuf::from("/tmp/redis-cluster-auth"),
         extra_config: extra,
         ..Default::default()
