@@ -9,6 +9,7 @@ members = [
     "crates/redis-tower-sentinel",
     "crates/redis-tower-sync",
     "crates/redis-test-harness",
+    "crates/cluster-bench",
     "examples",
 ]
 
