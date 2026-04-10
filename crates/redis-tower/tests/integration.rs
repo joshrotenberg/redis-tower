@@ -2640,6 +2640,50 @@ async fn auto_pipeline_sequential_commands() {
     }
 }
 
+#[tokio::test]
+async fn auto_pipeline_call_pipeline_atomic() {
+    // Verify that call_pipeline emits frames contiguously on the wire: the
+    // three commands in one call return matching responses in order.
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService};
+    use redis_tower_core::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    let c = conn().await;
+    let mut svc = AutoPipelineService::new(c, AutoPipelineConfig::default());
+
+    let k = key("auto_pipe_atomic", "k");
+
+    let frames = vec![
+        array(vec![bulk("SET"), bulk(k.as_bytes()), bulk("one")]),
+        array(vec![bulk("APPEND"), bulk(k.as_bytes()), bulk("-two")]),
+        array(vec![bulk("GET"), bulk(k.as_bytes())]),
+    ];
+    let responses = svc.call_pipeline(frames).await.unwrap();
+    assert_eq!(responses.len(), 3);
+
+    // Third response should be the concatenated value.
+    match &responses[2] {
+        Frame::BulkString(Some(b)) => assert_eq!(b.as_ref(), b"one-two".as_slice()),
+        other => panic!("expected bulk string, got {other:?}"),
+    }
+
+    // Cleanup.
+    let mut cleanup = conn().await;
+    cleanup.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_pipeline_call_pipeline_empty() {
+    // Empty call_pipeline is a no-op and returns an empty response vec.
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService};
+
+    let c = conn().await;
+    let mut svc = AutoPipelineService::new(c, AutoPipelineConfig::default());
+
+    let responses = svc.call_pipeline(Vec::new()).await.unwrap();
+    assert!(responses.is_empty());
+}
+
 // -- Connection pool integration tests (#222) --
 
 #[tokio::test]

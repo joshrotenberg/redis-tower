@@ -82,9 +82,42 @@ enum ConnSource {
 }
 
 /// A request sent through the channel to the background worker.
-struct PipelineRequest {
-    frame: Frame,
-    response_tx: oneshot::Sender<Result<Frame, RedisError>>,
+///
+/// Most callers send a `Single` frame. Callers that need multiple frames to
+/// land on the wire contiguously (without other tasks' commands interleaving)
+/// -- for example ASKING followed by a migrated command during a cluster
+/// resharding -- send a `Multi` request instead. The worker guarantees that
+/// all frames inside one `Multi` are flushed back-to-back in the same
+/// `execute_pipeline` call.
+enum WorkerRequest {
+    Single {
+        frame: Frame,
+        response_tx: oneshot::Sender<Result<Frame, RedisError>>,
+    },
+    Multi {
+        frames: Vec<Frame>,
+        response_tx: oneshot::Sender<Result<Vec<Frame>, RedisError>>,
+    },
+}
+
+impl WorkerRequest {
+    fn frame_count(&self) -> usize {
+        match self {
+            WorkerRequest::Single { .. } => 1,
+            WorkerRequest::Multi { frames, .. } => frames.len(),
+        }
+    }
+
+    fn fail(self, err: RedisError) {
+        match self {
+            WorkerRequest::Single { response_tx, .. } => {
+                let _ = response_tx.send(Err(err));
+            }
+            WorkerRequest::Multi { response_tx, .. } => {
+                let _ = response_tx.send(Err(err));
+            }
+        }
+    }
 }
 
 /// A `Service<Frame>` that transparently batches concurrent requests into
@@ -104,7 +137,7 @@ struct PipelineRequest {
 /// let svc = CommandAdapter::new(AutoPipelineService::new(conn, config));
 /// ```
 pub struct AutoPipelineService {
-    tx: mpsc::Sender<PipelineRequest>,
+    tx: mpsc::Sender<WorkerRequest>,
     _worker: Arc<tokio::task::JoinHandle<()>>,
 }
 
@@ -156,11 +189,43 @@ impl AutoPipelineService {
             _worker: Arc::new(worker),
         }
     }
+
+    /// Send multiple frames through the service as a single atomic batch.
+    ///
+    /// The worker guarantees that all frames in the supplied slice are
+    /// flushed back-to-back in one [`RedisConnection::execute_pipeline`]
+    /// call, with no interleaving from other concurrent callers. This is
+    /// what you want for sequences like `ASKING` + the migrated command
+    /// during cluster resharding, where ordering on a single connection
+    /// matters.
+    ///
+    /// Returns one response frame per input frame, in order. If any frame's
+    /// response is an error, the overall call still returns the full
+    /// response vector -- error inspection is left to the caller.
+    pub async fn call_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
+        if frames.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.tx
+            .send(WorkerRequest::Multi {
+                frames,
+                response_tx: resp_tx,
+            })
+            .await
+            .map_err(|_| RedisError::ConnectionClosed)?;
+        resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
+    }
 }
 
 /// Background task that collects requests and executes them as pipelines.
+///
+/// Batch size is measured in *frames*, not requests, so a single `Multi`
+/// request carrying N frames counts as N toward `max_batch_size`. This keeps
+/// the effective flush size stable regardless of how many frames individual
+/// callers send.
 async fn pipeline_worker(
-    mut rx: mpsc::Receiver<PipelineRequest>,
+    mut rx: mpsc::Receiver<WorkerRequest>,
     mut conn: RedisConnection,
     config: AutoPipelineConfig,
     source: ConnSource,
@@ -172,28 +237,35 @@ async fn pipeline_worker(
             None => break, // channel closed, all senders dropped
         };
 
-        let mut batch = vec![first];
+        let mut frame_count = first.frame_count();
+        let mut batch: Vec<WorkerRequest> = vec![first];
 
         // Drain any immediately-available requests without waiting.
         // This handles the high-concurrency case where multiple requests
         // arrive between flushes.
-        while batch.len() < config.max_batch_size {
+        while frame_count < config.max_batch_size {
             match rx.try_recv() {
-                Ok(req) => batch.push(req),
+                Ok(req) => {
+                    frame_count += req.frame_count();
+                    batch.push(req);
+                }
                 Err(_) => break,
             }
         }
 
         // If we haven't filled the batch and the window is non-zero,
         // wait briefly for more requests to arrive.
-        if batch.len() < config.max_batch_size && !config.batch_window.is_zero() {
+        if frame_count < config.max_batch_size && !config.batch_window.is_zero() {
             let deadline = tokio::time::Instant::now() + config.batch_window;
             loop {
-                if batch.len() >= config.max_batch_size {
+                if frame_count >= config.max_batch_size {
                     break;
                 }
                 match tokio::time::timeout_at(deadline, rx.recv()).await {
-                    Ok(Some(req)) => batch.push(req),
+                    Ok(Some(req)) => {
+                        frame_count += req.frame_count();
+                        batch.push(req);
+                    }
                     Ok(None) => {
                         // Channel closed -- flush remaining and exit.
                         let _ = flush_batch(&mut conn, batch).await;
@@ -224,7 +296,7 @@ async fn pipeline_worker(
                             // subsequent callers will see ConnectionClosed
                             // from poll_ready because the channel closes.
                             while let Ok(req) = rx.try_recv() {
-                                let _ = req.response_tx.send(Err(RedisError::ConnectionClosed));
+                                req.fail(RedisError::ConnectionClosed);
                             }
                             return;
                         }
@@ -237,21 +309,57 @@ async fn pipeline_worker(
 
 /// Send a batch of requests as a pipeline and route responses back.
 ///
+/// Frames from all requests are flattened into a single `execute_pipeline`
+/// call in request order, preserving within-request contiguity: every frame
+/// from a given `Multi` request appears consecutively on the wire, with no
+/// other caller's frames in between. Responses are partitioned back to the
+/// originating request.
+///
 /// Returns `Ok(())` on success and `Err(())` on pipeline failure so the
 /// worker can decide whether to reconnect. All individual response channels
 /// are always notified before this returns.
-async fn flush_batch(conn: &mut RedisConnection, batch: Vec<PipelineRequest>) -> Result<(), ()> {
-    let frames: Vec<Frame> = batch.iter().map(|r| r.frame.clone()).collect();
+async fn flush_batch(conn: &mut RedisConnection, batch: Vec<WorkerRequest>) -> Result<(), ()> {
+    // Flatten all frames in order.
+    let total_frames: usize = batch.iter().map(|r| r.frame_count()).sum();
+    let mut frames: Vec<Frame> = Vec::with_capacity(total_frames);
+    for req in &batch {
+        match req {
+            WorkerRequest::Single { frame, .. } => frames.push(frame.clone()),
+            WorkerRequest::Multi { frames: fs, .. } => frames.extend(fs.iter().cloned()),
+        }
+    }
+
     match conn.execute_pipeline(frames).await {
         Ok(responses) => {
-            for (req, resp) in batch.into_iter().zip(responses) {
-                let _ = req.response_tx.send(Ok(resp));
+            let mut iter = responses.into_iter();
+            for req in batch {
+                match req {
+                    WorkerRequest::Single { response_tx, .. } => {
+                        if let Some(resp) = iter.next() {
+                            let _ = response_tx.send(Ok(resp));
+                        } else {
+                            let _ = response_tx.send(Err(RedisError::ConnectionClosed));
+                        }
+                    }
+                    WorkerRequest::Multi {
+                        frames: fs,
+                        response_tx,
+                    } => {
+                        let count = fs.len();
+                        let collected: Vec<Frame> = iter.by_ref().take(count).collect();
+                        if collected.len() == count {
+                            let _ = response_tx.send(Ok(collected));
+                        } else {
+                            let _ = response_tx.send(Err(RedisError::ConnectionClosed));
+                        }
+                    }
+                }
             }
             Ok(())
         }
         Err(_) => {
             for req in batch {
-                let _ = req.response_tx.send(Err(RedisError::ConnectionClosed));
+                req.fail(RedisError::ConnectionClosed);
             }
             Err(())
         }
@@ -307,7 +415,7 @@ impl Service<Frame> for AutoPipelineService {
         let (resp_tx, resp_rx) = oneshot::channel();
         let tx = self.tx.clone();
         Box::pin(async move {
-            tx.send(PipelineRequest {
+            tx.send(WorkerRequest::Single {
                 frame,
                 response_tx: resp_tx,
             })
@@ -352,7 +460,7 @@ mod tests {
     async fn closed_channel_error_is_retryable() {
         // When the background worker is gone (connection death), the error
         // must be retryable so upstream retry layers can reconnect.
-        let (tx, rx) = mpsc::channel::<PipelineRequest>(1);
+        let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx);
         let mut svc = AutoPipelineService {
             tx,
@@ -367,7 +475,7 @@ mod tests {
     #[tokio::test]
     async fn closed_channel_returns_error() {
         // Create a service with a channel that we immediately close.
-        let (tx, rx) = mpsc::channel::<PipelineRequest>(1);
+        let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx); // close the receiver
         let mut svc = AutoPipelineService {
             tx,
