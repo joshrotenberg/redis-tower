@@ -84,6 +84,17 @@
 //! `.credentials(provider)` on its builder. The provider is consulted on
 //! initial connect and on every reconnect, so credential rotation flows
 //! through automatically.
+//!
+//! # TLS
+//!
+//! [`MultiplexedClusterClient`] supports TLS behind the `tls-rustls` or
+//! `tls-native-tls` feature. Pass a `TlsConfig` (from
+//! `redis_tower_core::tls`) via `.tls(config)` on the builder -- the
+//! seed connection used for topology discovery as well as every per-node
+//! factory will speak TLS on each (re)connect. The SNI hostname is taken
+//! from the host portion of each node's address; combine with
+//! `.host_override(host)` if your nodes report IPs that don't match your
+//! certificate.
 
 mod client;
 mod connection;
