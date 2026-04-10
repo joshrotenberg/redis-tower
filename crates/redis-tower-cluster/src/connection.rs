@@ -113,7 +113,7 @@ impl ReadRoutingStrategy for FirstReplicaRouting {
 }
 
 /// Maximum number of redirects before giving up.
-const MAX_REDIRECTS: usize = 5;
+pub(crate) const MAX_REDIRECTS: usize = 5;
 
 /// Read routing preference for cluster commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -228,7 +228,7 @@ impl ClusterConnectionBuilder {
 
 /// Parsed redirect from a MOVED or ASK error.
 #[derive(Debug)]
-enum Redirect {
+pub(crate) enum Redirect {
     Moved { slot: u16, addr: String },
     Ask { addr: String },
 }
@@ -566,7 +566,7 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
 }
 
 /// Parse a MOVED or ASK redirect from an error frame.
-fn parse_redirect(frame: &Frame) -> Option<Redirect> {
+pub(crate) fn parse_redirect(frame: &Frame) -> Option<Redirect> {
     let error_msg = match frame {
         Frame::Error(e) => String::from_utf8_lossy(e),
         _ => return None,
@@ -593,7 +593,7 @@ fn parse_redirect(frame: &Frame) -> Option<Redirect> {
 }
 
 /// Remap all node addresses in a topology to use a specific host.
-fn remap_topology(topology: &mut ClusterTopology, host: &str) {
+pub(crate) fn remap_topology(topology: &mut ClusterTopology, host: &str) {
     for range in &mut topology.slot_ranges {
         range.master.host = host.to_string();
         for replica in &mut range.replicas {
@@ -606,7 +606,10 @@ fn remap_topology(topology: &mut ClusterTopology, host: &str) {
 ///
 /// Each key in `map` is `"internal_host:port"` and the value is
 /// `"external_host:port"`. Only matching addresses are remapped.
-fn remap_topology_with_map(topology: &mut ClusterTopology, map: &HashMap<String, String>) {
+pub(crate) fn remap_topology_with_map(
+    topology: &mut ClusterTopology,
+    map: &HashMap<String, String>,
+) {
     for range in &mut topology.slot_ranges {
         remap_node_addr(&mut range.master, map);
         for replica in &mut range.replicas {

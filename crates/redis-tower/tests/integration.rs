@@ -2,11 +2,12 @@ use std::sync::OnceLock;
 
 use bytes::Bytes;
 use redis_test_harness::standalone::{RedisStandalone, StandaloneConfig};
+use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::commands::*;
 use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
-    Pipeline, PubSubConnection, RedisClient, RedisConnection, ResilientConnection,
-    ResilientRedisClient, Transaction, TransactionResult,
+    MultiplexedClient, Pipeline, PubSubConnection, RedisClient, RedisConnection,
+    ResilientConnection, ResilientRedisClient, Transaction, TransactionResult,
 };
 use tokio_stream::StreamExt;
 use tower::Service;
@@ -2639,6 +2640,50 @@ async fn auto_pipeline_sequential_commands() {
     }
 }
 
+#[tokio::test]
+async fn auto_pipeline_call_pipeline_atomic() {
+    // Verify that call_pipeline emits frames contiguously on the wire: the
+    // three commands in one call return matching responses in order.
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService};
+    use redis_tower_core::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    let c = conn().await;
+    let mut svc = AutoPipelineService::new(c, AutoPipelineConfig::default());
+
+    let k = key("auto_pipe_atomic", "k");
+
+    let frames = vec![
+        array(vec![bulk("SET"), bulk(k.as_bytes()), bulk("one")]),
+        array(vec![bulk("APPEND"), bulk(k.as_bytes()), bulk("-two")]),
+        array(vec![bulk("GET"), bulk(k.as_bytes())]),
+    ];
+    let responses = svc.call_pipeline(frames).await.unwrap();
+    assert_eq!(responses.len(), 3);
+
+    // Third response should be the concatenated value.
+    match &responses[2] {
+        Frame::BulkString(Some(b)) => assert_eq!(b.as_ref(), b"one-two".as_slice()),
+        other => panic!("expected bulk string, got {other:?}"),
+    }
+
+    // Cleanup.
+    let mut cleanup = conn().await;
+    cleanup.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn auto_pipeline_call_pipeline_empty() {
+    // Empty call_pipeline is a no-op and returns an empty response vec.
+    use redis_tower::{AutoPipelineConfig, AutoPipelineService};
+
+    let c = conn().await;
+    let mut svc = AutoPipelineService::new(c, AutoPipelineConfig::default());
+
+    let responses = svc.call_pipeline(Vec::new()).await.unwrap();
+    assert!(responses.is_empty());
+}
+
 // -- Connection pool integration tests (#222) --
 
 #[tokio::test]
@@ -2686,4 +2731,92 @@ async fn pool_concurrent_tasks() {
     for h in handles {
         h.await.unwrap();
     }
+}
+
+// -- MultiplexedClient factory-backed reconnect --
+
+#[tokio::test]
+async fn multiplexed_client_reconnects_after_server_restart() {
+    // Dedicated standalone on a non-default port so we don't interfere
+    // with the shared REDIS instance used by the rest of the suite.
+    let mut standalone = RedisStandalone::new(StandaloneConfig {
+        port: 6401,
+        work_dir: std::path::PathBuf::from("/tmp/redis-mux-reconnect"),
+        ..Default::default()
+    });
+    standalone.start().expect("start standalone");
+    let addr = standalone.addr();
+
+    let client = MultiplexedClient::from_factory(
+        AddrConnectionFactory::new(&addr),
+        AutoPipelineConfig::default(),
+        AutoPipelineReconnectConfig::new(
+            ReconnectConfig::default()
+                .base_delay(std::time::Duration::from_millis(20))
+                .max_delay(std::time::Duration::from_millis(200)),
+        ),
+    )
+    .await
+    .expect("connect");
+
+    // Baseline op before the outage.
+    client
+        .execute(Set::new("mux:reconnect:k", "before"))
+        .await
+        .unwrap();
+    let before: Option<Bytes> = client.execute(Get::new("mux:reconnect:k")).await.unwrap();
+    assert_eq!(before, Some(Bytes::from("before")));
+
+    // Kill the server. The next request will fail, then the worker will
+    // reconnect via the factory.
+    standalone.stop().expect("stop standalone");
+
+    // One or more requests may error while the server is down / before
+    // the worker has reconnected. That's expected -- we just want eventual
+    // recovery after the server comes back.
+    let _ = client
+        .execute(Set::new("mux:reconnect:k", "during-outage"))
+        .await;
+
+    // Bring the server back up on the same port.
+    standalone.start().expect("restart standalone");
+
+    // Poll for recovery: give the worker up to ~3s to reconnect and
+    // start serving requests again.
+    let mut recovered = false;
+    for _ in 0..60 {
+        // Probe GET. The key was never written on the restarted server
+        // (save is disabled), so a None response confirms both that the
+        // client recovered AND that the server really did restart with a
+        // fresh DB -- not that the original connection somehow survived.
+        match client.execute(Get::new("mux:reconnect:k")).await {
+            Ok(None) => {
+                recovered = true;
+                break;
+            }
+            Ok(Some(_)) => {
+                panic!(
+                    "key persisted across restart -- server did not actually \
+                     restart or save was not disabled"
+                );
+            }
+            Err(_) => {}
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        recovered,
+        "client failed to recover within 3s of server restart"
+    );
+
+    // Confirm the recovered connection accepts writes too.
+    client
+        .execute(Set::new("mux:reconnect:k", "after"))
+        .await
+        .unwrap();
+    let after: Option<Bytes> = client.execute(Get::new("mux:reconnect:k")).await.unwrap();
+    assert_eq!(after, Some(Bytes::from("after")));
+
+    client.execute(Del::new("mux:reconnect:k")).await.unwrap();
+    let _ = standalone.stop();
 }
