@@ -213,3 +213,61 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
 
     let _ = cluster.stop();
 }
+
+// -- TLS cluster tests (infrastructure-dependent) --
+//
+// These are `#[ignore]`d by default because an automatic TLS-enabled test
+// cluster would need self-signed cert generation and redis-server TLS
+// config in the harness. Point REDIS_TLS_CLUSTER_ADDR at a running
+// TLS-enabled cluster and run with `--ignored` to exercise the TLS path.
+// Build with a TLS feature, e.g.:
+//
+//   cargo test -p redis-tower-cluster --features tls-rustls \
+//       --test cluster_integration mux_cluster_tls -- --ignored
+//
+// If the cluster uses a self-signed cert, set REDIS_TLS_ACCEPT_INVALID=1
+// to skip certificate verification.
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+#[tokio::test]
+#[ignore = "requires a TLS-enabled Redis cluster -- set REDIS_TLS_CLUSTER_ADDR"]
+async fn mux_cluster_tls_connect_and_roundtrip() {
+    use redis_tower_core::tls::TlsConfig;
+
+    let addr =
+        std::env::var("REDIS_TLS_CLUSTER_ADDR").unwrap_or_else(|_| "127.0.0.1:7300".to_string());
+    let accept_invalid = std::env::var("REDIS_TLS_ACCEPT_INVALID")
+        .ok()
+        .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+
+    #[cfg(feature = "tls-rustls")]
+    let mut tls = TlsConfig::default_rustls();
+    #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
+    let mut tls = TlsConfig::default_native_tls();
+
+    if accept_invalid {
+        tls = tls
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true);
+    }
+
+    let client = MultiplexedClusterClient::builder(&addr)
+        .tls(tls)
+        .connect()
+        .await
+        .expect("TLS connect should succeed");
+
+    let topo = client.topology().await;
+    assert!(
+        !topo.master_addrs().is_empty(),
+        "TLS cluster reported no masters"
+    );
+
+    for i in 0..16 {
+        let k = format!("mux_cluster_tls:{i}");
+        client.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+        let v = client.execute(Get::new(&k)).await.unwrap();
+        assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+        client.execute(Del::new(&k)).await.unwrap();
+    }
+}

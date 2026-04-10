@@ -48,6 +48,8 @@ use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig
 use redis_tower::credentials::CredentialProvider;
 use redis_tower::reconnect::ConnectionFactory;
 use redis_tower_commands::Auth;
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+use redis_tower_core::tls::TlsConfig;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 use tokio::sync::RwLock;
@@ -89,6 +91,8 @@ struct Inner {
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<Arc<TlsConfig>>,
 }
 
 /// Builder for configuring a [`MultiplexedClusterClient`].
@@ -101,6 +105,8 @@ pub struct MultiplexedClusterClientBuilder {
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<Arc<TlsConfig>>,
 }
 
 impl MultiplexedClusterClientBuilder {
@@ -155,6 +161,35 @@ impl MultiplexedClusterClientBuilder {
         self
     }
 
+    /// Enable TLS for every per-node connection, including the seed
+    /// connection used for topology discovery.
+    ///
+    /// The hostname used for SNI / certificate verification is derived
+    /// from each node's address (`host` portion of `host:port`). If your
+    /// cluster reports internal IPs that don't match your certificate,
+    /// combine this with [`Self::host_override`] to remap all nodes to a
+    /// canonical hostname, or use
+    /// [`TlsConfig::danger_accept_invalid_hostnames`].
+    ///
+    /// Requires the `tls-rustls` or `tls-native-tls` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redis_tower_cluster::MultiplexedClusterClient;
+    /// use redis_tower_core::tls::TlsConfig;
+    ///
+    /// let client = MultiplexedClusterClient::builder("redis.example.com:7000")
+    ///     .tls(TlsConfig::default_rustls())
+    ///     .connect()
+    ///     .await?;
+    /// ```
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn tls(mut self, tls: TlsConfig) -> Self {
+        self.tls = Some(Arc::new(tls));
+        self
+    }
+
     /// Connect to the cluster.
     pub async fn connect(self) -> Result<MultiplexedClusterClient, RedisError> {
         MultiplexedClusterClient::connect_inner(
@@ -166,6 +201,8 @@ impl MultiplexedClusterClientBuilder {
             self.pipeline_config,
             self.reconnect_config,
             self.credentials,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            self.tls,
         )
         .await
     }
@@ -182,6 +219,8 @@ impl MultiplexedClusterClient {
             None,
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
         .await
@@ -201,6 +240,8 @@ impl MultiplexedClusterClient {
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
             None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
         )
         .await
     }
@@ -216,6 +257,8 @@ impl MultiplexedClusterClient {
             pipeline_config: AutoPipelineConfig::default(),
             reconnect_config: AutoPipelineReconnectConfig::default(),
             credentials: None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         }
     }
 
@@ -229,11 +272,17 @@ impl MultiplexedClusterClient {
         pipeline_config: AutoPipelineConfig,
         reconnect_config: AutoPipelineReconnectConfig,
         credentials: Option<Arc<dyn CredentialProvider>>,
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
     ) -> Result<Self, RedisError> {
         // Discover topology via a short-lived raw connection. Authenticate
         // before CLUSTER SLOTS so the discovery itself works against an
         // ACL-protected cluster.
-        let mut seed_conn = RedisConnection::connect(seed_addr).await?;
+        let mut seed_conn = connect_node(
+            seed_addr,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.as_deref(),
+        )
+        .await?;
         if let Some(ref provider) = credentials {
             authenticate(&mut seed_conn, provider.as_ref()).await?;
         }
@@ -262,6 +311,8 @@ impl MultiplexedClusterClient {
                 pipeline_config.clone(),
                 reconnect_config.clone(),
                 credentials.clone(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.clone(),
             )
             .await?;
             if default_node.is_empty() {
@@ -284,6 +335,8 @@ impl MultiplexedClusterClient {
                     pipeline_config.clone(),
                     reconnect_config.clone(),
                     credentials.clone(),
+                    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                    tls.clone(),
                 )
                 .await?;
                 replicas.insert(addr_str, svc);
@@ -299,6 +352,8 @@ impl MultiplexedClusterClient {
                 pipeline_config.clone(),
                 reconnect_config.clone(),
                 credentials.clone(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.clone(),
             )
             .await?;
             masters.insert(seed_addr.to_string(), svc);
@@ -320,6 +375,8 @@ impl MultiplexedClusterClient {
                 pipeline_config,
                 reconnect_config,
                 credentials,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls,
             })),
         })
     }
@@ -417,6 +474,8 @@ impl MultiplexedClusterClient {
                 inner.credentials.clone(),
             )
         };
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let tls: Option<Arc<TlsConfig>> = self.inner.read().await.tls.clone();
 
         // Use a short-lived raw connection to an existing master to run
         // CLUSTER SLOTS. We pick any master addr we know about.
@@ -429,7 +488,12 @@ impl MultiplexedClusterClient {
                 .cloned()
                 .ok_or(RedisError::ConnectionClosed)?
         };
-        let mut seed_conn = RedisConnection::connect(&seed_addr).await?;
+        let mut seed_conn = connect_node(
+            &seed_addr,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.as_deref(),
+        )
+        .await?;
         if let Some(ref provider) = credentials {
             authenticate(&mut seed_conn, provider.as_ref()).await?;
         }
@@ -457,6 +521,8 @@ impl MultiplexedClusterClient {
                         pipeline_config.clone(),
                         reconnect_config.clone(),
                         credentials.clone(),
+                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                        tls.clone(),
                     )
                     .await?;
                     new_masters.push((addr_str, svc));
@@ -476,6 +542,8 @@ impl MultiplexedClusterClient {
                         pipeline_config.clone(),
                         reconnect_config.clone(),
                         credentials.clone(),
+                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                        tls.clone(),
                     )
                     .await?;
                     new_replicas.push((addr_str, svc));
@@ -581,8 +649,18 @@ impl MultiplexedClusterClient {
                 inner.credentials.clone(),
             )
         };
-        let svc =
-            build_node_service(addr, false, pipeline_config, reconnect_config, credentials).await?;
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let tls: Option<Arc<TlsConfig>> = self.inner.read().await.tls.clone();
+        let svc = build_node_service(
+            addr,
+            false,
+            pipeline_config,
+            reconnect_config,
+            credentials,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls,
+        )
+        .await?;
         let mut inner = self.inner.write().await;
         inner.masters.entry(addr.to_string()).or_insert(svc);
         Ok(())
@@ -642,20 +720,45 @@ async fn build_node_service(
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
 ) -> Result<AutoPipelineService, RedisError> {
     let factory = NodeConnectionFactory {
         addr: addr.to_string(),
         readonly,
         credentials,
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        tls,
     };
     AutoPipelineService::with_factory(factory, pipeline_config, reconnect_config).await
+}
+
+/// Open a raw [`RedisConnection`] to `addr`, using TLS if configured.
+///
+/// The TLS hostname is taken from the host portion of `addr` (the part
+/// before the final `:`). For TLS peers that report internal IPs, combine
+/// with [`MultiplexedClusterClientBuilder::host_override`] so the SNI
+/// hostname matches the certificate.
+async fn connect_node(
+    addr: &str,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<&TlsConfig>,
+) -> Result<RedisConnection, RedisError> {
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    if let Some(tls) = tls {
+        let hostname = addr
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(addr)
+            .to_string();
+        return RedisConnection::connect_tls(addr, &hostname, tls).await;
+    }
+    RedisConnection::connect(addr).await
 }
 
 /// A [`ConnectionFactory`] that connects to a single node and optionally
 /// authenticates and/or sends READONLY before yielding the connection.
 ///
 /// Order on each (re)connect:
-/// 1. Open TCP to `addr`.
+/// 1. Open TCP (or TLS if configured) to `addr`.
 /// 2. If `credentials` is set, fetch fresh credentials from the provider
 ///    and send AUTH. Fetching on every reconnect means credential rotation
 ///    flows through automatically.
@@ -665,6 +768,8 @@ struct NodeConnectionFactory {
     addr: String,
     readonly: bool,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<Arc<TlsConfig>>,
 }
 
 impl ConnectionFactory for NodeConnectionFactory {
@@ -672,8 +777,15 @@ impl ConnectionFactory for NodeConnectionFactory {
         let addr = self.addr.clone();
         let readonly = self.readonly;
         let credentials = self.credentials.clone();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let tls = self.tls.clone();
         Box::pin(async move {
-            let mut conn = RedisConnection::connect(&addr).await?;
+            let mut conn = connect_node(
+                &addr,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.as_deref(),
+            )
+            .await?;
             if let Some(provider) = credentials {
                 authenticate(&mut conn, provider.as_ref()).await?;
             }

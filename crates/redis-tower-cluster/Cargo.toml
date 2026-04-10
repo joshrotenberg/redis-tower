@@ -12,6 +12,20 @@ readme = "../../README.md"
 keywords = ["redis", "cluster", "tower", "async"]
 categories = ["database", "asynchronous", "network-programming"]
 
+[features]
+default = []
+# Forward TLS backends to redis-tower-core / redis-tower. Enabling one of
+# these makes the `MultiplexedClusterClientBuilder::tls` method available
+# and lets every per-node factory speak TLS.
+tls-rustls = [
+    "redis-tower-core/tls-rustls",
+    "redis-tower/tls-rustls",
+]
+tls-native-tls = [
+    "redis-tower-core/tls-native-tls",
+    "redis-tower/tls-native-tls",
+]
+
 [dependencies]
 redis-tower = { workspace = true }
 redis-tower-protocol = { workspace = true }
