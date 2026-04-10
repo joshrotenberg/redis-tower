@@ -2,26 +2,33 @@
 //!
 //! Each client provides a `spawn_workers` method that creates N long-lived
 //! workers (tokio tasks for async clients, blocking threads for the sync one),
-//! each holding its own persistent connection. Workers return their latency
-//! samples when they see `stop`.
+//! each holding its own persistent connection / shared worker. Workers return
+//! their latency samples when they see `stop`.
+//!
+//! Clients under test:
+//!
+//! - `RedisTower` -- redis-tower-cluster ClusterClient (baseline: one
+//!   `Arc<Mutex<ClusterConnection>>` serializing all ops).
+//! - `RedisTowerMux` -- redis-tower-cluster MultiplexedClusterClient
+//!   (factory-backed AutoPipelineService per master).
+//! - `RedisRsSync` -- redis 1.2 cluster blocking client, one persistent
+//!   connection per worker thread.
+//! - `RedisRsAsync` -- redis 1.2 cluster_async ClusterConnection.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
-use redis_tower_cluster::ClusterClient as TowerClusterClient;
+use redis_tower_cluster::{ClusterClient as TowerClusterClient, MultiplexedClusterClient};
 use redis_tower_commands::{Get as TGet, Set as TSet};
 
-use crate::concurrent::ConcurrentClusterClient;
-use crate::multiplexed_cluster::MultiplexedClusterClient;
 use crate::runner::{WorkerHandle, Workload};
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug)]
 pub enum ClientKind {
     RedisTower,
-    RedisTowerConcurrent,
-    RedisTowerMultiplexed,
+    RedisTowerMux,
     RedisRsSync,
     RedisRsAsync,
 }
@@ -29,8 +36,7 @@ pub enum ClientKind {
 /// A client is just a factory that knows how to spin up N workers.
 pub enum Client {
     Tower(TowerClusterClient),
-    TowerConcurrent(Arc<ConcurrentClusterClient>),
-    TowerMultiplexed(Arc<MultiplexedClusterClient>),
+    TowerMux(MultiplexedClusterClient),
     RedisRsSync(Arc<redis::cluster::ClusterClient>),
     RedisRsAsync(redis::cluster_async::ClusterConnection),
 }
@@ -39,8 +45,7 @@ impl Client {
     pub fn kind(&self) -> ClientKind {
         match self {
             Client::Tower(_) => ClientKind::RedisTower,
-            Client::TowerConcurrent(_) => ClientKind::RedisTowerConcurrent,
-            Client::TowerMultiplexed(_) => ClientKind::RedisTowerMultiplexed,
+            Client::TowerMux(_) => ClientKind::RedisTowerMux,
             Client::RedisRsSync(_) => ClientKind::RedisRsSync,
             Client::RedisRsAsync(_) => ClientKind::RedisRsAsync,
         }
@@ -56,13 +61,9 @@ impl Client {
                 .await
                 .map(Client::Tower)
                 .map_err(|e| e.to_string()),
-            ClientKind::RedisTowerConcurrent => ConcurrentClusterClient::connect(seed)
+            ClientKind::RedisTowerMux => MultiplexedClusterClient::connect(seed)
                 .await
-                .map(|c| Client::TowerConcurrent(Arc::new(c)))
-                .map_err(|e| e.to_string()),
-            ClientKind::RedisTowerMultiplexed => MultiplexedClusterClient::connect(seed)
-                .await
-                .map(|c| Client::TowerMultiplexed(Arc::new(c)))
+                .map(Client::TowerMux)
                 .map_err(|e| e.to_string()),
             ClientKind::RedisRsSync => {
                 let c = redis::cluster::ClusterClient::new(seed_urls.to_vec())
@@ -97,23 +98,13 @@ impl Client {
                     })));
                 }
             }
-            Client::TowerConcurrent(c) => {
+            Client::TowerMux(c) => {
                 for worker_id in 0..concurrency {
                     let c = c.clone();
                     let stop = stop.clone();
                     let ops = ops.clone();
                     handles.push(WorkerHandle::Async(tokio::spawn(async move {
-                        tower_concurrent_loop(c, worker_id, workload, stop, ops).await
-                    })));
-                }
-            }
-            Client::TowerMultiplexed(c) => {
-                for worker_id in 0..concurrency {
-                    let c = c.clone();
-                    let stop = stop.clone();
-                    let ops = ops.clone();
-                    handles.push(WorkerHandle::Async(tokio::spawn(async move {
-                        tower_multiplexed_loop(c, worker_id, workload, stop, ops).await
+                        tower_mux_loop(c, worker_id, workload, stop, ops).await
                     })));
                 }
             }
@@ -173,8 +164,8 @@ async fn tower_loop(
     latencies
 }
 
-async fn tower_concurrent_loop(
-    c: Arc<ConcurrentClusterClient>,
+async fn tower_mux_loop(
+    c: MultiplexedClusterClient,
     worker_id: usize,
     workload: Workload,
     stop: Arc<AtomicBool>,
@@ -187,32 +178,8 @@ async fn tower_concurrent_loop(
         seq = seq.wrapping_add(1);
         let t0 = Instant::now();
         let ok = match workload {
-            Workload::Set => c.set(&key, "value").await.is_ok(),
-            Workload::Get => c.get(&key).await.is_ok(),
-        };
-        if ok {
-            record(&mut latencies, &ops, t0);
-        }
-    }
-    latencies
-}
-
-async fn tower_multiplexed_loop(
-    c: Arc<MultiplexedClusterClient>,
-    worker_id: usize,
-    workload: Workload,
-    stop: Arc<AtomicBool>,
-    ops: Arc<AtomicU64>,
-) -> Vec<u32> {
-    let mut latencies = Vec::with_capacity(1 << 16);
-    let mut seq = worker_id as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let key = next_key(seq);
-        seq = seq.wrapping_add(1);
-        let t0 = Instant::now();
-        let ok = match workload {
-            Workload::Set => c.set(&key, "value").await.is_ok(),
-            Workload::Get => c.get(&key).await.is_ok(),
+            Workload::Set => c.execute(TSet::new(&key, "value")).await.is_ok(),
+            Workload::Get => c.execute(TGet::new(&key)).await.is_ok(),
         };
         if ok {
             record(&mut latencies, &ops, t0);

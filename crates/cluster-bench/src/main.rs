@@ -2,10 +2,25 @@
 //!
 //! Spins up a 3-master Redis cluster via redis-test-harness, runs a fixed-duration
 //! workload across several concurrency levels, and prints a comparison table.
+//!
+//! Clients under test (all four always run):
+//!
+//! - `RedisTower` -- redis-tower-cluster `ClusterClient` baseline (one
+//!   cluster-wide `Arc<Mutex<ClusterConnection>>`).
+//! - `RedisTowerMux` -- redis-tower-cluster `MultiplexedClusterClient`
+//!   (per-node factory-backed `AutoPipelineService` -- the production
+//!   high-concurrency path).
+//! - `RedisRsSync` -- redis 1.2 cluster blocking client.
+//! - `RedisRsAsync` -- redis 1.2 cluster_async client.
+//!
+//! Env vars:
+//! ```text
+//! BENCH_SECS=8               duration per run
+//! BENCH_CONCURRENCY=1,8,...  concurrency levels
+//! BENCH_BASE_PORT=17000      starting port for the throwaway cluster
+//! ```
 
 mod clients;
-mod concurrent;
-mod multiplexed_cluster;
 mod runner;
 
 use std::time::Duration;
@@ -17,8 +32,6 @@ use crate::runner::{BenchConfig, BenchReport, Workload};
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
-    let include_concurrent = std::env::args().any(|a| a == "--concurrent");
-    let include_multiplexed = std::env::args().any(|a| a == "--multiplexed");
     let duration_secs: u64 = std::env::var("BENCH_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -64,17 +77,12 @@ async fn main() {
         .map(|p| format!("redis://{}:{}/", cluster.config().bind, p))
         .collect();
 
-    let mut kinds = vec![
+    let kinds = [
         ClientKind::RedisTower,
         ClientKind::RedisRsSync,
         ClientKind::RedisRsAsync,
+        ClientKind::RedisTowerMux,
     ];
-    if include_concurrent {
-        kinds.push(ClientKind::RedisTowerConcurrent);
-    }
-    if include_multiplexed {
-        kinds.push(ClientKind::RedisTowerMultiplexed);
-    }
 
     let workloads = [Workload::Set, Workload::Get];
 
@@ -93,10 +101,7 @@ async fn main() {
                     concurrency,
                     workload: wl,
                 };
-                println!(
-                    "running {:?} workload={:?} concurrency={}",
-                    kind, wl, concurrency
-                );
+                println!("running {kind:?} workload={wl:?} concurrency={concurrency}");
                 let client = match Client::connect(*kind, &seed, &seed_urls).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -122,13 +127,13 @@ async fn main() {
 
 fn print_table(reports: &[BenchReport]) {
     println!(
-        "{:<28} {:<10} {:>8} {:>12} {:>12} {:>12} {:>12}",
+        "{:<22} {:<10} {:>8} {:>12} {:>12} {:>12} {:>12}",
         "client", "workload", "conc", "ops", "ops/s", "p50 (us)", "p99 (us)"
     );
-    println!("{}", "-".repeat(96));
+    println!("{}", "-".repeat(92));
     for r in reports {
         println!(
-            "{:<28} {:<10} {:>8} {:>12} {:>12} {:>12} {:>12}",
+            "{:<22} {:<10} {:>8} {:>12} {:>12} {:>12} {:>12}",
             format!("{:?}", r.client),
             format!("{:?}", r.workload),
             r.concurrency,
