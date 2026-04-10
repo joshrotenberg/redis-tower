@@ -30,18 +30,13 @@
 //! });
 //! ```
 //!
-//! # Current limitations
+//! # Redirect handling
 //!
-//! - **ASK redirects** during slot migrations are not handled atomically.
-//!   Because [`AutoPipelineService`] does not yet support sending multiple
-//!   frames as a single atomic batch, we cannot reliably send
-//!   `ASKING` followed by the migrated command on the same worker slot.
-//!   Instead, ASK is treated like MOVED: the topology is refreshed and the
-//!   command is retried against whichever node the refreshed topology
-//!   reports. This is correct after migration completes but may
-//!   oscillate (and eventually error with "too many redirects") during an
-//!   active migration. If you need zero-error operation through resharding,
-//!   use [`ClusterConnection`](crate::ClusterConnection) for now.
+//! MOVED and ASK redirects are handled transparently. ASK is dispatched as
+//! an atomic `[ASKING, cmd]` pipeline via
+//! [`AutoPipelineService::call_pipeline`], so the ASKING connection state
+//! set by the first frame is always consumed by our migrated command and
+//! not by another in-flight request from a concurrent task.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -50,7 +45,9 @@ use std::sync::Arc;
 
 use redis_tower::AutoPipelineService;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
+use redis_tower::credentials::CredentialProvider;
 use redis_tower::reconnect::ConnectionFactory;
+use redis_tower_commands::Auth;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 use tokio::sync::RwLock;
@@ -91,6 +88,7 @@ struct Inner {
     read_routing: Arc<dyn ReadRoutingStrategy>,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
 /// Builder for configuring a [`MultiplexedClusterClient`].
@@ -102,6 +100,7 @@ pub struct MultiplexedClusterClientBuilder {
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
 impl MultiplexedClusterClientBuilder {
@@ -143,6 +142,19 @@ impl MultiplexedClusterClientBuilder {
         self
     }
 
+    /// Authenticate every per-node connection using the given credential
+    /// provider.
+    ///
+    /// The provider is consulted on the initial connection and on every
+    /// reconnect (for example after a node failover), so credential
+    /// rotation flows through transparently without any additional wiring:
+    /// the node factory fetches fresh credentials from the provider each
+    /// time it has to rebuild a connection.
+    pub fn credentials(mut self, provider: impl CredentialProvider) -> Self {
+        self.credentials = Some(Arc::new(provider));
+        self
+    }
+
     /// Connect to the cluster.
     pub async fn connect(self) -> Result<MultiplexedClusterClient, RedisError> {
         MultiplexedClusterClient::connect_inner(
@@ -153,6 +165,7 @@ impl MultiplexedClusterClientBuilder {
             self.read_routing,
             self.pipeline_config,
             self.reconnect_config,
+            self.credentials,
         )
         .await
     }
@@ -169,6 +182,7 @@ impl MultiplexedClusterClient {
             None,
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
+            None,
         )
         .await
     }
@@ -186,6 +200,7 @@ impl MultiplexedClusterClient {
             None,
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
+            None,
         )
         .await
     }
@@ -200,6 +215,7 @@ impl MultiplexedClusterClient {
             read_routing: None,
             pipeline_config: AutoPipelineConfig::default(),
             reconnect_config: AutoPipelineReconnectConfig::default(),
+            credentials: None,
         }
     }
 
@@ -212,9 +228,15 @@ impl MultiplexedClusterClient {
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
         pipeline_config: AutoPipelineConfig,
         reconnect_config: AutoPipelineReconnectConfig,
+        credentials: Option<Arc<dyn CredentialProvider>>,
     ) -> Result<Self, RedisError> {
-        // Discover topology via a short-lived raw connection.
+        // Discover topology via a short-lived raw connection. Authenticate
+        // before CLUSTER SLOTS so the discovery itself works against an
+        // ACL-protected cluster.
         let mut seed_conn = RedisConnection::connect(seed_addr).await?;
+        if let Some(ref provider) = credentials {
+            authenticate(&mut seed_conn, provider.as_ref()).await?;
+        }
         let mut topology = discover_topology(&mut seed_conn).await?;
         drop(seed_conn);
 
@@ -239,6 +261,7 @@ impl MultiplexedClusterClient {
                 /* readonly = */ false,
                 pipeline_config.clone(),
                 reconnect_config.clone(),
+                credentials.clone(),
             )
             .await?;
             if default_node.is_empty() {
@@ -260,6 +283,7 @@ impl MultiplexedClusterClient {
                     /* readonly = */ true,
                     pipeline_config.clone(),
                     reconnect_config.clone(),
+                    credentials.clone(),
                 )
                 .await?;
                 replicas.insert(addr_str, svc);
@@ -274,6 +298,7 @@ impl MultiplexedClusterClient {
                 false,
                 pipeline_config.clone(),
                 reconnect_config.clone(),
+                credentials.clone(),
             )
             .await?;
             masters.insert(seed_addr.to_string(), svc);
@@ -294,15 +319,17 @@ impl MultiplexedClusterClient {
                 read_routing,
                 pipeline_config,
                 reconnect_config,
+                credentials,
             })),
         })
     }
 
     /// Execute a command, routing it to the correct cluster node.
     ///
-    /// Handles MOVED redirects transparently by refreshing the topology
-    /// slot mapping and retrying against the new owner. ASK redirects are
-    /// currently treated like MOVED (see module docs for limitations).
+    /// Handles MOVED and ASK redirects transparently. ASK is handled by
+    /// sending `ASKING` + the migrated command as an atomic pipeline through
+    /// the target node, preserving single-connection ordering during
+    /// live resharding.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
 
@@ -321,15 +348,35 @@ impl MultiplexedClusterClient {
                     continue;
                 }
                 Some(Redirect::Ask { addr }) => {
-                    // Without atomic multi-frame support we cannot send
-                    // ASKING + cmd on the same worker slot. Refresh topology
-                    // so a subsequent call uses the new owner, and retry
-                    // against the ASK target (which may itself MOVED back --
-                    // we rely on MAX_REDIRECTS to bound the loop).
                     let addr = self.remap_addr(&addr).await;
                     self.ensure_master(&addr).await?;
-                    target = self.master_service(&addr).await?;
-                    continue;
+                    let mut ask_target = self.master_service(&addr).await?;
+                    // Atomic [ASKING, cmd] via call_pipeline. The worker
+                    // guarantees contiguous emission on the wire, so the
+                    // ASKING state set on the connection is consumed by
+                    // our cmd and not some other in-flight request.
+                    let asking_frame = array(vec![bulk("ASKING")]);
+                    let responses = ask_target
+                        .svc
+                        .call_pipeline(vec![asking_frame, cmd_frame.clone()])
+                        .await?;
+                    let cmd_response = responses
+                        .into_iter()
+                        .nth(1)
+                        .ok_or(RedisError::ConnectionClosed)?;
+                    // If ASKING + cmd returned MOVED, fall through the
+                    // redirect loop to handle it as a MOVED from this node.
+                    if let Some(Redirect::Moved { slot, addr }) = parse_redirect(&cmd_response) {
+                        let addr = self.remap_addr(&addr).await;
+                        self.ensure_master(&addr).await?;
+                        self.update_slot_owner(slot, &addr).await;
+                        target = self.master_service(&addr).await?;
+                        continue;
+                    }
+                    if let Frame::Error(ref e) = cmd_response {
+                        return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+                    }
+                    return cmd.parse_response(cmd_response);
                 }
                 None => {
                     if let Frame::Error(ref e) = response {
@@ -352,7 +399,14 @@ impl MultiplexedClusterClient {
     pub async fn refresh_topology(&self) -> Result<(), RedisError> {
         // Snapshot what we need from the inner state, then release the lock
         // before doing network I/O.
-        let (pipeline_config, reconnect_config, host_override, address_map, read_preference) = {
+        let (
+            pipeline_config,
+            reconnect_config,
+            host_override,
+            address_map,
+            read_preference,
+            credentials,
+        ) = {
             let inner = self.inner.read().await;
             (
                 inner.pipeline_config.clone(),
@@ -360,6 +414,7 @@ impl MultiplexedClusterClient {
                 inner.host_override.clone(),
                 inner.address_map.clone(),
                 inner.read_preference,
+                inner.credentials.clone(),
             )
         };
 
@@ -375,6 +430,9 @@ impl MultiplexedClusterClient {
                 .ok_or(RedisError::ConnectionClosed)?
         };
         let mut seed_conn = RedisConnection::connect(&seed_addr).await?;
+        if let Some(ref provider) = credentials {
+            authenticate(&mut seed_conn, provider.as_ref()).await?;
+        }
         let mut topology = discover_topology(&mut seed_conn).await?;
         drop(seed_conn);
 
@@ -398,6 +456,7 @@ impl MultiplexedClusterClient {
                         false,
                         pipeline_config.clone(),
                         reconnect_config.clone(),
+                        credentials.clone(),
                     )
                     .await?;
                     new_masters.push((addr_str, svc));
@@ -416,6 +475,7 @@ impl MultiplexedClusterClient {
                         true,
                         pipeline_config.clone(),
                         reconnect_config.clone(),
+                        credentials.clone(),
                     )
                     .await?;
                     new_replicas.push((addr_str, svc));
@@ -511,14 +571,16 @@ impl MultiplexedClusterClient {
             }
         }
         // Build the new service without holding any lock across connect.
-        let (pipeline_config, reconnect_config) = {
+        let (pipeline_config, reconnect_config, credentials) = {
             let inner = self.inner.read().await;
             (
                 inner.pipeline_config.clone(),
                 inner.reconnect_config.clone(),
+                inner.credentials.clone(),
             )
         };
-        let svc = build_node_service(addr, false, pipeline_config, reconnect_config).await?;
+        let svc =
+            build_node_service(addr, false, pipeline_config, reconnect_config, credentials).await?;
         let mut inner = self.inner.write().await;
         inner.masters.entry(addr.to_string()).or_insert(svc);
         Ok(())
@@ -577,27 +639,42 @@ async fn build_node_service(
     readonly: bool,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
 ) -> Result<AutoPipelineService, RedisError> {
     let factory = NodeConnectionFactory {
         addr: addr.to_string(),
         readonly,
+        credentials,
     };
     AutoPipelineService::with_factory(factory, pipeline_config, reconnect_config).await
 }
 
 /// A [`ConnectionFactory`] that connects to a single node and optionally
-/// sends READONLY before yielding the connection.
+/// authenticates and/or sends READONLY before yielding the connection.
+///
+/// Order on each (re)connect:
+/// 1. Open TCP to `addr`.
+/// 2. If `credentials` is set, fetch fresh credentials from the provider
+///    and send AUTH. Fetching on every reconnect means credential rotation
+///    flows through automatically.
+/// 3. If `readonly` is set (replica node), send READONLY so reads to this
+///    connection succeed.
 struct NodeConnectionFactory {
     addr: String,
     readonly: bool,
+    credentials: Option<Arc<dyn CredentialProvider>>,
 }
 
 impl ConnectionFactory for NodeConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let addr = self.addr.clone();
         let readonly = self.readonly;
+        let credentials = self.credentials.clone();
         Box::pin(async move {
             let mut conn = RedisConnection::connect(&addr).await?;
+            if let Some(provider) = credentials {
+                authenticate(&mut conn, provider.as_ref()).await?;
+            }
             if readonly {
                 let responses = conn
                     .execute_pipeline(vec![array(vec![bulk("READONLY")])])
@@ -611,6 +688,28 @@ impl ConnectionFactory for NodeConnectionFactory {
     }
 }
 
+/// Fetch credentials from the provider and send AUTH on the given connection.
+async fn authenticate(
+    conn: &mut RedisConnection,
+    provider: &dyn CredentialProvider,
+) -> Result<(), RedisError> {
+    let creds = provider.get_credentials().await?;
+    let auth_cmd = match creds.username.as_deref() {
+        Some(user) => Auth::credentials(user, &creds.password),
+        None => Auth::password(&creds.password),
+    };
+    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
+    match responses.into_iter().next() {
+        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
+        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
+        Some(other) => Err(RedisError::UnexpectedResponse {
+            expected: "OK",
+            actual: format!("{other:?}"),
+        }),
+        None => Err(RedisError::ConnectionClosed),
+    }
+}
+
 /// Send a single frame through an [`AutoPipelineService`] and await the
 /// response. Mirrors what `MultiplexedClient::execute` does internally, but
 /// stays at the frame level so the cluster routing code can reuse the same
@@ -620,10 +719,28 @@ async fn call_service(svc: &mut AutoPipelineService, frame: Frame) -> Result<Fra
     <AutoPipelineService as Service<Frame>>::call(svc, frame).await
 }
 
-// Note: Tower `Service<Cmd>` impl for `MultiplexedClusterClient` is deferred
-// to PR 3. The current `execute` path requires `&self`, which doesn't match
-// Tower's `&mut self` poll_ready/call cleanly for a cloneable shared client.
-// A wrapping adapter is straightforward but adds scope.
+// Tower `Service<Cmd>` impl. `execute` takes `&self` because multiple tasks
+// share one client via `Clone`, so we bridge to the `&mut self` Service API
+// by cloning the client into the call future. poll_ready is always Ready:
+// per-node worker readiness is implicit (the worker owns the connection and
+// the client's channels are bounded).
+impl<Cmd: Command + 'static> tower_service::Service<Cmd> for MultiplexedClusterClient {
+    type Response = Cmd::Response;
+    type Error = RedisError;
+    type Future = std::pin::Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, cmd: Cmd) -> Self::Future {
+        let this = self.clone();
+        Box::pin(async move { this.execute(cmd).await })
+    }
+}
 
 impl std::fmt::Debug for MultiplexedClusterClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

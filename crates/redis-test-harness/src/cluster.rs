@@ -19,6 +19,12 @@ pub struct ClusterConfig {
     pub work_dir: PathBuf,
     pub redis_server_bin: String,
     pub redis_cli_bin: String,
+    /// Extra `key value` lines appended to every node's `redis.conf`.
+    ///
+    /// If `requirepass` is present, it is also passed as `-a <password>` to
+    /// `redis-cli --cluster create` and to the shutdown calls so the harness
+    /// can still talk to the nodes.
+    pub extra_config: HashMap<String, String>,
 }
 
 impl Default for ClusterConfig {
@@ -31,6 +37,7 @@ impl Default for ClusterConfig {
             work_dir: PathBuf::from("/tmp/redis-cluster"),
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
+            extra_config: HashMap::new(),
         }
     }
 }
@@ -94,7 +101,7 @@ impl RedisCluster {
             std::fs::create_dir_all(&node_dir)?;
 
             let conf_path = node_dir.join("redis.conf");
-            let conf = format!(
+            let mut conf = format!(
                 "port {port}\nbind {bind}\ndaemonize yes\n\
                  pidfile {ndir}/redis.pid\nlogfile {ndir}/redis.log\n\
                  dir {ndir}\nsave \"\"\nprotected-mode no\n\
@@ -103,6 +110,9 @@ impl RedisCluster {
                 bind = self.config.bind,
                 ndir = node_dir.display(),
             );
+            for (k, v) in &self.config.extra_config {
+                conf.push_str(&format!("{k} {v}\n"));
+            }
             std::fs::write(&conf_path, conf)?;
 
             let status = Command::new(&self.config.redis_server_bin)
@@ -135,6 +145,10 @@ impl RedisCluster {
         args.push("--cluster-replicas".into());
         args.push(self.config.replicas_per_master.to_string());
         args.push("--cluster-yes".into());
+        if let Some(pw) = self.config.extra_config.get("requirepass") {
+            args.push("-a".into());
+            args.push(pw.clone());
+        }
 
         let output = Command::new(&self.config.redis_cli_bin)
             .args(&args)
@@ -153,16 +167,22 @@ impl RedisCluster {
 
     pub fn stop(&self) -> io::Result<()> {
         if self.started {
+            let pw = self.config.extra_config.get("requirepass").cloned();
             for port in self.config.ports() {
+                let mut args: Vec<String> = vec![
+                    "-h".into(),
+                    self.config.bind.clone(),
+                    "-p".into(),
+                    port.to_string(),
+                ];
+                if let Some(ref p) = pw {
+                    args.push("-a".into());
+                    args.push(p.clone());
+                }
+                args.push("SHUTDOWN".into());
+                args.push("NOSAVE".into());
                 let _ = Command::new(&self.config.redis_cli_bin)
-                    .args([
-                        "-h",
-                        &self.config.bind,
-                        "-p",
-                        &port.to_string(),
-                        "SHUTDOWN",
-                        "NOSAVE",
-                    ])
+                    .args(&args)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .status();
@@ -172,22 +192,29 @@ impl RedisCluster {
     }
 
     pub fn poke(&self) -> io::Result<ClusterStatus> {
+        let pw = self.config.extra_config.get("requirepass");
         for port in self.config.ports() {
+            let mut args: Vec<String> = vec![
+                "-h".into(),
+                self.config.bind.clone(),
+                "-p".into(),
+                port.to_string(),
+            ];
+            if let Some(p) = pw {
+                args.push("-a".into());
+                args.push(p.clone());
+                args.push("--no-auth-warning".into());
+            }
+            args.push("CLUSTER".into());
+            args.push("INFO".into());
             let output = Command::new(&self.config.redis_cli_bin)
-                .args([
-                    "-h",
-                    &self.config.bind,
-                    "-p",
-                    &port.to_string(),
-                    "CLUSTER",
-                    "INFO",
-                ])
+                .args(&args)
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let raw = String::from_utf8_lossy(&out.stdout).to_string();
-                    return Ok(parse_cluster_info(&raw));
-                }
+            if let Ok(out) = output
+                && out.status.success()
+            {
+                let raw = String::from_utf8_lossy(&out.stdout).to_string();
+                return Ok(parse_cluster_info(&raw));
             }
         }
         Err(io::Error::new(
@@ -215,15 +242,29 @@ impl RedisCluster {
     }
 
     fn wait_for_ping(&self, port: u16, timeout: Duration) -> io::Result<()> {
+        let pw = self.config.extra_config.get("requirepass");
         let start = Instant::now();
         loop {
+            let mut args: Vec<String> = vec![
+                "-h".into(),
+                self.config.bind.clone(),
+                "-p".into(),
+                port.to_string(),
+            ];
+            if let Some(p) = pw {
+                args.push("-a".into());
+                args.push(p.clone());
+                args.push("--no-auth-warning".into());
+            }
+            args.push("PING".into());
             let output = Command::new(&self.config.redis_cli_bin)
-                .args(["-h", &self.config.bind, "-p", &port.to_string(), "PING"])
+                .args(&args)
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
-                    return Ok(());
-                }
+            if let Ok(out) = output
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "PONG"
+            {
+                return Ok(());
             }
             if start.elapsed() > timeout {
                 return Err(io::Error::new(
