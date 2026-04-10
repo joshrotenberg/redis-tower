@@ -33,8 +33,9 @@
 
 use redis_tower_core::{Command, RedisConnection, RedisError};
 
-use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
+use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::command_adapter::CommandAdapter;
+use crate::reconnect::ConnectionFactory;
 
 /// A multiplexed Redis client that batches concurrent requests.
 ///
@@ -78,6 +79,47 @@ impl MultiplexedClient {
         Self {
             inner: CommandAdapter::new(AutoPipelineService::new(conn, config)),
         }
+    }
+
+    /// Build a multiplexed client backed by a [`ConnectionFactory`].
+    ///
+    /// Unlike [`Self::connect`] / [`Self::from_connection`], the resulting
+    /// client transparently reconnects when the underlying TCP connection
+    /// drops, using the provided factory to build a fresh connection with
+    /// exponential backoff.
+    ///
+    /// The factory is also the right place to replay any per-connection
+    /// session setup -- AUTH, SELECT, HELLO, READONLY. Use a
+    /// [`UrlConnectionFactory`](crate::reconnect::UrlConnectionFactory) for
+    /// AUTH+SELECT from a URL, or implement [`ConnectionFactory`] yourself
+    /// for custom init.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use redis_tower::MultiplexedClient;
+    /// use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
+    /// use redis_tower::reconnect::{ReconnectConfig, UrlConnectionFactory};
+    ///
+    /// let factory = UrlConnectionFactory::new("redis://user:pass@host:6379/0");
+    /// let client = MultiplexedClient::from_factory(
+    ///     factory,
+    ///     AutoPipelineConfig::default(),
+    ///     AutoPipelineReconnectConfig::new(
+    ///         ReconnectConfig::default().base_delay(Duration::from_millis(50)),
+    ///     ),
+    /// ).await?;
+    /// ```
+    pub async fn from_factory(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Result<Self, RedisError> {
+        let svc = AutoPipelineService::with_factory(factory, config, reconnect).await?;
+        Ok(Self {
+            inner: CommandAdapter::new(svc),
+        })
     }
 
     /// Execute a command.

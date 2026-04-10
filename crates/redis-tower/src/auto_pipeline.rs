@@ -26,6 +26,9 @@ use std::time::Duration;
 use redis_tower_core::{Frame, RedisConnection, RedisError};
 use tokio::sync::{mpsc, oneshot};
 use tower_service::Service;
+use tracing::warn;
+
+use crate::reconnect::{ConnectionFactory, ReconnectConfig};
 
 /// Configuration for the auto-pipelining service.
 #[derive(Debug, Clone)]
@@ -47,6 +50,35 @@ impl Default for AutoPipelineConfig {
             batch_window: Duration::ZERO,
         }
     }
+}
+
+/// Reconnect policy for a factory-backed [`AutoPipelineService`].
+///
+/// Applies only when the service is constructed via
+/// [`AutoPipelineService::with_factory`]. The plain [`AutoPipelineService::new`]
+/// path owns a single pre-built connection and does not reconnect.
+#[derive(Debug, Clone, Default)]
+pub struct AutoPipelineReconnectConfig {
+    /// Backoff parameters for reconnection attempts.
+    pub reconnect: ReconnectConfig,
+}
+
+impl AutoPipelineReconnectConfig {
+    /// Create a new reconnect config with the given backoff parameters.
+    pub fn new(reconnect: ReconnectConfig) -> Self {
+        Self { reconnect }
+    }
+}
+
+/// Source of the connection owned by the background worker.
+enum ConnSource {
+    /// Fixed pre-built connection: no reconnect on failure.
+    Fixed,
+    /// Factory-backed connection: rebuild on failure using the factory.
+    Factory {
+        factory: Arc<dyn ConnectionFactory>,
+        reconnect: ReconnectConfig,
+    },
 }
 
 /// A request sent through the channel to the background worker.
@@ -81,9 +113,44 @@ impl AutoPipelineService {
     ///
     /// The connection is moved into a background task that exclusively owns it.
     /// All requests are sent through a channel and batched automatically.
+    ///
+    /// The service does **not** reconnect if the connection fails -- every
+    /// subsequent request returns [`RedisError::ConnectionClosed`]. Wrap this
+    /// in a reconnect layer, or use [`Self::with_factory`] to build a
+    /// service that rebuilds its own connection on failure.
     pub fn new(conn: RedisConnection, config: AutoPipelineConfig) -> Self {
+        Self::from_parts(conn, config, ConnSource::Fixed)
+    }
+
+    /// Create a new auto-pipelining service that rebuilds its connection on
+    /// failure using the provided [`ConnectionFactory`].
+    ///
+    /// On pipeline execution failure, in-flight requests receive
+    /// [`RedisError::ConnectionClosed`], then the worker reconnects via the
+    /// factory with exponential backoff governed by `reconnect`. Subsequent
+    /// requests are served by the new connection.
+    ///
+    /// The factory is also the right place to replay session setup
+    /// (AUTH, SELECT, HELLO, READONLY) on every reconnect -- see
+    /// [`UrlConnectionFactory`](crate::reconnect::UrlConnectionFactory)
+    /// for a ready-made AUTH+SELECT factory.
+    pub async fn with_factory(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Result<Self, RedisError> {
+        let factory: Arc<dyn ConnectionFactory> = Arc::new(factory);
+        let conn = factory.connect().await?;
+        let source = ConnSource::Factory {
+            factory,
+            reconnect: reconnect.reconnect,
+        };
+        Ok(Self::from_parts(conn, config, source))
+    }
+
+    fn from_parts(conn: RedisConnection, config: AutoPipelineConfig, source: ConnSource) -> Self {
         let (tx, rx) = mpsc::channel(config.max_batch_size * 2);
-        let worker = tokio::spawn(pipeline_worker(rx, conn, config));
+        let worker = tokio::spawn(pipeline_worker(rx, conn, config, source));
         Self {
             tx,
             _worker: Arc::new(worker),
@@ -96,6 +163,7 @@ async fn pipeline_worker(
     mut rx: mpsc::Receiver<PipelineRequest>,
     mut conn: RedisConnection,
     config: AutoPipelineConfig,
+    source: ConnSource,
 ) {
     loop {
         // Wait for the first request (blocks until one arrives).
@@ -128,7 +196,7 @@ async fn pipeline_worker(
                     Ok(Some(req)) => batch.push(req),
                     Ok(None) => {
                         // Channel closed -- flush remaining and exit.
-                        flush_batch(&mut conn, batch).await;
+                        let _ = flush_batch(&mut conn, batch).await;
                         return;
                     }
                     Err(_) => break, // timeout
@@ -136,22 +204,87 @@ async fn pipeline_worker(
             }
         }
 
-        flush_batch(&mut conn, batch).await;
+        if flush_batch(&mut conn, batch).await.is_err() {
+            // Pipeline execution failed. Either give up (Fixed source) or
+            // reconnect via factory and keep serving.
+            match &source {
+                ConnSource::Fixed => {
+                    // Current behavior: leave the worker running on the dead
+                    // connection so any future batches also fail-fast and
+                    // upstream retry layers can notice.
+                }
+                ConnSource::Factory { factory, reconnect } => {
+                    match reconnect_with_backoff(factory.as_ref(), reconnect).await {
+                        Some(new_conn) => {
+                            conn = new_conn;
+                        }
+                        None => {
+                            // Max retries exhausted. Drain any queued
+                            // requests with errors and exit the worker --
+                            // subsequent callers will see ConnectionClosed
+                            // from poll_ready because the channel closes.
+                            while let Ok(req) = rx.try_recv() {
+                                let _ = req.response_tx.send(Err(RedisError::ConnectionClosed));
+                            }
+                            return;
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
 /// Send a batch of requests as a pipeline and route responses back.
-async fn flush_batch(conn: &mut RedisConnection, batch: Vec<PipelineRequest>) {
+///
+/// Returns `Ok(())` on success and `Err(())` on pipeline failure so the
+/// worker can decide whether to reconnect. All individual response channels
+/// are always notified before this returns.
+async fn flush_batch(conn: &mut RedisConnection, batch: Vec<PipelineRequest>) -> Result<(), ()> {
     let frames: Vec<Frame> = batch.iter().map(|r| r.frame.clone()).collect();
     match conn.execute_pipeline(frames).await {
         Ok(responses) => {
             for (req, resp) in batch.into_iter().zip(responses) {
                 let _ = req.response_tx.send(Ok(resp));
             }
+            Ok(())
         }
         Err(_) => {
             for req in batch {
                 let _ = req.response_tx.send(Err(RedisError::ConnectionClosed));
+            }
+            Err(())
+        }
+    }
+}
+
+/// Reconnect with exponential backoff. Returns `None` if `max_retries` is
+/// exhausted.
+async fn reconnect_with_backoff(
+    factory: &dyn ConnectionFactory,
+    config: &ReconnectConfig,
+) -> Option<RedisConnection> {
+    let mut attempt: usize = 0;
+    loop {
+        if let Some(max) = config.max_retries
+            && attempt >= max
+        {
+            warn!(
+                attempts = attempt,
+                "auto_pipeline: reconnect attempts exhausted"
+            );
+            return None;
+        }
+        let delay = config.delay_for_attempt(attempt);
+        tokio::time::sleep(delay).await;
+        attempt += 1;
+        match factory.connect().await {
+            Ok(conn) => {
+                return Some(conn);
+            }
+            Err(e) => {
+                warn!(attempt, error = %e, "auto_pipeline: reconnect attempt failed");
+                continue;
             }
         }
     }
