@@ -33,6 +33,8 @@ pub mod sentinel;
 pub mod standalone;
 
 // Re-export the main types at crate root for convenience.
-pub use cluster::{ClusterConfig, ClusterStatus, RedisCluster};
+pub use cluster::{
+    ClusterConfig, ClusterStatus, RedisCluster, TlsClusterConfig, generate_tls_certs,
+};
 pub use sentinel::{RedisSentinel, SentinelConfig, SentinelMasterStatus};
 pub use standalone::{RedisStandalone, StandaloneConfig};

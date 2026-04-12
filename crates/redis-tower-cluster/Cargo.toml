@@ -15,8 +15,8 @@ categories = ["database", "asynchronous", "network-programming"]
 [features]
 default = []
 # Forward TLS backends to redis-tower-core / redis-tower. Enabling one of
-# these makes the `MultiplexedClusterClientBuilder::tls` method available
-# and lets every per-node factory speak TLS.
+# these makes the `.tls()` builder method available on both
+# ClusterConnectionBuilder and MultiplexedClusterClientBuilder.
 tls-rustls = [
     "redis-tower-core/tls-rustls",
     "redis-tower/tls-rustls",
