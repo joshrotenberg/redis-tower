@@ -11,6 +11,20 @@ use crate::connection::{ClusterConnection, ClusterConnectionBuilder, ReadPrefere
 ///
 /// Wraps a [`ClusterConnection`] in `Arc<Mutex<>>` for cross-task sharing.
 ///
+/// # When to use this
+///
+/// `ClusterClient` serializes every command through a single cluster-wide
+/// mutex, so throughput does not scale with concurrency. Use this for:
+///
+/// - Simple single-task workloads
+/// - Code that needs direct access to connection-level features like
+///   `MULTI`/`EXEC`
+///
+/// For high-concurrency sharing across many tokio tasks, prefer
+/// [`MultiplexedClusterClient`](crate::MultiplexedClusterClient), which
+/// maintains per-node connections with automatic pipelining and delivers
+/// ~35x higher throughput under load.
+///
 /// # Example
 ///
 /// ```ignore

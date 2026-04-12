@@ -163,14 +163,39 @@ let results = Search::new("idx", "shoes")
 
 ## Cluster
 
+Two cluster clients for different workloads:
+
+- **`ClusterConnection`** / **`ClusterClient`** -- simple, mutex-based sharing.
+  Good for single-task workloads or when you need connection-level features
+  like `MULTI`/`EXEC`.
+- **`MultiplexedClusterClient`** -- per-node connections with automatic
+  pipelining. Designed for high-concurrency sharing across many tokio tasks
+  (~35x higher throughput than `ClusterClient` under load).
+
 ```rust,ignore
 use redis_tower_cluster::{ClusterConnection, ReadPreference};
 
+// Simple single-connection usage
 let mut cluster = ClusterConnection::builder("127.0.0.1:7000")
     .read_preference(ReadPreference::PreferReplica)
     .connect().await?;
 
 cluster.execute(Set::new("{user:1}:name", "Alice")).await?;
+```
+
+```rust,ignore
+use redis_tower_cluster::MultiplexedClusterClient;
+
+// High-concurrency shared client
+let client = MultiplexedClusterClient::builder("127.0.0.1:7000")
+    .read_preference(ReadPreference::PreferReplica)
+    .connect().await?;
+
+// Clone and share across tasks
+let c = client.clone();
+tokio::spawn(async move {
+    c.execute(Set::new("{user:1}:name", "Alice")).await.unwrap();
+});
 ```
 
 MOVED/ASK redirects handled automatically.
@@ -265,6 +290,19 @@ client.execute(Set::new("key", "hello"))?;
 | `serde` | JSON and Search high-level APIs |
 | `tls-native-tls` | TLS via native-tls |
 | `tls-rustls` | TLS via rustls |
+
+## Benchmarks
+
+Cluster throughput at c=128 on a local 3-master cluster (Apple M3 Max):
+
+| Client | SET ops/s | GET ops/s | GET p99 (us) |
+|--------|----------:|----------:|-------------:|
+| ClusterClient (baseline) | 13,786 | 13,944 | 9,955 |
+| redis-rs cluster_async | 448,851 | 448,206 | 537 |
+| MultiplexedClusterClient | 502,306 | 522,441 | 383 |
+
+See [`crates/cluster-bench`](crates/cluster-bench/) for full results and
+how to reproduce.
 
 ## Workspace
 

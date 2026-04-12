@@ -2367,7 +2367,7 @@ async fn pipeline_mixed_types() {
 async fn pipeline_with_redis_error_partial() {
     // One command errors but others succeed
     let mut conn = conn().await;
-    let k = key("pipe_err", "k");
+    let k = key("pipe_err_partial", "k");
     conn.execute(Set::new(&k, "not_a_list")).await.unwrap();
 
     let results = Pipeline::new()
@@ -2455,17 +2455,17 @@ async fn csc_multiple_keys_cached() {
     let addr = redis_addr();
     let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
 
-    let k1 = "csc_multi:k1";
-    let k2 = "csc_multi:k2";
+    let k1 = key("csc_multi", "k1");
+    let k2 = key("csc_multi", "k2");
     let mut writer = conn().await;
-    writer.execute(Set::new(k1, "v1")).await.unwrap();
-    writer.execute(Set::new(k2, "v2")).await.unwrap();
+    writer.execute(Set::new(&k1, "v1")).await.unwrap();
+    writer.execute(Set::new(&k2, "v2")).await.unwrap();
 
-    let _: Option<Bytes> = client.execute(Get::new(k1)).await.unwrap();
-    let _: Option<Bytes> = client.execute(Get::new(k2)).await.unwrap();
+    let _: Option<Bytes> = client.execute(Get::new(&k1)).await.unwrap();
+    let _: Option<Bytes> = client.execute(Get::new(&k2)).await.unwrap();
     assert_eq!(client.cache_size().await, 2);
 
-    writer.execute(Del::keys([k1, k2])).await.unwrap();
+    writer.execute(Del::keys([&k1, &k2])).await.unwrap();
     client.clear_cache().await;
 }
 
