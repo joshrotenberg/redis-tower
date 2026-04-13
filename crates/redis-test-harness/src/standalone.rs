@@ -103,10 +103,11 @@ impl RedisStandalone {
                     "PING",
                 ])
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
-                    break;
-                }
+            if let Ok(out) = output
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "PONG"
+            {
+                break;
             }
             if start.elapsed() > Duration::from_secs(10) {
                 return Err(io::Error::new(

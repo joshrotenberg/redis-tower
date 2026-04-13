@@ -585,15 +585,13 @@ impl MultiplexedClusterClient {
             // Read-only commands with replica preference: try a replica first.
             if inner.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
+                && let Some(addr) = pick_replica(&inner, slot)
+                && let Some(svc) = inner.replicas.get(&addr)
             {
-                if let Some(addr) = pick_replica(&inner, slot) {
-                    if let Some(svc) = inner.replicas.get(&addr) {
-                        return Ok(Target {
-                            svc: svc.clone(),
-                            _addr: addr,
-                        });
-                    }
-                }
+                return Ok(Target {
+                    svc: svc.clone(),
+                    _addr: addr,
+                });
             }
 
             if let Some(addr_node) = inner.topology.master_for_slot(slot) {
@@ -668,16 +666,16 @@ impl MultiplexedClusterClient {
 
     async fn update_slot_owner(&self, slot: u16, addr: &str) {
         let mut inner = self.inner.write().await;
-        if let Some((host, port_str)) = addr.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                for range in &mut inner.topology.slot_ranges {
-                    if slot >= range.start && slot <= range.end {
-                        range.master = NodeAddr {
-                            host: host.to_string(),
-                            port,
-                        };
-                        return;
-                    }
+        if let Some((host, port_str)) = addr.rsplit_once(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            for range in &mut inner.topology.slot_ranges {
+                if slot >= range.start && slot <= range.end {
+                    range.master = NodeAddr {
+                        host: host.to_string(),
+                        port,
+                    };
+                    return;
                 }
             }
         }
@@ -685,15 +683,15 @@ impl MultiplexedClusterClient {
 
     async fn remap_addr(&self, addr: &str) -> String {
         let inner = self.inner.read().await;
-        if let Some(ref map) = inner.address_map {
-            if let Some(mapped) = map.get(addr) {
-                return mapped.clone();
-            }
+        if let Some(ref map) = inner.address_map
+            && let Some(mapped) = map.get(addr)
+        {
+            return mapped.clone();
         }
-        if let Some(ref host) = inner.host_override {
-            if let Some((_old_host, port)) = addr.rsplit_once(':') {
-                return format!("{host}:{port}");
-            }
+        if let Some(ref host) = inner.host_override
+            && let Some((_old_host, port)) = addr.rsplit_once(':')
+        {
+            return format!("{host}:{port}");
         }
         addr.to_string()
     }

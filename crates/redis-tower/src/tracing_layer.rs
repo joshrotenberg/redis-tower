@@ -67,12 +67,11 @@ impl<S> TracingService<S> {
 /// Expects `Frame::Array(Some(vec![Frame::BulkString(Some(name)), ...]))`.
 /// Returns `"UNKNOWN"` if the frame does not match this pattern.
 fn extract_command_name(frame: &Frame) -> String {
-    if let Frame::Array(Some(items)) = frame {
-        if let Some(Frame::BulkString(Some(bytes))) = items.first() {
-            if let Ok(name) = std::str::from_utf8(bytes) {
-                return name.to_ascii_uppercase();
-            }
-        }
+    if let Frame::Array(Some(items)) = frame
+        && let Some(Frame::BulkString(Some(bytes))) = items.first()
+        && let Ok(name) = std::str::from_utf8(bytes)
+    {
+        return name.to_ascii_uppercase();
     }
     "UNKNOWN".to_string()
 }

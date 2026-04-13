@@ -370,10 +370,10 @@ impl ResilientConnection {
         match &mut self.state {
             ConnState::Connected(conn) => {
                 let result = conn.execute(cmd).await;
-                if let Err(ref e) = result {
-                    if e.is_connection_error() {
-                        self.needs_reconnect.store(true, Ordering::Release);
-                    }
+                if let Err(ref e) = result
+                    && e.is_connection_error()
+                {
+                    self.needs_reconnect.store(true, Ordering::Release);
                 }
                 result
             }
@@ -382,11 +382,11 @@ impl ResilientConnection {
     }
 
     fn trigger_reconnect(&mut self, attempt: usize) {
-        if let Some(max) = self.config.max_retries {
-            if attempt > max {
-                self.state = ConnState::Failed;
-                return;
-            }
+        if let Some(max) = self.config.max_retries
+            && attempt > max
+        {
+            self.state = ConnState::Failed;
+            return;
         }
         let delay = self.config.delay_for_attempt(attempt);
         self.state = ConnState::WaitingToReconnect {
@@ -434,10 +434,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                     Poll::Ready(Ok(conn)) => {
                         let attempt = *attempt;
                         self.state = ConnState::Connected(conn);
-                        if attempt > 0 {
-                            if let Some(ref cb) = self.on_reconnect {
-                                cb(attempt);
-                            }
+                        if attempt > 0
+                            && let Some(ref cb) = self.on_reconnect
+                        {
+                            cb(attempt);
                         }
                         if let Some(ref cb) = self.on_connect {
                             cb();
@@ -465,10 +465,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
 
         Box::pin(async move {
             let result = future.await;
-            if let Err(ref e) = result {
-                if e.is_connection_error() {
-                    needs_reconnect.store(true, Ordering::Release);
-                }
+            if let Err(ref e) = result
+                && e.is_connection_error()
+            {
+                needs_reconnect.store(true, Ordering::Release);
             }
             result
         })

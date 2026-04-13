@@ -374,14 +374,14 @@ async fn reconnect_with_backoff(
 ) -> Option<RedisConnection> {
     let mut attempt: usize = 0;
     loop {
-        if let Some(max) = config.max_retries {
-            if attempt >= max {
-                warn!(
-                    attempts = attempt,
-                    "auto_pipeline: reconnect attempts exhausted"
-                );
-                return None;
-            }
+        if let Some(max) = config.max_retries
+            && attempt >= max
+        {
+            warn!(
+                attempts = attempt,
+                "auto_pipeline: reconnect attempts exhausted"
+            );
+            return None;
         }
         let delay = config.delay_for_attempt(attempt);
         tokio::time::sleep(delay).await;
