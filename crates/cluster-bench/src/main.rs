@@ -25,7 +25,7 @@ mod runner;
 
 use std::time::Duration;
 
-use redis_test_harness::cluster::{ClusterConfig, RedisCluster};
+use redis_server_wrapper::RedisCluster;
 
 use crate::clients::{Client, ClientKind};
 use crate::runner::{BenchConfig, BenchReport, Workload};
@@ -54,27 +54,21 @@ async fn main() {
         base_port,
         base_port + 2
     );
-    let mut cluster = RedisCluster::new(ClusterConfig {
-        masters: 3,
-        replicas_per_master: 0,
-        base_port,
-        work_dir: std::path::PathBuf::from(format!("/tmp/redis-cluster-bench-{base_port}")),
-        ..Default::default()
-    });
-    let _ = cluster.stop();
-    std::thread::sleep(Duration::from_millis(500));
-    cluster.start().expect("failed to start cluster");
-    cluster
-        .wait_for_healthy(Duration::from_secs(15))
-        .expect("cluster not healthy");
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(base_port)
+        .start()
+        .await
+        .expect("failed to start cluster");
     println!("cluster ready");
 
-    let seed = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
+    let seed = cluster.addr();
     let seed_urls: Vec<String> = cluster
-        .config()
-        .ports()
-        .take(cluster.config().masters as usize)
-        .map(|p| format!("redis://{}:{}/", cluster.config().bind, p))
+        .node_addrs()
+        .into_iter()
+        .take(3)
+        .map(|a| format!("redis://{a}/"))
         .collect();
 
     let kinds = [
@@ -118,7 +112,7 @@ async fn main() {
     println!();
     print_table(&reports);
 
-    let _ = cluster.stop();
+    drop(cluster);
     // Some sync client resources (blocking thread pool, etc) can keep the
     // tokio runtime alive after the bench completes. The results are in
     // stdout already, so exit hard.

@@ -1,7 +1,5 @@
-use std::sync::OnceLock;
-
 use bytes::Bytes;
-use redis_test_harness::standalone::{RedisStandalone, StandaloneConfig};
+use redis_server_wrapper::RedisServer;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::commands::*;
 use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, UrlConnectionFactory};
@@ -9,47 +7,45 @@ use redis_tower::{
     MultiplexedClient, Pipeline, PubSubConnection, RedisClient, RedisConnection,
     ResilientConnection, ResilientRedisClient, Transaction, TransactionResult,
 };
+use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
 use tower::Service;
 
 /// Shared Redis instance -- started once, stopped on Drop.
-static REDIS: OnceLock<RedisStandalone> = OnceLock::new();
+static REDIS: OnceCell<redis_server_wrapper::RedisServerHandle> = OnceCell::const_new();
 
-fn ensure_redis() -> &'static RedisStandalone {
-    REDIS.get_or_init(|| {
-        // Check for external Redis first (CI service container).
-        if let Ok(url) = std::env::var("REDIS_URL") {
-            let addr = url
-                .strip_prefix("redis://")
-                .unwrap_or(&url)
-                .trim_end_matches('/')
-                .to_string();
-            if let Some((host, port_str)) = addr.rsplit_once(':')
-                && let Ok(port) = port_str.parse::<u16>()
-            {
-                // Return a "fake" standalone that points at the external Redis.
-                // It won't start/stop anything since the server is already running.
-                return RedisStandalone::new(StandaloneConfig {
-                    port,
-                    bind: host.to_string(),
-                    ..Default::default()
-                });
+/// Address of the shared Redis instance (may be external via REDIS_URL).
+static REDIS_ADDR: OnceCell<String> = OnceCell::const_new();
+
+async fn redis_addr() -> &'static str {
+    REDIS_ADDR
+        .get_or_init(|| async {
+            // Check for external Redis first (CI service container).
+            if let Ok(url) = std::env::var("REDIS_URL") {
+                let addr = url
+                    .strip_prefix("redis://")
+                    .unwrap_or(&url)
+                    .trim_end_matches('/')
+                    .to_string();
+                return addr;
             }
-        }
 
-        let mut standalone = RedisStandalone::with_defaults();
-        standalone.start().expect("failed to start Redis server");
-        standalone
-    })
-}
-
-fn redis_addr() -> String {
-    ensure_redis().addr()
+            let handle = RedisServer::new()
+                .port(6399)
+                .start()
+                .await
+                .expect("failed to start Redis server");
+            let addr = handle.addr();
+            // Store the handle so it lives for the process lifetime.
+            REDIS.set(handle).ok();
+            addr
+        })
+        .await
 }
 
 async fn conn() -> RedisConnection {
-    let addr = redis_addr();
-    RedisConnection::connect(&addr)
+    let addr = redis_addr().await;
+    RedisConnection::connect(addr)
         .await
         .expect("failed to connect to Redis")
 }
@@ -64,8 +60,8 @@ redis_test_harness::command_tests!(standalone_conn, "standalone_cmd");
 
 // RESP3 connection factory.
 async fn resp3_conn() -> RedisConnection {
-    let addr = redis_addr();
-    RedisConnection::connect_resp3(&addr)
+    let addr = redis_addr().await;
+    RedisConnection::connect_resp3(addr)
         .await
         .expect("failed to connect with RESP3")
 }
@@ -77,8 +73,8 @@ mod resp3 {
 }
 
 async fn client() -> RedisClient {
-    let addr = redis_addr();
-    RedisClient::connect(&addr)
+    let addr = redis_addr().await;
+    RedisClient::connect(addr)
         .await
         .expect("failed to connect to Redis")
 }
@@ -115,7 +111,7 @@ async fn ping_with_message() {
 
 #[tokio::test]
 async fn connect_url() {
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let url = format!("redis://{addr}");
     let mut conn = RedisConnection::connect_url(&url).await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
@@ -1003,7 +999,7 @@ async fn pubsub_punsubscribe() {
 
 /// Get a connection on DB 1 (isolated for destructive tests like FLUSHDB).
 async fn conn_db1() -> RedisConnection {
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let url = format!("redis://{addr}/1");
     RedisConnection::connect_url(&url).await.unwrap()
 }
@@ -1104,7 +1100,7 @@ async fn transaction_len_and_empty() {
 
 #[tokio::test]
 async fn client_connect_url() {
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let url = format!("redis://{addr}");
     let client = RedisClient::connect_url(&url).await.unwrap();
     let pong = client.execute(Ping::new()).await.unwrap();
@@ -1425,13 +1421,11 @@ async fn lmove() {
 
 #[tokio::test]
 async fn resilient_connection_basic() {
-    let addr = redis_addr();
-    let mut conn = ResilientConnection::new(
-        AddrConnectionFactory::new(&addr),
-        ReconnectConfig::default(),
-    )
-    .await
-    .unwrap();
+    let addr = redis_addr().await;
+    let mut conn =
+        ResilientConnection::new(AddrConnectionFactory::new(addr), ReconnectConfig::default())
+            .await
+            .unwrap();
 
     let k = key("resilient_basic", "k");
     conn.execute(Set::new(&k, "hello")).await.unwrap();
@@ -1445,19 +1439,17 @@ async fn resilient_connection_with_callbacks() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let connected = Arc::new(AtomicBool::new(false));
     let connected_clone = Arc::clone(&connected);
 
-    let mut conn = ResilientConnection::new(
-        AddrConnectionFactory::new(&addr),
-        ReconnectConfig::default(),
-    )
-    .await
-    .unwrap()
-    .on_connect(move || {
-        connected_clone.store(true, Ordering::Release);
-    });
+    let mut conn =
+        ResilientConnection::new(AddrConnectionFactory::new(addr), ReconnectConfig::default())
+            .await
+            .unwrap()
+            .on_connect(move || {
+                connected_clone.store(true, Ordering::Release);
+            });
 
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
@@ -1478,8 +1470,8 @@ async fn resilient_connection_max_retries() {
 
 #[tokio::test]
 async fn resilient_client_basic() {
-    let addr = redis_addr();
-    let client = ResilientRedisClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let client = ResilientRedisClient::connect(addr).await.unwrap();
 
     let k = key("resilient_client", "k");
     client.execute(Set::new(&k, "val")).await.unwrap();
@@ -1490,8 +1482,8 @@ async fn resilient_client_basic() {
 
 #[tokio::test]
 async fn resilient_client_shared_across_tasks() {
-    let addr = redis_addr();
-    let client = ResilientRedisClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let client = ResilientRedisClient::connect(addr).await.unwrap();
     let k1 = key("resilient_shared", "t1");
     let k2 = key("resilient_shared", "t2");
 
@@ -1519,7 +1511,7 @@ async fn resilient_client_shared_across_tasks() {
 
 #[tokio::test]
 async fn resilient_client_connect_url() {
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let url = format!("redis://{addr}");
     let client = ResilientRedisClient::connect_url(&url).await.unwrap();
     let pong = client.execute(Ping::new()).await.unwrap();
@@ -1530,8 +1522,8 @@ async fn resilient_client_connect_url() {
 
 #[tokio::test]
 async fn csc_cache_hit() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_test:cache_hit";
     // Write via a separate connection (bypasses cache).
@@ -1553,8 +1545,8 @@ async fn csc_cache_hit() {
 
 #[tokio::test]
 async fn csc_invalidation() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_test:invalidation";
 
@@ -1585,8 +1577,8 @@ async fn csc_invalidation() {
 
 #[tokio::test]
 async fn csc_write_not_cached() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_test:write_not_cached";
     // SET should not be cached.
@@ -1604,8 +1596,8 @@ async fn tower_csc_cache_hit() {
     use redis_tower::cache_layer::{CacheConfig, CacheService};
     use redis_tower::command_adapter::CommandAdapter;
 
-    let addr = redis_addr();
-    let frame_svc = FrameService::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let frame_svc = FrameService::connect(addr).await.unwrap();
     let cache_svc = CacheService::new(frame_svc, CacheConfig::default());
     let mut svc = CommandAdapter::new(cache_svc);
 
@@ -1632,8 +1624,8 @@ async fn tower_csc_write_bypasses_cache() {
     use redis_tower::cache_layer::{CacheConfig, CacheService};
     use redis_tower::command_adapter::CommandAdapter;
 
-    let addr = redis_addr();
-    let frame_svc = FrameService::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let frame_svc = FrameService::connect(addr).await.unwrap();
     let cache_svc = CacheService::new(frame_svc, CacheConfig::default());
     let mut svc = CommandAdapter::new(cache_svc);
 
@@ -1652,13 +1644,13 @@ async fn tower_csc_with_invalidation() {
     use redis_tower::command_adapter::CommandAdapter;
     use redis_tower::commands::ClientTracking;
 
-    let addr = redis_addr();
+    let addr = redis_addr().await;
 
     // Data connection as FrameService.
-    let frame_svc = FrameService::connect(&addr).await.unwrap();
+    let frame_svc = FrameService::connect(addr).await.unwrap();
 
     // Tracking connection for invalidation pushes.
-    let mut tracking_conn = RedisConnection::connect_resp3(&addr).await.unwrap();
+    let mut tracking_conn = RedisConnection::connect_resp3(addr).await.unwrap();
     tracking_conn
         .execute(ClientTracking::on().bcast())
         .await
@@ -2293,13 +2285,11 @@ async fn bzpopmax_with_data() {
 #[tokio::test]
 async fn resilient_connection_service_call() {
     // Test ResilientConnection via Service trait (poll_ready + call)
-    let addr = redis_addr();
-    let mut conn = ResilientConnection::new(
-        AddrConnectionFactory::new(&addr),
-        ReconnectConfig::default(),
-    )
-    .await
-    .unwrap();
+    let addr = redis_addr().await;
+    let mut conn =
+        ResilientConnection::new(AddrConnectionFactory::new(addr), ReconnectConfig::default())
+            .await
+            .unwrap();
     let k = key("resilient_svc", "k");
     conn.execute(Set::new(&k, "via_service")).await.unwrap();
     let val: Option<Bytes> = conn.execute(Get::new(&k)).await.unwrap();
@@ -2310,7 +2300,7 @@ async fn resilient_connection_service_call() {
 #[tokio::test]
 async fn resilient_connection_url_factory() {
     // Test UrlConnectionFactory
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let url = format!("redis://{addr}");
     let _conn =
         ResilientConnection::new(UrlConnectionFactory::new(&url), ReconnectConfig::default())
@@ -2323,12 +2313,12 @@ async fn resilient_connection_url_factory() {
 async fn resilient_connection_custom_config() {
     // Test custom backoff config
     use std::time::Duration;
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let config = ReconnectConfig::default()
         .max_retries(3)
         .base_delay(Duration::from_millis(50))
         .max_delay(Duration::from_secs(1));
-    let mut conn = ResilientConnection::new(AddrConnectionFactory::new(&addr), config)
+    let mut conn = ResilientConnection::new(AddrConnectionFactory::new(addr), config)
         .await
         .unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
@@ -2452,8 +2442,8 @@ async fn transaction_with_error_aborts_cleanly() {
 
 #[tokio::test]
 async fn csc_multiple_keys_cached() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k1 = key("csc_multi", "k1");
     let k2 = key("csc_multi", "k2");
@@ -2471,8 +2461,8 @@ async fn csc_multiple_keys_cached() {
 
 #[tokio::test]
 async fn csc_clear_cache() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_clear:k";
     let mut writer = conn().await;
@@ -2489,8 +2479,8 @@ async fn csc_clear_cache() {
 
 #[tokio::test]
 async fn csc_set_bypasses_cache() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_set_bypass:k";
     client.execute(Set::new(k, "val")).await.unwrap();
@@ -2501,8 +2491,8 @@ async fn csc_set_bypasses_cache() {
 
 #[tokio::test]
 async fn csc_hgetall_cached() {
-    let addr = redis_addr();
-    let mut client = redis_tower::CachedClient::connect(&addr).await.unwrap();
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_hgetall:k";
     let mut writer = conn().await;
@@ -2690,10 +2680,10 @@ async fn auto_pipeline_call_pipeline_empty() {
 async fn pool_basic() {
     use redis_tower::pool::ConnectionPool;
 
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let pool = ConnectionPool::connect(2, || {
-        let a = addr.clone();
-        async move { RedisConnection::connect(&a).await }
+        let a = addr;
+        async move { RedisConnection::connect(a).await }
     })
     .await
     .unwrap();
@@ -2709,10 +2699,10 @@ async fn pool_basic() {
 async fn pool_concurrent_tasks() {
     use redis_tower::pool::ConnectionPool;
 
-    let addr = redis_addr();
+    let addr = redis_addr().await;
     let pool = ConnectionPool::connect(4, || {
-        let a = addr.clone();
-        async move { RedisConnection::connect(&a).await }
+        let a = addr;
+        async move { RedisConnection::connect(a).await }
     })
     .await
     .unwrap();
@@ -2739,16 +2729,15 @@ async fn pool_concurrent_tasks() {
 async fn multiplexed_client_reconnects_after_server_restart() {
     // Dedicated standalone on a non-default port so we don't interfere
     // with the shared REDIS instance used by the rest of the suite.
-    let mut standalone = RedisStandalone::new(StandaloneConfig {
-        port: 6401,
-        work_dir: std::path::PathBuf::from("/tmp/redis-mux-reconnect"),
-        ..Default::default()
-    });
-    standalone.start().expect("start standalone");
-    let addr = standalone.addr();
+    let server = RedisServer::new()
+        .port(6401)
+        .start()
+        .await
+        .expect("start standalone");
+    let addr = server.addr();
 
     let client = MultiplexedClient::from_factory(
-        AddrConnectionFactory::new(&addr),
+        AddrConnectionFactory::new(addr),
         AutoPipelineConfig::default(),
         AutoPipelineReconnectConfig::new(
             ReconnectConfig::default()
@@ -2769,7 +2758,7 @@ async fn multiplexed_client_reconnects_after_server_restart() {
 
     // Kill the server. The next request will fail, then the worker will
     // reconnect via the factory.
-    standalone.stop().expect("stop standalone");
+    server.stop();
 
     // One or more requests may error while the server is down / before
     // the worker has reconnected. That's expected -- we just want eventual
@@ -2779,7 +2768,11 @@ async fn multiplexed_client_reconnects_after_server_restart() {
         .await;
 
     // Bring the server back up on the same port.
-    standalone.start().expect("restart standalone");
+    let _restarted = RedisServer::new()
+        .port(6401)
+        .start()
+        .await
+        .expect("restart standalone");
 
     // Poll for recovery: give the worker up to ~3s to reconnect and
     // start serving requests again.
@@ -2818,5 +2811,4 @@ async fn multiplexed_client_reconnects_after_server_restart() {
     assert_eq!(after, Some(Bytes::from("after")));
 
     client.execute(Del::new("mux:reconnect:k")).await.unwrap();
-    let _ = standalone.stop();
 }

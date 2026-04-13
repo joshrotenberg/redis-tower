@@ -1,7 +1,7 @@
 [package]
 name = "redis-test-harness"
 version = "0.1.0"
-description = "Redis topology management for integration testing (cluster, sentinel)"
+description = "Test utilities for redis-tower (mock connections, command test macros)"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -14,4 +14,3 @@ publish = false
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
-rcgen = "0.14"

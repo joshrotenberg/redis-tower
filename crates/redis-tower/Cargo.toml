@@ -55,6 +55,7 @@ tower = { workspace = true, features = ["buffer", "timeout"] }
 bytes = { workspace = true }
 redis-tower-protocol = { workspace = true }
 redis-test-harness = { path = "../redis-test-harness" }
+redis-server-wrapper = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]

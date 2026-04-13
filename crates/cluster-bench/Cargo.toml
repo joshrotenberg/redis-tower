@@ -14,7 +14,7 @@ redis-tower-cluster = { path = "../redis-tower-cluster" }
 redis-tower-commands = { path = "../redis-tower-commands" }
 redis-tower-core = { path = "../redis-tower-core" }
 redis-tower-protocol = { path = "../redis-tower-protocol" }
-redis-test-harness = { path = "../redis-test-harness" }
+redis-server-wrapper = { workspace = true }
 
 redis = { version = "1.2", features = ["cluster", "cluster-async", "tokio-comp"] }
 
