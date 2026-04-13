@@ -2729,15 +2729,44 @@ async fn pool_concurrent_tasks() {
 async fn multiplexed_client_reconnects_after_server_restart() {
     // Dedicated standalone on a non-default port so we don't interfere
     // with the shared REDIS instance used by the rest of the suite.
-    let server = RedisServer::new()
-        .port(6401)
-        .start()
-        .await
-        .expect("start standalone");
-    let addr = server.addr();
+    //
+    // Uses redis-cli directly for start/stop instead of RedisServer handles
+    // because the multi-step shutdown (kill_by_port via lsof) can kill the
+    // test binary itself when it has an open connection to the same port.
+    let port = 6401u16;
+    let addr = format!("127.0.0.1:{port}");
+    let dir = std::path::PathBuf::from("/tmp/redis-reconnect-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = format!(
+        "port {port}\nbind 127.0.0.1\ndaemonize yes\n\
+         pidfile {dir}/redis.pid\nlogfile {dir}/redis.log\n\
+         dir {dir}\nsave \"\"\nprotected-mode no\n",
+        dir = dir.display(),
+    );
+    std::fs::write(dir.join("redis.conf"), &conf).unwrap();
+    assert!(
+        std::process::Command::new("redis-server")
+            .arg(dir.join("redis.conf"))
+            .status()
+            .expect("spawn redis-server")
+            .success(),
+        "redis-server failed to start on port {port}"
+    );
+    // Wait for ready.
+    for _ in 0..100 {
+        if std::process::Command::new("redis-cli")
+            .args(["-h", "127.0.0.1", "-p", &port.to_string(), "PING"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 
     let client = MultiplexedClient::from_factory(
-        AddrConnectionFactory::new(addr),
+        AddrConnectionFactory::new(&addr),
         AutoPipelineConfig::default(),
         AutoPipelineReconnectConfig::new(
             ReconnectConfig::default()
@@ -2756,9 +2785,17 @@ async fn multiplexed_client_reconnects_after_server_restart() {
     let before: Option<Bytes> = client.execute(Get::new("mux:reconnect:k")).await.unwrap();
     assert_eq!(before, Some(Bytes::from("before")));
 
-    // Kill the server. The next request will fail, then the worker will
-    // reconnect via the factory.
-    server.stop();
+    // Kill the server via redis-cli SHUTDOWN.
+    let _ = std::process::Command::new("redis-cli")
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "SHUTDOWN",
+            "NOSAVE",
+        ])
+        .status();
 
     // One or more requests may error while the server is down / before
     // the worker has reconnected. That's expected -- we just want eventual
@@ -2768,11 +2805,14 @@ async fn multiplexed_client_reconnects_after_server_restart() {
         .await;
 
     // Bring the server back up on the same port.
-    let _restarted = RedisServer::new()
-        .port(6401)
-        .start()
-        .await
-        .expect("restart standalone");
+    assert!(
+        std::process::Command::new("redis-server")
+            .arg(dir.join("redis.conf"))
+            .status()
+            .expect("restart redis-server")
+            .success(),
+        "redis-server restart failed"
+    );
 
     // Poll for recovery: give the worker up to ~3s to reconnect and
     // start serving requests again.
@@ -2811,4 +2851,16 @@ async fn multiplexed_client_reconnects_after_server_restart() {
     assert_eq!(after, Some(Bytes::from("after")));
 
     client.execute(Del::new("mux:reconnect:k")).await.unwrap();
+
+    // Clean up the dedicated server.
+    let _ = std::process::Command::new("redis-cli")
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "SHUTDOWN",
+            "NOSAVE",
+        ])
+        .status();
 }
