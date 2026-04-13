@@ -20,7 +20,7 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/joshrotenberg/redis-tower"
 homepage = "https://github.com/joshrotenberg/redis-tower"
 readme = "README.md"
-rust-version = "1.87"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal crates

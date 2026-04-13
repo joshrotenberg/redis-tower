@@ -68,10 +68,10 @@ impl SentinelConnection {
         }
 
         let result = self.conn.execute(cmd).await;
-        if let Err(ref e) = result {
-            if e.is_connection_error() {
-                self.needs_rediscovery = true;
-            }
+        if let Err(ref e) = result
+            && e.is_connection_error()
+        {
+            self.needs_rediscovery = true;
         }
         result
     }

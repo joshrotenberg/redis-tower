@@ -69,11 +69,11 @@ impl ResilientRedisClient {
         let mut conn = self.conn.lock().await;
         let result = conn.execute(cmd).await;
 
-        if let Err(ref e) = result {
-            if e.is_connection_error() {
-                drop(conn);
-                self.reconnect().await;
-            }
+        if let Err(ref e) = result
+            && e.is_connection_error()
+        {
+            drop(conn);
+            self.reconnect().await;
         }
 
         result

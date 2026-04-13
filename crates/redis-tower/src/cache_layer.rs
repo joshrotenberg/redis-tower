@@ -102,11 +102,11 @@ where
             // Try cache lookup.
             // We can't await inside call(), so we need to check synchronously
             // or defer to the future. Use try_lock for non-blocking check.
-            if let Ok(guard) = cache.try_read() {
-                if let Some(cached) = guard.get(&key_clone) {
-                    let result = cached.clone();
-                    return Box::pin(async move { Ok(result) });
-                }
+            if let Ok(guard) = cache.try_read()
+                && let Some(cached) = guard.get(&key_clone)
+            {
+                let result = cached.clone();
+                return Box::pin(async move { Ok(result) });
             }
         }
 
@@ -119,17 +119,18 @@ where
             let response = future.await?;
 
             // Cache the response if this was a cacheable command.
-            if let Some(key) = cache_key {
-                if !matches!(response, Frame::Error(_)) {
-                    let mut guard = cache.write().await;
-                    // Evict oldest if at capacity (simple eviction -- not LRU).
-                    if max_size > 0 && guard.len() >= max_size {
-                        if let Some(first_key) = guard.keys().next().cloned() {
-                            guard.remove(&first_key);
-                        }
-                    }
-                    guard.insert(key, response.clone());
+            if let Some(key) = cache_key
+                && !matches!(response, Frame::Error(_))
+            {
+                let mut guard = cache.write().await;
+                // Evict oldest if at capacity (simple eviction -- not LRU).
+                if max_size > 0
+                    && guard.len() >= max_size
+                    && let Some(first_key) = guard.keys().next().cloned()
+                {
+                    guard.remove(&first_key);
                 }
+                guard.insert(key, response.clone());
             }
 
             Ok(response)

@@ -24,16 +24,16 @@ fn ensure_redis() -> &'static RedisStandalone {
                 .unwrap_or(&url)
                 .trim_end_matches('/')
                 .to_string();
-            if let Some((host, port_str)) = addr.rsplit_once(':') {
-                if let Ok(port) = port_str.parse::<u16>() {
-                    // Return a "fake" standalone that points at the external Redis.
-                    // It won't start/stop anything since the server is already running.
-                    return RedisStandalone::new(StandaloneConfig {
-                        port,
-                        bind: host.to_string(),
-                        ..Default::default()
-                    });
-                }
+            if let Some((host, port_str)) = addr.rsplit_once(':')
+                && let Ok(port) = port_str.parse::<u16>()
+            {
+                // Return a "fake" standalone that points at the external Redis.
+                // It won't start/stop anything since the server is already running.
+                return RedisStandalone::new(StandaloneConfig {
+                    port,
+                    bind: host.to_string(),
+                    ..Default::default()
+                });
             }
         }
 

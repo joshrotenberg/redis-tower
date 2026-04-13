@@ -83,7 +83,7 @@ body:
     attributes:
       label: Rust Version
       description: What Rust version are you using?
-      placeholder: "rustc 1.87.0"
+      placeholder: "rustc 1.88.0"
 
   - type: textarea
     id: additional

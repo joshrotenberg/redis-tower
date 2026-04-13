@@ -85,11 +85,11 @@ impl ReconnectService {
     }
 
     fn trigger_reconnect(&mut self, attempt: usize) {
-        if let Some(max) = self.config.max_retries {
-            if attempt > max {
-                self.state = State::Failed;
-                return;
-            }
+        if let Some(max) = self.config.max_retries
+            && attempt > max
+        {
+            self.state = State::Failed;
+            return;
         }
         let delay = self.config.delay_for_attempt(attempt);
         self.state = State::WaitingToReconnect {
@@ -156,10 +156,10 @@ impl Service<Frame> for ReconnectService {
 
         Box::pin(async move {
             let result = future.await;
-            if let Err(ref e) = result {
-                if e.is_connection_error() {
-                    needs_reconnect.store(true, Ordering::Release);
-                }
+            if let Err(ref e) = result
+                && e.is_connection_error()
+            {
+                needs_reconnect.store(true, Ordering::Release);
             }
             result
         })

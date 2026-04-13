@@ -175,11 +175,11 @@ impl RedisSentinel {
                     &self.config.master_name,
                 ])
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let raw = String::from_utf8_lossy(&out.stdout).to_string();
-                    return Ok(parse_sentinel_master(&raw, &self.config.master_name));
-                }
+            if let Ok(out) = output
+                && out.status.success()
+            {
+                let raw = String::from_utf8_lossy(&out.stdout).to_string();
+                return Ok(parse_sentinel_master(&raw, &self.config.master_name));
             }
         }
         Err(io::Error::new(
@@ -191,13 +191,12 @@ impl RedisSentinel {
     pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
         let start = Instant::now();
         loop {
-            if let Ok(status) = self.poke() {
-                if status.flags == "master"
-                    && status.num_slaves >= self.config.num_replicas as u64
-                    && status.num_sentinels >= self.config.num_sentinels as u64
-                {
-                    return Ok(());
-                }
+            if let Ok(status) = self.poke()
+                && status.flags == "master"
+                && status.num_slaves >= self.config.num_replicas as u64
+                && status.num_sentinels >= self.config.num_sentinels as u64
+            {
+                return Ok(());
             }
             if start.elapsed() > timeout {
                 return Err(io::Error::new(
@@ -285,10 +284,11 @@ impl RedisSentinel {
             let output = Command::new(&self.config.redis_cli_bin)
                 .args(["-h", &self.config.bind, "-p", &port.to_string(), "PING"])
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
-                    return Ok(());
-                }
+            if let Ok(out) = output
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "PONG"
+            {
+                return Ok(());
             }
             if start.elapsed() > timeout {
                 return Err(io::Error::new(

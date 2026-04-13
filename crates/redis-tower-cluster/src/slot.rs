@@ -45,12 +45,11 @@ fn crc16(data: &[u8]) -> u16 {
 /// - `foo{}bar` -> entire key (empty tag ignored)
 /// - `foo` -> entire key
 pub fn extract_hash_tag(key: &[u8]) -> &[u8] {
-    if let Some(start) = key.iter().position(|&b| b == b'{') {
-        if let Some(end) = key[start + 1..].iter().position(|&b| b == b'}') {
-            if end > 0 {
-                return &key[start + 1..start + 1 + end];
-            }
-        }
+    if let Some(start) = key.iter().position(|&b| b == b'{')
+        && let Some(end) = key[start + 1..].iter().position(|&b| b == b'}')
+        && end > 0
+    {
+        return &key[start + 1..start + 1 + end];
     }
     key
 }

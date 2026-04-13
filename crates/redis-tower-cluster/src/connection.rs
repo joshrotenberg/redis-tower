@@ -445,15 +445,15 @@ impl ClusterConnection {
     /// is found, the host override is applied (replacing the host but
     /// keeping the port).
     fn remap_addr(&self, addr: &str) -> String {
-        if let Some(ref map) = self.address_map {
-            if let Some(mapped) = map.get(addr) {
-                return mapped.clone();
-            }
+        if let Some(ref map) = self.address_map
+            && let Some(mapped) = map.get(addr)
+        {
+            return mapped.clone();
         }
-        if let Some(ref host) = self.host_override {
-            if let Some((_old_host, port)) = addr.rsplit_once(':') {
-                return format!("{host}:{port}");
-            }
+        if let Some(ref host) = self.host_override
+            && let Some((_old_host, port)) = addr.rsplit_once(':')
+        {
+            return format!("{host}:{port}");
         }
         addr.to_string()
     }
@@ -469,16 +469,16 @@ impl ClusterConnection {
 
     /// Update the topology to assign a slot to a new node (after MOVED).
     fn update_slot_owner(&mut self, slot: u16, addr: &str) {
-        if let Some((host, port_str)) = addr.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                for range in &mut self.topology.slot_ranges {
-                    if slot >= range.start && slot <= range.end {
-                        range.master = NodeAddr {
-                            host: host.to_string(),
-                            port,
-                        };
-                        return;
-                    }
+        if let Some((host, port_str)) = addr.rsplit_once(':')
+            && let Ok(port) = port_str.parse::<u16>()
+        {
+            for range in &mut self.topology.slot_ranges {
+                if slot >= range.start && slot <= range.end {
+                    range.master = NodeAddr {
+                        host: host.to_string(),
+                        port,
+                    };
+                    return;
                 }
             }
         }
@@ -621,13 +621,12 @@ pub(crate) fn remap_topology_with_map(
 /// Remap a single `NodeAddr` if it matches an entry in the address map.
 fn remap_node_addr(node: &mut NodeAddr, map: &HashMap<String, String>) {
     let key = node.addr_string();
-    if let Some(mapped) = map.get(&key) {
-        if let Some((host, port_str)) = mapped.rsplit_once(':') {
-            if let Ok(port) = port_str.parse::<u16>() {
-                node.host = host.to_string();
-                node.port = port;
-            }
-        }
+    if let Some(mapped) = map.get(&key)
+        && let Some((host, port_str)) = mapped.rsplit_once(':')
+        && let Ok(port) = port_str.parse::<u16>()
+    {
+        node.host = host.to_string();
+        node.port = port;
     }
 }
 

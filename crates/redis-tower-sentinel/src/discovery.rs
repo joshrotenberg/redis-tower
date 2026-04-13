@@ -125,10 +125,10 @@ fn parse_replicas_response(frame: &Frame) -> Result<Vec<String>, RedisError> {
     let mut addrs = Vec::new();
     for item in items {
         // Each replica is a flat array of alternating key-value pairs.
-        if let Ok(map) = parse_flat_map(item) {
-            if let (Some(ip), Some(port)) = (map.get("ip"), map.get("port")) {
-                addrs.push(format!("{ip}:{port}"));
-            }
+        if let Ok(map) = parse_flat_map(item)
+            && let (Some(ip), Some(port)) = (map.get("ip"), map.get("port"))
+        {
+            addrs.push(format!("{ip}:{port}"));
         }
     }
     Ok(addrs)

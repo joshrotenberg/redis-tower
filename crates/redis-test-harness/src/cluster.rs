@@ -210,11 +210,11 @@ impl RedisCluster {
             let output = Command::new(&self.config.redis_cli_bin)
                 .args(&args)
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() {
-                    let raw = String::from_utf8_lossy(&out.stdout).to_string();
-                    return Ok(parse_cluster_info(&raw));
-                }
+            if let Ok(out) = output
+                && out.status.success()
+            {
+                let raw = String::from_utf8_lossy(&out.stdout).to_string();
+                return Ok(parse_cluster_info(&raw));
             }
         }
         Err(io::Error::new(
@@ -226,10 +226,11 @@ impl RedisCluster {
     pub fn wait_for_healthy(&self, timeout: Duration) -> io::Result<()> {
         let start = Instant::now();
         loop {
-            if let Ok(status) = self.poke() {
-                if status.cluster_state == "ok" && status.cluster_slots_ok == 16384 {
-                    return Ok(());
-                }
+            if let Ok(status) = self.poke()
+                && status.cluster_state == "ok"
+                && status.cluster_slots_ok == 16384
+            {
+                return Ok(());
             }
             if start.elapsed() > timeout {
                 return Err(io::Error::new(
@@ -260,10 +261,11 @@ impl RedisCluster {
             let output = Command::new(&self.config.redis_cli_bin)
                 .args(&args)
                 .output();
-            if let Ok(out) = output {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "PONG" {
-                    return Ok(());
-                }
+            if let Ok(out) = output
+                && out.status.success()
+                && String::from_utf8_lossy(&out.stdout).trim() == "PONG"
+            {
+                return Ok(());
             }
             if start.elapsed() > timeout {
                 return Err(io::Error::new(
