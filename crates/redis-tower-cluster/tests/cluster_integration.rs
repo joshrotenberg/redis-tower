@@ -179,27 +179,6 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
         assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
         client.execute(Del::new(&k)).await.unwrap();
     }
-
-    // Shut down nodes via redis-cli and leak the handle to prevent
-    // RedisServerHandle::stop() from running kill_by_port, which can
-    // SIGKILL the test binary via open sockets (redis-server-wrapper#76).
-    drop(client);
-    drop(no_auth);
-    for port in 17300..17303 {
-        let _ = std::process::Command::new("redis-cli")
-            .args([
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &port.to_string(),
-                "-a",
-                "cluster-secret",
-                "SHUTDOWN",
-                "NOSAVE",
-            ])
-            .output();
-    }
-    std::mem::forget(cluster);
 }
 
 // -- TLS cluster tests --
