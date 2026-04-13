@@ -1,46 +1,38 @@
-//! Sentinel integration tests using redis-test-harness.
+//! Sentinel integration tests.
 //!
 //! Run with: `cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored`
 
-use std::sync::OnceLock;
-
 use bytes::Bytes;
-use redis_test_harness::sentinel::RedisSentinel;
+use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
 use redis_tower_commands::*;
 use redis_tower_sentinel::{SentinelClient, SentinelConnection};
+use tokio::sync::OnceCell;
 
-static SENTINEL: OnceLock<RedisSentinel> = OnceLock::new();
+static SENTINEL: OnceCell<RedisSentinelHandle> = OnceCell::const_new();
 
-fn ensure_sentinel() -> &'static RedisSentinel {
-    SENTINEL.get_or_init(|| {
-        use redis_test_harness::sentinel::SentinelConfig;
-        // Use non-default ports to avoid conflicts with other services.
-        let mut sentinel = RedisSentinel::new(SentinelConfig {
-            master_port: 6390,
-            replica_base_port: 6391,
-            sentinel_base_port: 26389,
-            ..Default::default()
-        });
-        let _ = sentinel.stop();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        sentinel.start().expect("failed to start sentinel topology");
-        sentinel
-            .wait_for_healthy(std::time::Duration::from_secs(15))
-            .expect("sentinel topology not healthy");
-        sentinel
-    })
+async fn ensure_sentinel() -> &'static RedisSentinelHandle {
+    SENTINEL
+        .get_or_init(|| async {
+            RedisSentinel::builder()
+                .master_port(6390)
+                .replica_base_port(6391)
+                .sentinel_base_port(26389)
+                .replicas(2)
+                .sentinels(3)
+                .quorum(2)
+                .start()
+                .await
+                .expect("failed to start sentinel topology")
+        })
+        .await
 }
 
-fn sentinel_addrs() -> Vec<String> {
-    let s = ensure_sentinel();
-    s.config()
-        .sentinel_ports()
-        .map(|p| format!("{}:{}", s.config().bind, p))
-        .collect()
+async fn sentinel_addrs() -> Vec<String> {
+    ensure_sentinel().await.sentinel_addrs()
 }
 
 async fn sentinel_conn() -> SentinelConnection {
-    let addrs = sentinel_addrs();
+    let addrs = sentinel_addrs().await;
     SentinelConnection::connect(&addrs, "mymaster")
         .await
         .expect("failed to connect via sentinel")
@@ -58,7 +50,7 @@ redis_test_harness::command_tests!(sentinel_conn, "sentinel_cmd", ignored);
 #[tokio::test]
 #[ignore]
 async fn sentinel_discovers_master() {
-    let addrs = sentinel_addrs();
+    let addrs = sentinel_addrs().await;
     let addr = redis_tower_sentinel::discovery::discover_master(&addrs, "mymaster")
         .await
         .unwrap();
@@ -71,11 +63,10 @@ async fn sentinel_discovers_master() {
 #[tokio::test]
 #[ignore]
 async fn sentinel_discovers_replicas() {
-    let addrs = sentinel_addrs();
+    let addrs = sentinel_addrs().await;
     let replicas = redis_tower_sentinel::discovery::discover_replicas(&addrs, "mymaster")
         .await
         .unwrap();
-    // Default config: 2 replicas.
     assert_eq!(replicas.len(), 2, "expected 2 replicas, got {replicas:?}");
 }
 
@@ -93,7 +84,7 @@ async fn sentinel_set_and_get() {
 #[tokio::test]
 #[ignore]
 async fn sentinel_client_shared() {
-    let addrs = sentinel_addrs();
+    let addrs = sentinel_addrs().await;
     let client = SentinelClient::connect(&addrs, "mymaster").await.unwrap();
     let k = key("client_shared", "k");
     client.execute(Set::new(&k, "val")).await.unwrap();
@@ -111,7 +102,6 @@ async fn sentinel_client_shared() {
 #[ignore]
 async fn sentinel_rediscover() {
     let mut conn = sentinel_conn().await;
-    // Force rediscovery -- should reconnect to the same master.
     conn.rediscover().await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");

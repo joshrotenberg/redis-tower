@@ -2,52 +2,40 @@
 //!
 //! Run with: `cargo test -p redis-tower-cluster --test cluster_integration -- --ignored`
 
-use std::sync::OnceLock;
-
 use bytes::Bytes;
-use redis_test_harness::cluster::{ClusterConfig, RedisCluster};
+use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
 use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient};
 use redis_tower_commands::*;
+use tokio::sync::OnceCell;
 
-static CLUSTER: OnceLock<RedisCluster> = OnceLock::new();
+static CLUSTER: OnceCell<RedisClusterHandle> = OnceCell::const_new();
 
-fn ensure_cluster() -> &'static RedisCluster {
-    CLUSTER.get_or_init(|| {
-        // Use 17200..17202 instead of the harness default 7000..7002 to
-        // avoid conflicts with macOS Control Center, which opportunistically
-        // binds port 7000 as "afs3-fileserver" and makes local cluster
-        // tests flaky. Kept distinct from cluster-bench (17000..) and the
-        // credentials test (7100..) to allow parallel runs.
-        let mut cluster = RedisCluster::new(ClusterConfig {
-            masters: 3,
-            replicas_per_master: 0,
-            base_port: 17200,
-            work_dir: std::path::PathBuf::from("/tmp/redis-cluster-integration"),
-            ..Default::default()
-        });
-        // Stop any leftover nodes from a previous run.
-        let _ = cluster.stop();
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        cluster.start().expect("failed to start Redis cluster");
-        cluster
-            .wait_for_healthy(std::time::Duration::from_secs(10))
-            .expect("cluster not healthy");
-        cluster
-    })
+async fn ensure_cluster() -> &'static RedisClusterHandle {
+    CLUSTER
+        .get_or_init(|| async {
+            // Use 17200..17202 instead of the default 7000..7002 to
+            // avoid conflicts with macOS Control Center on port 7000.
+            RedisCluster::builder()
+                .masters(3)
+                .replicas_per_master(0)
+                .base_port(17200)
+                .start()
+                .await
+                .expect("failed to start Redis cluster")
+        })
+        .await
 }
 
 async fn cluster_conn() -> ClusterConnection {
-    let cluster = ensure_cluster();
-    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
-    ClusterConnection::connect(&addr)
+    let cluster = ensure_cluster().await;
+    ClusterConnection::connect(&cluster.addr())
         .await
         .expect("failed to connect to cluster")
 }
 
 async fn mux_cluster_conn() -> MultiplexedClusterClient {
-    let cluster = ensure_cluster();
-    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
-    MultiplexedClusterClient::connect(&addr)
+    let cluster = ensure_cluster().await;
+    MultiplexedClusterClient::connect(&cluster.addr())
         .await
         .expect("failed to connect to multiplexed cluster")
 }
@@ -125,9 +113,6 @@ async fn mux_cluster_topology_has_three_masters() {
 #[tokio::test]
 #[ignore]
 async fn mux_cluster_concurrent_writes_from_many_tasks() {
-    // With the multiplexed client, dozens of tasks should share the per-node
-    // workers and all make progress. This exercises the "clone the client,
-    // spawn many tasks" usage that justified the whole design.
     let cluster = mux_cluster_conn().await;
     let mut handles = Vec::new();
     for i in 0..64 {
@@ -160,49 +145,33 @@ async fn mux_cluster_refresh_topology() {
 #[tokio::test]
 #[ignore]
 async fn mux_cluster_credentials_authenticate_on_connect() {
-    // Dedicated 3-master cluster with `requirepass` set, on its own port
-    // range so we don't disturb the shared CLUSTER in other tests.
     use redis_tower::credentials::StaticCredentials;
-    use std::collections::HashMap;
 
-    let mut extra = HashMap::new();
-    extra.insert("requirepass".to_string(), "cluster-secret".to_string());
-    extra.insert("masterauth".to_string(), "cluster-secret".to_string());
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17300)
+        .password("cluster-secret")
+        .start()
+        .await
+        .expect("failed to start auth cluster");
 
-    let mut cluster = RedisCluster::new(ClusterConfig {
-        masters: 3,
-        replicas_per_master: 0,
-        base_port: 17300,
-        work_dir: std::path::PathBuf::from("/tmp/redis-cluster-auth"),
-        extra_config: extra,
-        ..Default::default()
-    });
-    let _ = cluster.stop();
-    std::thread::sleep(std::time::Duration::from_millis(500));
-    cluster.start().expect("failed to start auth cluster");
-    cluster
-        .wait_for_healthy(std::time::Duration::from_secs(10))
-        .expect("auth cluster not healthy");
+    let seed = cluster.addr();
 
-    let seed = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
-
-    // Without credentials, connect must fail -- AUTH is required before
-    // CLUSTER SLOTS can run.
+    // Without credentials, connect must fail.
     let no_auth = MultiplexedClusterClient::connect(&seed).await;
     assert!(
         no_auth.is_err(),
         "connect without credentials should fail on an auth cluster"
     );
 
-    // With credentials via the builder, connect should succeed and commands
-    // should work across all three masters.
+    // With credentials via the builder, connect should succeed.
     let client = MultiplexedClusterClient::builder(&seed)
         .credentials(StaticCredentials::password("cluster-secret"))
         .connect()
         .await
         .expect("connect with credentials should succeed");
 
-    // Spread writes across slots so we actually exercise multiple nodes.
     for i in 0..16 {
         let k = format!("mux_cluster_auth:{i}");
         client.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
@@ -210,14 +179,12 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
         assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
         client.execute(Del::new(&k)).await.unwrap();
     }
-
-    let _ = cluster.stop();
 }
 
 // -- TLS cluster tests --
 //
 // These spin up a TLS-enabled cluster automatically using self-signed
-// certificates generated by the test harness. No external infrastructure
+// certificates generated by redis-server-wrapper. No external infrastructure
 // or env vars needed.
 //
 // Run with:
@@ -225,34 +192,45 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
 //       --test cluster_integration -- --ignored --test-threads=1
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-static TLS_CLUSTER: OnceLock<Option<RedisCluster>> = OnceLock::new();
+static TLS_CLUSTER: OnceCell<Option<RedisClusterHandle>> = OnceCell::const_new();
 
 /// Try to start a TLS cluster. Returns `None` if redis-server was not
 /// compiled with TLS support (e.g. missing `BUILD_TLS=yes`).
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-fn ensure_tls_cluster() -> Option<&'static RedisCluster> {
+async fn ensure_tls_cluster() -> Option<&'static RedisClusterHandle> {
     TLS_CLUSTER
-        .get_or_init(|| {
-            let mut cluster = RedisCluster::new(ClusterConfig {
-                masters: 3,
-                replicas_per_master: 0,
-                base_port: 17400,
-                work_dir: std::path::PathBuf::from("/tmp/redis-cluster-tls-integration"),
-                tls: true,
-                ..Default::default()
-            });
-            let _ = cluster.stop();
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Err(e) = cluster.start() {
-                eprintln!("skipping TLS tests: failed to start TLS cluster: {e}");
-                return None;
+        .get_or_init(|| async {
+            let certs_dir = std::path::PathBuf::from("/tmp/redis-cluster-tls-integration/certs");
+            let certs = match redis_server_wrapper::tls::generate_test_certs(&certs_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("skipping TLS tests: failed to generate certs: {e}");
+                    return None;
+                }
+            };
+
+            match RedisCluster::builder()
+                .masters(3)
+                .replicas_per_master(0)
+                .base_port(17400)
+                .tls_port(17400)
+                .tls_cert_file(&certs.cert_file)
+                .tls_key_file(&certs.key_file)
+                .tls_ca_cert_file(&certs.ca_cert_file)
+                .tls_auth_clients(false)
+                .tls_replication(true)
+                .tls_cluster(true)
+                .start()
+                .await
+            {
+                Ok(cluster) => Some(cluster),
+                Err(e) => {
+                    eprintln!("skipping TLS tests: failed to start TLS cluster: {e}");
+                    None
+                }
             }
-            if let Err(e) = cluster.wait_for_healthy(std::time::Duration::from_secs(15)) {
-                eprintln!("skipping TLS tests: TLS cluster not healthy: {e}");
-                return None;
-            }
-            Some(cluster)
         })
+        .await
         .as_ref()
 }
 
@@ -263,7 +241,6 @@ fn tls_config_for_test() -> redis_tower_core::tls::TlsConfig {
     #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
     let tls = redis_tower_core::tls::TlsConfig::default_native_tls();
 
-    // Self-signed certs need relaxed verification.
     tls.danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)
 }
@@ -272,11 +249,11 @@ fn tls_config_for_test() -> redis_tower_core::tls::TlsConfig {
 #[tokio::test]
 #[ignore = "requires redis-server with TLS support"]
 async fn mux_cluster_tls_connect_and_roundtrip() {
-    let Some(cluster) = ensure_tls_cluster() else {
+    let Some(cluster) = ensure_tls_cluster().await else {
         eprintln!("skipping: redis-server not compiled with TLS support");
         return;
     };
-    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
+    let addr = cluster.addr();
 
     let client = MultiplexedClusterClient::builder(&addr)
         .tls(tls_config_for_test())
@@ -303,11 +280,11 @@ async fn mux_cluster_tls_connect_and_roundtrip() {
 #[tokio::test]
 #[ignore = "requires redis-server with TLS support"]
 async fn cluster_connection_tls_connect_and_roundtrip() {
-    let Some(cluster) = ensure_tls_cluster() else {
+    let Some(cluster) = ensure_tls_cluster().await else {
         eprintln!("skipping: redis-server not compiled with TLS support");
         return;
     };
-    let addr = format!("{}:{}", cluster.config().bind, cluster.config().base_port);
+    let addr = cluster.addr();
 
     let mut conn = ClusterConnection::builder(&addr)
         .tls(tls_config_for_test())

@@ -43,3 +43,4 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 redis-test-harness = { path = "../redis-test-harness" }
+redis-server-wrapper = { workspace = true }
