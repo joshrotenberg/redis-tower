@@ -97,11 +97,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install OpenSSL dev headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
       - name: Cache Redis build
         uses: actions/cache@v4
         with:
           path: ~/redis
-          key: redis-${{ matrix.redis }}-${{ runner.os }}
+          key: redis-tls-${{ matrix.redis }}-${{ runner.os }}
 
       - name: Build Redis ${{ matrix.redis }}
         run: |
@@ -109,7 +112,7 @@ jobs:
             cd /tmp
             curl -fsSL https://github.com/redis/redis/archive/refs/tags/${{ matrix.redis }}.tar.gz | tar xz
             cd redis-${{ matrix.redis }}
-            make -j$(nproc)
+            make -j$(nproc) BUILD_TLS=yes
             mkdir -p ~/redis/bin
             cp src/redis-server src/redis-cli ~/redis/bin/
           fi

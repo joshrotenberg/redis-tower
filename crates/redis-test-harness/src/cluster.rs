@@ -9,6 +9,77 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// TLS configuration for a cluster.
+///
+/// When present, the cluster nodes listen on `tls-port` instead of the
+/// plaintext `port`. Self-signed certificates can be generated
+/// automatically via [`generate_tls_certs`].
+#[derive(Debug, Clone)]
+pub struct TlsClusterConfig {
+    /// Path to the CA certificate file (PEM).
+    pub ca_cert_file: PathBuf,
+    /// Path to the server certificate file (PEM).
+    pub cert_file: PathBuf,
+    /// Path to the server private key file (PEM).
+    pub key_file: PathBuf,
+}
+
+/// Generate self-signed CA and server certificates for testing.
+///
+/// Writes `ca.crt`, `server.crt`, and `server.key` into `dir` and
+/// returns a [`TlsClusterConfig`] pointing at them.
+pub fn generate_tls_certs(dir: &std::path::Path) -> io::Result<TlsClusterConfig> {
+    use rcgen::{CertificateParams, Issuer, KeyPair};
+
+    std::fs::create_dir_all(dir)?;
+
+    // Generate CA key pair and self-signed CA cert.
+    let ca_key = KeyPair::generate().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut ca_params = CertificateParams::new(Vec::<String>::new())
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "redis-test-ca");
+    let ca_cert = ca_params
+        .clone()
+        .self_signed(&ca_key)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+    let ca_issuer = Issuer::new(ca_params, &ca_key);
+
+    // Generate server key pair and cert signed by the CA.
+    let server_key = KeyPair::generate().map_err(|e| io::Error::other(e.to_string()))?;
+    let mut server_params =
+        CertificateParams::new(vec!["localhost".to_string(), "127.0.0.1".to_string()])
+            .map_err(|e| io::Error::other(e.to_string()))?;
+    server_params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    // Add 127.0.0.1 as a SAN IP address.
+    server_params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::LOCALHOST,
+        )));
+    let server_cert = server_params
+        .signed_by(&server_key, &ca_issuer)
+        .map_err(|e| io::Error::other(e.to_string()))?;
+
+    let ca_cert_path = dir.join("ca.crt");
+    let cert_path = dir.join("server.crt");
+    let key_path = dir.join("server.key");
+
+    std::fs::write(&ca_cert_path, ca_cert.pem())?;
+    std::fs::write(&cert_path, server_cert.pem())?;
+    std::fs::write(&key_path, server_key.serialize_pem())?;
+
+    Ok(TlsClusterConfig {
+        ca_cert_file: ca_cert_path,
+        cert_file: cert_path,
+        key_file: key_path,
+    })
+}
+
 /// Configuration for the cluster as a whole.
 #[derive(Debug, Clone)]
 pub struct ClusterConfig {
@@ -25,6 +96,10 @@ pub struct ClusterConfig {
     /// `redis-cli --cluster create` and to the shutdown calls so the harness
     /// can still talk to the nodes.
     pub extra_config: HashMap<String, String>,
+    /// Enable TLS on the cluster. When `true`, `start()` generates
+    /// self-signed certificates in `work_dir/tls/` and configures every
+    /// node with `tls-port` (plaintext port disabled).
+    pub tls: bool,
 }
 
 impl Default for ClusterConfig {
@@ -38,6 +113,7 @@ impl Default for ClusterConfig {
             redis_server_bin: "redis-server".into(),
             redis_cli_bin: "redis-cli".into(),
             extra_config: HashMap::new(),
+            tls: false,
         }
     }
 }
@@ -69,6 +145,8 @@ pub struct ClusterStatus {
 pub struct RedisCluster {
     config: ClusterConfig,
     started: bool,
+    /// Populated by `start()` when `config.tls` is `true`.
+    tls_certs: Option<TlsClusterConfig>,
 }
 
 impl RedisCluster {
@@ -76,7 +154,15 @@ impl RedisCluster {
         Self {
             config,
             started: false,
+            tls_certs: None,
         }
+    }
+
+    /// Returns the TLS certificate paths if TLS is enabled.
+    ///
+    /// Only populated after `start()` is called with `config.tls = true`.
+    pub fn tls_certs(&self) -> Option<&TlsClusterConfig> {
+        self.tls_certs.as_ref()
     }
 
     pub fn with_defaults() -> Self {
@@ -95,14 +181,25 @@ impl RedisCluster {
         }
         std::fs::create_dir_all(dir)?;
 
+        // Generate TLS certs if TLS is enabled.
+        if self.config.tls {
+            let tls = generate_tls_certs(&dir.join("tls"))?;
+            self.tls_certs = Some(tls);
+        }
+
         // Start each node.
         for port in self.config.ports() {
             let node_dir = dir.join(format!("node-{port}"));
             std::fs::create_dir_all(&node_dir)?;
 
             let conf_path = node_dir.join("redis.conf");
+            let port_line = if self.config.tls {
+                format!("port 0\ntls-port {port}\n")
+            } else {
+                format!("port {port}\n")
+            };
             let mut conf = format!(
-                "port {port}\nbind {bind}\ndaemonize yes\n\
+                "{port_line}bind {bind}\ndaemonize yes\n\
                  pidfile {ndir}/redis.pid\nlogfile {ndir}/redis.log\n\
                  dir {ndir}\nsave \"\"\nprotected-mode no\n\
                  cluster-enabled yes\ncluster-config-file {ndir}/nodes.conf\n\
@@ -110,6 +207,15 @@ impl RedisCluster {
                 bind = self.config.bind,
                 ndir = node_dir.display(),
             );
+            if let Some(ref tls) = self.tls_certs {
+                conf.push_str(&format!(
+                    "tls-cert-file {cert}\ntls-key-file {key}\ntls-ca-cert-file {ca}\n\
+                     tls-auth-clients no\ntls-replication yes\ntls-cluster yes\n",
+                    cert = tls.cert_file.display(),
+                    key = tls.key_file.display(),
+                    ca = tls.ca_cert_file.display(),
+                ));
+            }
             for (k, v) in &self.config.extra_config {
                 conf.push_str(&format!("{k} {v}\n"));
             }
@@ -149,6 +255,9 @@ impl RedisCluster {
             args.push("-a".into());
             args.push(pw.clone());
         }
+        if let Some(ref tls) = self.tls_certs {
+            append_tls_cli_args(&mut args, tls);
+        }
 
         let output = Command::new(&self.config.redis_cli_bin)
             .args(&args)
@@ -156,8 +265,9 @@ impl RedisCluster {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
             return Err(io::Error::other(format!(
-                "redis-cli --cluster create failed: {stderr}"
+                "redis-cli --cluster create failed: {stderr}{stdout}"
             )));
         }
 
@@ -166,26 +276,49 @@ impl RedisCluster {
     }
 
     pub fn stop(&self) -> io::Result<()> {
-        if self.started {
-            let pw = self.config.extra_config.get("requirepass").cloned();
-            for port in self.config.ports() {
-                let mut args: Vec<String> = vec![
-                    "-h".into(),
-                    self.config.bind.clone(),
-                    "-p".into(),
-                    port.to_string(),
-                ];
-                if let Some(ref p) = pw {
-                    args.push("-a".into());
-                    args.push(p.clone());
+        // Always try to stop nodes -- even if `started` is false there may
+        // be leftovers from a previous run.
+        let pw = self.config.extra_config.get("requirepass").cloned();
+        for port in self.config.ports() {
+            // Try graceful shutdown via redis-cli first.
+            let mut args: Vec<String> = vec![
+                "-h".into(),
+                self.config.bind.clone(),
+                "-p".into(),
+                port.to_string(),
+            ];
+            if let Some(ref p) = pw {
+                args.push("-a".into());
+                args.push(p.clone());
+            }
+            if let Some(ref tls) = self.tls_certs {
+                append_tls_cli_args(&mut args, tls);
+            }
+            args.push("SHUTDOWN".into());
+            args.push("NOSAVE".into());
+            let cli_ok = Command::new(&self.config.redis_cli_bin)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success());
+
+            // If redis-cli couldn't connect (e.g. TLS nodes with no certs
+            // available yet), fall back to killing via pid file.
+            if !cli_ok {
+                let pid_path = self
+                    .config
+                    .work_dir
+                    .join(format!("node-{port}"))
+                    .join("redis.pid");
+                if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                    let pid = pid_str.trim();
+                    let _ = Command::new("kill")
+                        .arg(pid)
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null())
+                        .status();
                 }
-                args.push("SHUTDOWN".into());
-                args.push("NOSAVE".into());
-                let _ = Command::new(&self.config.redis_cli_bin)
-                    .args(&args)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status();
             }
         }
         Ok(())
@@ -204,6 +337,9 @@ impl RedisCluster {
                 args.push("-a".into());
                 args.push(p.clone());
                 args.push("--no-auth-warning".into());
+            }
+            if let Some(ref tls) = self.tls_certs {
+                append_tls_cli_args(&mut args, tls);
             }
             args.push("CLUSTER".into());
             args.push("INFO".into());
@@ -257,6 +393,9 @@ impl RedisCluster {
                 args.push(p.clone());
                 args.push("--no-auth-warning".into());
             }
+            if let Some(ref tls) = self.tls_certs {
+                append_tls_cli_args(&mut args, tls);
+            }
             args.push("PING".into());
             let output = Command::new(&self.config.redis_cli_bin)
                 .args(&args)
@@ -282,6 +421,17 @@ impl Drop for RedisCluster {
     fn drop(&mut self) {
         let _ = self.stop();
     }
+}
+
+/// Append TLS flags to a redis-cli argument list.
+///
+/// Uses `--insecure` because the harness generates self-signed certificates
+/// and `--cacert` may not work reliably with all redis-cli builds (depends
+/// on the linked OpenSSL/LibreSSL version). Since `tls-auth-clients no` is
+/// set on the server side, no client cert is needed.
+fn append_tls_cli_args(args: &mut Vec<String>, _tls: &TlsClusterConfig) {
+    args.push("--tls".into());
+    args.push("--insecure".into());
 }
 
 fn parse_cluster_info(raw: &str) -> ClusterStatus {

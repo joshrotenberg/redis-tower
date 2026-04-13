@@ -14,3 +14,4 @@ publish = false
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
+rcgen = "0.14"

@@ -165,6 +165,9 @@ pub struct ClusterConnection {
     read_preference: ReadPreference,
     /// Strategy for selecting which replica to read from.
     read_routing: Arc<dyn ReadRoutingStrategy>,
+    /// TLS configuration for node connections.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
 
 /// Builder for configuring a `ClusterConnection`.
@@ -174,6 +177,8 @@ pub struct ClusterConnectionBuilder {
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
 
 impl ClusterConnectionBuilder {
@@ -213,6 +218,19 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Set the TLS configuration for cluster connections.
+    ///
+    /// When set, all connections to cluster nodes (seed, masters, and
+    /// replicas) will use TLS. The hostname for SNI verification is
+    /// derived from each node's address.
+    ///
+    /// Requires the `tls-rustls` or `tls-native-tls` feature.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
+        self.tls = Some(Arc::new(tls));
+        self
+    }
+
     /// Connect to the cluster.
     pub async fn connect(self) -> Result<ClusterConnection, RedisError> {
         ClusterConnection::connect_inner(
@@ -221,6 +239,8 @@ impl ClusterConnectionBuilder {
             self.address_map,
             self.read_preference,
             self.read_routing,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            self.tls,
         )
         .await
     }
@@ -236,7 +256,16 @@ pub(crate) enum Redirect {
 impl ClusterConnection {
     /// Connect to a cluster using a seed node address.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
-        Self::connect_inner(seed_addr, None, None, ReadPreference::Master, None).await
+        Self::connect_inner(
+            seed_addr,
+            None,
+            None,
+            ReadPreference::Master,
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        )
+        .await
     }
 
     /// Connect to a cluster, remapping all node hosts to `host_override`.
@@ -250,6 +279,8 @@ impl ClusterConnection {
             None,
             ReadPreference::Master,
             None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
         )
         .await
     }
@@ -262,6 +293,8 @@ impl ClusterConnection {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         }
     }
 
@@ -271,8 +304,16 @@ impl ClusterConnection {
         address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
+            Arc<redis_tower_core::tls::TlsConfig>,
+        >,
     ) -> Result<Self, RedisError> {
-        let mut seed_conn = RedisConnection::connect(seed_addr).await?;
+        let mut seed_conn = connect_node(
+            seed_addr,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.as_deref(),
+        )
+        .await?;
         let mut topology = discover_topology(&mut seed_conn).await?;
 
         if let Some(ref map) = address_map {
@@ -289,7 +330,12 @@ impl ClusterConnection {
         for addr in topology.master_addrs() {
             let addr_str = addr.addr_string();
             if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone()) {
-                let conn = RedisConnection::connect(&addr_str).await?;
+                let conn = connect_node(
+                    &addr_str,
+                    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                    tls.as_deref(),
+                )
+                .await?;
                 if default_node.is_empty() {
                     default_node.clone_from(&addr_str);
                 }
@@ -303,7 +349,12 @@ impl ClusterConnection {
                 let addr_str = addr.addr_string();
                 if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone())
                 {
-                    let mut conn = RedisConnection::connect(&addr_str).await?;
+                    let mut conn = connect_node(
+                        &addr_str,
+                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                        tls.as_deref(),
+                    )
+                    .await?;
                     // Send READONLY to enable reads on this replica.
                     conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
                         .await?;
@@ -327,6 +378,8 @@ impl ClusterConnection {
             address_map,
             read_preference,
             read_routing,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls,
         })
     }
 
@@ -461,7 +514,12 @@ impl ClusterConnection {
     /// Ensure we have a connection to the given address.
     async fn ensure_connection(&mut self, addr: &str) -> Result<(), RedisError> {
         if !self.nodes.contains_key(addr) {
-            let conn = RedisConnection::connect(addr).await?;
+            let conn = connect_node(
+                addr,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                self.tls.as_deref(),
+            )
+            .await?;
             self.nodes.insert(addr.to_string(), conn);
         }
         Ok(())
@@ -515,7 +573,12 @@ impl ClusterConnection {
             let addr_str = addr.addr_string();
             if let std::collections::hash_map::Entry::Vacant(e) = self.nodes.entry(addr_str.clone())
             {
-                let conn = RedisConnection::connect(&addr_str).await?;
+                let conn = connect_node(
+                    &addr_str,
+                    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                    self.tls.as_deref(),
+                )
+                .await?;
                 e.insert(conn);
             }
         }
@@ -526,7 +589,12 @@ impl ClusterConnection {
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     self.nodes.entry(addr_str.clone())
                 {
-                    let mut conn = RedisConnection::connect(&addr_str).await?;
+                    let mut conn = connect_node(
+                        &addr_str,
+                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                        self.tls.as_deref(),
+                    )
+                    .await?;
                     conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
                         .await?;
                     e.insert(conn);
@@ -590,6 +658,25 @@ pub(crate) fn parse_redirect(frame: &Frame) -> Option<Redirect> {
         }),
         _ => None,
     }
+}
+
+/// Connect to a single cluster node, using TLS if configured.
+async fn connect_node(
+    addr: &str,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
+        &redis_tower_core::tls::TlsConfig,
+    >,
+) -> Result<RedisConnection, RedisError> {
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    if let Some(tls) = tls {
+        let hostname = addr
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(addr)
+            .to_string();
+        return RedisConnection::connect_tls(addr, &hostname, tls).await;
+    }
+    RedisConnection::connect(addr).await
 }
 
 /// Remap all node addresses in a topology to use a specific host.
@@ -753,6 +840,8 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         };
         assert_eq!(conn.remap_addr("10.0.0.1:7000"), "127.0.0.1:7000");
     }
@@ -767,6 +856,8 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         };
         assert_eq!(conn.remap_addr("10.0.0.1:7000"), "10.0.0.1:7000");
     }
@@ -791,6 +882,8 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         };
 
         // Mapped address returns the external address.
@@ -816,6 +909,8 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         };
 
         // Address in the map uses the map (takes priority).
@@ -903,6 +998,8 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
         };
 
         // Slot 100 is in range 0-5460, owned by 10.0.0.1:7000.
