@@ -5,6 +5,288 @@ use common::conn;
 use redis_tower::commands::*;
 
 #[tokio::test]
+async fn zinterstore() {
+    let mut c = conn().await;
+    let k1 = "cover2:zset:zinterstore:s1";
+    let k2 = "cover2:zset:zinterstore:s2";
+    let dst = "cover2:zset:zinterstore:dst";
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+    c.execute(
+        ZAdd::new(k1)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+    c.execute(
+        ZAdd::new(k2)
+            .member(10.0, "b")
+            .member(20.0, "c")
+            .member(30.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    let count = c.execute(ZInterStore::new(dst, [k1, k2])).await.unwrap();
+    // "b" and "c" are in both sets
+    assert_eq!(count, 2);
+
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.contains(&Bytes::from("b")));
+    assert!(members.contains(&Bytes::from("c")));
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+}
+
+#[tokio::test]
+async fn zunionstore() {
+    let mut c = conn().await;
+    let k1 = "cover2:zset:zunionstore:s1";
+    let k2 = "cover2:zset:zunionstore:s2";
+    let dst = "cover2:zset:zunionstore:dst";
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+    c.execute(ZAdd::new(k1).member(1.0, "a").member(2.0, "b"))
+        .await
+        .unwrap();
+    c.execute(ZAdd::new(k2).member(10.0, "b").member(20.0, "c"))
+        .await
+        .unwrap();
+
+    let count = c.execute(ZUnionStore::new(dst, [k1, k2])).await.unwrap();
+    // "a", "b", "c" -- union of the two sets
+    assert_eq!(count, 3);
+
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(members.len(), 3);
+    assert!(members.contains(&Bytes::from("a")));
+    assert!(members.contains(&Bytes::from("b")));
+    assert!(members.contains(&Bytes::from("c")));
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+}
+
+#[tokio::test]
+async fn zdiffstore() {
+    let mut c = conn().await;
+    let k1 = "cover2:zset:zdiffstore:s1";
+    let k2 = "cover2:zset:zdiffstore:s2";
+    let dst = "cover2:zset:zdiffstore:dst";
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+    c.execute(
+        ZAdd::new(k1)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+    c.execute(ZAdd::new(k2).member(10.0, "b").member(20.0, "c"))
+        .await
+        .unwrap();
+
+    let count = c.execute(ZDiffStore::new(dst, [k1, k2])).await.unwrap();
+    // "a" is in k1 but not k2
+    assert_eq!(count, 1);
+
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0], Bytes::from("a"));
+
+    c.execute(Del::keys([k1, k2, dst])).await.unwrap();
+}
+
+#[tokio::test]
+async fn zintercard() {
+    let mut c = conn().await;
+    let k1 = "cover2:zset:zintercard:s1";
+    let k2 = "cover2:zset:zintercard:s2";
+
+    c.execute(Del::keys([k1, k2])).await.unwrap();
+    c.execute(
+        ZAdd::new(k1)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+    c.execute(
+        ZAdd::new(k2)
+            .member(10.0, "b")
+            .member(20.0, "c")
+            .member(30.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // "b" and "c" are in both -- cardinality is 2
+    let card = c.execute(ZInterCard::new([k1, k2])).await.unwrap();
+    assert_eq!(card, 2);
+
+    // with LIMIT 1, result is capped at 1
+    let card_limited = c.execute(ZInterCard::new([k1, k2]).limit(1)).await.unwrap();
+    assert_eq!(card_limited, 1);
+
+    c.execute(Del::keys([k1, k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn zrangestore() {
+    let mut c = conn().await;
+    let src = "cover2:zset:zrangestore:src";
+    let dst = "cover2:zset:zrangestore:dst";
+
+    c.execute(Del::keys([src, dst])).await.unwrap();
+    c.execute(
+        ZAdd::new(src)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Copy rank range 1..2 (members "b" and "c") to dst.
+    let count = c
+        .execute(ZRangeStore::new(dst, src, "1", "2"))
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0], Bytes::from("b"));
+    assert_eq!(members[1], Bytes::from("c"));
+
+    c.execute(Del::keys([src, dst])).await.unwrap();
+}
+
+#[tokio::test]
+async fn zremrangebyrank() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zremrangebyrank";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(
+        ZAdd::new(key)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Remove ranks 0 and 1 (members "a" and "b").
+    let removed = c.execute(ZRemRangeByRank::new(key, 0, 1)).await.unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining = c.execute(ZRange::new(key, 0, -1)).await.unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0], Bytes::from("c"));
+    assert_eq!(remaining[1], Bytes::from("d"));
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zremrangebyscore() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zremrangebyscore";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(
+        ZAdd::new(key)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Remove members with score between 2 and 3 inclusive.
+    let removed = c
+        .execute(ZRemRangeByScore::new(key, "2", "3"))
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining = c.execute(ZRange::new(key, 0, -1)).await.unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0], Bytes::from("a"));
+    assert_eq!(remaining[1], Bytes::from("d"));
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zremrangebylex() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zremrangebylex";
+
+    c.execute(Del::new(key)).await.unwrap();
+    // All members must have the same score for lex range to be meaningful.
+    c.execute(
+        ZAdd::new(key)
+            .member(0.0, "a")
+            .member(0.0, "b")
+            .member(0.0, "c")
+            .member(0.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Remove members in lex range [b, c] inclusive.
+    let removed = c
+        .execute(ZRemRangeByLex::new(key, "[b", "[c"))
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining = c.execute(ZRange::new(key, 0, -1)).await.unwrap();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining[0], Bytes::from("a"));
+    assert_eq!(remaining[1], Bytes::from("d"));
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zrevrank() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zrevrank";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(
+        ZAdd::new(key)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+
+    // In reverse order: "c" (score 3) has revrank 0, "a" (score 1) has revrank 2.
+    let rank_c = c.execute(ZRevRank::new(key, "c")).await.unwrap();
+    assert_eq!(rank_c, Some(0));
+
+    let rank_a = c.execute(ZRevRank::new(key, "a")).await.unwrap();
+    assert_eq!(rank_a, Some(2));
+
+    let rank_missing = c.execute(ZRevRank::new(key, "nope")).await.unwrap();
+    assert_eq!(rank_missing, None);
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
 async fn zpopmin() {
     let mut c = conn().await;
     let key = "cover2:zset:zpopmin";
@@ -119,165 +401,9 @@ async fn zmscore() {
 }
 
 #[tokio::test]
-async fn zinterstore() {
+async fn zmpop_min() {
     let mut c = conn().await;
-    let key1 = "cover2:zset:zinterstore:1";
-    let key2 = "cover2:zset:zinterstore:2";
-    let dst = "cover2:zset:zinterstore:dst";
-
-    c.execute(Del::new(key1)).await.unwrap();
-    c.execute(Del::new(key2)).await.unwrap();
-    c.execute(Del::new(dst)).await.unwrap();
-    c.execute(
-        ZAdd::new(key1)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-    c.execute(
-        ZAdd::new(key2)
-            .member(1.0, "b")
-            .member(2.0, "c")
-            .member(3.0, "d"),
-    )
-    .await
-    .unwrap();
-
-    let count = c
-        .execute(ZInterStore::new(dst, [key1, key2]))
-        .await
-        .unwrap();
-    assert_eq!(count, 2);
-}
-
-#[tokio::test]
-async fn zunionstore() {
-    let mut c = conn().await;
-    let key1 = "cover2:zset:zunionstore:1";
-    let key2 = "cover2:zset:zunionstore:2";
-    let dst = "cover2:zset:zunionstore:dst";
-
-    c.execute(Del::new(key1)).await.unwrap();
-    c.execute(Del::new(key2)).await.unwrap();
-    c.execute(Del::new(dst)).await.unwrap();
-    c.execute(
-        ZAdd::new(key1)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-    c.execute(
-        ZAdd::new(key2)
-            .member(1.0, "b")
-            .member(2.0, "c")
-            .member(3.0, "d"),
-    )
-    .await
-    .unwrap();
-
-    let count = c
-        .execute(ZUnionStore::new(dst, [key1, key2]))
-        .await
-        .unwrap();
-    assert_eq!(count, 4);
-}
-
-#[tokio::test]
-async fn zdiffstore() {
-    let mut c = conn().await;
-    let key1 = "cover2:zset:zdiffstore:1";
-    let key2 = "cover2:zset:zdiffstore:2";
-    let dst = "cover2:zset:zdiffstore:dst";
-
-    c.execute(Del::new(key1)).await.unwrap();
-    c.execute(Del::new(key2)).await.unwrap();
-    c.execute(Del::new(dst)).await.unwrap();
-    c.execute(
-        ZAdd::new(key1)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-    c.execute(ZAdd::new(key2).member(1.0, "b").member(2.0, "c"))
-        .await
-        .unwrap();
-
-    let count = c.execute(ZDiffStore::new(dst, [key1, key2])).await.unwrap();
-    assert_eq!(count, 1);
-}
-
-#[tokio::test]
-async fn zintercard() {
-    let mut c = conn().await;
-    let key1 = "cover2:zset:zintercard:1";
-    let key2 = "cover2:zset:zintercard:2";
-
-    c.execute(Del::new(key1)).await.unwrap();
-    c.execute(Del::new(key2)).await.unwrap();
-    c.execute(
-        ZAdd::new(key1)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-    c.execute(
-        ZAdd::new(key2)
-            .member(1.0, "b")
-            .member(2.0, "c")
-            .member(3.0, "d"),
-    )
-    .await
-    .unwrap();
-
-    let count = c.execute(ZInterCard::new([key1, key2])).await.unwrap();
-    assert_eq!(count, 2);
-
-    let limited = c
-        .execute(ZInterCard::new([key1, key2]).limit(1))
-        .await
-        .unwrap();
-    assert_eq!(limited, 1);
-}
-
-#[tokio::test]
-async fn zrangestore() {
-    let mut c = conn().await;
-    let src = "cover2:zset:zrangestore:src";
-    let dst = "cover2:zset:zrangestore:dst";
-
-    c.execute(Del::new(src)).await.unwrap();
-    c.execute(Del::new(dst)).await.unwrap();
-    c.execute(
-        ZAdd::new(src)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-
-    let count = c
-        .execute(ZRangeStore::new(dst, src, "0", "-1"))
-        .await
-        .unwrap();
-    assert_eq!(count, 3);
-
-    let stored = c.execute(ZCard::new(dst)).await.unwrap();
-    assert_eq!(stored, 3);
-}
-
-#[tokio::test]
-async fn zmpop() {
-    let mut c = conn().await;
-    let key = "cover2:zset:zmpop";
+    let key = "cover2:zset:zmpop_min";
 
     c.execute(Del::new(key)).await.unwrap();
     c.execute(
@@ -293,25 +419,19 @@ async fn zmpop() {
         .execute(ZMPop::new([key], ZMPopDirection::Min))
         .await
         .unwrap();
-    let (popped_key, members) = result.expect("expected a popped member");
+    let (popped_key, members) = result.expect("expected Some result");
     assert_eq!(popped_key, Bytes::from(key));
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].0, Bytes::from("a"));
     assert!((members[0].1 - 1.0).abs() < f64::EPSILON);
 
-    let empty = "cover2:zset:zmpop:empty";
-    c.execute(Del::new(empty)).await.unwrap();
-    let none = c
-        .execute(ZMPop::new([empty], ZMPopDirection::Min))
-        .await
-        .unwrap();
-    assert!(none.is_none());
+    c.execute(Del::new(key)).await.unwrap();
 }
 
 #[tokio::test]
-async fn zremrangebyrank() {
+async fn zmpop_max() {
     let mut c = conn().await;
-    let key = "cover2:zset:zremrangebyrank";
+    let key = "cover2:zset:zmpop_max";
 
     c.execute(Del::new(key)).await.unwrap();
     c.execute(
@@ -323,75 +443,87 @@ async fn zremrangebyrank() {
     .await
     .unwrap();
 
-    let removed = c.execute(ZRemRangeByRank::new(key, 0, 0)).await.unwrap();
-    assert_eq!(removed, 1);
-    assert_eq!(c.execute(ZCard::new(key)).await.unwrap(), 2);
-}
-
-#[tokio::test]
-async fn zremrangebyscore() {
-    let mut c = conn().await;
-    let key = "cover2:zset:zremrangebyscore";
-
-    c.execute(Del::new(key)).await.unwrap();
-    c.execute(
-        ZAdd::new(key)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
-
-    let removed = c
-        .execute(ZRemRangeByScore::new(key, "1", "2"))
+    let result = c
+        .execute(ZMPop::new([key], ZMPopDirection::Max))
         .await
         .unwrap();
-    assert_eq!(removed, 2);
-    assert_eq!(c.execute(ZCard::new(key)).await.unwrap(), 1);
+    let (popped_key, members) = result.expect("expected Some result");
+    assert_eq!(popped_key, Bytes::from(key));
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].0, Bytes::from("c"));
+    assert!((members[0].1 - 3.0).abs() < f64::EPSILON);
+
+    c.execute(Del::new(key)).await.unwrap();
 }
 
 #[tokio::test]
-async fn zremrangebylex() {
+async fn zmpop_with_count() {
     let mut c = conn().await;
-    let key = "cover2:zset:zremrangebylex";
+    let key = "cover2:zset:zmpop_count";
 
     c.execute(Del::new(key)).await.unwrap();
     c.execute(
         ZAdd::new(key)
-            .member(0.0, "a")
-            .member(0.0, "b")
-            .member(0.0, "c"),
+            .member(10.0, "x")
+            .member(20.0, "y")
+            .member(30.0, "z")
+            .member(40.0, "w"),
     )
     .await
     .unwrap();
 
-    let removed = c
-        .execute(ZRemRangeByLex::new(key, "[a", "[c"))
+    let result = c
+        .execute(ZMPop::new([key], ZMPopDirection::Min).count(2))
         .await
         .unwrap();
-    assert_eq!(removed, 3);
-    assert_eq!(c.execute(ZCard::new(key)).await.unwrap(), 0);
+    let (popped_key, members) = result.expect("expected Some result");
+    assert_eq!(popped_key, Bytes::from(key));
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].0, Bytes::from("x"));
+    assert_eq!(members[1].0, Bytes::from("y"));
+
+    c.execute(Del::new(key)).await.unwrap();
 }
 
 #[tokio::test]
-async fn zrevrank() {
+async fn zmpop_multiple_keys_first_nonempty() {
     let mut c = conn().await;
-    let key = "cover2:zset:zrevrank";
+    let k1 = "cover2:zset:zmpop_multi:k1";
+    let k2 = "cover2:zset:zmpop_multi:k2";
 
-    c.execute(Del::new(key)).await.unwrap();
-    c.execute(
-        ZAdd::new(key)
-            .member(1.0, "a")
-            .member(2.0, "b")
-            .member(3.0, "c"),
-    )
-    .await
-    .unwrap();
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
 
-    let rank = c.execute(ZRevRank::new(key, "a")).await.unwrap();
-    assert_eq!(rank, Some(2));
+    // k1 is empty; k2 has members -- ZMPOP should pop from k2.
+    c.execute(ZAdd::new(k2).member(5.0, "alpha").member(10.0, "beta"))
+        .await
+        .unwrap();
 
-    let missing = c.execute(ZRevRank::new(key, "missing")).await.unwrap();
-    assert!(missing.is_none());
+    let result = c
+        .execute(ZMPop::new([k1, k2], ZMPopDirection::Min))
+        .await
+        .unwrap();
+    let (popped_key, members) = result.expect("expected Some result");
+    assert_eq!(popped_key, Bytes::from(k2));
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].0, Bytes::from("alpha"));
+
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn zmpop_empty_sources() {
+    let mut c = conn().await;
+    let k1 = "cover2:zset:zmpop_empty:k1";
+    let k2 = "cover2:zset:zmpop_empty:k2";
+
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+
+    let result = c
+        .execute(ZMPop::new([k1, k2], ZMPopDirection::Min))
+        .await
+        .unwrap();
+    assert!(result.is_none());
 }

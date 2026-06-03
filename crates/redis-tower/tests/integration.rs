@@ -2768,6 +2768,56 @@ async fn pool_concurrent_tasks() {
     }
 }
 
+// -- MultiplexedClient RESP3 tests --
+
+#[tokio::test]
+async fn multiplexed_client_connect_resp3() {
+    let addr = redis_addr().await;
+    let client = MultiplexedClient::connect_resp3(addr)
+        .await
+        .expect("failed to connect via RESP3");
+
+    let k = key("mux_resp3", "k");
+    let hk = key("mux_resp3", "h");
+    let sk = key("mux_resp3", "s");
+
+    // Basic SET/GET round-trip over the multiplexed RESP3 connection.
+    client.execute(Set::new(&k, "resp3_value")).await.unwrap();
+    let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("resp3_value")));
+
+    // HSET + HGETALL -- RESP3 returns a map type; the command adapter
+    // normalises it to Vec<(Bytes, Bytes)> the same as RESP2.
+    client
+        .execute(HSet::new(&hk, "field1", "v1").field("field2", "v2"))
+        .await
+        .unwrap();
+    let pairs = client.execute(HGetAll::new(&hk)).await.unwrap();
+    assert_eq!(pairs.len(), 2);
+    let has_f1 = pairs
+        .iter()
+        .any(|(f, v)| f == &Bytes::from("field1") && v == &Bytes::from("v1"));
+    let has_f2 = pairs
+        .iter()
+        .any(|(f, v)| f == &Bytes::from("field2") && v == &Bytes::from("v2"));
+    assert!(
+        has_f1 && has_f2,
+        "HGETALL missing expected fields via RESP3"
+    );
+
+    // SMEMBERS -- RESP3 returns a set type; the command adapter normalises
+    // it to Vec<Bytes> the same as RESP2.
+    client
+        .execute(SAdd::members(&sk, ["alpha", "beta", "gamma"]))
+        .await
+        .unwrap();
+    let members = client.execute(SMembers::new(&sk)).await.unwrap();
+    assert_eq!(members.len(), 3);
+
+    // Cleanup.
+    client.execute(Del::keys([&k, &hk, &sk])).await.unwrap();
+}
+
 // -- MultiplexedClient factory-backed reconnect --
 
 #[tokio::test]
