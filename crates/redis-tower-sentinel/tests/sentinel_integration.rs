@@ -1,6 +1,6 @@
 //! Sentinel integration tests.
 //!
-//! Run with: `cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored`
+//! Run with: `cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored`
 
 use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
