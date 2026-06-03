@@ -58,6 +58,10 @@ pub enum RedisError {
         attempts: usize,
         last_error: Box<RedisError>,
     },
+
+    /// The internal command queue is full; the caller should shed load.
+    #[error("queue full: the auto-pipeline channel is at capacity")]
+    QueueFull,
 }
 
 impl RedisError {

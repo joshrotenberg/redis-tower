@@ -41,6 +41,14 @@ pub struct AutoPipelineConfig {
     /// that arrive concurrently). Set to 1-2ms for write-heavy workloads
     /// where batching reduces round-trips.
     pub batch_window: Duration,
+    /// Capacity of the internal command queue (number of pending requests
+    /// that can be buffered before callers start receiving `QueueFull`).
+    ///
+    /// When the queue is full and a caller issues a new request, the call
+    /// returns `RedisError::QueueFull` immediately instead of blocking.
+    ///
+    /// Default: 1024.
+    pub queue_capacity: usize,
 }
 
 impl Default for AutoPipelineConfig {
@@ -48,6 +56,7 @@ impl Default for AutoPipelineConfig {
         Self {
             max_batch_size: 100,
             batch_window: Duration::ZERO,
+            queue_capacity: 1024,
         }
     }
 }
@@ -221,7 +230,7 @@ impl AutoPipelineService {
     }
 
     fn from_parts(conn: RedisConnection, config: AutoPipelineConfig, source: ConnSource) -> Self {
-        let (tx, rx) = mpsc::channel(config.max_batch_size * 2);
+        let (tx, rx) = mpsc::channel(config.queue_capacity);
         let handle = tokio::spawn(pipeline_worker(rx, conn, config, source));
         Self {
             tx,
@@ -247,12 +256,14 @@ impl AutoPipelineService {
         }
         let (resp_tx, resp_rx) = oneshot::channel();
         self.tx
-            .send(WorkerRequest::Multi {
+            .try_send(WorkerRequest::Multi {
                 frames,
                 response_tx: resp_tx,
             })
-            .await
-            .map_err(|_| RedisError::ConnectionClosed)?;
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
+            })?;
         resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
     }
 
@@ -483,12 +494,14 @@ impl Service<Frame> for AutoPipelineService {
         let (resp_tx, resp_rx) = oneshot::channel();
         let tx = self.tx.clone();
         Box::pin(async move {
-            tx.send(WorkerRequest::Single {
+            tx.try_send(WorkerRequest::Single {
                 frame,
                 response_tx: resp_tx,
             })
-            .await
-            .map_err(|_| RedisError::ConnectionClosed)?;
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
+            })?;
             resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
         })
     }
@@ -503,6 +516,16 @@ impl Clone for AutoPipelineService {
     }
 }
 
+impl AutoPipelineService {
+    /// Returns the current number of requests pending in the internal queue.
+    ///
+    /// This is an instantaneous snapshot; the value may change immediately
+    /// after reading. Use it for observability (metrics, health checks).
+    pub fn queue_depth(&self) -> usize {
+        self.tx.max_capacity() - self.tx.capacity()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +535,7 @@ mod tests {
         let config = AutoPipelineConfig::default();
         assert_eq!(config.max_batch_size, 100);
         assert_eq!(config.batch_window, Duration::ZERO);
+        assert_eq!(config.queue_capacity, 1024);
     }
 
     #[test]
@@ -519,9 +543,11 @@ mod tests {
         let config = AutoPipelineConfig {
             max_batch_size: 50,
             batch_window: Duration::from_micros(500),
+            queue_capacity: 512,
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
+        assert_eq!(config.queue_capacity, 512);
     }
 
     fn make_test_svc(
@@ -599,5 +625,51 @@ mod tests {
 
         // _clone still holds the Arc; worker is still running.
         // Drop the clone to let the worker task get cleaned up.
+    }
+
+    #[tokio::test]
+    async fn queue_full_returns_queue_full_error() {
+        // Fill the channel (capacity 1), then verify the next call returns QueueFull.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
+        // Fill the one slot without receiving.
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        tx.try_send(WorkerRequest::Single {
+            frame: Frame::SimpleString(b"PING"[..].into()),
+            response_tx: dummy_tx,
+        })
+        .unwrap();
+
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
+
+        let frame = Frame::SimpleString(b"PING"[..].into());
+        let err = svc.call(frame).await.unwrap_err();
+        assert!(
+            matches!(err, RedisError::QueueFull),
+            "expected QueueFull, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_full_not_retryable() {
+        assert!(!RedisError::QueueFull.is_retryable());
+    }
+
+    #[tokio::test]
+    async fn queue_full_not_connection_error() {
+        assert!(!RedisError::QueueFull.is_connection_error());
+    }
+
+    #[test]
+    fn config_queue_capacity_default() {
+        let config = AutoPipelineConfig::default();
+        assert_eq!(config.queue_capacity, 1024);
+    }
+
+    #[tokio::test]
+    async fn queue_depth_zero_when_empty() {
+        // A fresh channel with nothing sent should report depth 0.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(64);
+        let svc = make_test_svc(tx, tokio::spawn(async {}));
+        assert_eq!(svc.queue_depth(), 0);
     }
 }
