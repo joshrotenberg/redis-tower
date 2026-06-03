@@ -101,6 +101,16 @@ impl SentinelConnection {
     }
 }
 
+impl redis_tower::RedisExecutor for SentinelConnection {
+    fn execute<Cmd: redis_tower_core::Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl std::future::Future<Output = Result<Cmd::Response, redis_tower_core::RedisError>> + Send
+    {
+        SentinelConnection::execute(self, cmd)
+    }
+}
+
 impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection {
     type Response = Cmd::Response;
     type Error = RedisError;

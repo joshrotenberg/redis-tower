@@ -4,6 +4,7 @@
 
 use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
+use redis_tower::pool::ConnectionPool;
 use redis_tower_commands::*;
 use redis_tower_sentinel::{MultiplexedSentinelClient, SentinelClient, SentinelConnection};
 use tokio::sync::OnceCell;
@@ -182,4 +183,83 @@ async fn multiplexed_sentinel_connect_with_reconnect() {
     let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
     assert_eq!(val, Some(Bytes::from("resilient")));
     client.execute(Del::new(&k)).await.unwrap();
+}
+
+// -- ConnectionPool<SentinelConnection> tests --
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_pool_set_and_get() {
+    let addrs = sentinel_addrs().await;
+    let pool = ConnectionPool::connect(3, || {
+        let addrs = addrs.clone();
+        async move { SentinelConnection::connect(&addrs, "mymaster").await }
+    })
+    .await
+    .expect("failed to create sentinel pool");
+
+    assert_eq!(pool.size(), 3);
+
+    let k = key("pool_set_get", "k");
+    pool.execute(Set::new(&k, "hello")).await.unwrap();
+    let val: Option<Bytes> = pool.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello")));
+    pool.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_pool_concurrent_tasks() {
+    let addrs = sentinel_addrs().await;
+    let pool = ConnectionPool::connect(3, || {
+        let addrs = addrs.clone();
+        async move { SentinelConnection::connect(&addrs, "mymaster").await }
+    })
+    .await
+    .expect("failed to create sentinel pool");
+
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = key("pool_concurrent", &format!("k{i}"));
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_pool_exhaustion_and_recovery() {
+    // Verify that a pool with a single connection serializes concurrent callers
+    // rather than failing. Each task should complete successfully even though
+    // only one connection is available.
+    let addrs = sentinel_addrs().await;
+    let pool = ConnectionPool::connect(1, || {
+        let addrs = addrs.clone();
+        async move { SentinelConnection::connect(&addrs, "mymaster").await }
+    })
+    .await
+    .expect("failed to create sentinel pool");
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = key("pool_exhaust", &format!("k{i}"));
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
 }

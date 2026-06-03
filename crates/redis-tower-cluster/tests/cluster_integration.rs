@@ -4,6 +4,7 @@
 
 use bytes::Bytes;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
+use redis_tower::pool::ConnectionPool;
 use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient};
 use redis_tower_commands::*;
 use tokio::sync::OnceCell;
@@ -304,5 +305,87 @@ async fn cluster_connection_tls_connect_and_roundtrip() {
         let v: Option<Bytes> = conn.execute(Get::new(&k)).await.unwrap();
         assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
         conn.execute(Del::new(&k)).await.unwrap();
+    }
+}
+
+// -- ConnectionPool<ClusterConnection> tests --
+
+#[tokio::test]
+#[ignore]
+async fn cluster_pool_set_and_get() {
+    let cluster = ensure_cluster().await;
+    let addr = cluster.addr();
+    let pool = ConnectionPool::connect(3, || {
+        let addr = addr.clone();
+        async move { ClusterConnection::connect(&addr).await }
+    })
+    .await
+    .expect("failed to create cluster pool");
+
+    assert_eq!(pool.size(), 3);
+
+    let k = "cluster_pool:set_get";
+    pool.execute(Set::new(k, "hello")).await.unwrap();
+    let val: Option<Bytes> = pool.execute(Get::new(k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello")));
+    pool.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_pool_concurrent_tasks() {
+    let cluster = ensure_cluster().await;
+    let addr = cluster.addr();
+    let pool = ConnectionPool::connect(3, || {
+        let addr = addr.clone();
+        async move { ClusterConnection::connect(&addr).await }
+    })
+    .await
+    .expect("failed to create cluster pool");
+
+    let mut handles = Vec::new();
+    for i in 0..16 {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = format!("cluster_pool_concurrent:{i}");
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_pool_exhaustion_and_recovery() {
+    // Verify that a pool with a single connection serializes concurrent callers
+    // rather than failing. Each task should complete successfully even though
+    // only one connection is available.
+    let cluster = ensure_cluster().await;
+    let addr = cluster.addr();
+    let pool = ConnectionPool::connect(1, || {
+        let addr = addr.clone();
+        async move { ClusterConnection::connect(&addr).await }
+    })
+    .await
+    .expect("failed to create cluster pool");
+
+    let mut handles = Vec::new();
+    for i in 0..8 {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = format!("cluster_pool_exhaust:{i}");
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(v, Some(Bytes::from(format!("v{i}"))));
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
     }
 }
