@@ -105,3 +105,88 @@ async fn cover_lpos() {
     assert_eq!(pos, Some(1));
     c.execute(Del::new(k)).await.unwrap();
 }
+
+#[tokio::test]
+async fn lmpop_left() {
+    let mut c = conn().await;
+    let k1 = "cover:lists:lmpop_left:k1";
+    let k2 = "cover:lists:lmpop_left:k2";
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+
+    // k1 is empty; k2 has elements -- LMPOP should pop from k2.
+    c.execute(RPush::elements(k2, ["x", "y", "z"]))
+        .await
+        .unwrap();
+
+    let result = c
+        .execute(LMPop::new([k1, k2], ListDirection::Left))
+        .await
+        .unwrap();
+    let (key, elements) = result.expect("expected Some result");
+    assert_eq!(key, Bytes::from(k2));
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0], Bytes::from("x"));
+
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn lmpop_right() {
+    let mut c = conn().await;
+    let k = "cover:lists:lmpop_right";
+    c.execute(Del::new(k)).await.unwrap();
+    c.execute(RPush::elements(k, ["a", "b", "c"]))
+        .await
+        .unwrap();
+
+    let result = c
+        .execute(LMPop::new([k], ListDirection::Right))
+        .await
+        .unwrap();
+    let (key, elements) = result.expect("expected Some result");
+    assert_eq!(key, Bytes::from(k));
+    assert_eq!(elements.len(), 1);
+    assert_eq!(elements[0], Bytes::from("c"));
+
+    c.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn lmpop_with_count() {
+    let mut c = conn().await;
+    let k = "cover:lists:lmpop_count";
+    c.execute(Del::new(k)).await.unwrap();
+    c.execute(RPush::elements(k, ["a", "b", "c", "d"]))
+        .await
+        .unwrap();
+
+    let result = c
+        .execute(LMPop::new([k], ListDirection::Left).count(3))
+        .await
+        .unwrap();
+    let (key, elements) = result.expect("expected Some result");
+    assert_eq!(key, Bytes::from(k));
+    assert_eq!(elements.len(), 3);
+    assert_eq!(elements[0], Bytes::from("a"));
+    assert_eq!(elements[1], Bytes::from("b"));
+    assert_eq!(elements[2], Bytes::from("c"));
+
+    c.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn lmpop_empty_sources() {
+    let mut c = conn().await;
+    let k1 = "cover:lists:lmpop_empty:k1";
+    let k2 = "cover:lists:lmpop_empty:k2";
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+
+    let result = c
+        .execute(LMPop::new([k1, k2], ListDirection::Left))
+        .await
+        .unwrap();
+    assert!(result.is_none());
+}
