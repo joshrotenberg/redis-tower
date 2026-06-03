@@ -83,13 +83,7 @@ async fn cover_object_idletime() {
     c.execute(Del::new(key)).await.unwrap();
 }
 
-// Ignored: this test exposes a real bug in ObjectHelp::parse_response
-// (crates/redis-tower-commands/src/keys.rs). The server returns the HELP lines
-// as RESP SimpleString frames inside the array, but the parser only accepts
-// BulkString, so execution errors with UnexpectedResponse. The fix is to also
-// accept SimpleString in that match arm; tracked as a follow-up to #261.
 #[tokio::test]
-#[ignore = "ObjectHelp parser rejects SimpleString frames returned by the server (see #261 follow-up)"]
 async fn cover_object_help() {
     let mut c = conn().await;
     let help = c.execute(ObjectHelp::new()).await.unwrap();

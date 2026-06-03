@@ -1137,8 +1137,10 @@ impl Command for ObjectHelp {
                 .into_iter()
                 .map(|f| match f {
                     Frame::BulkString(Some(data)) => Ok(data),
+                    // Redis may return OBJECT HELP lines as SimpleString frames.
+                    Frame::SimpleString(data) => Ok(data),
                     other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string",
+                        expected: "bulk string or simple string",
                         actual: format!("{other:?}"),
                     }),
                 })
