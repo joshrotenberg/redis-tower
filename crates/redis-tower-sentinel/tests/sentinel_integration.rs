@@ -263,3 +263,90 @@ async fn sentinel_pool_exhaustion_and_recovery() {
         h.await.unwrap();
     }
 }
+
+// -- Failover simulation --
+
+// This test is destructive: it kills the master process, leaving the topology
+// degraded with one fewer Redis node. Other sentinel tests that rely on the
+// full 3-sentinel + 2-replica topology may behave differently if run after
+// this test. CI runs sentinel tests single-threaded with --ignored and they
+// share a static topology via OnceCell, so running this test last is safest.
+#[tokio::test]
+#[ignore]
+async fn sentinel_failover_simulation() {
+    let handle = ensure_sentinel().await;
+
+    let addrs = sentinel_addrs().await;
+    let client = SentinelClient::connect(&addrs, "mymaster").await.unwrap();
+
+    // Verify initial connectivity.
+    let k = key("failover", "k");
+    client.execute(Set::new(&k, "before")).await.unwrap();
+    let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("before")));
+
+    // Record the sentinel-reported master address before the failover.
+    // handle.master_addr() returns the original static address of the master
+    // RedisServerHandle, which does not change after a failover. We use poke()
+    // to query the sentinel for the live master address instead.
+    let initial_info = handle
+        .poke()
+        .await
+        .expect("sentinel poke failed before kill");
+    let initial_master = format!(
+        "{}:{}",
+        initial_info.get("ip").expect("no ip in sentinel response"),
+        initial_info
+            .get("port")
+            .expect("no port in sentinel response"),
+    );
+
+    // Kill the master process (index 0 is always the master).
+    let master_pid = handle.pids()[0];
+    std::process::Command::new("kill")
+        .args(["-9", &master_pid.to_string()])
+        .status()
+        .expect("kill failed");
+
+    // Wait for sentinel to elect a new master. After the kill, the topology
+    // has one fewer replica (the promoted node is now master), so we poll
+    // the sentinel directly for a master with flags="master" rather than
+    // relying on the full-replica-count health check in wait_for_healthy.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let new_master = loop {
+        let info = handle.poke().await;
+        if let Ok(info) = info {
+            let flags = info.get("flags").map(String::as_str).unwrap_or("");
+            if flags == "master" {
+                let addr = format!(
+                    "{}:{}",
+                    info.get("ip").expect("no ip in sentinel response"),
+                    info.get("port").expect("no port in sentinel response"),
+                );
+                if addr != initial_master {
+                    break addr;
+                }
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "sentinel did not elect a new master within 30 seconds"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    };
+
+    // Force the client to rediscover the current master.
+    client.rediscover().await.unwrap();
+
+    // Verify commands succeed on the promoted master.
+    let k2 = key("failover", "k2");
+    client.execute(Set::new(&k2, "after")).await.unwrap();
+    let val2: Option<Bytes> = client.execute(Get::new(&k2)).await.unwrap();
+    assert_eq!(val2, Some(Bytes::from("after")));
+
+    // The promoted master must be a different node than the original.
+    assert_ne!(
+        initial_master, new_master,
+        "expected a different master after failover"
+    );
+}
