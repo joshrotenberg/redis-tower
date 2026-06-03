@@ -61,6 +61,11 @@ impl<S> CommandAdapter<S> {
     pub fn inner_mut(&mut self) -> &mut S {
         &mut self.inner
     }
+
+    /// Consume the adapter and return the inner service.
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
 }
 
 impl<Cmd, S> Service<Cmd> for CommandAdapter<S>
