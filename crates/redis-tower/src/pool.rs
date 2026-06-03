@@ -43,6 +43,20 @@ use tokio::sync::Mutex;
 
 use crate::executor::RedisExecutor;
 
+/// A type-erased factory for creating pooled connections.
+///
+/// Implement this trait to give a [`ConnectionPool`] the ability to replace
+/// dead connections after a failed health-check PING. When a PING fails and
+/// a factory is present, the pool calls [`PoolFactory::create`] to obtain a
+/// fresh connection and substitutes it into the dead slot before proceeding.
+pub trait PoolFactory: Send + Sync + 'static {
+    /// The connection type this factory creates.
+    type Connection: RedisExecutor + Send + 'static;
+
+    /// Create a new connection.
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
+}
+
 /// Dispatch strategy for distributing commands across pooled connections.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum DispatchStrategy {
@@ -68,7 +82,9 @@ pub struct PoolConfig {
     ///
     /// This provides lazy health checking: when a connection has been idle
     /// beyond this interval, a PING is sent before dispatching the actual
-    /// command. If the PING fails, the error is returned to the caller.
+    /// command. If the PING fails and the pool has a factory, the dead slot
+    /// is replaced before the command is retried. If no factory is present,
+    /// the error is returned to the caller.
     pub health_check_interval: Option<Duration>,
 }
 
@@ -124,6 +140,25 @@ struct PoolInner<S> {
     dispatch: DispatchStrategy,
     /// Health check interval in milliseconds, or 0 if disabled.
     health_check_interval_ms: u64,
+    /// Optional factory used to replace dead connections after a failed PING.
+    factory: Option<Arc<dyn ErasedPoolFactory<Connection = S>>>,
+}
+
+/// Object-safe wrapper around [`PoolFactory`] that erases the concrete type.
+///
+/// `PoolFactory` cannot itself be made into a trait object because of the
+/// associated type, so we use this helper to expose the same surface via
+/// `dyn`.
+trait ErasedPoolFactory: Send + Sync + 'static {
+    type Connection: RedisExecutor + Send + 'static;
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
+}
+
+impl<F: PoolFactory> ErasedPoolFactory for F {
+    type Connection = F::Connection;
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+        PoolFactory::create(self)
+    }
 }
 
 /// A pool of Redis connections that dispatches commands across them.
@@ -202,24 +237,68 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
+                factory: None,
             }),
         })
     }
 
-    /// Build a pool from pre-created connections.
-    pub fn from_connections(
-        connections: Vec<S>,
-        dispatch: DispatchStrategy,
-    ) -> Result<Self, RedisError> {
-        Self::from_connections_with_config(connections, dispatch, None)
+    /// Create a pool with custom configuration and a [`PoolFactory`].
+    ///
+    /// The factory is used both to build the initial connections and to
+    /// replace any connection slot that fails a health-check PING. This
+    /// ensures that a single dead connection does not permanently degrade
+    /// pool capacity.
+    pub async fn connect_with_factory<Fact>(
+        config: PoolConfig,
+        factory: Fact,
+    ) -> Result<Self, RedisError>
+    where
+        Fact: PoolFactory<Connection = S>,
+        S: RedisExecutor,
+    {
+        assert!(config.size > 0, "pool size must be at least 1");
+
+        let mut connections = Vec::with_capacity(config.size);
+        for _ in 0..config.size {
+            let conn = factory.create().await?;
+            connections.push(Mutex::new(conn));
+        }
+
+        let now = now_millis();
+        let inflight = (0..connections.len())
+            .map(|_| AtomicUsize::new(0))
+            .collect();
+        let last_used = (0..connections.len())
+            .map(|_| AtomicU64::new(now))
+            .collect();
+        let health_check_interval_ms = config
+            .health_check_interval
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        Ok(Self {
+            inner: Arc::new(PoolInner {
+                connections,
+                inflight,
+                last_used,
+                index: AtomicUsize::new(0),
+                dispatch: config.dispatch,
+                health_check_interval_ms,
+                factory: Some(Arc::new(factory)),
+            }),
+        })
     }
 
-    /// Build a pool from pre-created connections with a health check interval.
-    pub fn from_connections_with_config(
-        connections: Vec<S>,
-        dispatch: DispatchStrategy,
-        health_check_interval: Option<Duration>,
-    ) -> Result<Self, RedisError> {
+    /// Build a pool from pre-created connections using the given [`PoolConfig`].
+    ///
+    /// The `config.size` field is ignored here because the pool size is
+    /// determined by the number of connections supplied. All other config
+    /// fields (`dispatch`, `health_check_interval`) are applied normally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `connections` is empty.
+    pub fn from_connections(connections: Vec<S>, config: PoolConfig) -> Result<Self, RedisError> {
         if connections.is_empty() {
             return Err(RedisError::InvalidUrl(
                 "pool requires at least one connection".into(),
@@ -233,7 +312,8 @@ where
         let last_used = (0..connections.len())
             .map(|_| AtomicU64::new(now))
             .collect();
-        let health_check_interval_ms = health_check_interval
+        let health_check_interval_ms = config
+            .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
         let mutexed: Vec<Mutex<S>> = connections.into_iter().map(Mutex::new).collect();
@@ -244,8 +324,9 @@ where
                 inflight,
                 last_used,
                 index: AtomicUsize::new(0),
-                dispatch,
+                dispatch: config.dispatch,
                 health_check_interval_ms,
+                factory: None,
             }),
         })
     }
@@ -316,11 +397,29 @@ where
             let mut conn = inner.connections[idx].lock().await;
 
             // Lazy health check: PING if idle beyond the threshold.
-            if inner.health_check_interval_ms > 0 {
-                let last = inner.last_used[idx].load(Ordering::Acquire);
-                let now = now_millis();
-                if now.saturating_sub(last) >= inner.health_check_interval_ms {
-                    let _: String = conn.execute(Ping::new()).await?;
+            let last = inner.last_used[idx].load(Ordering::Acquire);
+            let now = now_millis();
+            if inner.health_check_interval_ms > 0
+                && now.saturating_sub(last) >= inner.health_check_interval_ms
+                && let Err(ping_err) = conn.execute(Ping::new()).await
+            {
+                // PING failed. Attempt to replace the dead slot via the factory.
+                if let Some(ref factory) = inner.factory {
+                    match factory.create().await {
+                        Ok(fresh) => {
+                            *conn = fresh;
+                            inner.last_used[idx].store(now_millis(), Ordering::Release);
+                        }
+                        Err(replace_err) => {
+                            drop(conn);
+                            inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                            return Err(replace_err);
+                        }
+                    }
+                } else {
+                    drop(conn);
+                    inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                    return Err(ping_err);
                 }
             }
 
@@ -346,18 +445,40 @@ where
     ///
     /// If `health_check_interval` is configured and the selected connection
     /// has been idle longer than the interval, a PING is sent first to
-    /// verify the connection is alive.
+    /// verify the connection is alive. If the PING fails and the pool was
+    /// built with a [`PoolFactory`] (via [`ConnectionPool::connect_with_factory`]),
+    /// the dead slot is replaced with a fresh connection before the actual
+    /// command is executed. If no factory is available, the PING error is
+    /// returned to the caller.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
         // inflight already incremented by next_index()
         let mut conn = self.inner.connections[idx].lock().await;
 
         // Lazy health check: PING if idle beyond the threshold.
-        if self.inner.health_check_interval_ms > 0 {
-            let last = self.inner.last_used[idx].load(Ordering::Acquire);
-            let now = now_millis();
-            if now.saturating_sub(last) >= self.inner.health_check_interval_ms {
-                let _: String = conn.execute(Ping::new()).await?;
+        let last = self.inner.last_used[idx].load(Ordering::Acquire);
+        let now = now_millis();
+        if self.inner.health_check_interval_ms > 0
+            && now.saturating_sub(last) >= self.inner.health_check_interval_ms
+            && let Err(ping_err) = conn.execute(Ping::new()).await
+        {
+            // PING failed. Attempt to replace the dead slot via the factory.
+            if let Some(ref factory) = self.inner.factory {
+                match factory.create().await {
+                    Ok(fresh) => {
+                        *conn = fresh;
+                        self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+                    }
+                    Err(replace_err) => {
+                        drop(conn);
+                        self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                        return Err(replace_err);
+                    }
+                }
+            } else {
+                drop(conn);
+                self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                return Err(ping_err);
             }
         }
 
@@ -367,18 +488,6 @@ where
         self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result
     }
-}
-
-/// A type-erased factory for creating pooled connections.
-///
-/// This trait extends [`ConnectionFactory`](crate::reconnect::ConnectionFactory)
-/// to support creating any connection type, not just `RedisConnection`.
-pub trait PoolFactory: Send + Sync + 'static {
-    /// The connection type this factory creates.
-    type Connection: RedisExecutor + Send + 'static;
-
-    /// Create a new connection.
-    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
 }
 
 #[cfg(test)]
@@ -426,6 +535,36 @@ mod tests {
         }
     }
 
+    /// Mock factory that hands out pre-built MockConn instances one at a time.
+    struct MockFactory {
+        conns: Arc<tokio::sync::Mutex<VecDeque<MockConn>>>,
+    }
+
+    impl MockFactory {
+        fn new(conns: Vec<MockConn>) -> Self {
+            Self {
+                conns: Arc::new(tokio::sync::Mutex::new(VecDeque::from(conns))),
+            }
+        }
+    }
+
+    impl PoolFactory for MockFactory {
+        type Connection = MockConn;
+
+        fn create(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+            let conns = Arc::clone(&self.conns);
+            Box::pin(async move {
+                conns
+                    .lock()
+                    .await
+                    .pop_front()
+                    .ok_or_else(|| RedisError::InvalidUrl("no more mock connections".into()))
+            })
+        }
+    }
+
     #[tokio::test]
     async fn pool_default_config() {
         let config = PoolConfig::default();
@@ -445,14 +584,13 @@ mod tests {
     #[tokio::test]
     async fn pool_from_connections() {
         let conns = vec![MockConn::new(0, vec![]), MockConn::new(1, vec![])];
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
         assert_eq!(pool.size(), 2);
     }
 
     #[tokio::test]
     async fn pool_empty_connections_fails() {
-        let result =
-            ConnectionPool::<MockConn>::from_connections(vec![], DispatchStrategy::RoundRobin);
+        let result = ConnectionPool::<MockConn>::from_connections(vec![], PoolConfig::default());
         assert!(result.is_err());
     }
 
@@ -477,7 +615,11 @@ mod tests {
             ),
         ];
 
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
 
         // 4 commands should distribute 2 to each connection.
         for _ in 0..4 {
@@ -523,7 +665,11 @@ mod tests {
             ],
         )];
 
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
         let pool2 = pool.clone();
 
         let _: String = pool.execute(Ping::new()).await.unwrap();
@@ -547,7 +693,11 @@ mod tests {
             ));
         }
 
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::Random).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::Random),
+        )
+        .unwrap();
 
         for _ in 0..20 {
             let _: String = pool.execute(Ping::new()).await.unwrap();
@@ -570,7 +720,11 @@ mod tests {
             vec![Frame::BulkString(Some(Bytes::from("hello")))],
         )];
 
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
         let result: Option<Bytes> = pool.execute(Get::new("key")).await.unwrap();
         assert_eq!(result, Some(Bytes::from("hello")));
     }
@@ -584,7 +738,11 @@ mod tests {
             vec![Frame::Error(Bytes::from("ERR something went wrong"))],
         )];
 
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
         let result = pool.execute(Get::new("key")).await;
         assert!(result.is_err());
     }
@@ -611,8 +769,11 @@ mod tests {
             ),
         ];
 
-        let pool =
-            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::LeastConnections),
+        )
+        .unwrap();
 
         // Sequential calls -- all inflight counts are 0 after each completes,
         // so least-connections falls back to picking index 0 each time.
@@ -647,8 +808,11 @@ mod tests {
             ),
         ];
 
-        let pool =
-            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::LeastConnections),
+        )
+        .unwrap();
 
         // Both start at 0. First next_index() picks 0 and increments it.
         let idx0 = pool.next_index();
@@ -675,8 +839,11 @@ mod tests {
             vec![Frame::SimpleString(Bytes::from("PONG"))],
         )];
 
-        let pool =
-            ConnectionPool::from_connections(conns, DispatchStrategy::LeastConnections).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::LeastConnections),
+        )
+        .unwrap();
         let _: String = pool.execute(Ping::new()).await.unwrap();
 
         assert_eq!(pool.inner.inflight[0].load(Ordering::Relaxed), 0);
@@ -702,10 +869,11 @@ mod tests {
         )];
 
         // Use a very short health check interval (1 ms) so it always triggers.
-        let pool = ConnectionPool::from_connections_with_config(
+        let pool = ConnectionPool::from_connections(
             conns,
-            DispatchStrategy::RoundRobin,
-            Some(Duration::from_millis(1)),
+            PoolConfig::default()
+                .dispatch(DispatchStrategy::RoundRobin)
+                .health_check_interval(Duration::from_millis(1)),
         )
         .unwrap();
 
@@ -730,10 +898,11 @@ mod tests {
         )];
 
         // Use a very long health check interval so it never triggers.
-        let pool = ConnectionPool::from_connections_with_config(
+        let pool = ConnectionPool::from_connections(
             conns,
-            DispatchStrategy::RoundRobin,
-            Some(Duration::from_secs(3600)),
+            PoolConfig::default()
+                .dispatch(DispatchStrategy::RoundRobin)
+                .health_check_interval(Duration::from_secs(3600)),
         )
         .unwrap();
 
@@ -755,7 +924,7 @@ mod tests {
         )];
 
         // No health check interval set (default).
-        let pool = ConnectionPool::from_connections(conns, DispatchStrategy::RoundRobin).unwrap();
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
 
         // Set last_used to 0 so connection appears stale.
         pool.inner.last_used[0].store(0, Ordering::Release);
@@ -765,5 +934,74 @@ mod tests {
         // Only 1 call -- health check is disabled.
         let c0 = pool.inner.connections[0].lock().await;
         assert_eq!(c0.calls(), 1);
+    }
+
+    /// Verify that a dead connection slot is replaced by the factory after a
+    /// failed health-check PING (issue #339).
+    ///
+    /// Sequence:
+    ///   1. Pool is built via `connect_with_factory`; the initial connection
+    ///      is a MockConn that returns an error for its first call (the health-
+    ///      check PING will fail).
+    ///   2. The factory supplies a fresh MockConn with a PONG response.
+    ///   3. `execute(Ping::new())` is called; the health check triggers (last_used
+    ///      is set to 0 so the slot appears stale).
+    ///   4. The dead PING fails → factory creates a replacement → command
+    ///      succeeds against the fresh connection.
+    #[tokio::test]
+    async fn pool_health_check_dead_connection_replaced() {
+        use redis_tower_commands::Ping;
+
+        // The factory serves two connections in order:
+        //   slot 0 (initial): dead — first call returns an error (simulates a
+        //     stale/closed connection whose health-check PING will fail).
+        //   replacement: healthy — returns PONG for the actual command.
+        let factory = MockFactory::new(vec![
+            MockConn::new(0, vec![Frame::Error(Bytes::from("ERR connection closed"))]),
+            MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+        ]);
+
+        let pool = ConnectionPool::connect_with_factory(
+            PoolConfig::default()
+                .size(1)
+                .health_check_interval(Duration::from_millis(1)),
+            factory,
+        )
+        .await
+        .unwrap();
+
+        // Make the connection appear stale so the health check triggers.
+        pool.inner.last_used[0].store(0, Ordering::Release);
+
+        // The execute call should:
+        //  1. Trigger the health check (stale threshold exceeded).
+        //  2. The PING on the dead connection returns an error.
+        //  3. The factory creates the fresh connection and replaces the slot.
+        //  4. The actual Ping command is sent on the fresh connection and succeeds.
+        let result: String = pool.execute(Ping::new()).await.unwrap();
+        assert_eq!(result, "PONG");
+    }
+
+    /// Verify that when a health check PING fails and no factory is available,
+    /// the error is returned to the caller (original behaviour preserved).
+    #[tokio::test]
+    async fn pool_health_check_dead_no_factory_returns_error() {
+        use redis_tower_commands::Ping;
+
+        let dead_conn = MockConn::new(0, vec![Frame::Error(Bytes::from("ERR connection closed"))]);
+
+        // No factory — use from_connections.
+        let pool = ConnectionPool::from_connections(
+            vec![dead_conn],
+            PoolConfig::default()
+                .dispatch(DispatchStrategy::RoundRobin)
+                .health_check_interval(Duration::from_millis(1)),
+        )
+        .unwrap();
+
+        pool.inner.last_used[0].store(0, Ordering::Release);
+
+        let result = pool.execute(Ping::new()).await;
+        assert!(result.is_err(), "expected error when no factory present");
     }
 }
