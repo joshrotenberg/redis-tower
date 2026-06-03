@@ -2,6 +2,7 @@ mod common;
 
 use bytes::Bytes;
 use common::conn;
+use redis_tower::Frame;
 use redis_tower::commands::*;
 
 #[tokio::test]
@@ -119,4 +120,101 @@ async fn cover_strlen() {
     let len = c.execute(StrLen::new(k)).await.unwrap();
     assert_eq!(len, 5);
     c.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_lcs_basic() {
+    let mut c = conn().await;
+    let k1 = "cover:strings:lcs:k1";
+    let k2 = "cover:strings:lcs:k2";
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+    c.execute(Set::new(k1, "ohmytext")).await.unwrap();
+    c.execute(Set::new(k2, "mynewtext")).await.unwrap();
+    let result = c.execute(Lcs::new(k1, k2)).await.unwrap();
+    match result {
+        Frame::BulkString(Some(b)) => {
+            let s = String::from_utf8_lossy(&b).to_string();
+            assert_eq!(s, "mytext");
+        }
+        other => panic!("expected bulk string from LCS, got: {other:?}"),
+    }
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_lcs_len() {
+    let mut c = conn().await;
+    let k1 = "cover:strings:lcs_len:k1";
+    let k2 = "cover:strings:lcs_len:k2";
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+    c.execute(Set::new(k1, "ohmytext")).await.unwrap();
+    c.execute(Set::new(k2, "mynewtext")).await.unwrap();
+    let result = c.execute(Lcs::new(k1, k2).len()).await.unwrap();
+    match result {
+        Frame::Integer(n) => {
+            assert_eq!(n, 6); // "mytext" has length 6
+        }
+        other => panic!("expected integer from LCS LEN, got: {other:?}"),
+    }
+    c.execute(Del::new(k1)).await.unwrap();
+    c.execute(Del::new(k2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_getset_basic() {
+    let mut c = conn().await;
+    let k = "cover:strings:getset";
+    c.execute(Del::new(k)).await.unwrap();
+    c.execute(Set::new(k, "old_value")).await.unwrap();
+    let old = c.execute(GetSet::new(k, "new_value")).await.unwrap();
+    assert_eq!(old, Some(Bytes::from("old_value")));
+    let current = c.execute(Get::new(k)).await.unwrap();
+    assert_eq!(current, Some(Bytes::from("new_value")));
+    c.execute(Del::new(k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_msetnx_all_new() {
+    let mut c = conn().await;
+    let k1 = "cover:strings:msetnx:k1";
+    let k2 = "cover:strings:msetnx:k2";
+    c.execute(Del::keys([k1, k2])).await.unwrap();
+    let ok = c
+        .execute(MSetNx::new([(k1, "v1"), (k2, "v2")]))
+        .await
+        .unwrap();
+    assert!(ok, "MSETNX should return true when all keys are new");
+    let v1 = c.execute(Get::new(k1)).await.unwrap();
+    let v2 = c.execute(Get::new(k2)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("v1")));
+    assert_eq!(v2, Some(Bytes::from("v2")));
+    c.execute(Del::keys([k1, k2])).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_msetnx_one_exists() {
+    let mut c = conn().await;
+    let k1 = "cover:strings:msetnx_exists:k1";
+    let k2 = "cover:strings:msetnx_exists:k2";
+    c.execute(Del::keys([k1, k2])).await.unwrap();
+    // Pre-set k1 so MSETNX must refuse the whole operation.
+    c.execute(Set::new(k1, "existing")).await.unwrap();
+    let ok = c
+        .execute(MSetNx::new([(k1, "new1"), (k2, "new2")]))
+        .await
+        .unwrap();
+    assert!(
+        !ok,
+        "MSETNX should return false when any key already exists"
+    );
+    // k1 must still hold its original value.
+    let v1 = c.execute(Get::new(k1)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("existing")));
+    // k2 must not have been set.
+    let v2 = c.execute(Get::new(k2)).await.unwrap();
+    assert_eq!(v2, None);
+    c.execute(Del::keys([k1, k2])).await.unwrap();
 }
