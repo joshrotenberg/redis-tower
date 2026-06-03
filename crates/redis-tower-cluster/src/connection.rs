@@ -607,6 +607,16 @@ impl ClusterConnection {
     }
 }
 
+impl redis_tower::RedisExecutor for ClusterConnection {
+    fn execute<Cmd: redis_tower_core::Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl std::future::Future<Output = Result<Cmd::Response, redis_tower_core::RedisError>> + Send
+    {
+        ClusterConnection::execute(self, cmd)
+    }
+}
+
 // Note: Service::call routes to the correct node but does NOT handle
 // MOVED/ASK redirects. Use `execute()` for full redirect handling.
 // The Service impl enables Tower middleware composition (caching, timeouts).
