@@ -64,6 +64,33 @@ impl HSet {
         }
     }
 
+    /// Constructs an [`HSet`] from an iterator of `(field, value)` pairs.
+    ///
+    /// This is the bulk-insert constructor: equivalent to calling `.field()` for every
+    /// pair in the iterator. Accepts any `IntoIterator<Item = (impl Into<String>, impl Into<String>)>`,
+    /// including `HashMap`, `Vec<(&str, &str)>`, and similar collections.
+    ///
+    /// Produces the same wire frame as the incremental builder:
+    ///
+    /// ```rust,ignore
+    /// // These two are equivalent:
+    /// let a = HSet::new("h", "f1", "v1").field("f2", "v2");
+    /// let b = HSet::from_fields("h", [("f1", "v1"), ("f2", "v2")]);
+    /// assert_eq!(a.to_frame(), b.to_frame());
+    /// ```
+    pub fn from_fields(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields
+                .into_iter()
+                .map(|(f, v)| (f.into(), v.into()))
+                .collect(),
+        }
+    }
+
     /// Add an additional field-value pair.
     pub fn field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.fields.push((name.into(), value.into()));
@@ -1264,6 +1291,46 @@ mod tests {
     fn hset_parse_integer() {
         let cmd = HSet::new("h", "f", "v");
         assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn hset_from_fields_to_frame() {
+        let cmd = HSet::from_fields("h", [("f1", "v1"), ("f2", "v2")]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HSET"),
+                bulk("h"),
+                bulk("f1"),
+                bulk("v1"),
+                bulk("f2"),
+                bulk("v2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hset_from_fields_matches_incremental() {
+        let incremental = HSet::new("h", "f1", "v1").field("f2", "v2");
+        let bulk = HSet::from_fields("h", [("f1", "v1"), ("f2", "v2")]);
+        assert_eq!(incremental.to_frame(), bulk.to_frame());
+    }
+
+    #[test]
+    fn hset_from_fields_vec() {
+        let fields = vec![("name", "Alice"), ("city", "Portland")];
+        let cmd = HSet::from_fields("user:1", fields);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HSET"),
+                bulk("user:1"),
+                bulk("name"),
+                bulk("Alice"),
+                bulk("city"),
+                bulk("Portland"),
+            ])
+        );
     }
 
     // -- HDel --

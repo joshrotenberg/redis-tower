@@ -30,6 +30,45 @@ impl ZAdd {
         }
     }
 
+    /// Constructs a [`ZAdd`] pre-populated from an iterator of `(score, member)` pairs.
+    ///
+    /// This is the bulk-insert constructor: equivalent to calling `.member()` for every
+    /// pair in the iterator. Accepts any `IntoIterator<Item = (f64, impl Into<String>)>`,
+    /// including `Vec<(f64, String)>` and similar collections.
+    ///
+    /// Option flags (`nx`, `xx`, `gt`, `lt`, `ch`) can be chained as usual:
+    ///
+    /// ```rust,ignore
+    /// let scores = vec![(100.0, "alice"), (200.0, "bob")];
+    /// let cmd = ZAdd::from_members("leaderboard", scores).ch();
+    /// ```
+    ///
+    /// Produces the same wire frame as the incremental builder for the same members:
+    ///
+    /// ```rust,ignore
+    /// // These two are equivalent:
+    /// let a = ZAdd::new("z").member(1.0, "a").member(2.0, "b");
+    /// let b = ZAdd::from_members("z", [(1.0, "a"), (2.0, "b")]);
+    /// assert_eq!(a.to_frame(), b.to_frame());
+    /// ```
+    pub fn from_members(
+        key: impl Into<String>,
+        members: impl IntoIterator<Item = (f64, impl Into<String>)>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            members: members
+                .into_iter()
+                .map(|(score, member)| (score, member.into()))
+                .collect(),
+            nx: false,
+            xx: false,
+            gt: false,
+            lt: false,
+            ch: false,
+        }
+    }
+
     /// Adds a member with the given score.
     pub fn member(mut self, score: f64, member: impl Into<String>) -> Self {
         self.members.push((score, member.into()));
@@ -2236,6 +2275,62 @@ mod tests {
             cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn zadd_from_members_to_frame() {
+        let cmd = ZAdd::from_members("myzset", [(1.0_f64, "a"), (2.0_f64, "b")]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZADD"),
+                bulk("myzset"),
+                bulk("1"),
+                bulk("a"),
+                bulk("2"),
+                bulk("b"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zadd_from_members_matches_incremental() {
+        let incremental = ZAdd::new("z").member(1.0, "a").member(2.0, "b");
+        let bulk = ZAdd::from_members("z", [(1.0_f64, "a"), (2.0_f64, "b")]);
+        assert_eq!(incremental.to_frame(), bulk.to_frame());
+    }
+
+    #[test]
+    fn zadd_from_members_vec() {
+        let scores: Vec<(f64, &str)> = vec![(100.0, "alice"), (200.0, "bob"), (150.0, "carol")];
+        let cmd = ZAdd::from_members("leaderboard", scores);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZADD"),
+                bulk("leaderboard"),
+                bulk("100"),
+                bulk("alice"),
+                bulk("200"),
+                bulk("bob"),
+                bulk("150"),
+                bulk("carol"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zadd_from_members_with_options() {
+        // Verify that option flags can be chained after from_members
+        let cmd = ZAdd::from_members("z", [(1.0_f64, "a")]).ch();
+        match cmd.to_frame() {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("ZADD"));
+                assert_eq!(args[1], bulk("z"));
+                assert!(args.contains(&bulk("CH")));
+            }
+            _ => panic!("expected array"),
+        }
     }
 
     // -- ZRem --
