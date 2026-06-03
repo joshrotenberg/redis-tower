@@ -86,6 +86,15 @@ pub struct PoolConfig {
     /// is replaced before the command is retried. If no factory is present,
     /// the error is returned to the caller.
     pub health_check_interval: Option<Duration>,
+    /// Maximum time to wait for a connection slot to become available.
+    ///
+    /// When all connections in the pool are busy, new callers block waiting
+    /// for a slot to free up. If this is set and the wait exceeds the
+    /// duration, `RedisError::PoolAcquisitionTimeout` is returned.
+    ///
+    /// `None` (the default) means unlimited: the caller blocks until a slot
+    /// is available, which is the pre-existing behavior.
+    pub acquisition_timeout: Option<Duration>,
 }
 
 impl Default for PoolConfig {
@@ -94,6 +103,7 @@ impl Default for PoolConfig {
             size: 4,
             dispatch: DispatchStrategy::RoundRobin,
             health_check_interval: None,
+            acquisition_timeout: None,
         }
     }
 }
@@ -119,6 +129,16 @@ impl PoolConfig {
         self.health_check_interval = Some(interval);
         self
     }
+
+    /// Set the maximum time to wait for a connection slot.
+    ///
+    /// If all connections are busy when a command is submitted and a slot
+    /// does not free up within `timeout`, the call returns
+    /// [`RedisError::PoolAcquisitionTimeout`].
+    pub fn acquisition_timeout(mut self, timeout: Duration) -> Self {
+        self.acquisition_timeout = Some(timeout);
+        self
+    }
 }
 
 /// Return the current epoch time in milliseconds.
@@ -140,6 +160,8 @@ struct PoolInner<S> {
     dispatch: DispatchStrategy,
     /// Health check interval in milliseconds, or 0 if disabled.
     health_check_interval_ms: u64,
+    /// Acquisition timeout in nanoseconds, or 0 if unlimited.
+    acquisition_timeout_ns: u64,
     /// Optional factory used to replace dead connections after a failed PING.
     factory: Option<Arc<dyn ErasedPoolFactory<Connection = S>>>,
 }
@@ -228,6 +250,10 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let acquisition_timeout_ns = config
+            .acquisition_timeout
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
 
         Ok(Self {
             inner: Arc::new(PoolInner {
@@ -237,6 +263,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
+                acquisition_timeout_ns,
                 factory: None,
             }),
         })
@@ -275,6 +302,10 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let acquisition_timeout_ns = config
+            .acquisition_timeout
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
 
         Ok(Self {
             inner: Arc::new(PoolInner {
@@ -284,6 +315,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
+                acquisition_timeout_ns,
                 factory: Some(Arc::new(factory)),
             }),
         })
@@ -316,6 +348,10 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let acquisition_timeout_ns = config
+            .acquisition_timeout
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
         let mutexed: Vec<Mutex<S>> = connections.into_iter().map(Mutex::new).collect();
 
         Ok(Self {
@@ -326,6 +362,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
+                acquisition_timeout_ns,
                 factory: None,
             }),
         })
@@ -394,7 +431,22 @@ where
         let idx = self.next_index();
         async move {
             // inflight already incremented by next_index()
-            let mut conn = inner.connections[idx].lock().await;
+            // Acquire with optional timeout.
+            let mut conn = if inner.acquisition_timeout_ns > 0 {
+                let timeout_dur = Duration::from_nanos(inner.acquisition_timeout_ns);
+                match tokio::time::timeout(timeout_dur, inner.connections[idx].lock()).await {
+                    Ok(guard) => guard,
+                    Err(_elapsed) => {
+                        inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                        return Err(RedisError::PoolAcquisitionTimeout {
+                            waited: timeout_dur,
+                            pool_size: inner.connections.len(),
+                        });
+                    }
+                }
+            } else {
+                inner.connections[idx].lock().await
+            };
 
             // Lazy health check: PING if idle beyond the threshold.
             let last = inner.last_used[idx].load(Ordering::Acquire);
@@ -453,7 +505,22 @@ where
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
         // inflight already incremented by next_index()
-        let mut conn = self.inner.connections[idx].lock().await;
+        // Acquire with optional timeout.
+        let mut conn = if self.inner.acquisition_timeout_ns > 0 {
+            let timeout_dur = Duration::from_nanos(self.inner.acquisition_timeout_ns);
+            match tokio::time::timeout(timeout_dur, self.inner.connections[idx].lock()).await {
+                Ok(guard) => guard,
+                Err(_elapsed) => {
+                    self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                    return Err(RedisError::PoolAcquisitionTimeout {
+                        waited: timeout_dur,
+                        pool_size: self.inner.connections.len(),
+                    });
+                }
+            }
+        } else {
+            self.inner.connections[idx].lock().await
+        };
 
         // Lazy health check: PING if idle beyond the threshold.
         let last = self.inner.last_used[idx].load(Ordering::Acquire);
@@ -1003,5 +1070,72 @@ mod tests {
 
         let result = pool.execute(Ping::new()).await;
         assert!(result.is_err(), "expected error when no factory present");
+    }
+
+    /// When acquisition_timeout is set and all slots are busy,
+    /// execute() returns PoolAcquisitionTimeout promptly.
+    #[tokio::test]
+    async fn pool_acquisition_timeout_fires_when_all_busy() {
+        use redis_tower_commands::Ping;
+        use std::time::Instant;
+
+        // Single-connection pool so it's easy to saturate.
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().acquisition_timeout(Duration::from_millis(50)),
+        )
+        .unwrap();
+
+        // Hold the lock on slot 0 to simulate a busy connection.
+        let _guard = pool.inner.connections[0].lock().await;
+
+        let start = Instant::now();
+        let result = pool.execute(Ping::new()).await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(result, Err(RedisError::PoolAcquisitionTimeout { .. })),
+            "expected PoolAcquisitionTimeout, got {result:?}"
+        );
+        // Should return well under 1 second (timeout is 50 ms).
+        assert!(elapsed < Duration::from_secs(1));
+    }
+
+    /// With acquisition_timeout: None (the default), execute() still blocks
+    /// until the lock is available — existing behavior is unchanged.
+    #[tokio::test]
+    async fn pool_no_acquisition_timeout_blocks_until_available() {
+        use redis_tower_commands::Ping;
+
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default(), // no acquisition_timeout
+        )
+        .unwrap();
+
+        // Release the lock after a short delay on a background task.
+        let pool2 = pool.clone();
+        tokio::spawn(async move {
+            let _guard = pool2.inner.connections[0].lock().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // guard drops here, releasing the lock
+        });
+
+        // Give the spawned task time to acquire the lock.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // execute() should block until the background task releases, then succeed.
+        let result: String = pool.execute(Ping::new()).await.unwrap();
+        assert_eq!(result, "PONG");
     }
 }

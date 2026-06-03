@@ -268,6 +268,7 @@
 pub mod auto_pipeline;
 pub mod cache_layer;
 pub mod caching;
+pub mod circuit_breaker;
 mod client;
 pub mod command_adapter;
 pub mod consumer;
@@ -294,6 +295,7 @@ pub mod search_api;
 pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
 pub use cache_layer::CacheService;
 pub use caching::CachedClient;
+pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerLayer, CircuitBreakerService};
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};

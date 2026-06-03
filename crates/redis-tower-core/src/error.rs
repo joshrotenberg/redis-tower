@@ -58,6 +58,23 @@ pub enum RedisError {
         attempts: usize,
         last_error: Box<RedisError>,
     },
+
+    /// The circuit breaker is open; request rejected without touching the service.
+    #[error("circuit open: too many recent failures")]
+    CircuitOpen,
+
+    /// Timed out waiting to acquire a connection from the pool.
+    #[error("pool acquisition timeout after {waited:?} waiting for 1 of {pool_size} connections")]
+    PoolAcquisitionTimeout {
+        /// How long the caller waited before the timeout fired.
+        waited: std::time::Duration,
+        /// Number of connections in the pool.
+        pool_size: usize,
+    },
+
+    /// The internal command queue is full; the caller should shed load.
+    #[error("queue full: the auto-pipeline channel is at capacity")]
+    QueueFull,
 }
 
 impl RedisError {
