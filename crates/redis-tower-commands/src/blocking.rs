@@ -162,7 +162,7 @@ impl Command for BLMove {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::BulkString(Some(data)) => Ok(Some(data)),
-            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(None),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "bulk string or null",
                 actual: format!("{other:?}"),

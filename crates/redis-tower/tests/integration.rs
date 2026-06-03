@@ -2280,6 +2280,51 @@ async fn bzpopmax_with_data() {
     conn.execute(Del::new(k)).await.unwrap();
 }
 
+#[tokio::test]
+async fn blmove_left_left() {
+    let mut conn = conn().await;
+    let src = "blocking_test:blmove_src";
+    let dst = "blocking_test:blmove_dst";
+    conn.execute(Del::new(src)).await.unwrap();
+    conn.execute(Del::new(dst)).await.unwrap();
+    conn.execute(RPush::elements(src, ["x", "y"]))
+        .await
+        .unwrap();
+
+    let result = conn
+        .execute(BLMove::new(src, dst, ListDir::Left, ListDir::Left, 1.0))
+        .await
+        .unwrap();
+    assert_eq!(result, Some(Bytes::from("x")));
+
+    // Source should have one element remaining.
+    let src_len: i64 = conn.execute(LLen::new(src)).await.unwrap();
+    assert_eq!(src_len, 1);
+
+    // Destination should contain the moved element.
+    let dst_items: Vec<Bytes> = conn.execute(LRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(dst_items, vec![Bytes::from("x")]);
+
+    conn.execute(Del::new(src)).await.unwrap();
+    conn.execute(Del::new(dst)).await.unwrap();
+}
+
+#[tokio::test]
+async fn blmove_timeout() {
+    let mut conn = conn().await;
+    let src = "blocking_test:blmove_timeout_src";
+    let dst = "blocking_test:blmove_timeout_dst";
+    conn.execute(Del::new(src)).await.unwrap();
+    conn.execute(Del::new(dst)).await.unwrap();
+
+    // Source is empty -- should time out and return None.
+    let result = conn
+        .execute(BLMove::new(src, dst, ListDir::Left, ListDir::Left, 0.1))
+        .await
+        .unwrap();
+    assert_eq!(result, None);
+}
+
 // -- Reconnection / resilience tests (#154) --
 
 #[tokio::test]
