@@ -890,6 +890,215 @@ impl Command for LMPop {
     }
 }
 
+/// LPOP key count
+///
+/// Removes and returns up to `count` elements from the head of the list stored
+/// at `key`. Returns an empty vector if the key does not exist.
+pub struct LPopCount {
+    key: String,
+    count: u64,
+}
+
+impl LPopCount {
+    pub fn new(key: impl Into<String>, count: u64) -> Self {
+        Self {
+            key: key.into(),
+            count,
+        }
+    }
+}
+
+impl Command for LPopCount {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("LPOP"),
+            bulk(self.key.as_str()),
+            bulk(self.count.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            Frame::Array(None) | Frame::Null => Ok(Vec::new()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LPOP"
+    }
+}
+
+/// RPOP key count
+///
+/// Removes and returns up to `count` elements from the tail of the list stored
+/// at `key`. Returns an empty vector if the key does not exist.
+pub struct RPopCount {
+    key: String,
+    count: u64,
+}
+
+impl RPopCount {
+    pub fn new(key: impl Into<String>, count: u64) -> Self {
+        Self {
+            key: key.into(),
+            count,
+        }
+    }
+}
+
+impl Command for RPopCount {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("RPOP"),
+            bulk(self.key.as_str()),
+            bulk(self.count.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            Frame::Array(None) | Frame::Null => Ok(Vec::new()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RPOP"
+    }
+}
+
+/// BLMPOP timeout numkeys key \[key ...\] LEFT|RIGHT \[COUNT count\]
+///
+/// Blocking variant of LMPOP. Pops one or more elements from the first
+/// non-empty list among the specified keys, blocking up to `timeout` seconds
+/// (0 to block indefinitely). Returns the key name and the popped elements as
+/// `Some((key, elements))`, or `None` on timeout.
+pub struct BlMPop {
+    timeout: f64,
+    keys: Vec<String>,
+    direction: ListDirection,
+    count: Option<u64>,
+}
+
+impl BlMPop {
+    pub fn new(
+        timeout: f64,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        direction: ListDirection,
+    ) -> Self {
+        Self {
+            timeout,
+            keys: keys.into_iter().map(Into::into).collect(),
+            direction,
+            count: None,
+        }
+    }
+
+    /// Set the COUNT option to pop multiple elements.
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for BlMPop {
+    type Response = Option<(Bytes, Vec<Bytes>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("BLMPOP"),
+            bulk(self.timeout.to_string()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        args.push(bulk(self.direction.as_str()));
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Null => Ok(None),
+            Frame::Array(None) => Ok(None),
+            Frame::Array(Some(frames)) if frames.len() == 2 => {
+                let mut iter = frames.into_iter();
+                let key = match iter.next().unwrap() {
+                    Frame::BulkString(Some(data)) => data,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "bulk string (key name)",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let elements = match iter.next().unwrap() {
+                    Frame::Array(Some(elems)) => elems
+                        .into_iter()
+                        .map(|f| match f {
+                            Frame::BulkString(Some(data)) => Ok(data),
+                            other => Err(RedisError::UnexpectedResponse {
+                                expected: "bulk string",
+                                actual: format!("{other:?}"),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "array of bulk strings",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                Ok(Some((key, elements)))
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "null or two-element array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "BLMPOP"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1188,5 +1397,82 @@ mod tests {
         let cmd = LTrim::new("mylist", 0, 99);
         cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
             .unwrap();
+    }
+
+    // -- LPopCount --
+
+    #[test]
+    fn lpop_count_to_frame() {
+        let cmd = LPopCount::new("mylist", 2);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LPOP"), bulk("mylist"), bulk("2")])
+        );
+    }
+
+    #[test]
+    fn lpop_count_parse_array() {
+        let cmd = LPopCount::new("mylist", 2);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn lpop_count_parse_null() {
+        let cmd = LPopCount::new("mylist", 2);
+        assert!(cmd.parse_response(Frame::Null).unwrap().is_empty());
+    }
+
+    // -- RPopCount --
+
+    #[test]
+    fn rpop_count_to_frame() {
+        let cmd = RPopCount::new("mylist", 3);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("RPOP"), bulk("mylist"), bulk("3")])
+        );
+    }
+
+    // -- BlMPop --
+
+    #[test]
+    fn blmpop_to_frame() {
+        let cmd = BlMPop::new(1.5, vec!["k1", "k2"], ListDirection::Left).count(3);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("BLMPOP"),
+                bulk("1.5"),
+                bulk("2"),
+                bulk("k1"),
+                bulk("k2"),
+                bulk("LEFT"),
+                bulk("COUNT"),
+                bulk("3"),
+            ])
+        );
+    }
+
+    #[test]
+    fn blmpop_parse_null() {
+        let cmd = BlMPop::new(1.0, vec!["k1"], ListDirection::Right);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn blmpop_parse_result() {
+        let cmd = BlMPop::new(1.0, vec!["k1"], ListDirection::Left);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("k1"))),
+            array(vec![Frame::BulkString(Some(Bytes::from("elem")))]),
+        ]);
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert_eq!(result.0, Bytes::from("k1"));
+        assert_eq!(result.1, vec![Bytes::from("elem")]);
     }
 }

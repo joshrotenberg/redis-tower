@@ -130,6 +130,132 @@ impl Command for EvalSha {
 }
 
 // ---------------------------------------------------------------------------
+// EVAL_RO
+// ---------------------------------------------------------------------------
+
+/// EVAL_RO script numkeys [key ...] [arg ...]
+///
+/// Read-only variant of EVAL. Evaluates a Lua script server-side, rejecting any
+/// write commands. Returns `Frame` directly.
+pub struct EvalRo {
+    script: String,
+    keys: Vec<String>,
+    args: Vec<String>,
+}
+
+impl EvalRo {
+    pub fn new(script: impl Into<String>) -> Self {
+        Self {
+            script: script.into(),
+            keys: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Add a key argument (populates KEYS table in Lua).
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.keys.push(key.into());
+        self
+    }
+
+    /// Add a regular argument (populates ARGV table in Lua).
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+}
+
+impl Command for EvalRo {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut parts = vec![
+            bulk("EVAL_RO"),
+            bulk(self.script.as_str()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for k in &self.keys {
+            parts.push(bulk(k.as_str()));
+        }
+        for a in &self.args {
+            parts.push(bulk(a.as_str()));
+        }
+        array(parts)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "EVAL_RO"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EVALSHA_RO
+// ---------------------------------------------------------------------------
+
+/// EVALSHA_RO sha1 numkeys [key ...] [arg ...]
+///
+/// Read-only variant of EVALSHA. Evaluates a cached Lua script by its SHA1
+/// digest, rejecting any write commands. Returns `Frame` directly.
+pub struct EvalShaRo {
+    sha1: String,
+    keys: Vec<String>,
+    args: Vec<String>,
+}
+
+impl EvalShaRo {
+    pub fn new(sha1: impl Into<String>) -> Self {
+        Self {
+            sha1: sha1.into(),
+            keys: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Add a key argument (populates KEYS table in Lua).
+    pub fn key(mut self, key: impl Into<String>) -> Self {
+        self.keys.push(key.into());
+        self
+    }
+
+    /// Add a regular argument (populates ARGV table in Lua).
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+}
+
+impl Command for EvalShaRo {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut parts = vec![
+            bulk("EVALSHA_RO"),
+            bulk(self.sha1.as_str()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for k in &self.keys {
+            parts.push(bulk(k.as_str()));
+        }
+        for a in &self.args {
+            parts.push(bulk(a.as_str()));
+        }
+        array(parts)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "EVALSHA_RO"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // SCRIPT LOAD
 // ---------------------------------------------------------------------------
 
@@ -967,6 +1093,48 @@ mod tests {
                 bulk("readonly_fn"),
                 bulk("1"),
                 bulk("k1")
+            ])
+        );
+    }
+
+    // -- EvalRo --
+
+    #[test]
+    fn eval_ro_to_frame() {
+        let cmd = EvalRo::new("return redis.call('GET', KEYS[1])").key("mykey");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVAL_RO"),
+                bulk("return redis.call('GET', KEYS[1])"),
+                bulk("1"),
+                bulk("mykey"),
+            ])
+        );
+    }
+
+    #[test]
+    fn eval_ro_parse_response() {
+        let cmd = EvalRo::new("return 1");
+        assert_eq!(
+            cmd.parse_response(Frame::Integer(1)).unwrap(),
+            Frame::Integer(1)
+        );
+    }
+
+    // -- EvalShaRo --
+
+    #[test]
+    fn evalsha_ro_to_frame() {
+        let cmd = EvalShaRo::new("abc123").key("k1").arg("a1");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVALSHA_RO"),
+                bulk("abc123"),
+                bulk("1"),
+                bulk("k1"),
+                bulk("a1"),
             ])
         );
     }
