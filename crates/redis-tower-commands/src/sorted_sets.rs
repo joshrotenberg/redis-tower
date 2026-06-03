@@ -10,6 +10,11 @@ use redis_tower_protocol::helpers::{array, bulk};
 pub struct ZAdd {
     key: String,
     members: Vec<(f64, String)>,
+    nx: bool,
+    xx: bool,
+    gt: bool,
+    lt: bool,
+    ch: bool,
 }
 
 impl ZAdd {
@@ -17,12 +22,47 @@ impl ZAdd {
         Self {
             key: key.into(),
             members: Vec::new(),
+            nx: false,
+            xx: false,
+            gt: false,
+            lt: false,
+            ch: false,
         }
     }
 
     /// Adds a member with the given score.
     pub fn member(mut self, score: f64, member: impl Into<String>) -> Self {
         self.members.push((score, member.into()));
+        self
+    }
+
+    /// Only add new members; do not update existing members (NX).
+    pub fn nx(mut self) -> Self {
+        self.nx = true;
+        self
+    }
+
+    /// Only update existing members; do not add new members (XX).
+    pub fn xx(mut self) -> Self {
+        self.xx = true;
+        self
+    }
+
+    /// Only update existing members if the new score is greater (GT).
+    pub fn gt(mut self) -> Self {
+        self.gt = true;
+        self
+    }
+
+    /// Only update existing members if the new score is less (LT).
+    pub fn lt(mut self) -> Self {
+        self.lt = true;
+        self
+    }
+
+    /// Return the number of changed members rather than only added ones (CH).
+    pub fn ch(mut self) -> Self {
+        self.ch = true;
         self
     }
 }
@@ -32,6 +72,21 @@ impl Command for ZAdd {
 
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZADD"), bulk(self.key.as_str())];
+        if self.nx {
+            args.push(bulk("NX"));
+        }
+        if self.xx {
+            args.push(bulk("XX"));
+        }
+        if self.gt {
+            args.push(bulk("GT"));
+        }
+        if self.lt {
+            args.push(bulk("LT"));
+        }
+        if self.ch {
+            args.push(bulk("CH"));
+        }
         for (score, member) in &self.members {
             args.push(bulk(score.to_string()));
             args.push(bulk(member.as_str()));
@@ -1541,6 +1596,608 @@ impl Command for ZRevRank {
     }
 }
 
+/// Parse a flat array of bulk-string members into a `Vec<Bytes>`.
+fn parse_member_array(frame: Frame) -> Result<Vec<Bytes>, RedisError> {
+    match frame {
+        Frame::Array(Some(frames)) => frames
+            .into_iter()
+            .map(|f| match f {
+                Frame::BulkString(Some(data)) => Ok(data),
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "bulk string",
+                    actual: format!("{other:?}"),
+                }),
+            })
+            .collect(),
+        Frame::Array(None) => Ok(Vec::new()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Parse a WITHSCORES response (flat `[member, score, ...]` array in RESP2 or
+/// an array of `[member, score]` pairs in RESP3) into `Vec<(Bytes, f64)>`.
+fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisError> {
+    fn parse_score(frame: &Frame) -> Result<f64, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => {
+                let s = String::from_utf8_lossy(data);
+                s.parse::<f64>()
+                    .map_err(|_| RedisError::UnexpectedResponse {
+                        expected: "float string",
+                        actual: format!("{s}"),
+                    })
+            }
+            Frame::Double(d) => Ok(*d),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or double",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+    fn parse_member(frame: &Frame) -> Result<Bytes, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data.clone()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+    match frame {
+        Frame::Array(None) => Ok(Vec::new()),
+        Frame::Array(Some(frames)) => {
+            // RESP3: array of [member, score] pairs.
+            if frames
+                .iter()
+                .all(|f| matches!(f, Frame::Array(Some(inner)) if inner.len() == 2))
+            {
+                return frames
+                    .iter()
+                    .map(|pair| match pair {
+                        Frame::Array(Some(inner)) => {
+                            Ok((parse_member(&inner[0])?, parse_score(&inner[1])?))
+                        }
+                        other => Err(RedisError::UnexpectedResponse {
+                            expected: "array of [member, score]",
+                            actual: format!("{other:?}"),
+                        }),
+                    })
+                    .collect();
+            }
+            // RESP2: flat [member, score, member, score, ...] array.
+            if frames.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even number of elements (member/score pairs)",
+                    actual: format!("array of length {}", frames.len()),
+                });
+            }
+            frames
+                .chunks(2)
+                .map(|pair| Ok((parse_member(&pair[0])?, parse_score(&pair[1])?)))
+                .collect()
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// ZADD key INCR score member
+///
+/// Increments the score of `member` by `score` (ZADD with the INCR flag). When
+/// used together with NX/XX the operation may be skipped, in which case `None`
+/// is returned; otherwise returns the new score of the member.
+pub struct ZAddIncr {
+    key: String,
+    score: f64,
+    member: String,
+}
+
+impl ZAddIncr {
+    pub fn new(key: impl Into<String>, score: f64, member: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            score,
+            member: member.into(),
+        }
+    }
+}
+
+impl Command for ZAddIncr {
+    type Response = Option<f64>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZADD"),
+            bulk(self.key.as_str()),
+            bulk("INCR"),
+            bulk(self.score.to_string()),
+            bulk(self.member.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => {
+                let s = String::from_utf8_lossy(&data);
+                let score = s
+                    .parse::<f64>()
+                    .map_err(|_| RedisError::UnexpectedResponse {
+                        expected: "float string",
+                        actual: format!("{s}"),
+                    })?;
+                Ok(Some(score))
+            }
+            Frame::Double(d) => Ok(Some(d)),
+            Frame::BulkString(None) | Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string, double, or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ZADD"
+    }
+}
+
+/// ZDIFF numkeys key \[key ...\]
+///
+/// Returns the difference between the first sorted set and all successive
+/// sorted sets. Returns only the members (without scores).
+pub struct ZDiff {
+    keys: Vec<String>,
+}
+
+impl ZDiff {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for ZDiff {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZDIFF"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZDIFF"
+    }
+}
+
+/// ZDIFF numkeys key \[key ...\] WITHSCORES
+///
+/// Returns the difference between the first sorted set and all successive
+/// sorted sets, including each member's score.
+pub struct ZDiffWithScores {
+    keys: Vec<String>,
+}
+
+impl ZDiffWithScores {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for ZDiffWithScores {
+    type Response = Vec<(Bytes, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZDIFF"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        args.push(bulk("WITHSCORES"));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_score_pairs(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZDIFF"
+    }
+}
+
+/// ZUNION numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\]
+///
+/// Returns the union of the sorted sets given by the specified keys. Returns
+/// only the members (without scores).
+pub struct ZUnion {
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZUnion {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZUnion {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZUNION"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZUNION"
+    }
+}
+
+/// ZUNION numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\] WITHSCORES
+///
+/// Returns the union of the sorted sets given by the specified keys, including
+/// each member's score.
+pub struct ZUnionWithScores {
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZUnionWithScores {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZUnionWithScores {
+    type Response = Vec<(Bytes, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZUNION"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        args.push(bulk("WITHSCORES"));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_score_pairs(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZUNION"
+    }
+}
+
+/// ZINTER numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\]
+///
+/// Returns the intersection of the sorted sets given by the specified keys.
+/// Returns only the members (without scores).
+pub struct ZInter {
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZInter {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZInter {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZINTER"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZINTER"
+    }
+}
+
+/// ZINTER numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\] WITHSCORES
+///
+/// Returns the intersection of the sorted sets given by the specified keys,
+/// including each member's score.
+pub struct ZInterWithScores {
+    keys: Vec<String>,
+    weights: Option<Vec<f64>>,
+    aggregate: Option<Aggregate>,
+}
+
+impl ZInterWithScores {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            keys: keys.into_iter().map(Into::into).collect(),
+            weights: None,
+            aggregate: None,
+        }
+    }
+
+    /// Sets the weight multipliers for each input sorted set.
+    pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
+        self.weights = Some(weights.into_iter().collect());
+        self
+    }
+
+    /// Sets the aggregation function for combining scores.
+    pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
+        self.aggregate = Some(aggregate);
+        self
+    }
+}
+
+impl Command for ZInterWithScores {
+    type Response = Vec<(Bytes, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("ZINTER"), bulk(self.keys.len().to_string())];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        if let Some(weights) = &self.weights {
+            args.push(bulk("WEIGHTS"));
+            for w in weights {
+                args.push(bulk(w.to_string()));
+            }
+        }
+        if let Some(agg) = &self.aggregate {
+            args.push(bulk("AGGREGATE"));
+            args.push(bulk(agg.as_str()));
+        }
+        args.push(bulk("WITHSCORES"));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_score_pairs(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZINTER"
+    }
+}
+
+/// BZMPOP timeout numkeys key \[key ...\] MIN|MAX \[COUNT count\]
+///
+/// Blocking variant of ZMPOP. Pops one or more members with the lowest or
+/// highest scores from the first non-empty sorted set among the specified
+/// keys, blocking up to `timeout` seconds (0 to block indefinitely). Returns
+/// `None` on timeout, or `Some((key, members))` where `members` is a list of
+/// `(member, score)` pairs.
+pub struct BZMPop {
+    timeout: f64,
+    keys: Vec<String>,
+    direction: ZMPopDirection,
+    count: Option<u64>,
+}
+
+impl BZMPop {
+    pub fn new(
+        timeout: f64,
+        keys: impl IntoIterator<Item = impl Into<String>>,
+        direction: ZMPopDirection,
+    ) -> Self {
+        Self {
+            timeout,
+            keys: keys.into_iter().map(Into::into).collect(),
+            direction,
+            count: None,
+        }
+    }
+
+    /// Sets the number of members to pop.
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for BZMPop {
+    type Response = Option<(Bytes, Vec<(Bytes, f64)>)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("BZMPOP"),
+            bulk(self.timeout.to_string()),
+            bulk(self.keys.len().to_string()),
+        ];
+        for key in &self.keys {
+            args.push(bulk(key.as_str()));
+        }
+        args.push(bulk(self.direction.as_str()));
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) if frames.len() == 2 => {
+                let key = match &frames[0] {
+                    Frame::BulkString(Some(data)) => data.clone(),
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "bulk string (key name)",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let members = match &frames[1] {
+                    Frame::Array(Some(pairs)) => pairs
+                        .iter()
+                        .map(|pair| match pair {
+                            Frame::Array(Some(inner)) if inner.len() == 2 => {
+                                let member = match &inner[0] {
+                                    Frame::BulkString(Some(data)) => data.clone(),
+                                    other => {
+                                        return Err(RedisError::UnexpectedResponse {
+                                            expected: "bulk string (member)",
+                                            actual: format!("{other:?}"),
+                                        });
+                                    }
+                                };
+                                let score = match &inner[1] {
+                                    Frame::BulkString(Some(data)) => {
+                                        let s = String::from_utf8_lossy(data);
+                                        s.parse::<f64>().map_err(|_| {
+                                            RedisError::UnexpectedResponse {
+                                                expected: "float string",
+                                                actual: format!("{s}"),
+                                            }
+                                        })?
+                                    }
+                                    Frame::Double(d) => *d,
+                                    other => {
+                                        return Err(RedisError::UnexpectedResponse {
+                                            expected: "bulk string or double (score)",
+                                            actual: format!("{other:?}"),
+                                        });
+                                    }
+                                };
+                                Ok((member, score))
+                            }
+                            other => Err(RedisError::UnexpectedResponse {
+                                expected: "array of [member, score]",
+                                actual: format!("{other:?}"),
+                            }),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "array of member/score pairs",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                Ok(Some((key, members)))
+            }
+            Frame::Array(None) | Frame::Null | Frame::BulkString(None) => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "two-element array or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "BZMPOP"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1813,5 +2470,211 @@ mod tests {
                 bulk("+inf"),
             ])
         );
+    }
+
+    // -- ZAdd options --
+
+    #[test]
+    fn zadd_with_options_to_frame() {
+        let cmd = ZAdd::new("myzset").nx().ch().member(1.0, "a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZADD"),
+                bulk("myzset"),
+                bulk("NX"),
+                bulk("CH"),
+                bulk("1"),
+                bulk("a"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zadd_gt_lt_to_frame() {
+        let cmd = ZAdd::new("myzset").gt().lt().member(2.0, "b");
+        match cmd.to_frame() {
+            Frame::Array(Some(args)) => {
+                assert!(args.contains(&bulk("GT")));
+                assert!(args.contains(&bulk("LT")));
+                assert!(!args.contains(&bulk("XX")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    // -- ZAddIncr --
+
+    #[test]
+    fn zadd_incr_to_frame() {
+        let cmd = ZAddIncr::new("myzset", 5.0, "member");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZADD"),
+                bulk("myzset"),
+                bulk("INCR"),
+                bulk("5"),
+                bulk("member"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zadd_incr_parse_score() {
+        let cmd = ZAddIncr::new("myzset", 5.0, "m");
+        let frame = Frame::BulkString(Some(Bytes::from("7.5")));
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert!((result - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn zadd_incr_parse_null() {
+        let cmd = ZAddIncr::new("myzset", 5.0, "m");
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- ZDiff --
+
+    #[test]
+    fn zdiff_to_frame() {
+        let cmd = ZDiff::new(vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZDIFF"), bulk("2"), bulk("s1"), bulk("s2")])
+        );
+    }
+
+    #[test]
+    fn zdiff_parse_members() {
+        let cmd = ZDiff::new(vec!["s1"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn zdiff_with_scores_to_frame() {
+        let cmd = ZDiffWithScores::new(vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZDIFF"),
+                bulk("2"),
+                bulk("s1"),
+                bulk("s2"),
+                bulk("WITHSCORES"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zdiff_with_scores_parse_flat() {
+        let cmd = ZDiffWithScores::new(vec!["s1"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("1.5"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, Bytes::from("a"));
+        assert!((result[0].1 - 1.5).abs() < f64::EPSILON);
+    }
+
+    // -- ZUnion / ZInter --
+
+    #[test]
+    fn zunion_to_frame() {
+        let cmd = ZUnion::new(vec!["s1", "s2"]).aggregate(Aggregate::Max);
+        match cmd.to_frame() {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("ZUNION"));
+                assert_eq!(args[1], bulk("2"));
+                assert!(args.contains(&bulk("AGGREGATE")));
+                assert!(args.contains(&bulk("MAX")));
+                assert!(!args.contains(&bulk("WITHSCORES")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn zunion_with_scores_to_frame() {
+        let cmd = ZUnionWithScores::new(vec!["s1"]).weights(vec![2.0]);
+        match cmd.to_frame() {
+            Frame::Array(Some(args)) => {
+                assert_eq!(args[0], bulk("ZUNION"));
+                assert!(args.contains(&bulk("WEIGHTS")));
+                assert!(args.contains(&bulk("WITHSCORES")));
+            }
+            _ => panic!("expected array"),
+        }
+    }
+
+    #[test]
+    fn zinter_to_frame() {
+        let cmd = ZInter::new(vec!["s1", "s2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("ZINTER"), bulk("2"), bulk("s1"), bulk("s2")])
+        );
+    }
+
+    #[test]
+    fn zinter_with_scores_parse_pairs_resp3() {
+        let cmd = ZInterWithScores::new(vec!["s1"]);
+        let frame = array(vec![array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::Double(3.0),
+        ])]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, Bytes::from("a"));
+        assert!((result[0].1 - 3.0).abs() < f64::EPSILON);
+    }
+
+    // -- BZMPop --
+
+    #[test]
+    fn bzmpop_to_frame() {
+        let cmd = BZMPop::new(1.5, vec!["k1", "k2"], ZMPopDirection::Min).count(2);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("BZMPOP"),
+                bulk("1.5"),
+                bulk("2"),
+                bulk("k1"),
+                bulk("k2"),
+                bulk("MIN"),
+                bulk("COUNT"),
+                bulk("2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn bzmpop_parse_null() {
+        let cmd = BZMPop::new(1.0, vec!["k1"], ZMPopDirection::Max);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn bzmpop_parse_result() {
+        let cmd = BZMPop::new(1.0, vec!["k1"], ZMPopDirection::Min);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("k1"))),
+            array(vec![array(vec![
+                Frame::BulkString(Some(Bytes::from("a"))),
+                Frame::BulkString(Some(Bytes::from("1.0"))),
+            ])]),
+        ]);
+        let result = cmd.parse_response(frame).unwrap().unwrap();
+        assert_eq!(result.0, Bytes::from("k1"));
+        assert_eq!(result.1[0].0, Bytes::from("a"));
+        assert!((result.1[0].1 - 1.0).abs() < f64::EPSILON);
     }
 }

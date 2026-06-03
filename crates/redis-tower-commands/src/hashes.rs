@@ -1035,6 +1035,167 @@ impl Command for HExpireTime {
     }
 }
 
+/// HMGET key field [field ...]
+///
+/// Returns the values associated with the specified fields in the hash stored
+/// at `key`. For each field, returns `Some(value)` if it exists, or `None` if
+/// the field is missing.
+pub struct HMGet {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HMGet {
+    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            fields: vec![field.into()],
+        }
+    }
+
+    pub fn fields(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Add another field to request.
+    pub fn field(mut self, f: impl Into<String>) -> Self {
+        self.fields.push(f.into());
+        self
+    }
+}
+
+impl Command for HMGet {
+    type Response = Vec<Option<Bytes>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HMGET"), bulk(self.key.as_str())];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(data) => Ok(data),
+                    Frame::Null => Ok(None),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string or null",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HMGET"
+    }
+}
+
+/// HSTRLEN key field
+///
+/// Returns the string length of the value associated with `field` in the hash
+/// stored at `key`, or 0 if the field or key does not exist.
+pub struct HStrLen {
+    key: String,
+    field: String,
+}
+
+impl HStrLen {
+    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            field: field.into(),
+        }
+    }
+}
+
+impl Command for HStrLen {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("HSTRLEN"),
+            bulk(self.key.as_str()),
+            bulk(self.field.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HSTRLEN"
+    }
+}
+
+/// HPEXPIRETIME key FIELDS numfields field [field ...]
+///
+/// Returns the absolute Unix expiration timestamp (in milliseconds) for the
+/// specified hash fields. Returns one value per field.
+pub struct HPExpireTime {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HPExpireTime {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HPExpireTime {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HPEXPIRETIME"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_per_field_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HPEXPIRETIME"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1315,5 +1476,79 @@ mod tests {
         let cmd = HRandField::new("h");
         let result = cmd.parse_response(Frame::Null).unwrap();
         assert!(result.is_empty());
+    }
+
+    // -- HMGet --
+
+    #[test]
+    fn hmget_to_frame() {
+        let cmd = HMGet::fields("h", vec!["f1", "f2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HMGET"), bulk("h"), bulk("f1"), bulk("f2")])
+        );
+    }
+
+    #[test]
+    fn hmget_builder_to_frame() {
+        let cmd = HMGet::new("h", "f1").field("f2");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HMGET"), bulk("h"), bulk("f1"), bulk("f2")])
+        );
+    }
+
+    #[test]
+    fn hmget_parse_mixed() {
+        let cmd = HMGet::fields("h", vec!["f1", "f2"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("v1"))),
+            Frame::Null,
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Some(Bytes::from("v1")), None]);
+    }
+
+    // -- HStrLen --
+
+    #[test]
+    fn hstrlen_to_frame() {
+        let cmd = HStrLen::new("h", "f");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("HSTRLEN"), bulk("h"), bulk("f")])
+        );
+    }
+
+    #[test]
+    fn hstrlen_parse_integer() {
+        let cmd = HStrLen::new("h", "f");
+        assert_eq!(cmd.parse_response(Frame::Integer(5)).unwrap(), 5);
+    }
+
+    // -- HPExpireTime --
+
+    #[test]
+    fn hpexpiretime_to_frame() {
+        let cmd = HPExpireTime::new("h", vec!["f1", "f2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HPEXPIRETIME"),
+                bulk("h"),
+                bulk("FIELDS"),
+                bulk("2"),
+                bulk("f1"),
+                bulk("f2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hpexpiretime_parse_per_field() {
+        let cmd = HPExpireTime::new("h", vec!["f1"]);
+        let frame = array(vec![Frame::Integer(1700000000000)]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![1700000000000]);
     }
 }

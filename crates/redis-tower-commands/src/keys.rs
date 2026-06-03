@@ -96,12 +96,37 @@ impl Command for Exists {
     }
 }
 
-/// EXPIRE key seconds
+/// Condition flag for the EXPIRE family of commands (Redis 7.0+).
+#[derive(Debug, Clone, Copy)]
+pub enum ExpireCondition {
+    /// Set expiry only when the key has no existing expiry.
+    Nx,
+    /// Set expiry only when the key already has an expiry.
+    Xx,
+    /// Set expiry only when the new TTL is greater than the current one.
+    Gt,
+    /// Set expiry only when the new TTL is less than the current one.
+    Lt,
+}
+
+impl ExpireCondition {
+    fn as_str(&self) -> &str {
+        match self {
+            ExpireCondition::Nx => "NX",
+            ExpireCondition::Xx => "XX",
+            ExpireCondition::Gt => "GT",
+            ExpireCondition::Lt => "LT",
+        }
+    }
+}
+
+/// EXPIRE key seconds \[NX | XX | GT | LT\]
 ///
 /// Sets a timeout on `key`. Returns `true` if the timeout was set.
 pub struct Expire {
     key: String,
     seconds: u64,
+    condition: Option<ExpireCondition>,
 }
 
 impl Expire {
@@ -109,7 +134,14 @@ impl Expire {
         Self {
             key: key.into(),
             seconds,
+            condition: None,
         }
+    }
+
+    /// Set the condition flag (NX, XX, GT, or LT).
+    pub fn condition(mut self, condition: ExpireCondition) -> Self {
+        self.condition = Some(condition);
+        self
     }
 }
 
@@ -117,11 +149,15 @@ impl Command for Expire {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
+        let mut args = vec![
             bulk("EXPIRE"),
             bulk(self.key.as_str()),
             bulk(self.seconds.to_string()),
-        ])
+        ];
+        if let Some(condition) = self.condition {
+            args.push(bulk(condition.as_str()));
+        }
+        array(args)
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -339,12 +375,13 @@ impl Command for Persist {
     }
 }
 
-/// PEXPIRE key milliseconds
+/// PEXPIRE key milliseconds \[NX | XX | GT | LT\]
 ///
 /// Sets a timeout on `key` in milliseconds. Returns `true` if the timeout was set.
 pub struct PExpire {
     key: String,
     milliseconds: u64,
+    condition: Option<ExpireCondition>,
 }
 
 impl PExpire {
@@ -352,7 +389,14 @@ impl PExpire {
         Self {
             key: key.into(),
             milliseconds,
+            condition: None,
         }
+    }
+
+    /// Set the condition flag (NX, XX, GT, or LT).
+    pub fn condition(mut self, condition: ExpireCondition) -> Self {
+        self.condition = Some(condition);
+        self
     }
 }
 
@@ -360,11 +404,15 @@ impl Command for PExpire {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
+        let mut args = vec![
             bulk("PEXPIRE"),
             bulk(self.key.as_str()),
             bulk(self.milliseconds.to_string()),
-        ])
+        ];
+        if let Some(condition) = self.condition {
+            args.push(bulk(condition.as_str()));
+        }
+        array(args)
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -383,13 +431,14 @@ impl Command for PExpire {
     }
 }
 
-/// PEXPIREAT key ms-timestamp
+/// PEXPIREAT key ms-timestamp \[NX | XX | GT | LT\]
 ///
 /// Sets an expiry on `key` as an absolute Unix timestamp in milliseconds.
 /// Returns `true` if the timeout was set.
 pub struct PExpireAt {
     key: String,
     ms_timestamp: i64,
+    condition: Option<ExpireCondition>,
 }
 
 impl PExpireAt {
@@ -397,7 +446,14 @@ impl PExpireAt {
         Self {
             key: key.into(),
             ms_timestamp,
+            condition: None,
         }
+    }
+
+    /// Set the condition flag (NX, XX, GT, or LT).
+    pub fn condition(mut self, condition: ExpireCondition) -> Self {
+        self.condition = Some(condition);
+        self
     }
 }
 
@@ -405,11 +461,15 @@ impl Command for PExpireAt {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
+        let mut args = vec![
             bulk("PEXPIREAT"),
             bulk(self.key.as_str()),
             bulk(self.ms_timestamp.to_string()),
-        ])
+        ];
+        if let Some(condition) = self.condition {
+            args.push(bulk(condition.as_str()));
+        }
+        array(args)
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1236,6 +1296,189 @@ impl Command for ObjectRefCount {
     }
 }
 
+/// EXPIREAT key unix-time-seconds \[NX | XX | GT | LT\]
+///
+/// Sets an expiry on `key` as an absolute Unix timestamp in seconds.
+/// Returns `true` if the timeout was set.
+pub struct ExpireAt {
+    key: String,
+    timestamp: i64,
+    condition: Option<ExpireCondition>,
+}
+
+impl ExpireAt {
+    pub fn new(key: impl Into<String>, timestamp: i64) -> Self {
+        Self {
+            key: key.into(),
+            timestamp,
+            condition: None,
+        }
+    }
+
+    /// Set the condition flag (NX, XX, GT, or LT).
+    pub fn condition(mut self, condition: ExpireCondition) -> Self {
+        self.condition = Some(condition);
+        self
+    }
+}
+
+impl Command for ExpireAt {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("EXPIREAT"),
+            bulk(self.key.as_str()),
+            bulk(self.timestamp.to_string()),
+        ];
+        if let Some(condition) = self.condition {
+            args.push(bulk(condition.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or boolean",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "EXPIREAT"
+    }
+}
+
+/// PTTL key
+///
+/// Returns the remaining time to live of a key in milliseconds.
+/// Returns -2 if the key does not exist, -1 if no expiry is set.
+pub struct Pttl {
+    key: String,
+}
+
+impl Pttl {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for Pttl {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("PTTL"), bulk(self.key.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "PTTL"
+    }
+}
+
+/// RENAMENX key newkey
+///
+/// Renames `key` to `newkey`, only if `newkey` does not yet exist.
+/// Returns `true` if the key was renamed.
+pub struct RenameNx {
+    key: String,
+    new_key: String,
+}
+
+impl RenameNx {
+    pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            new_key: new_key.into(),
+        }
+    }
+}
+
+impl Command for RenameNx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("RENAMENX"),
+            bulk(self.key.as_str()),
+            bulk(self.new_key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or boolean",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RENAMENX"
+    }
+}
+
+/// MOVE key db
+///
+/// Moves `key` from the currently selected database to the specified
+/// destination database. Returns `true` if the key was moved.
+pub struct Move {
+    key: String,
+    db: u16,
+}
+
+impl Move {
+    pub fn new(key: impl Into<String>, db: u16) -> Self {
+        Self {
+            key: key.into(),
+            db,
+        }
+    }
+}
+
+impl Command for Move {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("MOVE"),
+            bulk(self.key.as_str()),
+            bulk(self.db.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n == 1),
+            Frame::Boolean(b) => Ok(b),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer or boolean",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MOVE"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1490,5 +1733,124 @@ mod tests {
     fn randomkey_parse_null() {
         let cmd = RandomKey::new();
         assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    // -- Expire with condition --
+
+    #[test]
+    fn expire_with_condition_to_frame() {
+        let cmd = Expire::new("k", 60).condition(ExpireCondition::Nx);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("EXPIRE"), bulk("k"), bulk("60"), bulk("NX")])
+        );
+    }
+
+    #[test]
+    fn pexpire_with_condition_to_frame() {
+        let cmd = PExpire::new("k", 1000).condition(ExpireCondition::Gt);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("PEXPIRE"), bulk("k"), bulk("1000"), bulk("GT")])
+        );
+    }
+
+    #[test]
+    fn pexpireat_with_condition_to_frame() {
+        let cmd = PExpireAt::new("k", 99999).condition(ExpireCondition::Lt);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("PEXPIREAT"),
+                bulk("k"),
+                bulk("99999"),
+                bulk("LT")
+            ])
+        );
+    }
+
+    // -- ExpireAt --
+
+    #[test]
+    fn expireat_to_frame() {
+        let cmd = ExpireAt::new("k", 1700000000);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("EXPIREAT"), bulk("k"), bulk("1700000000")])
+        );
+    }
+
+    #[test]
+    fn expireat_with_condition_to_frame() {
+        let cmd = ExpireAt::new("k", 1700000000).condition(ExpireCondition::Xx);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EXPIREAT"),
+                bulk("k"),
+                bulk("1700000000"),
+                bulk("XX")
+            ])
+        );
+    }
+
+    #[test]
+    fn expireat_parse_true() {
+        let cmd = ExpireAt::new("k", 1700000000);
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- Pttl --
+
+    #[test]
+    fn pttl_to_frame() {
+        let cmd = Pttl::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PTTL"), bulk("k")]));
+    }
+
+    #[test]
+    fn pttl_parse_integer() {
+        let cmd = Pttl::new("k");
+        assert_eq!(cmd.parse_response(Frame::Integer(1500)).unwrap(), 1500);
+    }
+
+    // -- RenameNx --
+
+    #[test]
+    fn renamenx_to_frame() {
+        let cmd = RenameNx::new("old", "new");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("RENAMENX"), bulk("old"), bulk("new")])
+        );
+    }
+
+    #[test]
+    fn renamenx_parse_true() {
+        let cmd = RenameNx::new("old", "new");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    #[test]
+    fn renamenx_parse_false() {
+        let cmd = RenameNx::new("old", "new");
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    // -- Move --
+
+    #[test]
+    fn move_to_frame() {
+        let cmd = Move::new("k", 1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("MOVE"), bulk("k"), bulk("1")])
+        );
+    }
+
+    #[test]
+    fn move_parse_true() {
+        let cmd = Move::new("k", 1);
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
     }
 }

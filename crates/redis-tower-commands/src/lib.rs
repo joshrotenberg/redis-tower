@@ -64,6 +64,7 @@ mod sets;
 mod sorted_sets;
 mod streams;
 mod strings;
+mod transaction;
 
 pub use acl::*;
 pub use bitmap::*;
@@ -84,6 +85,7 @@ pub use sets::*;
 pub use sorted_sets::*;
 pub use streams::*;
 pub use strings::*;
+pub use transaction::*;
 
 // -- Redis Stack module commands (feature-gated) --
 #[cfg(feature = "bloom")]

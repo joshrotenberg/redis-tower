@@ -1945,6 +1945,691 @@ impl Command for ClientSetInfoLibVer {
     }
 }
 
+/// ECHO message
+///
+/// Returns `message` back to the client. Useful for testing connectivity.
+pub struct Echo {
+    message: String,
+}
+
+impl Echo {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl Command for Echo {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("ECHO"), bulk(self.message.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(data)) => Ok(data),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ECHO"
+    }
+}
+
+/// FLUSHALL [ASYNC|SYNC]
+///
+/// Delete all keys in all databases.
+pub struct FlushAll {
+    mode: Option<FlushMode>,
+}
+
+impl FlushAll {
+    pub fn new() -> Self {
+        Self { mode: None }
+    }
+
+    pub fn async_mode(mut self) -> Self {
+        self.mode = Some(FlushMode::Async);
+        self
+    }
+
+    pub fn sync_mode(mut self) -> Self {
+        self.mode = Some(FlushMode::Sync);
+        self
+    }
+}
+
+impl Default for FlushAll {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for FlushAll {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("FLUSHALL")];
+        match &self.mode {
+            Some(FlushMode::Async) => args.push(bulk("ASYNC")),
+            Some(FlushMode::Sync) => args.push(bulk("SYNC")),
+            None => {}
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "FLUSHALL"
+    }
+}
+
+/// SAVE
+///
+/// Synchronously save the dataset to disk.
+pub struct Save;
+
+impl Save {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Save {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Save {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("SAVE")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SAVE"
+    }
+}
+
+/// Save behavior for SHUTDOWN.
+pub enum ShutdownMode {
+    /// Do not save the dataset before shutting down.
+    NoSave,
+    /// Force a save of the dataset before shutting down.
+    Save,
+}
+
+/// SHUTDOWN \[NOSAVE | SAVE\] \[NOW\] \[FORCE\] \[ABORT\]
+///
+/// Shuts down the server. On a successful shutdown the connection is closed and
+/// no reply is received; this command therefore treats both an absent reply and
+/// an `OK` reply as success.
+pub struct Shutdown {
+    mode: Option<ShutdownMode>,
+    now: bool,
+    force: bool,
+    abort: bool,
+}
+
+impl Shutdown {
+    pub fn new() -> Self {
+        Self {
+            mode: None,
+            now: false,
+            force: false,
+            abort: false,
+        }
+    }
+
+    /// Skip saving the dataset (NOSAVE).
+    pub fn nosave(mut self) -> Self {
+        self.mode = Some(ShutdownMode::NoSave);
+        self
+    }
+
+    /// Force a save of the dataset (SAVE).
+    pub fn save_mode(mut self) -> Self {
+        self.mode = Some(ShutdownMode::Save);
+        self
+    }
+
+    /// Skip the graceful shutdown delay (NOW).
+    pub fn now(mut self) -> Self {
+        self.now = true;
+        self
+    }
+
+    /// Force shutdown even if there are errors (FORCE).
+    pub fn force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+
+    /// Abort an in-progress shutdown (ABORT).
+    pub fn abort(mut self) -> Self {
+        self.abort = true;
+        self
+    }
+}
+
+impl Default for Shutdown {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Shutdown {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("SHUTDOWN")];
+        match &self.mode {
+            Some(ShutdownMode::NoSave) => args.push(bulk("NOSAVE")),
+            Some(ShutdownMode::Save) => args.push(bulk("SAVE")),
+            None => {}
+        }
+        if self.now {
+            args.push(bulk("NOW"));
+        }
+        if self.force {
+            args.push(bulk("FORCE"));
+        }
+        if self.abort {
+            args.push(bulk("ABORT"));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, _frame: Frame) -> Result<Self::Response, RedisError> {
+        // A successful SHUTDOWN closes the connection without a reply. Any frame
+        // received (e.g. an OK from SHUTDOWN ABORT) is treated as success.
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "SHUTDOWN"
+    }
+}
+
+/// ROLE
+///
+/// Returns the role of the instance in the context of replication. The response
+/// structure varies by role, so the raw `Frame` is returned.
+pub struct Role;
+
+impl Role {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Role {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Role {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("ROLE")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ROLE"
+    }
+}
+
+/// HELLO \[protover \[AUTH username password\] \[SETNAME clientname\]\]
+///
+/// Switches the connection's protocol and returns a map of server properties.
+/// The response is returned as a raw `Frame` (map or array depending on the
+/// negotiated protocol version).
+pub struct Hello {
+    protover: Option<u8>,
+    auth: Option<(String, String)>,
+    setname: Option<String>,
+}
+
+impl Hello {
+    pub fn new() -> Self {
+        Self {
+            protover: None,
+            auth: None,
+            setname: None,
+        }
+    }
+
+    /// Set the protocol version to negotiate.
+    pub fn proto(mut self, version: u8) -> Self {
+        self.protover = Some(version);
+        self
+    }
+
+    /// Authenticate while switching protocols.
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.auth = Some((username.into(), password.into()));
+        self
+    }
+
+    /// Set the connection name.
+    pub fn setname(mut self, name: impl Into<String>) -> Self {
+        self.setname = Some(name.into());
+        self
+    }
+}
+
+impl Default for Hello {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Hello {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HELLO")];
+        if let Some(version) = self.protover {
+            args.push(bulk(version.to_string()));
+        }
+        if let Some((ref user, ref pass)) = self.auth {
+            args.push(bulk("AUTH"));
+            args.push(bulk(user.as_str()));
+            args.push(bulk(pass.as_str()));
+        }
+        if let Some(ref name) = self.setname {
+            args.push(bulk("SETNAME"));
+            args.push(bulk(name.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HELLO"
+    }
+}
+
+/// RESET
+///
+/// Resets the connection to its initial state. Returns the simple string
+/// `"RESET"`.
+pub struct Reset;
+
+impl Reset {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Reset {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Reset {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("RESET")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "simple string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "RESET"
+    }
+}
+
+/// COMMAND INFO command-name \[command-name ...\]
+///
+/// Returns details about the specified commands. The response is a nested,
+/// command-specific structure returned as a raw `Frame`.
+pub struct CommandInfo {
+    commands: Vec<String>,
+}
+
+impl CommandInfo {
+    pub fn new(cmd: impl Into<String>) -> Self {
+        Self {
+            commands: vec![cmd.into()],
+        }
+    }
+
+    /// Add another command to query.
+    pub fn command(mut self, c: impl Into<String>) -> Self {
+        self.commands.push(c.into());
+        self
+    }
+}
+
+impl Command for CommandInfo {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("COMMAND"), bulk("INFO")];
+        for c in &self.commands {
+            args.push(bulk(c.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "COMMAND INFO"
+    }
+}
+
+/// COMMAND GETKEYS command \[arg ...\]
+///
+/// Returns the keys that would be accessed by the given command invocation.
+pub struct CommandGetKeys {
+    command: String,
+    args: Vec<String>,
+}
+
+impl CommandGetKeys {
+    pub fn new(cmd: impl Into<String>) -> Self {
+        Self {
+            command: cmd.into(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Add an argument to the command invocation being analyzed.
+    pub fn arg(mut self, a: impl Into<String>) -> Self {
+        self.args.push(a.into());
+        self
+    }
+}
+
+impl Command for CommandGetKeys {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("COMMAND"),
+            bulk("GETKEYS"),
+            bulk(self.command.as_str()),
+        ];
+        for a in &self.args {
+            args.push(bulk(a.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) => Ok(data),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "COMMAND GETKEYS"
+    }
+}
+
+/// Reply mode for CLIENT REPLY.
+pub enum ClientReplyMode {
+    On,
+    Off,
+    Skip,
+}
+
+impl ClientReplyMode {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::On => "ON",
+            Self::Off => "OFF",
+            Self::Skip => "SKIP",
+        }
+    }
+}
+
+/// CLIENT REPLY ON|OFF|SKIP
+///
+/// Controls whether the server replies to commands from the current
+/// connection.
+pub struct ClientReply {
+    mode: ClientReplyMode,
+}
+
+impl ClientReply {
+    pub fn new(mode: ClientReplyMode) -> Self {
+        Self { mode }
+    }
+}
+
+impl Command for ClientReply {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("REPLY"),
+            bulk(self.mode.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT REPLY"
+    }
+}
+
+/// CLIENT TRACKINGINFO
+///
+/// Returns information about the current connection's server-assisted
+/// client-side caching state. Returned as a raw `Frame` map.
+pub struct ClientTrackingInfo;
+
+impl ClientTrackingInfo {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientTrackingInfo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientTrackingInfo {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("TRACKINGINFO")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT TRACKINGINFO"
+    }
+}
+
+/// Mode for CLIENT UNBLOCK.
+pub enum UnblockMode {
+    Timeout,
+    Error,
+}
+
+impl UnblockMode {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Timeout => "TIMEOUT",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+/// CLIENT UNBLOCK client-id \[TIMEOUT | ERROR\]
+///
+/// Unblocks a different connection that is blocked in a blocking command.
+/// Returns `1` if the client was unblocked, `0` otherwise.
+pub struct ClientUnblock {
+    client_id: i64,
+    mode: Option<UnblockMode>,
+}
+
+impl ClientUnblock {
+    pub fn new(client_id: i64) -> Self {
+        Self {
+            client_id,
+            mode: None,
+        }
+    }
+
+    /// Set the unblock mode (TIMEOUT or ERROR).
+    pub fn mode(mut self, m: UnblockMode) -> Self {
+        self.mode = Some(m);
+        self
+    }
+}
+
+impl Command for ClientUnblock {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("CLIENT"),
+            bulk("UNBLOCK"),
+            bulk(self.client_id.to_string()),
+        ];
+        if let Some(ref mode) = self.mode {
+            args.push(bulk(mode.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT UNBLOCK"
+    }
+}
+
+/// CLIENT CACHING YES|NO
+///
+/// Controls tracking of keys in the next command when client tracking is in
+/// OPTIN or OPTOUT mode.
+pub struct ClientCaching {
+    yes: bool,
+}
+
+impl ClientCaching {
+    pub fn new(yes: bool) -> Self {
+        Self { yes }
+    }
+}
+
+impl Command for ClientCaching {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CLIENT"),
+            bulk("CACHING"),
+            bulk(if self.yes { "yes" } else { "no" }),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT CACHING"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2306,5 +2991,238 @@ mod tests {
             }
             _ => panic!("expected array"),
         }
+    }
+
+    // -- Echo --
+
+    #[test]
+    fn echo_to_frame() {
+        let cmd = Echo::new("hello");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ECHO"), bulk("hello")]));
+    }
+
+    #[test]
+    fn echo_parse_response() {
+        let cmd = Echo::new("hello");
+        let frame = Frame::BulkString(Some(Bytes::from("hello")));
+        assert_eq!(cmd.parse_response(frame).unwrap(), Bytes::from("hello"));
+    }
+
+    // -- FlushAll --
+
+    #[test]
+    fn flushall_to_frame() {
+        let cmd = FlushAll::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FLUSHALL")]));
+    }
+
+    #[test]
+    fn flushall_async_to_frame() {
+        let cmd = FlushAll::new().async_mode();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FLUSHALL"), bulk("ASYNC")]));
+    }
+
+    #[test]
+    fn flushall_parse_ok() {
+        let cmd = FlushAll::new();
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    // -- Save --
+
+    #[test]
+    fn save_to_frame() {
+        let cmd = Save::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SAVE")]));
+    }
+
+    // -- Shutdown --
+
+    #[test]
+    fn shutdown_to_frame() {
+        let cmd = Shutdown::new().nosave().now().force();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("SHUTDOWN"),
+                bulk("NOSAVE"),
+                bulk("NOW"),
+                bulk("FORCE"),
+            ])
+        );
+    }
+
+    #[test]
+    fn shutdown_abort_to_frame() {
+        let cmd = Shutdown::new().abort();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("SHUTDOWN"), bulk("ABORT")]));
+    }
+
+    #[test]
+    fn shutdown_parse_any() {
+        let cmd = Shutdown::new();
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        cmd.parse_response(Frame::Null).unwrap();
+    }
+
+    // -- Role --
+
+    #[test]
+    fn role_to_frame() {
+        let cmd = Role::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ROLE")]));
+    }
+
+    #[test]
+    fn role_parse_passthrough() {
+        let cmd = Role::new();
+        let frame = array(vec![Frame::BulkString(Some(Bytes::from("master")))]);
+        assert_eq!(cmd.parse_response(frame.clone()).unwrap(), frame);
+    }
+
+    // -- Hello --
+
+    #[test]
+    fn hello_bare_to_frame() {
+        let cmd = Hello::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HELLO")]));
+    }
+
+    #[test]
+    fn hello_full_to_frame() {
+        let cmd = Hello::new().proto(3).auth("user", "pass").setname("conn");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HELLO"),
+                bulk("3"),
+                bulk("AUTH"),
+                bulk("user"),
+                bulk("pass"),
+                bulk("SETNAME"),
+                bulk("conn"),
+            ])
+        );
+    }
+
+    // -- Reset --
+
+    #[test]
+    fn reset_to_frame() {
+        let cmd = Reset::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("RESET")]));
+    }
+
+    #[test]
+    fn reset_parse_response() {
+        let cmd = Reset::new();
+        let frame = Frame::SimpleString(Bytes::from("RESET"));
+        assert_eq!(cmd.parse_response(frame).unwrap(), "RESET");
+    }
+
+    // -- CommandInfo --
+
+    #[test]
+    fn command_info_to_frame() {
+        let cmd = CommandInfo::new("get").command("set");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("COMMAND"),
+                bulk("INFO"),
+                bulk("get"),
+                bulk("set"),
+            ])
+        );
+    }
+
+    // -- CommandGetKeys --
+
+    #[test]
+    fn command_getkeys_to_frame() {
+        let cmd = CommandGetKeys::new("SET").arg("k").arg("v");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("COMMAND"),
+                bulk("GETKEYS"),
+                bulk("SET"),
+                bulk("k"),
+                bulk("v"),
+            ])
+        );
+    }
+
+    #[test]
+    fn command_getkeys_parse_array() {
+        let cmd = CommandGetKeys::new("SET");
+        let frame = array(vec![Frame::BulkString(Some(Bytes::from("k")))]);
+        assert_eq!(cmd.parse_response(frame).unwrap(), vec![Bytes::from("k")]);
+    }
+
+    // -- ClientReply --
+
+    #[test]
+    fn client_reply_to_frame() {
+        let cmd = ClientReply::new(ClientReplyMode::Skip);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("REPLY"), bulk("SKIP")])
+        );
+    }
+
+    // -- ClientTrackingInfo --
+
+    #[test]
+    fn client_trackinginfo_to_frame() {
+        let cmd = ClientTrackingInfo::new();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("TRACKINGINFO")])
+        );
+    }
+
+    // -- ClientUnblock --
+
+    #[test]
+    fn client_unblock_to_frame() {
+        let cmd = ClientUnblock::new(42).mode(UnblockMode::Error);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("UNBLOCK"),
+                bulk("42"),
+                bulk("ERROR"),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_unblock_parse_integer() {
+        let cmd = ClientUnblock::new(42);
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- ClientCaching --
+
+    #[test]
+    fn client_caching_to_frame() {
+        let cmd = ClientCaching::new(true);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("CACHING"), bulk("yes")])
+        );
+    }
+
+    #[test]
+    fn client_caching_no_to_frame() {
+        let cmd = ClientCaching::new(false);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("CACHING"), bulk("no")])
+        );
     }
 }
