@@ -1,3 +1,11 @@
+//! Integration tests for EVAL/EVALSHA/SCRIPT and Redis Functions commands.
+//!
+//! Run all tests in this file serially because FUNCTION FLUSH operates on the
+//! global function namespace. Running it concurrently with other function tests
+//! causes intermittent failures. Use:
+//!
+//!   cargo test --test test_scripting --all-features -- --test-threads=1
+
 mod common;
 
 use bytes::Bytes;
@@ -38,4 +46,168 @@ async fn script_load_evalsha() {
 
     let result = c.execute(EvalSha::new(&sha)).await.unwrap();
     assert_eq!(result, Frame::Integer(99));
+}
+
+#[tokio::test]
+async fn function_load() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_load\nredis.register_function('func_load', function(keys, args) return args[1] end)";
+    let lib_name = c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+    assert_eq!(lib_name, "mylib_load");
+
+    // Best-effort cleanup: another parallel test (e.g. function_flush) may have
+    // already removed this library.
+    let _ = c.execute(FunctionDelete::new("mylib_load")).await;
+}
+
+#[tokio::test]
+async fn fcall() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_fcall\nredis.register_function('func_fcall', function(keys, args) return args[1] end)";
+    c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+
+    let result = c
+        .execute(FCall::new("func_fcall").arg("hello"))
+        .await
+        .unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("hello"))));
+
+    // Best-effort cleanup.
+    let _ = c.execute(FunctionDelete::new("mylib_fcall")).await;
+}
+
+#[tokio::test]
+async fn fcall_ro() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_fcall_ro\nredis.register_function{function_name='func_fcall_ro', callback=function(keys, args) return args[1] end, flags={'no-writes'}}";
+    c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+
+    let result = c
+        .execute(FCallRo::new("func_fcall_ro").arg("world"))
+        .await
+        .unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("world"))));
+
+    // Best-effort cleanup.
+    let _ = c.execute(FunctionDelete::new("mylib_fcall_ro")).await;
+}
+
+#[tokio::test]
+async fn function_list() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_list\nredis.register_function('func_list', function(keys, args) return args[1] end)";
+    c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+
+    let libs = c
+        .execute(FunctionList::new().library("mylib_list"))
+        .await
+        .unwrap();
+    assert!(
+        !libs.is_empty(),
+        "FUNCTION LIST should return mylib_list after loading"
+    );
+
+    // Best-effort cleanup.
+    let _ = c.execute(FunctionDelete::new("mylib_list")).await;
+}
+
+#[tokio::test]
+async fn function_delete() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_delete\nredis.register_function('func_delete', function(keys, args) return args[1] end)";
+    let lib_name = c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+    assert_eq!(lib_name, "mylib_delete");
+
+    c.execute(FunctionDelete::new("mylib_delete"))
+        .await
+        .unwrap();
+
+    let libs = c
+        .execute(FunctionList::new().library("mylib_delete"))
+        .await
+        .unwrap();
+    assert!(
+        libs.is_empty(),
+        "FUNCTION LIST should return empty after deleting the library"
+    );
+}
+
+#[tokio::test]
+async fn function_flush() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_flush\nredis.register_function('func_flush', function(keys, args) return args[1] end)";
+    c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+
+    c.execute(FunctionFlush::new()).await.unwrap();
+
+    // Verify that the specific library loaded in this test is gone.
+    let libs = c
+        .execute(FunctionList::new().library("mylib_flush"))
+        .await
+        .unwrap();
+    assert!(
+        libs.is_empty(),
+        "mylib_flush should be gone after FUNCTION FLUSH"
+    );
+}
+
+#[tokio::test]
+async fn function_stats() {
+    let mut c = conn().await;
+
+    let stats = c.execute(FunctionStats::new()).await.unwrap();
+    // The response is a complex nested structure; just verify it returns without error.
+    assert!(
+        !stats.is_empty(),
+        "FUNCTION STATS should return a non-empty response"
+    );
+}
+
+#[tokio::test]
+async fn function_dump_restore() {
+    let mut c = conn().await;
+
+    let code = "#!lua name=mylib_dump\nredis.register_function('func_dump', function(keys, args) return args[1] end)";
+    c.execute(FunctionLoad::new(code).replace()).await.unwrap();
+
+    let payload = c.execute(FunctionDump::new()).await.unwrap();
+    assert!(
+        !payload.is_empty(),
+        "FUNCTION DUMP should return a non-empty payload"
+    );
+
+    // Delete only the library this test owns to avoid disrupting parallel tests.
+    c.execute(FunctionDelete::new("mylib_dump")).await.unwrap();
+
+    let libs_before = c
+        .execute(FunctionList::new().library("mylib_dump"))
+        .await
+        .unwrap();
+    assert!(
+        libs_before.is_empty(),
+        "mylib_dump should be gone after delete"
+    );
+
+    // Restore using REPLACE policy so the payload can be loaded even if mylib_dump
+    // somehow exists (e.g. from a concurrent test re-run).
+    c.execute(FunctionRestore::new(payload).policy(RestorePolicy::Replace))
+        .await
+        .unwrap();
+
+    let libs_after = c
+        .execute(FunctionList::new().library("mylib_dump"))
+        .await
+        .unwrap();
+    assert!(
+        !libs_after.is_empty(),
+        "mylib_dump should be present after FUNCTION RESTORE"
+    );
+
+    c.execute(FunctionDelete::new("mylib_dump")).await.unwrap();
 }
