@@ -122,3 +122,76 @@ async fn cover_smismember() {
     assert_eq!(results, vec![true, false, true]);
     c.execute(Del::new(k)).await.unwrap();
 }
+
+#[tokio::test]
+async fn cover_sinterstore() {
+    let mut c = conn().await;
+    let s1 = "cover:sets:sinterstore:s1";
+    let s2 = "cover:sets:sinterstore:s2";
+    let dst = "cover:sets:sinterstore:dst";
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+    c.execute(SAdd::members(s1, ["a", "b", "c"])).await.unwrap();
+    c.execute(SAdd::members(s2, ["b", "c", "d"])).await.unwrap();
+    let n = c.execute(SInterStore::new(dst, [s1, s2])).await.unwrap();
+    // intersection of {a,b,c} and {b,c,d} is {b,c} -- 2 members stored
+    assert_eq!(n, 2);
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_sinterstore_no_overlap() {
+    let mut c = conn().await;
+    let s1 = "cover:sets:sinterstore_no_overlap:s1";
+    let s2 = "cover:sets:sinterstore_no_overlap:s2";
+    let dst = "cover:sets:sinterstore_no_overlap:dst";
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+    c.execute(SAdd::members(s1, ["a", "b"])).await.unwrap();
+    c.execute(SAdd::members(s2, ["c", "d"])).await.unwrap();
+    let n = c.execute(SInterStore::new(dst, [s1, s2])).await.unwrap();
+    assert_eq!(n, 0);
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_sintercard() {
+    let mut c = conn().await;
+    let s1 = "cover:sets:sintercard:s1";
+    let s2 = "cover:sets:sintercard:s2";
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(SAdd::members(s1, ["a", "b", "c"])).await.unwrap();
+    c.execute(SAdd::members(s2, ["b", "c", "d"])).await.unwrap();
+    let n = c.execute(SInterCard::new([s1, s2])).await.unwrap();
+    // intersection of {a,b,c} and {b,c,d} is {b,c} -- cardinality 2
+    assert_eq!(n, 2);
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_sintercard_with_limit() {
+    let mut c = conn().await;
+    let s1 = "cover:sets:sintercard_limit:s1";
+    let s2 = "cover:sets:sintercard_limit:s2";
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+    c.execute(SAdd::members(s1, ["a", "b", "c", "d"]))
+        .await
+        .unwrap();
+    c.execute(SAdd::members(s2, ["b", "c", "d", "e"]))
+        .await
+        .unwrap();
+    // intersection is {b,c,d} -- 3 members, but LIMIT caps count at 2
+    let n = c.execute(SInterCard::new([s1, s2]).limit(2)).await.unwrap();
+    assert_eq!(n, 2);
+    c.execute(Del::new(s1)).await.unwrap();
+    c.execute(Del::new(s2)).await.unwrap();
+}
