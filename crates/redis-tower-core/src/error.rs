@@ -54,6 +54,11 @@ pub enum RedisError {
         attempts: usize,
         last_error: Box<RedisError>,
     },
+
+    /// JSON serialization or deserialization error (requires `serde` feature).
+    #[cfg(feature = "serde")]
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 impl RedisError {
@@ -358,5 +363,15 @@ mod tests {
         assert!(!err.is_busy());
         assert!(!err.is_oom());
         assert!(!err.is_readonly());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_json_error_converts_to_redis_error() {
+        let bad_json = "not valid json {{{{";
+        let err: serde_json::Error =
+            serde_json::from_str::<serde_json::Value>(bad_json).unwrap_err();
+        let redis_err: RedisError = err.into();
+        assert!(matches!(redis_err, RedisError::Json(_)));
     }
 }

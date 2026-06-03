@@ -311,22 +311,9 @@ impl RedisConvert<bool> for String {
 
 // -- RedisConvert from Vec<Bytes> --
 
-impl RedisConvert<Vec<Bytes>> for Vec<Bytes> {
+impl<T: FromRedisBytes> RedisConvert<Vec<Bytes>> for Vec<T> {
     fn redis_convert(value: Vec<Bytes>) -> Result<Self, RedisError> {
-        Ok(value)
-    }
-}
-
-impl RedisConvert<Vec<Bytes>> for Vec<String> {
-    fn redis_convert(value: Vec<Bytes>) -> Result<Self, RedisError> {
-        value
-            .into_iter()
-            .map(|b| {
-                String::from_utf8(b.to_vec()).map_err(|_| RedisError::TypeMismatch {
-                    expected: "valid UTF-8 string",
-                })
-            })
-            .collect()
+        value.into_iter().map(T::from_redis_bytes).collect()
     }
 }
 
@@ -379,10 +366,18 @@ impl RedisConvert<Vec<(Bytes, Bytes)>> for Vec<(String, String)> {
     }
 }
 
-impl RedisConvert<Vec<(Bytes, Bytes)>> for std::collections::HashMap<String, String> {
+impl<V: FromRedisBytes> RedisConvert<Vec<(Bytes, Bytes)>> for std::collections::HashMap<String, V> {
     fn redis_convert(value: Vec<(Bytes, Bytes)>) -> Result<Self, RedisError> {
-        let pairs: Vec<(String, String)> = RedisConvert::redis_convert(value)?;
-        Ok(pairs.into_iter().collect())
+        value
+            .into_iter()
+            .map(|(k, v)| {
+                let key = String::from_utf8(k.to_vec()).map_err(|_| RedisError::TypeMismatch {
+                    expected: "valid UTF-8 key",
+                })?;
+                let val = V::from_redis_bytes(v)?;
+                Ok((key, val))
+            })
+            .collect()
     }
 }
 
@@ -758,5 +753,25 @@ mod tests {
         let b = Bytes::from("data");
         let r: Bytes = b.parse_into().unwrap();
         assert_eq!(r, Bytes::from("data"));
+    }
+
+    // -- Blanket Vec<T> and HashMap<String, V> conversions --
+
+    #[test]
+    fn vec_bytes_to_vec_u32() {
+        let v = vec![Bytes::from("1"), Bytes::from("2"), Bytes::from("3")];
+        let nums: Vec<u32> = v.parse_into().unwrap();
+        assert_eq!(nums, vec![1u32, 2, 3]);
+    }
+
+    #[test]
+    fn vec_pairs_to_hashmap_string_f64() {
+        let v = vec![
+            (Bytes::from("score1"), Bytes::from("1.5")),
+            (Bytes::from("score2"), Bytes::from("2.5")),
+        ];
+        let m: std::collections::HashMap<String, f64> = v.parse_into().unwrap();
+        assert!((m["score1"] - 1.5).abs() < f64::EPSILON);
+        assert!((m["score2"] - 2.5).abs() < f64::EPSILON);
     }
 }

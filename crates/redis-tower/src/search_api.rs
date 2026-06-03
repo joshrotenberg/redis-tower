@@ -324,8 +324,7 @@ fn parse_search_results<T: DeserializeOwned>(
             map.insert(k, serde_json::Value::String(v));
         }
 
-        let doc: T = serde_json::from_value(serde_json::Value::Object(map))
-            .map_err(|e| RedisError::Redis(format!("deserialize error: {e}")))?;
+        let doc: T = serde_json::from_value(serde_json::Value::Object(map))?;
 
         docs.push(SearchDoc { key, doc, score });
     }

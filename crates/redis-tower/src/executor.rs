@@ -6,7 +6,7 @@
 
 use std::future::Future;
 
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, RedisConnection, RedisConvert, RedisError, RedisValueExt};
 
 use crate::caching::CachedClient;
 use crate::client::RedisClient;
@@ -31,6 +31,29 @@ pub trait RedisExecutor {
         &mut self,
         cmd: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send;
+
+    /// Execute a Redis command and convert its response into the target type `T`.
+    ///
+    /// This is a convenience wrapper over [`execute`](Self::execute) that chains
+    /// [`parse_into`](redis_tower_core::RedisValueExt::parse_into), saving callers
+    /// from writing `.await?.parse_into::<T>()` explicitly.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`RedisError`] if the command fails or if the response cannot be
+    /// converted into `T`.
+    fn execute_as<T, Cmd>(&mut self, cmd: Cmd) -> impl Future<Output = Result<T, RedisError>> + Send
+    where
+        Cmd: Command,
+        Cmd::Response: RedisValueExt<Cmd::Response>,
+        T: RedisConvert<Cmd::Response>,
+    {
+        let fut = self.execute(cmd);
+        async move {
+            let raw = fut.await?;
+            raw.parse_into::<T>()
+        }
+    }
 }
 
 impl RedisExecutor for RedisConnection {
@@ -106,5 +129,15 @@ mod tests {
         let mut mock = MockRedis::new(vec![Frame::BulkString(Some(Bytes::from("hello")))]);
         let result: Option<Bytes> = mock.execute(Get::new("key")).await.unwrap();
         assert_eq!(result, Some(Bytes::from("hello")));
+    }
+
+    #[tokio::test]
+    async fn mock_executor_execute_as_parses_response() {
+        use bytes::Bytes;
+        use redis_tower_commands::Get;
+
+        let mut mock = MockRedis::new(vec![Frame::BulkString(Some(Bytes::from("42")))]);
+        let count: u32 = mock.execute_as(Get::new("counter")).await.unwrap();
+        assert_eq!(count, 42);
     }
 }
