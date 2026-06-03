@@ -47,6 +47,7 @@ tracing = { workspace = true }
 sha1 = { workspace = true }
 hex = { workspace = true }
 tower-layer = { workspace = true }
+rand = "0.9"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

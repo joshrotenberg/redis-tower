@@ -153,6 +153,18 @@ impl ConnectionFactory for Resp3AddrConnectionFactory {
 /// - `max_retries`: `None` (infinite)
 /// - `base_delay`: 100ms
 /// - `max_delay`: 5s
+/// - `jitter`: `true`
+///
+/// # Jitter
+///
+/// When `jitter` is enabled (the default), each backoff delay is a uniformly
+/// random value in `[0, cap)` where `cap` is the un-jittered exponential
+/// delay. This is the "full jitter" strategy recommended by AWS for avoiding
+/// thundering-herd reconnect storms when Redis restarts and many clients
+/// reconnect simultaneously.
+///
+/// Set `jitter: false` (via [`.jitter(false)`](Self::jitter)) to restore
+/// deterministic backoff, which is useful in tests.
 #[derive(Debug, Clone)]
 pub struct ReconnectConfig {
     /// Maximum number of reconnection attempts. `None` means infinite.
@@ -161,6 +173,12 @@ pub struct ReconnectConfig {
     pub base_delay: Duration,
     /// Maximum delay between attempts (caps exponential backoff).
     pub max_delay: Duration,
+    /// Whether to apply full jitter to each backoff delay.
+    ///
+    /// Defaults to `true`. When enabled, each delay is a uniformly random
+    /// value in `[0, cap)` rather than the deterministic exponential value,
+    /// spreading reconnect attempts across time.
+    pub jitter: bool,
 }
 
 impl Default for ReconnectConfig {
@@ -169,18 +187,21 @@ impl Default for ReconnectConfig {
             max_retries: None,
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
+            jitter: true,
         }
     }
 }
 
 impl ReconnectConfig {
     /// Set the maximum number of reconnection attempts.
+    #[must_use]
     pub fn max_retries(mut self, n: usize) -> Self {
         self.max_retries = Some(n);
         self
     }
 
     /// Set the initial delay before the first reconnection attempt.
+    #[must_use]
     pub fn base_delay(mut self, d: Duration) -> Self {
         self.base_delay = d;
         self
@@ -189,16 +210,44 @@ impl ReconnectConfig {
     /// Set the maximum delay between reconnection attempts.
     ///
     /// Caps the exponential backoff so delays do not grow unbounded.
+    #[must_use]
     pub fn max_delay(mut self, d: Duration) -> Self {
         self.max_delay = d;
         self
     }
 
+    /// Enable or disable full jitter on backoff delays.
+    ///
+    /// When `true` (the default), each delay is a uniformly random value in
+    /// `[0, cap)` where `cap` is the un-jittered exponential delay. This
+    /// spreads reconnect attempts to avoid thundering-herd storms.
+    ///
+    /// When `false`, delays are deterministic: `base_delay * 2^attempt`,
+    /// capped at `max_delay`. Useful in tests that assert specific delay
+    /// values.
+    #[must_use]
+    pub fn jitter(mut self, enabled: bool) -> Self {
+        self.jitter = enabled;
+        self
+    }
+
     pub(crate) fn delay_for_attempt(&self, attempt: usize) -> Duration {
-        let delay = self
+        let cap = self
             .base_delay
-            .saturating_mul(1u32.wrapping_shl(attempt.min(31) as u32));
-        delay.min(self.max_delay)
+            .saturating_mul(1u32.wrapping_shl(attempt.min(31) as u32))
+            .min(self.max_delay);
+
+        if self.jitter {
+            // Full jitter (AWS recommendation): uniform random in [0, cap).
+            // This spreads reconnect storms when many clients back off together.
+            let nanos = cap.as_nanos() as u64;
+            if nanos == 0 {
+                return Duration::ZERO;
+            }
+            Duration::from_nanos(rand::random::<u64>() % nanos)
+        } else {
+            cap
+        }
     }
 }
 
@@ -472,5 +521,75 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
             }
             result
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jitter_produces_different_delays() {
+        let config = ReconnectConfig::default(); // jitter: true
+        // Collect 100 samples for attempt 0 (cap = 100 ms).
+        // The probability that all 100 are identical is astronomically small
+        // (≈ (1/100_000_000)^99 ≈ 0), so any failure here indicates a bug.
+        let delays: Vec<Duration> = (0..100).map(|_| config.delay_for_attempt(0)).collect();
+        let first = delays[0];
+        assert!(
+            delays.iter().any(|d| *d != first),
+            "all 100 jittered delays were identical — jitter may not be working"
+        );
+    }
+
+    #[test]
+    fn jitter_delays_are_within_cap() {
+        let config = ReconnectConfig::default(); // jitter: true
+        let cap = Duration::from_millis(100); // attempt 0 cap
+        for _ in 0..1000 {
+            let d = config.delay_for_attempt(0);
+            assert!(d < cap, "jittered delay {d:?} exceeded cap {cap:?}");
+        }
+    }
+
+    #[test]
+    fn no_jitter_produces_deterministic_delays() {
+        let config = ReconnectConfig::default().jitter(false);
+        let d0 = config.delay_for_attempt(0);
+        let d0b = config.delay_for_attempt(0);
+        assert_eq!(d0, d0b, "delays should be identical with jitter disabled");
+        assert_eq!(
+            d0,
+            Duration::from_millis(100),
+            "attempt 0 without jitter should equal base_delay"
+        );
+    }
+
+    #[test]
+    fn no_jitter_exponential_backoff() {
+        let config = ReconnectConfig::default().jitter(false);
+        assert_eq!(config.delay_for_attempt(0), Duration::from_millis(100));
+        assert_eq!(config.delay_for_attempt(1), Duration::from_millis(200));
+        assert_eq!(config.delay_for_attempt(2), Duration::from_millis(400));
+        assert_eq!(config.delay_for_attempt(3), Duration::from_millis(800));
+    }
+
+    #[test]
+    fn no_jitter_capped_at_max_delay() {
+        let config = ReconnectConfig::default().jitter(false);
+        // At attempt 6: 100ms * 2^6 = 6400ms > max_delay (5000ms).
+        assert_eq!(config.delay_for_attempt(6), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn zero_cap_returns_zero() {
+        // If base_delay * 2^attempt somehow rounds to 0, we should not panic.
+        let config = ReconnectConfig {
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            jitter: true,
+            ..Default::default()
+        };
+        assert_eq!(config.delay_for_attempt(0), Duration::ZERO);
     }
 }

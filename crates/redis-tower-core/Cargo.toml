@@ -30,6 +30,8 @@ tower-service = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+socket2 = { version = "0.5", features = ["all"] }
+
 # Optional TLS backends
 native-tls = { version = "0.2", optional = true }
 tokio-native-tls = { version = "0.3", optional = true }

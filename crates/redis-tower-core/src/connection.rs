@@ -1,9 +1,11 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use futures::Sink;
 use futures::SinkExt;
+use socket2::{Socket, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
@@ -16,6 +18,102 @@ use crate::command::Command;
 use crate::error::RedisError;
 use crate::stream::RedisStream;
 use crate::url::{RedisUrl, parse_redis_url};
+
+/// Configuration for TCP keepalive probes.
+///
+/// Controls `SO_KEEPALIVE` on TCP connections created by
+/// [`RedisConnection::connect`] and [`RedisConnection::connect_tls`].
+///
+/// When the connection has been idle for `idle` seconds, the OS begins
+/// sending keepalive probes every `interval` seconds. If `probes` consecutive
+/// probes go unanswered the connection is considered dead and a subsequent
+/// read or write will return an error.
+///
+/// # Example
+///
+/// ```
+/// use redis_tower_core::KeepaliveConfig;
+/// use std::time::Duration;
+///
+/// // Aggressive keepalive for cloud environments:
+/// let cfg = KeepaliveConfig::new()
+///     .with_idle(Duration::from_secs(30))
+///     .with_interval(Duration::from_secs(5))
+///     .with_probes(5);
+/// ```
+#[derive(Debug, Clone)]
+pub struct KeepaliveConfig {
+    /// Time the connection must be idle before keepalive probes start.
+    pub idle: Duration,
+    /// Interval between consecutive keepalive probes.
+    pub interval: Duration,
+    /// Number of unanswered probes before the connection is considered dead.
+    /// Note: ignored on Windows, which does not expose this parameter.
+    pub probes: u32,
+}
+
+impl Default for KeepaliveConfig {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            interval: Duration::from_secs(10),
+            probes: 3,
+        }
+    }
+}
+
+impl KeepaliveConfig {
+    /// Create a new `KeepaliveConfig` with default values (60s idle, 10s interval, 3 probes).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the idle time before keepalive probes start.
+    #[must_use]
+    pub fn with_idle(mut self, idle: Duration) -> Self {
+        self.idle = idle;
+        self
+    }
+
+    /// Set the interval between consecutive keepalive probes.
+    #[must_use]
+    pub fn with_interval(mut self, interval: Duration) -> Self {
+        self.interval = interval;
+        self
+    }
+
+    /// Set the number of unanswered probes before declaring the connection dead.
+    ///
+    /// This setting is ignored on Windows.
+    #[must_use]
+    pub fn with_probes(mut self, probes: u32) -> Self {
+        self.probes = probes;
+        self
+    }
+}
+
+/// Apply TCP keepalive settings to an already-connected `TcpStream`.
+///
+/// Converts through `socket2` to call `setsockopt(SO_KEEPALIVE, ...)`.
+fn apply_keepalive(stream: TcpStream, config: &KeepaliveConfig) -> Result<TcpStream, RedisError> {
+    let std_stream = stream.into_std()?;
+    let socket = Socket::from(std_stream);
+
+    let keepalive = TcpKeepalive::new()
+        .with_time(config.idle)
+        .with_interval(config.interval);
+
+    // `with_retries` is not available on Windows.
+    #[cfg(not(windows))]
+    let keepalive = keepalive.with_retries(config.probes);
+
+    socket.set_tcp_keepalive(&keepalive)?;
+
+    let std_stream: std::net::TcpStream = socket.into();
+    std_stream.set_nonblocking(true)?;
+    Ok(TcpStream::from_std(std_stream)?)
+}
 
 /// Read the next non-push response frame, routing push frames to the channel.
 async fn read_response_from(
@@ -79,8 +177,26 @@ impl RedisConnection {
     }
 
     /// Connect to a Redis server over TCP.
+    ///
+    /// TCP keepalive is enabled with sensible defaults: 60 s idle, 10 s
+    /// interval, 3 probes. Use [`connect_with_keepalive`](Self::connect_with_keepalive)
+    /// to supply custom keepalive parameters.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
+        Self::connect_with_keepalive(addr, &KeepaliveConfig::default()).await
+    }
+
+    /// Connect to a Redis server over TCP with a custom keepalive configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails or if
+    /// the keepalive socket options cannot be applied.
+    pub async fn connect_with_keepalive(
+        addr: &str,
+        keepalive: &KeepaliveConfig,
+    ) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr).await?;
+        let stream = apply_keepalive(stream, keepalive)?;
         stream.set_nodelay(true)?;
         let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
         conn.identify_client().await;
@@ -90,13 +206,37 @@ impl RedisConnection {
     /// Connect over TLS using the provided configuration.
     ///
     /// Requires either the `tls-native-tls` or `tls-rustls` feature.
+    ///
+    /// TCP keepalive is enabled with sensible defaults: 60 s idle, 10 s
+    /// interval, 3 probes. Use [`connect_tls_with_keepalive`](Self::connect_tls_with_keepalive)
+    /// to supply custom keepalive parameters.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     pub async fn connect_tls(
         addr: &str,
         hostname: &str,
         tls_config: &crate::tls::TlsConfig,
     ) -> Result<Self, RedisError> {
+        Self::connect_tls_with_keepalive(addr, hostname, tls_config, &KeepaliveConfig::default())
+            .await
+    }
+
+    /// Connect over TLS with a custom keepalive configuration.
+    ///
+    /// Requires either the `tls-native-tls` or `tls-rustls` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection or TLS
+    /// handshake fails, or if the keepalive socket options cannot be applied.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    pub async fn connect_tls_with_keepalive(
+        addr: &str,
+        hostname: &str,
+        tls_config: &crate::tls::TlsConfig,
+        keepalive: &KeepaliveConfig,
+    ) -> Result<Self, RedisError> {
         let tcp = TcpStream::connect(addr).await?;
+        let tcp = apply_keepalive(tcp, keepalive)?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
         let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));

@@ -49,7 +49,7 @@ mod url;
 pub mod value;
 
 pub use command::Command;
-pub use connection::RedisConnection;
+pub use connection::{KeepaliveConfig, RedisConnection};
 pub use error::RedisError;
 pub use frame_service::FrameService;
 pub use stream::RedisStream;
