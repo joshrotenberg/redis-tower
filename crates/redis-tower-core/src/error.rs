@@ -48,6 +48,10 @@ pub enum RedisError {
     #[error("type mismatch: expected {expected}")]
     TypeMismatch { expected: &'static str },
 
+    /// Index out of bounds when accessing a pipeline or transaction result.
+    #[error("index {index} out of bounds (len {len})")]
+    IndexOutOfBounds { index: usize, len: usize },
+
     /// Reconnection failed after exhausting all retries.
     #[error("reconnect failed after {attempts} attempts: {last_error}")]
     ReconnectFailed {

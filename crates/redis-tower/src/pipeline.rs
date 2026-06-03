@@ -140,8 +140,9 @@ impl PipelineResults {
                 expected: std::any::type_name::<T>(),
             }),
             Some(Err(e)) => Err(RedisError::Redis(e.to_string())),
-            None => Err(RedisError::TypeMismatch {
-                expected: "valid index",
+            None => Err(RedisError::IndexOutOfBounds {
+                index,
+                len: self.results.len(),
             }),
         }
     }
@@ -169,8 +170,9 @@ impl PipelineResults {
                     Err(e) => Err(e),
                 }
             }
-            None => Err(RedisError::TypeMismatch {
-                expected: "valid index",
+            None => Err(RedisError::IndexOutOfBounds {
+                index,
+                len: self.results.len(),
             }),
         }
     }
@@ -183,5 +185,93 @@ impl PipelineResults {
     /// Returns true if there are no results.
     pub fn is_empty(&self) -> bool {
         self.results.is_empty()
+    }
+
+    /// Returns `true` if any command in the pipeline produced an error.
+    pub fn has_errors(&self) -> bool {
+        self.results.iter().any(|r| r.is_err())
+    }
+
+    /// Collects all results into a `Vec<T>`, returning the first error if any
+    /// result is an error or if the type `T` doesn't match.
+    ///
+    /// Useful when all commands in the pipeline return the same type.
+    pub fn into_typed_vec<T: Send + 'static>(self) -> Result<Vec<T>, RedisError> {
+        self.results
+            .into_iter()
+            .map(|r| match r {
+                Ok(boxed) => {
+                    boxed
+                        .downcast::<T>()
+                        .map(|b| *b)
+                        .map_err(|_| RedisError::TypeMismatch {
+                            expected: std::any::type_name::<T>(),
+                        })
+                }
+                Err(e) => Err(e),
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ok<T: Send + 'static>(value: T) -> Result<Box<dyn Any + Send>, RedisError> {
+        Ok(Box::new(value))
+    }
+
+    fn err() -> Result<Box<dyn Any + Send>, RedisError> {
+        Err(RedisError::Redis("boom".to_string()))
+    }
+
+    #[test]
+    fn has_errors_false_for_all_success() {
+        let results = PipelineResults::from_raw(vec![ok(1i64), ok(2i64)]);
+        assert!(!results.has_errors());
+    }
+
+    #[test]
+    fn has_errors_true_when_any_error() {
+        let results = PipelineResults::from_raw(vec![ok(1i64), err()]);
+        assert!(results.has_errors());
+    }
+
+    #[test]
+    fn into_typed_vec_homogeneous_succeeds() {
+        let results = PipelineResults::from_raw(vec![ok(1i64), ok(2i64), ok(3i64)]);
+        let vec = results.into_typed_vec::<i64>().unwrap();
+        assert_eq!(vec, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn into_typed_vec_errors_when_any_slot_errors() {
+        let results = PipelineResults::from_raw(vec![ok(1i64), err()]);
+        assert!(results.into_typed_vec::<i64>().is_err());
+    }
+
+    #[test]
+    fn get_out_of_bounds_returns_index_out_of_bounds() {
+        let results = PipelineResults::from_raw(vec![ok(1i64)]);
+        match results.get::<i64>(5) {
+            Err(RedisError::IndexOutOfBounds { index, len }) => {
+                assert_eq!(index, 5);
+                assert_eq!(len, 1);
+            }
+            other => panic!("expected IndexOutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn take_out_of_bounds_returns_index_out_of_bounds() {
+        let mut results = PipelineResults::from_raw(vec![ok(1i64)]);
+        match results.take::<i64>(5) {
+            Err(RedisError::IndexOutOfBounds { index, len }) => {
+                assert_eq!(index, 5);
+                assert_eq!(len, 1);
+            }
+            other => panic!("expected IndexOutOfBounds, got {other:?}"),
+        }
     }
 }
