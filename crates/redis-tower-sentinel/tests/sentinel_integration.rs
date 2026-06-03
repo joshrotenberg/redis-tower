@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
 use redis_tower_commands::*;
-use redis_tower_sentinel::{SentinelClient, SentinelConnection};
+use redis_tower_sentinel::{MultiplexedSentinelClient, SentinelClient, SentinelConnection};
 use tokio::sync::OnceCell;
 
 static SENTINEL: OnceCell<RedisSentinelHandle> = OnceCell::const_new();
@@ -105,4 +105,81 @@ async fn sentinel_rediscover() {
     conn.rediscover().await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
+}
+
+// -- MultiplexedSentinelClient tests --
+
+#[tokio::test]
+#[ignore]
+async fn multiplexed_sentinel_connect_execute() {
+    let addrs = sentinel_addrs().await;
+    let client = MultiplexedSentinelClient::connect(&addrs, "mymaster")
+        .await
+        .unwrap();
+    let k = key("multiplexed_connect", "k");
+    client.execute(Set::new(&k, "hello")).await.unwrap();
+    let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("hello")));
+    client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn multiplexed_sentinel_clone_across_tasks() {
+    let addrs = sentinel_addrs().await;
+    let client = MultiplexedSentinelClient::connect(&addrs, "mymaster")
+        .await
+        .unwrap();
+    let k = key("multiplexed_clone", "k");
+    client.execute(Set::new(&k, "shared")).await.unwrap();
+
+    let c = client.clone();
+    let k2 = k.clone();
+    let handle = tokio::spawn(async move { c.execute(Get::new(&k2)).await.unwrap() });
+    let val: Option<Bytes> = handle.await.unwrap();
+    assert_eq!(val, Some(Bytes::from("shared")));
+    client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn multiplexed_sentinel_concurrent_commands() {
+    let addrs = sentinel_addrs().await;
+    let client = MultiplexedSentinelClient::connect(&addrs, "mymaster")
+        .await
+        .unwrap();
+
+    let n = 20usize;
+    let mut handles = Vec::with_capacity(n);
+    for i in 0..n {
+        let c = client.clone();
+        let k = key("multiplexed_concurrent", &format!("k{i}"));
+        let v = format!("val{i}");
+        handles.push(tokio::spawn(async move {
+            c.execute(Set::new(&k, v)).await.unwrap();
+        }));
+    }
+    for h in handles {
+        h.await.unwrap();
+    }
+
+    // Cleanup
+    for i in 0..n {
+        let k = key("multiplexed_concurrent", &format!("k{i}"));
+        client.execute(Del::new(&k)).await.unwrap();
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn multiplexed_sentinel_connect_with_reconnect() {
+    let addrs = sentinel_addrs().await;
+    let client = MultiplexedSentinelClient::connect_with_reconnect(&addrs, "mymaster")
+        .await
+        .unwrap();
+    let k = key("multiplexed_reconnect", "k");
+    client.execute(Set::new(&k, "resilient")).await.unwrap();
+    let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
+    assert_eq!(val, Some(Bytes::from("resilient")));
+    client.execute(Del::new(&k)).await.unwrap();
 }
