@@ -136,4 +136,18 @@ impl MultiplexedClient {
         .await?;
         tower_service::Service::call(&mut svc, cmd).await
     }
+
+    /// Gracefully shut down the multiplexed client.
+    ///
+    /// Signals the background worker to stop accepting new requests, then
+    /// waits for all in-flight requests to complete and joins the background
+    /// task. If other clones of this client are still alive, this returns
+    /// immediately -- the worker continues running until the last clone shuts
+    /// down or is dropped.
+    ///
+    /// For clean application shutdown, prefer calling `shutdown()` over
+    /// simply dropping the client.
+    pub async fn shutdown(self) {
+        self.inner.into_inner().shutdown().await;
+    }
 }

@@ -138,7 +138,46 @@ impl WorkerRequest {
 /// ```
 pub struct AutoPipelineService {
     tx: mpsc::Sender<WorkerRequest>,
-    _worker: Arc<tokio::task::JoinHandle<()>>,
+    worker: Arc<WorkerHandle>,
+}
+
+/// Wrapper around the background task's [`JoinHandle`](tokio::task::JoinHandle)
+/// that emits a warning when dropped without being cleanly shut down.
+///
+/// Stores the handle in an `Option` so it can be `take()`n by [`shutdown()`]
+/// without conflicting with the `Drop` impl.
+struct WorkerHandle {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl WorkerHandle {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    /// Returns `true` if the background task has already finished.
+    fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .map(|h| h.is_finished())
+            .unwrap_or(true)
+    }
+}
+
+impl Drop for WorkerHandle {
+    fn drop(&mut self) {
+        // If the task has not yet finished when the last Arc<WorkerHandle>
+        // is dropped, the JoinHandle is being abandoned. Any in-flight
+        // requests in the pipeline worker may be silently dropped.
+        if !self.is_finished() {
+            warn!(
+                "AutoPipelineService dropped without calling shutdown(); \
+                 background worker may still have queued requests in flight"
+            );
+        }
+    }
 }
 
 impl AutoPipelineService {
@@ -183,10 +222,10 @@ impl AutoPipelineService {
 
     fn from_parts(conn: RedisConnection, config: AutoPipelineConfig, source: ConnSource) -> Self {
         let (tx, rx) = mpsc::channel(config.max_batch_size * 2);
-        let worker = tokio::spawn(pipeline_worker(rx, conn, config, source));
+        let handle = tokio::spawn(pipeline_worker(rx, conn, config, source));
         Self {
             tx,
-            _worker: Arc::new(worker),
+            worker: Arc::new(WorkerHandle::new(handle)),
         }
     }
 
@@ -215,6 +254,35 @@ impl AutoPipelineService {
             .await
             .map_err(|_| RedisError::ConnectionClosed)?;
         resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
+    }
+
+    /// Gracefully shut down the pipeline service.
+    ///
+    /// Drops this instance's sender half, signalling the background worker
+    /// that no more requests will arrive from this handle. If this is the
+    /// last live clone (i.e. the last `tx` sender and the last `Arc`
+    /// reference to the worker handle), waits for the worker to drain the
+    /// remaining queue and exit cleanly.
+    ///
+    /// If other clones are still alive, returns immediately -- the worker
+    /// continues running until the last clone shuts down or is dropped.
+    ///
+    /// For clean application shutdown, prefer calling `shutdown()` over
+    /// simply dropping the service.
+    pub async fn shutdown(self) {
+        // Drop tx first: decrements the sender count. When all senders are
+        // gone the worker's `recv()` returns `None` and the worker exits
+        // after flushing any remaining batch.
+        drop(self.tx);
+        // Attempt to take sole ownership of the WorkerHandle Arc. Succeeds
+        // only when we hold the last reference (all other clones have already
+        // been dropped or shut down), in which case we await the worker to
+        // ensure the final batch is flushed before we return.
+        if let Ok(mut worker_handle) = Arc::try_unwrap(self.worker)
+            && let Some(handle) = worker_handle.handle.take()
+        {
+            let _ = handle.await;
+        }
     }
 }
 
@@ -430,7 +498,7 @@ impl Clone for AutoPipelineService {
     fn clone(&self) -> Self {
         Self {
             tx: self.tx.clone(),
-            _worker: Arc::clone(&self._worker),
+            worker: Arc::clone(&self.worker),
         }
     }
 }
@@ -456,16 +524,23 @@ mod tests {
         assert_eq!(config.batch_window, Duration::from_micros(500));
     }
 
+    fn make_test_svc(
+        tx: mpsc::Sender<WorkerRequest>,
+        handle: tokio::task::JoinHandle<()>,
+    ) -> AutoPipelineService {
+        AutoPipelineService {
+            tx,
+            worker: Arc::new(WorkerHandle::new(handle)),
+        }
+    }
+
     #[tokio::test]
     async fn closed_channel_error_is_retryable() {
         // When the background worker is gone (connection death), the error
         // must be retryable so upstream retry layers can reconnect.
         let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx);
-        let mut svc = AutoPipelineService {
-            tx,
-            _worker: Arc::new(tokio::spawn(async {})),
-        };
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
 
         let frame = Frame::SimpleString(b"PING"[..].into());
         let err = svc.call(frame).await.unwrap_err();
@@ -477,10 +552,7 @@ mod tests {
         // Create a service with a channel that we immediately close.
         let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx); // close the receiver
-        let mut svc = AutoPipelineService {
-            tx,
-            _worker: Arc::new(tokio::spawn(async {})),
-        };
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
 
         // poll_ready should report closed.
         let ready = futures::future::poll_fn(|cx| svc.poll_ready(cx)).await;
@@ -490,5 +562,42 @@ mod tests {
         let frame = Frame::SimpleString(b"PING"[..].into());
         let result = svc.call(frame).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn shutdown_last_clone_awaits_worker() {
+        // Create a service whose worker exits immediately (no connection, no
+        // requests -- the channel closes as soon as tx is dropped).
+        let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
+        let handle = tokio::spawn(async move {
+            // Simulate a worker that drains and exits when the channel closes.
+            let mut rx = rx;
+            while rx.recv().await.is_some() {}
+        });
+        let svc = make_test_svc(tx, handle);
+
+        // shutdown() on the sole instance should drop tx, succeed in
+        // Arc::try_unwrap, and await the worker to completion.
+        svc.shutdown().await;
+        // If we reach here the worker has exited cleanly.
+    }
+
+    #[tokio::test]
+    async fn shutdown_non_last_clone_returns_immediately() {
+        // When another clone is alive, Arc::try_unwrap fails and shutdown()
+        // returns immediately without awaiting the worker.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
+        // Spawn a worker that never exits on its own.
+        let handle = tokio::spawn(futures::future::pending::<()>());
+        let svc = make_test_svc(tx, handle);
+
+        // Keep a second clone alive so Arc::try_unwrap will fail.
+        let _clone = svc.clone();
+
+        // shutdown() on this clone should return immediately (not hang).
+        svc.shutdown().await;
+
+        // _clone still holds the Arc; worker is still running.
+        // Drop the clone to let the worker task get cleaned up.
     }
 }
