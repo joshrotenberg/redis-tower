@@ -7,12 +7,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Adds the specified members with scores to the sorted set stored at `key`.
 /// Returns the number of members added (excluding members already present
 /// whose score was updated).
+///
+/// See: <https://redis.io/commands/zadd>
 pub struct ZAdd {
     key: String,
     members: Vec<(f64, String)>,
 }
 
 impl ZAdd {
+    /// Creates a new [`ZAdd`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -21,6 +24,7 @@ impl ZAdd {
     }
 
     /// Adds a member with the given score.
+    #[must_use]
     pub fn member(mut self, score: f64, member: impl Into<String>) -> Self {
         self.members.push((score, member.into()));
         self
@@ -58,12 +62,15 @@ impl Command for ZAdd {
 ///
 /// Removes the specified members from the sorted set stored at `key`. Returns
 /// the number of members that were removed.
+///
+/// See: <https://redis.io/commands/zrem>
 pub struct ZRem {
     key: String,
     members: Vec<String>,
 }
 
 impl ZRem {
+    /// Creates a new [`ZRem`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -113,6 +120,8 @@ impl Command for ZRem {
 /// Returns the specified range of members in the sorted set stored at `key`,
 /// ordered from lowest to highest score. `start` and `stop` are zero-based
 /// indices, where -1 is the last element.
+///
+/// See: <https://redis.io/commands/zrange>
 pub struct ZRange {
     key: String,
     start: i64,
@@ -120,6 +129,7 @@ pub struct ZRange {
 }
 
 impl ZRange {
+    /// Creates a new [`ZRange`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -169,12 +179,15 @@ impl Command for ZRange {
 ///
 /// Returns the score of `member` in the sorted set at `key`, or `None` if
 /// the \[member\] or key does not exist.
+///
+/// See: <https://redis.io/commands/zscore>
 pub struct ZScore {
     key: String,
     member: String,
 }
 
 impl ZScore {
+    /// Creates a new [`ZScore`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -223,11 +236,14 @@ impl Command for ZScore {
 /// ZCARD key
 ///
 /// Returns the number of members in the sorted set stored at `key`.
+///
+/// See: <https://redis.io/commands/zcard>
 pub struct ZCard {
     key: String,
 }
 
 impl ZCard {
+    /// Creates a new [`ZCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -259,6 +275,8 @@ impl Command for ZCard {
 ///
 /// Increments the score of `member` in the sorted set at `key` by
 /// `increment`. Returns the new score of the \[member\].
+///
+/// See: <https://redis.io/commands/zincrby>
 pub struct ZIncrBy {
     key: String,
     increment: f64,
@@ -266,6 +284,7 @@ pub struct ZIncrBy {
 }
 
 impl ZIncrBy {
+    /// Creates a new [`ZIncrBy`] command.
     pub fn new(key: impl Into<String>, increment: f64, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -314,12 +333,15 @@ impl Command for ZIncrBy {
 ///
 /// Returns the rank of `member` in the sorted set at `key` (zero-based,
 /// lowest score = rank 0), or `None` if the \[member\] or key does not exist.
+///
+/// See: <https://redis.io/commands/zrank>
 pub struct ZRank {
     key: String,
     member: String,
 }
 
 impl ZRank {
+    /// Creates a new [`ZRank`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -360,6 +382,8 @@ impl Command for ZRank {
 /// Returns all members in the sorted set at `key` with a score between
 /// `min` and `max` (inclusive). The `min` and `max` arguments can be
 /// `"-inf"`, `"+inf"`, or numeric strings.
+///
+/// See: <https://redis.io/commands/zrangebyscore>
 pub struct ZRangeByScore {
     key: String,
     min: String,
@@ -367,6 +391,7 @@ pub struct ZRangeByScore {
 }
 
 impl ZRangeByScore {
+    /// Creates a new [`ZRangeByScore`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -416,12 +441,15 @@ impl Command for ZRangeByScore {
 ///
 /// Removes and returns the members with the lowest scores in the sorted set
 /// stored at `key`. Returns a list of `(member, score)` pairs.
+///
+/// See: <https://redis.io/commands/zpopmin>
 pub struct ZPopMin {
     key: String,
     count: Option<i64>,
 }
 
 impl ZPopMin {
+    /// Creates a new [`ZPopMin`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -430,6 +458,7 @@ impl ZPopMin {
     }
 
     /// Sets the number of members to pop.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -506,12 +535,15 @@ impl Command for ZPopMin {
 ///
 /// Removes and returns the members with the highest scores in the sorted set
 /// stored at `key`. Returns a list of `(member, score)` pairs.
+///
+/// See: <https://redis.io/commands/zpopmax>
 pub struct ZPopMax {
     key: String,
     count: Option<i64>,
 }
 
 impl ZPopMax {
+    /// Creates a new [`ZPopMax`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -520,6 +552,7 @@ impl ZPopMax {
     }
 
     /// Sets the number of members to pop.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -598,6 +631,8 @@ impl Command for ZPopMax {
 /// between `min` and `max` (inclusive by default). The `min` and `max`
 /// arguments can be `"-inf"`, `"+inf"`, or numeric strings (prefix with
 /// `"("` for exclusive bounds).
+///
+/// See: <https://redis.io/commands/zcount>
 pub struct ZCount {
     key: String,
     min: String,
@@ -605,6 +640,7 @@ pub struct ZCount {
 }
 
 impl ZCount {
+    /// Creates a new [`ZCount`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -647,6 +683,8 @@ impl Command for ZCount {
 /// lexicographical range specified by `min` and `max`. Valid values for
 /// `min` and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
 /// (exclusive).
+///
+/// See: <https://redis.io/commands/zlexcount>
 pub struct ZLexCount {
     key: String,
     min: String,
@@ -654,6 +692,7 @@ pub struct ZLexCount {
 }
 
 impl ZLexCount {
+    /// Creates a new [`ZLexCount`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -695,12 +734,15 @@ impl Command for ZLexCount {
 /// Returns one or more random members from the sorted set at `key`.
 /// When called without `count`, returns a single random member.
 /// When called with `count`, returns up to that many distinct members.
+///
+/// See: <https://redis.io/commands/zrandmember>
 pub struct ZRandMember {
     key: String,
     count: Option<i64>,
 }
 
 impl ZRandMember {
+    /// Creates a new [`ZRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -709,6 +751,7 @@ impl ZRandMember {
     }
 
     /// Sets the number of members to return.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -757,12 +800,15 @@ impl Command for ZRandMember {
 /// Returns the scores associated with the specified members in the sorted
 /// set at `key`. For each member, returns `Some(score)` if the member
 /// exists, or `None` if it does not.
+///
+/// See: <https://redis.io/commands/zmscore>
 pub struct ZMScore {
     key: String,
     members: Vec<String>,
 }
 
 impl ZMScore {
+    /// Creates a new [`ZMScore`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -850,6 +896,8 @@ impl Aggregate {
 /// Computes the intersection of the sorted sets given by the specified keys,
 /// and stores the result in `destination`. Returns the number of elements in
 /// the resulting sorted set.
+///
+/// See: <https://redis.io/commands/zinterstore>
 pub struct ZInterStore {
     destination: String,
     keys: Vec<String>,
@@ -858,6 +906,7 @@ pub struct ZInterStore {
 }
 
 impl ZInterStore {
+    /// Creates a new [`ZInterStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -871,12 +920,14 @@ impl ZInterStore {
     }
 
     /// Sets the weight multipliers for each input sorted set.
+    #[must_use]
     pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
         self.weights = Some(weights.into_iter().collect());
         self
     }
 
     /// Sets the aggregation function for combining scores.
+    #[must_use]
     pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
         self.aggregate = Some(aggregate);
         self
@@ -928,6 +979,8 @@ impl Command for ZInterStore {
 /// Computes the union of the sorted sets given by the specified keys, and
 /// stores the result in `destination`. Returns the number of elements in
 /// the resulting sorted set.
+///
+/// See: <https://redis.io/commands/zunionstore>
 pub struct ZUnionStore {
     destination: String,
     keys: Vec<String>,
@@ -936,6 +989,7 @@ pub struct ZUnionStore {
 }
 
 impl ZUnionStore {
+    /// Creates a new [`ZUnionStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -949,12 +1003,14 @@ impl ZUnionStore {
     }
 
     /// Sets the weight multipliers for each input sorted set.
+    #[must_use]
     pub fn weights(mut self, weights: impl IntoIterator<Item = f64>) -> Self {
         self.weights = Some(weights.into_iter().collect());
         self
     }
 
     /// Sets the aggregation function for combining scores.
+    #[must_use]
     pub fn aggregate(mut self, aggregate: Aggregate) -> Self {
         self.aggregate = Some(aggregate);
         self
@@ -1006,12 +1062,15 @@ impl Command for ZUnionStore {
 /// Computes the difference between the first sorted set and all successive
 /// sorted sets given by the specified keys, and stores the result in
 /// `destination`. Returns the number of elements in the resulting sorted set.
+///
+/// See: <https://redis.io/commands/zdiffstore>
 pub struct ZDiffStore {
     destination: String,
     keys: Vec<String>,
 }
 
 impl ZDiffStore {
+    /// Creates a new [`ZDiffStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -1058,12 +1117,15 @@ impl Command for ZDiffStore {
 /// Returns the cardinality of the intersection of the sorted sets given by
 /// the specified keys. The optional `LIMIT` argument caps the work done
 /// when the intersection cardinality reaches the limit.
+///
+/// See: <https://redis.io/commands/zintercard>
 pub struct ZInterCard {
     keys: Vec<String>,
     limit: Option<i64>,
 }
 
 impl ZInterCard {
+    /// Creates a new [`ZInterCard`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -1072,6 +1134,7 @@ impl ZInterCard {
     }
 
     /// Sets the upper bound for the returned cardinality.
+    #[must_use]
     pub fn limit(mut self, limit: i64) -> Self {
         self.limit = Some(limit);
         self
@@ -1112,6 +1175,8 @@ impl Command for ZInterCard {
 ///
 /// Stores the specified range of members from the sorted set at `src` into
 /// `dst`. Returns the number of elements in the resulting sorted set.
+///
+/// See: <https://redis.io/commands/zrangestore>
 pub struct ZRangeStore {
     dst: String,
     src: String,
@@ -1124,6 +1189,7 @@ pub struct ZRangeStore {
 }
 
 impl ZRangeStore {
+    /// Creates a new [`ZRangeStore`] command.
     pub fn new(
         dst: impl Into<String>,
         src: impl Into<String>,
@@ -1143,6 +1209,7 @@ impl ZRangeStore {
     }
 
     /// Uses score-based range interpretation.
+    #[must_use]
     pub fn by_score(mut self) -> Self {
         self.by_score = true;
         self.by_lex = false;
@@ -1150,6 +1217,7 @@ impl ZRangeStore {
     }
 
     /// Uses lexicographic range interpretation.
+    #[must_use]
     pub fn by_lex(mut self) -> Self {
         self.by_lex = true;
         self.by_score = false;
@@ -1157,12 +1225,14 @@ impl ZRangeStore {
     }
 
     /// Reverses the sort order.
+    #[must_use]
     pub fn rev(mut self) -> Self {
         self.rev = true;
         self
     }
 
     /// Limits the results to `count` elements starting at `offset`.
+    #[must_use]
     pub fn limit(mut self, offset: i64, count: i64) -> Self {
         self.limit = Some((offset, count));
         self
@@ -1234,6 +1304,8 @@ impl ZMPopDirection {
 /// elements could be popped from any of the sorted sets, or
 /// `Some((key, members))` where `key` is the name of the sorted set and
 /// `members` is a list of `(member, score)` pairs.
+///
+/// See: <https://redis.io/commands/zmpop>
 pub struct ZMPop {
     keys: Vec<String>,
     direction: ZMPopDirection,
@@ -1241,6 +1313,7 @@ pub struct ZMPop {
 }
 
 impl ZMPop {
+    /// Creates a new [`ZMPop`] command.
     pub fn new(
         keys: impl IntoIterator<Item = impl Into<String>>,
         direction: ZMPopDirection,
@@ -1253,6 +1326,7 @@ impl ZMPop {
     }
 
     /// Sets the number of members to pop.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -1354,6 +1428,8 @@ impl Command for ZMPop {
 /// Removes all members in the sorted set stored at `key` with rank between
 /// `start` and `stop` (inclusive, zero-based). Returns the number of members
 /// removed.
+///
+/// See: <https://redis.io/commands/zremrangebyrank>
 pub struct ZRemRangeByRank {
     key: String,
     start: i64,
@@ -1361,6 +1437,7 @@ pub struct ZRemRangeByRank {
 }
 
 impl ZRemRangeByRank {
+    /// Creates a new [`ZRemRangeByRank`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -1403,6 +1480,8 @@ impl Command for ZRemRangeByRank {
 /// `min` and `max` (inclusive). The `min` and `max` arguments can be `"-inf"`,
 /// `"+inf"`, or numeric strings (prefix with `"("` for exclusive bounds).
 /// Returns the number of members removed.
+///
+/// See: <https://redis.io/commands/zremrangebyscore>
 pub struct ZRemRangeByScore {
     key: String,
     min: String,
@@ -1410,6 +1489,7 @@ pub struct ZRemRangeByScore {
 }
 
 impl ZRemRangeByScore {
+    /// Creates a new [`ZRemRangeByScore`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1452,6 +1532,8 @@ impl Command for ZRemRangeByScore {
 /// lexicographical range specified by `min` and `max`. Valid values for
 /// `min` and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
 /// (exclusive). Returns the number of members removed.
+///
+/// See: <https://redis.io/commands/zremrangebylex>
 pub struct ZRemRangeByLex {
     key: String,
     min: String,
@@ -1459,6 +1541,7 @@ pub struct ZRemRangeByLex {
 }
 
 impl ZRemRangeByLex {
+    /// Creates a new [`ZRemRangeByLex`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1500,12 +1583,15 @@ impl Command for ZRemRangeByLex {
 /// Returns the rank of `member` in the sorted set at `key` with scores
 /// ordered from high to low (zero-based, highest score = rank 0), or `None`
 /// if the member or key does not exist.
+///
+/// See: <https://redis.io/commands/zrevrank>
 pub struct ZRevRank {
     key: String,
     member: String,
 }
 
 impl ZRevRank {
+    /// Creates a new [`ZRevRank`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),

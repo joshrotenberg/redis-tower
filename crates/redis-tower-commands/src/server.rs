@@ -5,11 +5,14 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// PING \[message\]
 ///
 /// Returns PONG, or echoes the message if provided.
+///
+/// See: <https://redis.io/commands/ping>
 pub struct Ping {
     message: Option<String>,
 }
 
 impl Ping {
+    /// Creates a new [`Ping`] command.
     pub fn new() -> Self {
         Self { message: None }
     }
@@ -57,6 +60,8 @@ impl Command for Ping {
 /// FLUSHDB [ASYNC|SYNC]
 ///
 /// Delete all keys in the current database.
+///
+/// See: <https://redis.io/commands/flushdb>
 pub struct FlushDb {
     mode: Option<FlushMode>,
 }
@@ -67,15 +72,18 @@ pub enum FlushMode {
 }
 
 impl FlushDb {
+    /// Creates a new [`FlushDb`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
 
+    #[must_use]
     pub fn async_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Async);
         self
     }
 
+    #[must_use]
     pub fn sync_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Sync);
         self
@@ -119,9 +127,12 @@ impl Command for FlushDb {
 /// DBSIZE
 ///
 /// Returns the number of keys in the current database.
+///
+/// See: <https://redis.io/commands/dbsize>
 pub struct DbSize;
 
 impl DbSize {
+    /// Creates a new [`DbSize`] command.
     pub fn new() -> Self {
         Self
     }
@@ -158,11 +169,14 @@ impl Command for DbSize {
 /// SELECT index
 ///
 /// Select the Redis database for the current connection.
+///
+/// See: <https://redis.io/commands/select>
 pub struct Select {
     db: u16,
 }
 
 impl Select {
+    /// Creates a new [`Select`] command.
     pub fn new(db: u16) -> Self {
         Self { db }
     }
@@ -194,6 +208,8 @@ impl Command for Select {
 ///
 /// Authenticate to the server. With Redis 6+ ACLs, pass both username
 /// and password. For older versions, only pass the password.
+///
+/// See: <https://redis.io/commands/auth>
 pub struct Auth {
     username: Option<String>,
     password: String,
@@ -247,6 +263,8 @@ impl Command for Auth {
 /// CLIENT TRACKING ON|OFF \[REDIRECT client-id\] \[PREFIX prefix\] \[BCAST\] \[OPTIN\] \[OPTOUT\]
 ///
 /// Enable or disable server-assisted client-side caching.
+///
+/// See: <https://redis.io/commands/client-tracking>
 pub struct ClientTracking {
     enabled: bool,
     bcast: bool,
@@ -279,24 +297,28 @@ impl ClientTracking {
     }
 
     /// Enable broadcasting mode (invalidate all keys matching prefixes).
+    #[must_use]
     pub fn bcast(mut self) -> Self {
         self.bcast = true;
         self
     }
 
     /// Add a key prefix to track (only with BCAST mode).
+    #[must_use]
     pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefixes.push(prefix.into());
         self
     }
 
     /// Enable opt-in mode (only track keys after CLIENT CACHING YES).
+    #[must_use]
     pub fn optin(mut self) -> Self {
         self.optin = true;
         self
     }
 
     /// Enable opt-out mode (track all keys, skip after CLIENT CACHING NO).
+    #[must_use]
     pub fn optout(mut self) -> Self {
         self.optout = true;
         self
@@ -349,12 +371,14 @@ impl Command for ClientTracking {
 /// filter can be provided to limit the output (e.g. "server", "memory",
 /// "replication"). Returns the raw bulk string; callers can parse the
 /// key-value pairs from the line-oriented format.
+///
+/// See: <https://redis.io/commands/info>
 pub struct Info {
     sections: Vec<String>,
 }
 
 impl Info {
-    /// Request all info sections.
+    /// Creates a new [`Info`] command requesting all sections.
     pub fn new() -> Self {
         Self {
             sections: Vec::new(),
@@ -362,6 +386,7 @@ impl Info {
     }
 
     /// Request a specific section (e.g. "server", "memory", "replication").
+    #[must_use]
     pub fn section(mut self, section: impl Into<String>) -> Self {
         self.sections.push(section.into());
         self
@@ -404,9 +429,12 @@ impl Command for Info {
 ///
 /// Returns the current server time as a two-element array:
 /// unix timestamp in seconds and microseconds.
+///
+/// See: <https://redis.io/commands/time>
 pub struct Time;
 
 impl Time {
+    /// Creates a new [`Time`] command.
     pub fn new() -> Self {
         Self
     }
@@ -474,9 +502,12 @@ impl Command for Time {
 /// COMMAND COUNT
 ///
 /// Returns the total number of commands supported by the server.
+///
+/// See: <https://redis.io/commands/command-count>
 pub struct CommandCount;
 
 impl CommandCount {
+    /// Creates a new [`CommandCount`] command.
     pub fn new() -> Self {
         Self
     }
@@ -515,12 +546,14 @@ impl Command for CommandCount {
 /// Returns documentary information about one or more commands.
 /// Each command's documentation is returned as a nested array of
 /// key-value pairs.
+///
+/// See: <https://redis.io/commands/command-docs>
 pub struct CommandDocs {
     commands: Vec<String>,
 }
 
 impl CommandDocs {
-    /// Request docs for all commands.
+    /// Creates a new [`CommandDocs`] command requesting docs for all commands.
     pub fn new() -> Self {
         Self {
             commands: Vec::new(),
@@ -528,6 +561,7 @@ impl CommandDocs {
     }
 
     /// Request docs for a specific command.
+    #[must_use]
     pub fn command(mut self, name: impl Into<String>) -> Self {
         self.commands.push(name.into());
         self
@@ -571,6 +605,8 @@ impl Command for CommandDocs {
 /// COMMAND LIST \[FILTERBY MODULE module | ACLCAT category | PATTERN pattern\]
 ///
 /// Returns a list of all command names supported by the server.
+///
+/// See: <https://redis.io/commands/command-list>
 pub struct CommandList {
     filter: Option<CommandListFilter>,
 }
@@ -586,7 +622,7 @@ pub enum CommandListFilter {
 }
 
 impl CommandList {
-    /// List all commands without filtering.
+    /// Creates a new [`CommandList`] command listing all commands without filtering.
     pub fn new() -> Self {
         Self { filter: None }
     }
@@ -675,16 +711,20 @@ impl Command for CommandList {
 ///
 /// Trigger a background save of the dataset. With `schedule`, the save
 /// is queued if one is already in progress (instead of returning an error).
+///
+/// See: <https://redis.io/commands/bgsave>
 pub struct BgSave {
     schedule: bool,
 }
 
 impl BgSave {
+    /// Creates a new [`BgSave`] command.
     pub fn new() -> Self {
         Self { schedule: false }
     }
 
     /// Queue the save if one is already in progress.
+    #[must_use]
     pub fn schedule(mut self) -> Self {
         self.schedule = true;
         self
@@ -726,9 +766,12 @@ impl Command for BgSave {
 /// BGREWRITEAOF
 ///
 /// Trigger an Append Only File rewrite. The rewrite runs in the background.
+///
+/// See: <https://redis.io/commands/bgrewriteaof>
 pub struct BgRewriteAof;
 
 impl BgRewriteAof {
+    /// Creates a new [`BgRewriteAof`] command.
     pub fn new() -> Self {
         Self
     }
@@ -765,9 +808,12 @@ impl Command for BgRewriteAof {
 /// LASTSAVE
 ///
 /// Returns the Unix timestamp of the last successful save to disk.
+///
+/// See: <https://redis.io/commands/lastsave>
 pub struct LastSave;
 
 impl LastSave {
+    /// Creates a new [`LastSave`] command.
     pub fn new() -> Self {
         Self
     }
@@ -805,6 +851,8 @@ impl Command for LastSave {
 ///
 /// Configure the server as a replica of another Redis instance,
 /// or promote it to a primary with `ReplicaOf::no_one()`.
+///
+/// See: <https://redis.io/commands/replicaof>
 pub struct ReplicaOf {
     host: String,
     port: String,
@@ -857,12 +905,15 @@ impl Command for ReplicaOf {
 /// SWAPDB index1 index2
 ///
 /// Swap two Redis databases atomically.
+///
+/// See: <https://redis.io/commands/swapdb>
 pub struct SwapDb {
     db1: u16,
     db2: u16,
 }
 
 impl SwapDb {
+    /// Creates a new [`SwapDb`] command to swap databases `db1` and `db2`.
     pub fn new(db1: u16, db2: u16) -> Self {
         Self { db1, db2 }
     }
@@ -898,6 +949,8 @@ impl Command for SwapDb {
 ///
 /// Trigger a replica failover (Redis 6.2+). When run on a primary, it
 /// coordinates with a replica to perform a graceful failover.
+///
+/// See: <https://redis.io/commands/failover>
 pub struct Failover {
     to: Option<(String, u16)>,
     force: bool,
@@ -906,7 +959,7 @@ pub struct Failover {
 }
 
 impl Failover {
-    /// Initiate a failover with default settings.
+    /// Creates a new [`Failover`] command with default settings.
     pub fn new() -> Self {
         Self {
             to: None,
@@ -927,6 +980,7 @@ impl Failover {
     }
 
     /// Target a specific replica for the failover.
+    #[must_use]
     pub fn to(mut self, host: impl Into<String>, port: u16) -> Self {
         self.to = Some((host.into(), port));
         self
@@ -934,12 +988,14 @@ impl Failover {
 
     /// Force the failover even if the target replica is unreachable.
     /// Only valid when a target is specified with `to()`.
+    #[must_use]
     pub fn force(mut self) -> Self {
         self.force = true;
         self
     }
 
     /// Set a timeout in milliseconds for the failover operation.
+    #[must_use]
     pub fn timeout(mut self, ms: u64) -> Self {
         self.timeout = Some(ms);
         self
@@ -995,12 +1051,15 @@ impl Command for Failover {
 /// Blocks the current client until all previous write commands are acknowledged
 /// by at least `numreplicas` replicas, or until the timeout (in milliseconds)
 /// expires. Returns the number of replicas that acknowledged.
+///
+/// See: <https://redis.io/commands/wait>
 pub struct Wait {
     numreplicas: i64,
     timeout: i64,
 }
 
 impl Wait {
+    /// Creates a new [`Wait`] command blocking until `numreplicas` acknowledge or `timeout` ms elapses.
     pub fn new(numreplicas: i64, timeout: i64) -> Self {
         Self {
             numreplicas,
@@ -1040,6 +1099,8 @@ impl Command for Wait {
 /// Blocks the current client until all previous write commands are fsynced
 /// to the AOF of the local host and/or at least `numreplicas` replicas.
 /// Returns a tuple of (local, replicas) counts parsed from a two-element array.
+///
+/// See: <https://redis.io/commands/waitaof>
 pub struct WaitAof {
     numlocal: i64,
     numreplicas: i64,
@@ -1047,6 +1108,7 @@ pub struct WaitAof {
 }
 
 impl WaitAof {
+    /// Creates a new [`WaitAof`] command blocking until `numlocal` local and `numreplicas` replica AOF fsyncs complete or `timeout` ms elapses.
     pub fn new(numlocal: i64, numreplicas: i64, timeout: i64) -> Self {
         Self {
             numlocal,
@@ -1110,9 +1172,12 @@ impl Command for WaitAof {
 /// CLIENT ID
 ///
 /// Returns the ID of the current connection.
+///
+/// See: <https://redis.io/commands/client-id>
 pub struct ClientId;
 
 impl ClientId {
+    /// Creates a new [`ClientId`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1150,9 +1215,12 @@ impl Command for ClientId {
 ///
 /// Returns the name of the current connection as set by CLIENT SETNAME,
 /// or None if no name is set.
+///
+/// See: <https://redis.io/commands/client-getname>
 pub struct ClientGetName;
 
 impl ClientGetName {
+    /// Creates a new [`ClientGetName`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1190,11 +1258,14 @@ impl Command for ClientGetName {
 /// CLIENT SETNAME connection-name
 ///
 /// Set the name of the current connection.
+///
+/// See: <https://redis.io/commands/client-setname>
 pub struct ClientSetName {
     name: String,
 }
 
 impl ClientSetName {
+    /// Creates a new [`ClientSetName`] command.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
@@ -1249,16 +1320,20 @@ impl ClientListType {
 ///
 /// Returns information and statistics about client connections.
 /// The response is raw text with one client per line.
+///
+/// See: <https://redis.io/commands/client-list>
 pub struct ClientList {
     client_type: Option<ClientListType>,
 }
 
 impl ClientList {
+    /// Creates a new [`ClientList`] command.
     pub fn new() -> Self {
         Self { client_type: None }
     }
 
     /// Filter clients by type.
+    #[must_use]
     pub fn client_type(mut self, t: ClientListType) -> Self {
         self.client_type = Some(t);
         self
@@ -1302,6 +1377,8 @@ impl Command for ClientList {
 ///
 /// Kill client connections matching the given filters.
 /// Returns the number of clients killed.
+///
+/// See: <https://redis.io/commands/client-kill>
 pub struct ClientKill {
     id: Option<i64>,
     addr: Option<String>,
@@ -1311,6 +1388,7 @@ pub struct ClientKill {
 }
 
 impl ClientKill {
+    /// Creates a new [`ClientKill`] command.
     pub fn new() -> Self {
         Self {
             id: None,
@@ -1322,30 +1400,35 @@ impl ClientKill {
     }
 
     /// Kill client by connection ID.
+    #[must_use]
     pub fn id(mut self, id: i64) -> Self {
         self.id = Some(id);
         self
     }
 
     /// Kill client by remote address (ip:port).
+    #[must_use]
     pub fn addr(mut self, addr: impl Into<String>) -> Self {
         self.addr = Some(addr.into());
         self
     }
 
     /// Kill client by local address (ip:port).
+    #[must_use]
     pub fn laddr(mut self, laddr: impl Into<String>) -> Self {
         self.laddr = Some(laddr.into());
         self
     }
 
     /// Kill client by authenticated username.
+    #[must_use]
     pub fn user(mut self, user: impl Into<String>) -> Self {
         self.user = Some(user.into());
         self
     }
 
     /// Whether to skip the calling client (default yes).
+    #[must_use]
     pub fn skipme(mut self, skipme: bool) -> Self {
         self.skipme = Some(skipme);
         self
@@ -1404,9 +1487,12 @@ impl Command for ClientKill {
 /// CLIENT INFO
 ///
 /// Returns information about the current client connection.
+///
+/// See: <https://redis.io/commands/client-info>
 pub struct ClientInfo;
 
 impl ClientInfo {
+    /// Creates a new [`ClientInfo`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1445,11 +1531,14 @@ impl Command for ClientInfo {
 /// Set the client eviction mode for the current connection. When enabled,
 /// the current client will not be evicted even when the maxmemory-clients
 /// threshold is reached.
+///
+/// See: <https://redis.io/commands/client-no-evict>
 pub struct ClientNoEvict {
     enabled: bool,
 }
 
 impl ClientNoEvict {
+    /// Creates a new [`ClientNoEvict`] command.
     pub fn new(enabled: bool) -> Self {
         Self { enabled }
     }
@@ -1486,11 +1575,14 @@ impl Command for ClientNoEvict {
 /// Control whether commands sent by the client affect LRU/LFU of accessed
 /// keys. When enabled, accessed keys will not have their idle time or
 /// frequency updated.
+///
+/// See: <https://redis.io/commands/client-no-touch>
 pub struct ClientNoTouch {
     enabled: bool,
 }
 
 impl ClientNoTouch {
+    /// Creates a new [`ClientNoTouch`] command.
     pub fn new(enabled: bool) -> Self {
         Self { enabled }
     }
@@ -1542,12 +1634,15 @@ impl ClientPauseMode {
 /// CLIENT PAUSE timeout \[WRITE|ALL\]
 ///
 /// Suspend all clients for the specified amount of time (in milliseconds).
+///
+/// See: <https://redis.io/commands/client-pause>
 pub struct ClientPause {
     timeout: u64,
     mode: Option<ClientPauseMode>,
 }
 
 impl ClientPause {
+    /// Creates a new [`ClientPause`] command pausing clients for `timeout` milliseconds.
     pub fn new(timeout: u64) -> Self {
         Self {
             timeout,
@@ -1556,6 +1651,7 @@ impl ClientPause {
     }
 
     /// Set the pause mode.
+    #[must_use]
     pub fn mode(mut self, mode: ClientPauseMode) -> Self {
         self.mode = Some(mode);
         self
@@ -1595,9 +1691,12 @@ impl Command for ClientPause {
 /// CLIENT UNPAUSE
 ///
 /// Resume clients that were paused by CLIENT PAUSE.
+///
+/// See: <https://redis.io/commands/client-unpause>
 pub struct ClientUnpause;
 
 impl ClientUnpause {
+    /// Creates a new [`ClientUnpause`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1639,11 +1738,14 @@ impl Command for ClientUnpause {
 ///
 /// Returns configuration parameters matching the glob-style pattern.
 /// The response is a list of key-value pairs.
+///
+/// See: <https://redis.io/commands/config-get>
 pub struct ConfigGet {
     pattern: String,
 }
 
 impl ConfigGet {
+    /// Creates a new [`ConfigGet`] command.
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -1737,6 +1839,8 @@ impl Command for ConfigGet {
 /// CONFIG SET param value \[param value ...\]
 ///
 /// Set one or more configuration parameters to the given values.
+///
+/// See: <https://redis.io/commands/config-set>
 pub struct ConfigSet {
     pairs: Vec<(String, String)>,
 }
@@ -1750,6 +1854,7 @@ impl ConfigSet {
     }
 
     /// Add an additional parameter-value pair.
+    #[must_use]
     pub fn param(mut self, param: impl Into<String>, value: impl Into<String>) -> Self {
         self.pairs.push((param.into(), value.into()));
         self
@@ -1786,9 +1891,12 @@ impl Command for ConfigSet {
 /// CONFIG RESETSTAT
 ///
 /// Reset the statistics reported by the INFO command.
+///
+/// See: <https://redis.io/commands/config-resetstat>
 pub struct ConfigResetStat;
 
 impl ConfigResetStat {
+    /// Creates a new [`ConfigResetStat`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1825,9 +1933,12 @@ impl Command for ConfigResetStat {
 /// CONFIG REWRITE
 ///
 /// Rewrite the configuration file with the in-memory configuration.
+///
+/// See: <https://redis.io/commands/config-rewrite>
 pub struct ConfigRewrite;
 
 impl ConfigRewrite {
+    /// Creates a new [`ConfigRewrite`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1865,11 +1976,14 @@ impl Command for ConfigRewrite {
 ///
 /// Set the client library name. Sent automatically on connection to
 /// identify the client library to the Redis server.
+///
+/// See: <https://redis.io/commands/client-setinfo>
 pub struct ClientSetInfoLibName {
     name: String,
 }
 
 impl ClientSetInfoLibName {
+    /// Creates a new [`ClientSetInfoLibName`] command.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
@@ -1906,11 +2020,14 @@ impl Command for ClientSetInfoLibName {
 ///
 /// Set the client library version. Sent automatically on connection to
 /// identify the client library version to the Redis server.
+///
+/// See: <https://redis.io/commands/client-setinfo>
 pub struct ClientSetInfoLibVer {
     version: String,
 }
 
 impl ClientSetInfoLibVer {
+    /// Creates a new [`ClientSetInfoLibVer`] command.
     pub fn new(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),

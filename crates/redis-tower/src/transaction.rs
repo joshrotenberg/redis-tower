@@ -87,12 +87,14 @@ impl Transaction {
     ///
     /// If any watched key is modified by another client between the WATCH
     /// and the EXEC, the transaction will be aborted.
+    #[must_use]
     pub fn watch(mut self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.watch_keys.extend(keys.into_iter().map(Into::into));
         self
     }
 
     /// Add a command to the transaction. Returns `self` for chaining.
+    #[must_use]
     pub fn push<Cmd: Command + 'static>(mut self, cmd: Cmd) -> Self {
         let frame = cmd.to_frame();
         let parser = Box::new(

@@ -41,16 +41,28 @@ pub struct ResilientRedisClient {
 
 impl ResilientRedisClient {
     /// Connect to Redis with default reconnection settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         Self::with_config(AddrConnectionFactory::new(addr), ReconnectConfig::default()).await
     }
 
     /// Connect via a Redis URL with default reconnection settings.
+    ///
+    /// # Errors
+    ///
+    /// See [`RedisConnection::connect_url`].
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         Self::with_config(UrlConnectionFactory::new(url), ReconnectConfig::default()).await
     }
 
     /// Connect with a custom factory and reconnection config.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the factory's initial connect fails.
     pub async fn with_config(
         factory: impl ConnectionFactory,
         config: ReconnectConfig,
@@ -65,6 +77,13 @@ impl ResilientRedisClient {
     }
 
     /// Execute a command, reconnecting if the connection is lost.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::ConnectionClosed`] if reconnection fails after all retries.
+    /// - Returns [`RedisError::Redis`] if the server returns an error response.
+    ///
+    /// Note: if the connection fails and `max_retries` is `None`, reconnection loops forever.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let mut conn = self.conn.lock().await;
         let result = conn.execute(cmd).await;

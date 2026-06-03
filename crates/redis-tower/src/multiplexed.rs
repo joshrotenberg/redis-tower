@@ -52,18 +52,30 @@ pub struct MultiplexedClient {
 
 impl MultiplexedClient {
     /// Connect to a Redis server at `host:port`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect(addr).await?;
         Ok(Self::from_connection(conn))
     }
 
     /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
+    ///
+    /// # Errors
+    ///
+    /// See [`RedisConnection::connect_url`].
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
         Ok(Self::from_connection(conn))
     }
 
     /// Connect and negotiate RESP3 protocol.
+    ///
+    /// # Errors
+    ///
+    /// See [`RedisConnection::connect_resp3`].
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_resp3(addr).await?;
         Ok(Self::from_connection(conn))
@@ -111,6 +123,10 @@ impl MultiplexedClient {
     ///     ),
     /// ).await?;
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the factory fails on the initial connect.
     pub async fn from_factory(
         factory: impl ConnectionFactory,
         config: AutoPipelineConfig,
@@ -126,6 +142,12 @@ impl MultiplexedClient {
     ///
     /// If other tasks are calling execute concurrently, their commands
     /// will be batched into a single Redis pipeline for efficiency.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::ConnectionClosed`] if the background worker has exited.
+    /// - Returns [`RedisError::Connection`] on I/O failure.
+    /// - Returns [`RedisError::Redis`] if the server returns an error response.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let mut svc = self.inner.clone();
         std::future::poll_fn(|cx| {

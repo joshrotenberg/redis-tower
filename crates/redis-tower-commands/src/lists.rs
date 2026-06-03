@@ -6,12 +6,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Prepends one or more elements to the head of the list stored at `key`.
 /// Returns the length of the list after the push operation.
+///
+/// See: <https://redis.io/commands/lpush>
 pub struct LPush {
     key: String,
     elements: Vec<String>,
 }
 
 impl LPush {
+    /// Creates a new [`LPush`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -30,6 +33,7 @@ impl LPush {
     }
 
     /// Add another element to push.
+    #[must_use]
     pub fn element(mut self, element: impl Into<String>) -> Self {
         self.elements.push(element.into());
         self
@@ -66,12 +70,15 @@ impl Command for LPush {
 ///
 /// Appends one or more elements to the tail of the list stored at `key`.
 /// Returns the length of the list after the push operation.
+///
+/// See: <https://redis.io/commands/rpush>
 pub struct RPush {
     key: String,
     elements: Vec<String>,
 }
 
 impl RPush {
+    /// Creates a new [`RPush`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -90,6 +97,7 @@ impl RPush {
     }
 
     /// Add another element to push.
+    #[must_use]
     pub fn element(mut self, element: impl Into<String>) -> Self {
         self.elements.push(element.into());
         self
@@ -126,11 +134,14 @@ impl Command for RPush {
 ///
 /// Removes and returns the first element of the list stored at `key`.
 /// Returns `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/lpop>
 pub struct LPop {
     key: String,
 }
 
 impl LPop {
+    /// Creates a new [`LPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -163,11 +174,14 @@ impl Command for LPop {
 ///
 /// Removes and returns the last element of the list stored at `key`.
 /// Returns `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/rpop>
 pub struct RPop {
     key: String,
 }
 
 impl RPop {
+    /// Creates a new [`RPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -201,6 +215,8 @@ impl Command for RPop {
 /// Returns the specified elements of the list stored at `key`. The offsets
 /// `start` and `stop` are zero-based indices, with negative values counting
 /// from the end of the list.
+///
+/// See: <https://redis.io/commands/lrange>
 pub struct LRange {
     key: String,
     start: i64,
@@ -208,6 +224,7 @@ pub struct LRange {
 }
 
 impl LRange {
+    /// Creates a new [`LRange`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -258,11 +275,14 @@ impl Command for LRange {
 ///
 /// Returns the length of the list stored at `key`. If the key does not
 /// exist, it is interpreted as an empty list and 0 is returned.
+///
+/// See: <https://redis.io/commands/llen>
 pub struct LLen {
     key: String,
 }
 
 impl LLen {
+    /// Creates a new [`LLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -295,12 +315,15 @@ impl Command for LLen {
 /// Returns the element at `index` in the list stored at `key`. The index
 /// is zero-based, with negative values counting from the end of the list.
 /// Returns `None` if the index is out of range.
+///
+/// See: <https://redis.io/commands/lindex>
 pub struct LIndex {
     key: String,
     index: i64,
 }
 
 impl LIndex {
+    /// Creates a new [`LIndex`] command.
     pub fn new(key: impl Into<String>, index: i64) -> Self {
         Self {
             key: key.into(),
@@ -340,6 +363,8 @@ impl Command for LIndex {
 ///
 /// Sets the list element at `index` to `element`. An error is returned for
 /// out-of-range indices.
+///
+/// See: <https://redis.io/commands/lset>
 pub struct LSet {
     key: String,
     index: i64,
@@ -347,6 +372,7 @@ pub struct LSet {
 }
 
 impl LSet {
+    /// Creates a new [`LSet`] command.
     pub fn new(key: impl Into<String>, index: i64, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -402,6 +428,8 @@ impl ListDirection {
 ///
 /// Atomically pops an element from `source` and pushes it to `destination`.
 /// Returns the element moved.
+///
+/// See: <https://redis.io/commands/lmove>
 pub struct LMove {
     source: String,
     destination: String,
@@ -410,6 +438,7 @@ pub struct LMove {
 }
 
 impl LMove {
+    /// Creates a new [`LMove`] command.
     pub fn new(
         source: impl Into<String>,
         destination: impl Into<String>,
@@ -459,12 +488,15 @@ impl Command for LMove {
 /// Prepends an element to the head of the list stored at `key`, only if `key`
 /// already exists and holds a list. Returns the length of the list after the
 /// push operation, or 0 if the key does not exist.
+///
+/// See: <https://redis.io/commands/lpushx>
 pub struct LPushX {
     key: String,
     element: String,
 }
 
 impl LPushX {
+    /// Creates a new [`LPushX`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -504,12 +536,15 @@ impl Command for LPushX {
 /// Appends an element to the tail of the list stored at `key`, only if `key`
 /// already exists and holds a list. Returns the length of the list after the
 /// push operation, or 0 if the key does not exist.
+///
+/// See: <https://redis.io/commands/rpushx>
 pub struct RPushX {
     key: String,
     element: String,
 }
 
 impl RPushX {
+    /// Creates a new [`RPushX`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -564,6 +599,8 @@ impl ListPosition {
 /// Inserts `element` in the list stored at `key` either before or after the
 /// reference value `pivot`. Returns the length of the list after the insert
 /// operation, or -1 when the pivot value was not found.
+///
+/// See: <https://redis.io/commands/linsert>
 pub struct LInsert {
     key: String,
     position: ListPosition,
@@ -572,6 +609,7 @@ pub struct LInsert {
 }
 
 impl LInsert {
+    /// Creates a new [`LInsert`] command.
     pub fn new(
         key: impl Into<String>,
         position: ListPosition,
@@ -621,6 +659,8 @@ impl Command for LInsert {
 /// at `key`. If `count` is positive, elements are removed from head to tail;
 /// if negative, from tail to head; if zero, all occurrences are removed.
 /// Returns the number of removed elements.
+///
+/// See: <https://redis.io/commands/lrem>
 pub struct LRem {
     key: String,
     count: i64,
@@ -628,6 +668,7 @@ pub struct LRem {
 }
 
 impl LRem {
+    /// Creates a new [`LRem`] command.
     pub fn new(key: impl Into<String>, count: i64, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -669,6 +710,8 @@ impl Command for LRem {
 /// Trims an existing list so that it will contain only the specified range of
 /// elements. Both `start` and `stop` are zero-based indices, with negative
 /// values counting from the end of the list.
+///
+/// See: <https://redis.io/commands/ltrim>
 pub struct LTrim {
     key: String,
     start: i64,
@@ -676,6 +719,7 @@ pub struct LTrim {
 }
 
 impl LTrim {
+    /// Creates a new [`LTrim`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -717,6 +761,8 @@ impl Command for LTrim {
 /// Returns the index of matching elements inside a list. By default returns
 /// the position of the first match. Use the builder methods to set optional
 /// `RANK`, `COUNT`, and `MAXLEN` sub-commands.
+///
+/// See: <https://redis.io/commands/lpos>
 pub struct LPos {
     key: String,
     element: String,
@@ -726,6 +772,7 @@ pub struct LPos {
 }
 
 impl LPos {
+    /// Creates a new [`LPos`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -738,6 +785,7 @@ impl LPos {
 
     /// Set the RANK option. A positive rank skips that many matches from the
     /// head; a negative rank searches from the tail.
+    #[must_use]
     pub fn rank(mut self, rank: i64) -> Self {
         self.rank = Some(rank);
         self
@@ -745,12 +793,14 @@ impl LPos {
 
     /// Set the COUNT option. Limits the number of returned matches (0 means
     /// return all matches).
+    #[must_use]
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
     }
 
     /// Set the MAXLEN option. Limits the scan to the first `maxlen` entries.
+    #[must_use]
     pub fn maxlen(mut self, maxlen: u64) -> Self {
         self.maxlen = Some(maxlen);
         self
@@ -802,6 +852,8 @@ impl Command for LPos {
 /// Pops one or more elements from the first non-empty list among the
 /// specified keys. Returns the key name and the popped elements as
 /// `Some((key, elements))`, or `None` if all lists are empty.
+///
+/// See: <https://redis.io/commands/lmpop>
 pub struct LMPop {
     keys: Vec<String>,
     direction: ListDirection,
@@ -809,6 +861,7 @@ pub struct LMPop {
 }
 
 impl LMPop {
+    /// Creates a new [`LMPop`] command.
     pub fn new(
         keys: impl IntoIterator<Item = impl Into<String>>,
         direction: ListDirection,
@@ -821,6 +874,7 @@ impl LMPop {
     }
 
     /// Set the COUNT option to pop multiple elements.
+    #[must_use]
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self

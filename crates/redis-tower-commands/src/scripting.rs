@@ -12,6 +12,8 @@ use crate::server::FlushMode;
 ///
 /// Evaluates a Lua script server-side. Returns `Frame` directly because Lua
 /// scripts can produce any response type.
+///
+/// See: <https://redis.io/commands/eval>
 pub struct Eval {
     script: String,
     keys: Vec<String>,
@@ -19,6 +21,7 @@ pub struct Eval {
 }
 
 impl Eval {
+    /// Creates a new [`Eval`] command.
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),
@@ -28,12 +31,14 @@ impl Eval {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
@@ -74,6 +79,8 @@ impl Command for Eval {
 /// EVALSHA sha1 numkeys [key ...] [arg ...]
 ///
 /// Evaluates a cached Lua script by its SHA1 digest. Returns `Frame` directly.
+///
+/// See: <https://redis.io/commands/evalsha>
 pub struct EvalSha {
     sha1: String,
     keys: Vec<String>,
@@ -81,6 +88,7 @@ pub struct EvalSha {
 }
 
 impl EvalSha {
+    /// Creates a new [`EvalSha`] command.
     pub fn new(sha1: impl Into<String>) -> Self {
         Self {
             sha1: sha1.into(),
@@ -90,12 +98,14 @@ impl EvalSha {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
@@ -137,11 +147,14 @@ impl Command for EvalSha {
 ///
 /// Loads a Lua script into the script cache without executing it. Returns the
 /// SHA1 digest of the script.
+///
+/// See: <https://redis.io/commands/script-load>
 pub struct ScriptLoad {
     script: String,
 }
 
 impl ScriptLoad {
+    /// Creates a new [`ScriptLoad`] command.
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),
@@ -183,11 +196,14 @@ impl Command for ScriptLoad {
 ///
 /// Returns a list of booleans indicating whether each script SHA1 exists in
 /// the cache.
+///
+/// See: <https://redis.io/commands/script-exists>
 pub struct ScriptExists {
     sha1s: Vec<String>,
 }
 
 impl ScriptExists {
+    /// Creates a new [`ScriptExists`] command.
     pub fn new(sha1: impl Into<String>) -> Self {
         Self {
             sha1s: vec![sha1.into()],
@@ -195,6 +211,7 @@ impl ScriptExists {
     }
 
     /// Add another SHA1 digest to check.
+    #[must_use]
     pub fn sha1(mut self, sha1: impl Into<String>) -> Self {
         self.sha1s.push(sha1.into());
         self
@@ -244,16 +261,20 @@ impl Command for ScriptExists {
 /// SCRIPT FLUSH [ASYNC | SYNC]
 ///
 /// Flushes the Lua script cache.
+///
+/// See: <https://redis.io/commands/script-flush>
 pub struct ScriptFlush {
     mode: Option<FlushMode>,
 }
 
 impl ScriptFlush {
+    /// Creates a new [`ScriptFlush`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
 
     /// Set the flush mode (ASYNC or SYNC).
+    #[must_use]
     pub fn mode(mut self, mode: FlushMode) -> Self {
         self.mode = Some(mode);
         self
@@ -301,9 +322,12 @@ impl Command for ScriptFlush {
 /// SCRIPT KILL
 ///
 /// Kills the currently executing Lua script.
+///
+/// See: <https://redis.io/commands/script-kill>
 pub struct ScriptKill;
 
 impl ScriptKill {
+    /// Creates a new [`ScriptKill`] command.
     pub fn new() -> Self {
         Self
     }
@@ -345,6 +369,8 @@ impl Command for ScriptKill {
 ///
 /// Calls a Redis function. Returns `Frame` directly because functions can
 /// produce any response type.
+///
+/// See: <https://redis.io/commands/fcall>
 pub struct FCall {
     function: String,
     keys: Vec<String>,
@@ -352,6 +378,7 @@ pub struct FCall {
 }
 
 impl FCall {
+    /// Creates a new [`FCall`] command.
     pub fn new(function: impl Into<String>) -> Self {
         Self {
             function: function.into(),
@@ -361,12 +388,14 @@ impl FCall {
     }
 
     /// Add a key argument (populates KEYS table).
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table).
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
@@ -408,6 +437,8 @@ impl Command for FCall {
 ///
 /// Read-only variant of FCALL. Calls a Redis function without write
 /// permissions. Returns `Frame` directly.
+///
+/// See: <https://redis.io/commands/fcall_ro>
 pub struct FCallRo {
     function: String,
     keys: Vec<String>,
@@ -415,6 +446,7 @@ pub struct FCallRo {
 }
 
 impl FCallRo {
+    /// Creates a new [`FCallRo`] command.
     pub fn new(function: impl Into<String>) -> Self {
         Self {
             function: function.into(),
@@ -424,12 +456,14 @@ impl FCallRo {
     }
 
     /// Add a key argument (populates KEYS table).
+    #[must_use]
     pub fn key(mut self, key: impl Into<String>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table).
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
@@ -470,12 +504,15 @@ impl Command for FCallRo {
 /// FUNCTION LOAD \[REPLACE\] function-code
 ///
 /// Loads a library to Redis. Returns the library name.
+///
+/// See: <https://redis.io/commands/function-load>
 pub struct FunctionLoad {
     code: String,
     replace: bool,
 }
 
 impl FunctionLoad {
+    /// Creates a new [`FunctionLoad`] command.
     pub fn new(code: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -484,6 +521,7 @@ impl FunctionLoad {
     }
 
     /// Replace the existing library if it already exists.
+    #[must_use]
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
@@ -524,11 +562,14 @@ impl Command for FunctionLoad {
 /// FUNCTION DELETE library-name
 ///
 /// Deletes a library and all its functions.
+///
+/// See: <https://redis.io/commands/function-delete>
 pub struct FunctionDelete {
     library: String,
 }
 
 impl FunctionDelete {
+    /// Creates a new [`FunctionDelete`] command.
     pub fn new(library: impl Into<String>) -> Self {
         Self {
             library: library.into(),
@@ -570,12 +611,15 @@ impl Command for FunctionDelete {
 ///
 /// Returns information about the libraries. Returns the raw `Frame` array
 /// because the response is a complex nested structure.
+///
+/// See: <https://redis.io/commands/function-list>
 pub struct FunctionList {
     library_pattern: Option<String>,
     withcode: bool,
 }
 
 impl FunctionList {
+    /// Creates a new [`FunctionList`] command.
     pub fn new() -> Self {
         Self {
             library_pattern: None,
@@ -584,12 +628,14 @@ impl FunctionList {
     }
 
     /// Filter by library name pattern.
+    #[must_use]
     pub fn library(mut self, pattern: impl Into<String>) -> Self {
         self.library_pattern = Some(pattern.into());
         self
     }
 
     /// Include the library source code in the response.
+    #[must_use]
     pub fn withcode(mut self) -> Self {
         self.withcode = true;
         self
@@ -640,9 +686,12 @@ impl Command for FunctionList {
 ///
 /// Returns a serialized payload of all libraries. The payload can be restored
 /// with FUNCTION RESTORE.
+///
+/// See: <https://redis.io/commands/function-dump>
 pub struct FunctionDump;
 
 impl FunctionDump {
+    /// Creates a new [`FunctionDump`] command.
     pub fn new() -> Self {
         Self
     }
@@ -683,6 +732,8 @@ impl Command for FunctionDump {
 /// FUNCTION RESTORE serialized-value [FLUSH | APPEND | REPLACE]
 ///
 /// Restores libraries from a serialized payload produced by FUNCTION DUMP.
+///
+/// See: <https://redis.io/commands/function-restore>
 pub struct FunctionRestore {
     payload: Bytes,
     policy: Option<RestorePolicy>,
@@ -699,6 +750,7 @@ pub enum RestorePolicy {
 }
 
 impl FunctionRestore {
+    /// Creates a new [`FunctionRestore`] command.
     pub fn new(payload: Bytes) -> Self {
         Self {
             payload,
@@ -707,6 +759,7 @@ impl FunctionRestore {
     }
 
     /// Set the restore policy.
+    #[must_use]
     pub fn policy(mut self, policy: RestorePolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -753,16 +806,20 @@ impl Command for FunctionRestore {
 /// FUNCTION FLUSH [ASYNC | SYNC]
 ///
 /// Deletes all libraries and functions.
+///
+/// See: <https://redis.io/commands/function-flush>
 pub struct FunctionFlush {
     mode: Option<FlushMode>,
 }
 
 impl FunctionFlush {
+    /// Creates a new [`FunctionFlush`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
 
     /// Set the flush mode (ASYNC or SYNC).
+    #[must_use]
     pub fn mode(mut self, mode: FlushMode) -> Self {
         self.mode = Some(mode);
         self
@@ -812,9 +869,12 @@ impl Command for FunctionFlush {
 /// Returns information about the function currently running and the available
 /// execution engines. Returns the raw `Frame` array because the response is a
 /// complex nested structure.
+///
+/// See: <https://redis.io/commands/function-stats>
 pub struct FunctionStats;
 
 impl FunctionStats {
+    /// Creates a new [`FunctionStats`] command.
     pub fn new() -> Self {
         Self
     }

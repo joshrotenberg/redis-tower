@@ -6,12 +6,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns the value associated with `field` in the hash stored at `key`,
 /// or `None` if the field or key does not exist.
+///
+/// See: <https://redis.io/commands/hget>
 pub struct HGet {
     key: String,
     field: String,
 }
 
 impl HGet {
+    /// Creates a new [`HGet`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -51,12 +54,15 @@ impl Command for HGet {
 ///
 /// Sets one or more field-value pairs in the hash stored at `key`.
 /// Returns the number of fields that were added (not updated).
+///
+/// See: <https://redis.io/commands/hset>
 pub struct HSet {
     key: String,
     fields: Vec<(String, String)>,
 }
 
 impl HSet {
+    /// Creates a new [`HSet`] command with the given key, field, and value.
     pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -65,6 +71,7 @@ impl HSet {
     }
 
     /// Add an additional field-value pair.
+    #[must_use]
     pub fn field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.fields.push((name.into(), value.into()));
         self
@@ -102,12 +109,15 @@ impl Command for HSet {
 ///
 /// Removes the specified fields from the hash stored at `key`.
 /// Returns the number of fields that were removed.
+///
+/// See: <https://redis.io/commands/hdel>
 pub struct HDel {
     key: String,
     fields: Vec<String>,
 }
 
 impl HDel {
+    /// Creates a new [`HDel`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -155,12 +165,15 @@ impl Command for HDel {
 /// HEXISTS key field
 ///
 /// Returns `true` if `field` exists in the hash stored at `key`.
+///
+/// See: <https://redis.io/commands/hexists>
 pub struct HExists {
     key: String,
     field: String,
 }
 
 impl HExists {
+    /// Creates a new [`HExists`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -200,11 +213,14 @@ impl Command for HExists {
 ///
 /// Returns all fields and values of the hash stored at `key` as a list
 /// of `(field, value)` pairs.
+///
+/// See: <https://redis.io/commands/hgetall>
 pub struct HGetAll {
     key: String,
 }
 
 impl HGetAll {
+    /// Creates a new [`HGetAll`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -292,6 +308,8 @@ impl Command for HGetAll {
 ///
 /// Increments the integer value of `field` in the hash stored at `key`
 /// by `increment`. Returns the new value.
+///
+/// See: <https://redis.io/commands/hincrby>
 pub struct HIncrBy {
     key: String,
     field: String,
@@ -299,6 +317,7 @@ pub struct HIncrBy {
 }
 
 impl HIncrBy {
+    /// Creates a new [`HIncrBy`] command with the given key, field, and increment.
     pub fn new(key: impl Into<String>, field: impl Into<String>, increment: i64) -> Self {
         Self {
             key: key.into(),
@@ -338,11 +357,14 @@ impl Command for HIncrBy {
 /// HKEYS key
 ///
 /// Returns all field names in the hash stored at `key`.
+///
+/// See: <https://redis.io/commands/hkeys>
 pub struct HKeys {
     key: String,
 }
 
 impl HKeys {
+    /// Creates a new [`HKeys`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -382,11 +404,14 @@ impl Command for HKeys {
 /// HVALS key
 ///
 /// Returns all values in the hash stored at `key`.
+///
+/// See: <https://redis.io/commands/hvals>
 pub struct HVals {
     key: String,
 }
 
 impl HVals {
+    /// Creates a new [`HVals`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -426,11 +451,14 @@ impl Command for HVals {
 /// HLEN key
 ///
 /// Returns the number of fields contained in the hash stored at `key`.
+///
+/// See: <https://redis.io/commands/hlen>
 pub struct HLen {
     key: String,
 }
 
 impl HLen {
+    /// Creates a new [`HLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -487,6 +515,8 @@ fn parse_per_field_response(frame: Frame) -> Result<Vec<i64>, RedisError> {
 ///
 /// Sets an expiration (in seconds) on the specified hash fields.
 /// Returns one status code per field.
+///
+/// See: <https://redis.io/commands/hexpire>
 pub struct HExpire {
     key: String,
     seconds: i64,
@@ -494,6 +524,7 @@ pub struct HExpire {
 }
 
 impl HExpire {
+    /// Creates a new [`HExpire`] command.
     pub fn new(
         key: impl Into<String>,
         seconds: i64,
@@ -537,6 +568,8 @@ impl Command for HExpire {
 ///
 /// Sets an expiration on hash fields using an absolute Unix timestamp (seconds).
 /// Returns one status code per field.
+///
+/// See: <https://redis.io/commands/hexpireat>
 pub struct HExpireAt {
     key: String,
     timestamp: i64,
@@ -544,6 +577,7 @@ pub struct HExpireAt {
 }
 
 impl HExpireAt {
+    /// Creates a new [`HExpireAt`] command.
     pub fn new(
         key: impl Into<String>,
         timestamp: i64,
@@ -587,6 +621,8 @@ impl Command for HExpireAt {
 ///
 /// Sets an expiration (in milliseconds) on the specified hash fields.
 /// Returns one status code per field.
+///
+/// See: <https://redis.io/commands/hpexpire>
 pub struct HPExpire {
     key: String,
     milliseconds: i64,
@@ -594,6 +630,7 @@ pub struct HPExpire {
 }
 
 impl HPExpire {
+    /// Creates a new [`HPExpire`] command.
     pub fn new(
         key: impl Into<String>,
         milliseconds: i64,
@@ -637,6 +674,8 @@ impl Command for HPExpire {
 ///
 /// Sets an expiration on hash fields using an absolute Unix timestamp (milliseconds).
 /// Returns one status code per field.
+///
+/// See: <https://redis.io/commands/hpexpireat>
 pub struct HPExpireAt {
     key: String,
     timestamp: i64,
@@ -644,6 +683,7 @@ pub struct HPExpireAt {
 }
 
 impl HPExpireAt {
+    /// Creates a new [`HPExpireAt`] command.
     pub fn new(
         key: impl Into<String>,
         timestamp: i64,
@@ -687,12 +727,15 @@ impl Command for HPExpireAt {
 ///
 /// Returns the remaining TTL (in seconds) for the specified hash fields.
 /// Returns one value per field.
+///
+/// See: <https://redis.io/commands/httl>
 pub struct HTtl {
     key: String,
     fields: Vec<String>,
 }
 
 impl HTtl {
+    /// Creates a new [`HTtl`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -733,12 +776,15 @@ impl Command for HTtl {
 ///
 /// Returns the remaining TTL (in milliseconds) for the specified hash fields.
 /// Returns one value per field.
+///
+/// See: <https://redis.io/commands/hpttl>
 pub struct HPTtl {
     key: String,
     fields: Vec<String>,
 }
 
 impl HPTtl {
+    /// Creates a new [`HPTtl`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -779,12 +825,15 @@ impl Command for HPTtl {
 ///
 /// Removes the expiration from the specified hash fields.
 /// Returns one status code per field.
+///
+/// See: <https://redis.io/commands/hpersist>
 pub struct HPersist {
     key: String,
     fields: Vec<String>,
 }
 
 impl HPersist {
+    /// Creates a new [`HPersist`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -826,6 +875,8 @@ impl Command for HPersist {
 /// Sets `field` in the hash stored at `key` to `value`, only if `field`
 /// does not yet exist. Returns `true` if the field was set, `false` if it
 /// already existed.
+///
+/// See: <https://redis.io/commands/hsetnx>
 pub struct HSetNx {
     key: String,
     field: String,
@@ -833,6 +884,7 @@ pub struct HSetNx {
 }
 
 impl HSetNx {
+    /// Creates a new [`HSetNx`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -874,6 +926,8 @@ impl Command for HSetNx {
 ///
 /// Increments the floating-point value of `field` in the hash stored at
 /// `key` by `increment`. Returns the new value as `f64`.
+///
+/// See: <https://redis.io/commands/hincrbyfloat>
 pub struct HIncrByFloat {
     key: String,
     field: String,
@@ -881,6 +935,7 @@ pub struct HIncrByFloat {
 }
 
 impl HIncrByFloat {
+    /// Creates a new [`HIncrByFloat`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, increment: f64) -> Self {
         Self {
             key: key.into(),
@@ -930,12 +985,15 @@ impl Command for HIncrByFloat {
 /// Returns one or more random field names from the hash stored at `key`.
 /// Without `count`, returns a single random field; with `count`, returns
 /// up to that many fields. The result is always returned as a `Vec<Bytes>`.
+///
+/// See: <https://redis.io/commands/hrandfield>
 pub struct HRandField {
     key: String,
     count: Option<i64>,
 }
 
 impl HRandField {
+    /// Creates a new [`HRandField`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -944,6 +1002,7 @@ impl HRandField {
     }
 
     /// Request `count` random fields. A negative count allows duplicates.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -993,12 +1052,15 @@ impl Command for HRandField {
 ///
 /// Returns the absolute Unix expiration timestamp (in seconds) for the
 /// specified hash fields. Returns one value per field.
+///
+/// See: <https://redis.io/commands/hexpiretime>
 pub struct HExpireTime {
     key: String,
     fields: Vec<String>,
 }
 
 impl HExpireTime {
+    /// Creates a new [`HExpireTime`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,

@@ -6,12 +6,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Adds the specified elements to the HyperLogLog at `key`.
 /// Returns `true` if the internal representation was altered (i.e., the
 /// estimated cardinality changed), `false` otherwise.
+///
+/// See: <https://redis.io/commands/pfadd>
 pub struct PfAdd {
     key: String,
     elements: Vec<String>,
 }
 
 impl PfAdd {
+    /// Creates a new [`PfAdd`] command adding `element` to the HyperLogLog at `key`.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -62,11 +65,14 @@ impl Command for PfAdd {
 /// Returns the approximate cardinality of the set(s) observed by the
 /// HyperLogLog at the specified key(s). When called with multiple keys,
 /// returns the approximate cardinality of the union.
+///
+/// See: <https://redis.io/commands/pfcount>
 pub struct PfCount {
     keys: Vec<String>,
 }
 
 impl PfCount {
+    /// Creates a new [`PfCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -110,12 +116,15 @@ impl Command for PfCount {
 ///
 /// Merges one or more HyperLogLog values into a single key.
 /// The destination key will hold the union of the source keys.
+///
+/// See: <https://redis.io/commands/pfmerge>
 pub struct PfMerge {
     destkey: String,
     sourcekeys: Vec<String>,
 }
 
 impl PfMerge {
+    /// Creates a new [`PfMerge`] command merging `sourcekeys` into `destkey`.
     pub fn new(
         destkey: impl Into<String>,
         sourcekeys: impl IntoIterator<Item = impl Into<String>>,

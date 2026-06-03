@@ -5,6 +5,8 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Sets or clears the bit at `offset` in the string value stored at `key`.
 /// Returns the original bit value stored at `offset`.
+///
+/// See: <https://redis.io/commands/setbit>
 pub struct SetBit {
     key: String,
     offset: u64,
@@ -12,6 +14,7 @@ pub struct SetBit {
 }
 
 impl SetBit {
+    /// Creates a new [`SetBit`] command.
     pub fn new(key: impl Into<String>, offset: u64, value: u8) -> Self {
         Self {
             key: key.into(),
@@ -51,12 +54,15 @@ impl Command for SetBit {
 /// GETBIT key offset
 ///
 /// Returns the bit value at `offset` in the string value stored at `key`.
+///
+/// See: <https://redis.io/commands/getbit>
 pub struct GetBit {
     key: String,
     offset: u64,
 }
 
 impl GetBit {
+    /// Creates a new [`GetBit`] command.
     pub fn new(key: impl Into<String>, offset: u64) -> Self {
         Self {
             key: key.into(),
@@ -96,6 +102,8 @@ impl Command for GetBit {
 /// Counts the number of set bits (population counting) in a string.
 /// By default counts all bytes; use `.range()` to limit and `.bit_mode()`
 /// to interpret the range as bit offsets instead of byte offsets.
+///
+/// See: <https://redis.io/commands/bitcount>
 pub struct BitCount {
     key: String,
     range: Option<(i64, i64)>,
@@ -103,6 +111,7 @@ pub struct BitCount {
 }
 
 impl BitCount {
+    /// Creates a new [`BitCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -112,12 +121,14 @@ impl BitCount {
     }
 
     /// Limit the count to the byte range `[start, end]`.
+    #[must_use]
     pub fn range(mut self, start: i64, end: i64) -> Self {
         self.range = Some((start, end));
         self
     }
 
     /// Interpret the range as bit offsets instead of byte offsets.
+    #[must_use]
     pub fn bit_mode(mut self) -> Self {
         self.bit_mode = true;
         self
@@ -159,6 +170,8 @@ impl Command for BitCount {
 /// Returns the position of the first bit set to `bit` (0 or 1) in the string
 /// stored at `key`. Use `.range()` to limit the search and `.bit_mode()` to
 /// interpret the range as bit offsets instead of byte offsets.
+///
+/// See: <https://redis.io/commands/bitpos>
 pub struct BitPos {
     key: String,
     bit: u8,
@@ -167,6 +180,7 @@ pub struct BitPos {
 }
 
 impl BitPos {
+    /// Creates a new [`BitPos`] command.
     pub fn new(key: impl Into<String>, bit: u8) -> Self {
         Self {
             key: key.into(),
@@ -177,12 +191,14 @@ impl BitPos {
     }
 
     /// Limit the search to the byte range `[start, end]`.
+    #[must_use]
     pub fn range(mut self, start: i64, end: i64) -> Self {
         self.range = Some((start, end));
         self
     }
 
     /// Interpret the range as bit offsets instead of byte offsets.
+    #[must_use]
     pub fn bit_mode(mut self) -> Self {
         self.bit_mode = true;
         self
@@ -251,6 +267,8 @@ impl BitOperation {
 /// Performs a bitwise operation between strings and stores the result in `destkey`.
 /// Returns the size of the string stored in the destination key (the longest
 /// input string length).
+///
+/// See: <https://redis.io/commands/bitop>
 pub struct BitOp {
     operation: BitOperation,
     destkey: String,
@@ -258,6 +276,7 @@ pub struct BitOp {
 }
 
 impl BitOp {
+    /// Creates a new [`BitOp`] command.
     pub fn new(
         operation: BitOperation,
         destkey: impl Into<String>,

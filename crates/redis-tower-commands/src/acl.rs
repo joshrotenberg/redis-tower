@@ -5,9 +5,12 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// ACL LIST
 ///
 /// Returns a list of ACL rules for all users.
+///
+/// See: <https://redis.io/commands/acl-list>
 pub struct AclList;
 
 impl AclList {
+    /// Creates a new [`AclList`] command.
     pub fn new() -> Self {
         Self
     }
@@ -53,11 +56,14 @@ impl Command for AclList {
 /// ACL GETUSER username
 ///
 /// Returns the ACL rules for a specific user as a complex nested response.
+///
+/// See: <https://redis.io/commands/acl-getuser>
 pub struct AclGetUser {
     username: String,
 }
 
 impl AclGetUser {
+    /// Creates a new [`AclGetUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -88,12 +94,15 @@ impl Command for AclGetUser {
 /// ACL SETUSER username [rule ...]
 ///
 /// Create or modify an ACL user with the specified rules.
+///
+/// See: <https://redis.io/commands/acl-setuser>
 pub struct AclSetUser {
     username: String,
     rules: Vec<String>,
 }
 
 impl AclSetUser {
+    /// Creates a new [`AclSetUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -102,12 +111,14 @@ impl AclSetUser {
     }
 
     /// Add a rule to the user definition (e.g. "on", "+@all", "~*").
+    #[must_use]
     pub fn rule(mut self, rule: impl Into<String>) -> Self {
         self.rules.push(rule.into());
         self
     }
 
     /// Add multiple rules to the user definition.
+    #[must_use]
     pub fn rules(mut self, rules: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.rules.extend(rules.into_iter().map(Into::into));
         self
@@ -143,11 +154,14 @@ impl Command for AclSetUser {
 /// ACL DELUSER username [username ...]
 ///
 /// Deletes one or more ACL users. Returns the number of users deleted.
+///
+/// See: <https://redis.io/commands/acl-deluser>
 pub struct AclDelUser {
     usernames: Vec<String>,
 }
 
 impl AclDelUser {
+    /// Creates a new [`AclDelUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             usernames: vec![username.into()],
@@ -190,6 +204,8 @@ impl Command for AclDelUser {
 /// ACL CAT \[category\]
 ///
 /// Lists ACL categories, or the commands within a given category.
+///
+/// See: <https://redis.io/commands/acl-cat>
 pub struct AclCat {
     category: Option<String>,
 }
@@ -252,6 +268,8 @@ impl Command for AclCat {
 /// ACL LOG [count|RESET]
 ///
 /// Returns recent ACL security events. Use `AclLogReset` to clear the log.
+///
+/// See: <https://redis.io/commands/acl-log>
 pub struct AclLog {
     count: Option<u64>,
 }
@@ -297,9 +315,12 @@ impl Command for AclLog {
 /// ACL LOG RESET
 ///
 /// Clears the ACL security event log.
+///
+/// See: <https://redis.io/commands/acl-log-reset>
 pub struct AclLogReset;
 
 impl AclLogReset {
+    /// Creates a new [`AclLogReset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -336,9 +357,12 @@ impl Command for AclLogReset {
 /// ACL SAVE
 ///
 /// Saves the current ACL rules to the configured ACL file.
+///
+/// See: <https://redis.io/commands/acl-save>
 pub struct AclSave;
 
 impl AclSave {
+    /// Creates a new [`AclSave`] command.
     pub fn new() -> Self {
         Self
     }
@@ -375,9 +399,12 @@ impl Command for AclSave {
 /// ACL LOAD
 ///
 /// Reloads ACL rules from the configured ACL file.
+///
+/// See: <https://redis.io/commands/acl-load>
 pub struct AclLoad;
 
 impl AclLoad {
+    /// Creates a new [`AclLoad`] command.
     pub fn new() -> Self {
         Self
     }
@@ -414,9 +441,12 @@ impl Command for AclLoad {
 /// ACL WHOAMI
 ///
 /// Returns the username of the current connection.
+///
+/// See: <https://redis.io/commands/acl-whoami>
 pub struct AclWhoAmI;
 
 impl AclWhoAmI {
+    /// Creates a new [`AclWhoAmI`] command.
     pub fn new() -> Self {
         Self
     }
@@ -454,6 +484,8 @@ impl Command for AclWhoAmI {
 ///
 /// Generates a random password. Optionally specify the number of bits
 /// of pseudo-random data (default 256).
+///
+/// See: <https://redis.io/commands/acl-genpass>
 pub struct AclGenPass {
     bits: Option<u32>,
 }
@@ -507,6 +539,8 @@ impl Command for AclGenPass {
 /// Simulates the execution of a command by the specified user and reports
 /// whether the user has permission. Returns "OK" on success or an error
 /// message describing the permission failure.
+///
+/// See: <https://redis.io/commands/acl-dryrun>
 pub struct AclDryRun {
     username: String,
     command: String,
@@ -514,6 +548,7 @@ pub struct AclDryRun {
 }
 
 impl AclDryRun {
+    /// Creates a new [`AclDryRun`] command.
     pub fn new(username: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -523,12 +558,14 @@ impl AclDryRun {
     }
 
     /// Add an argument to the simulated command.
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into());
         self
     }
 
     /// Add multiple arguments to the simulated command.
+    #[must_use]
     pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
         self

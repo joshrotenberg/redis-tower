@@ -14,6 +14,8 @@ pub struct StreamEntry {
 /// XADD key \[NOMKSTREAM\] \[MAXLEN|MINID \[=|~\] threshold\] \[*|id\] field value \[field value ...\]
 ///
 /// Appends an entry to a stream. Returns the entry ID.
+///
+/// See: <https://redis.io/commands/xadd>
 pub struct XAdd {
     key: String,
     id: String,
@@ -24,7 +26,7 @@ pub struct XAdd {
 }
 
 impl XAdd {
-    /// Create an XADD with auto-generated ID (*).
+    /// Creates a new [`XAdd`] command with auto-generated ID (`*`).
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -37,24 +39,28 @@ impl XAdd {
     }
 
     /// Set a specific entry ID instead of auto-generated.
+    #[must_use]
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.id = id.into();
         self
     }
 
     /// Add a field-value pair.
+    #[must_use]
     pub fn field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.fields.push((name.into(), value.into()));
         self
     }
 
     /// Don't create the stream if it doesn't exist.
+    #[must_use]
     pub fn nomkstream(mut self) -> Self {
         self.nomkstream = true;
         self
     }
 
     /// Trim stream to approximately `count` entries.
+    #[must_use]
     pub fn maxlen_approx(mut self, count: u64) -> Self {
         self.maxlen = Some((true, count));
         self.minid = None;
@@ -62,6 +68,7 @@ impl XAdd {
     }
 
     /// Trim stream to exactly `count` entries.
+    #[must_use]
     pub fn maxlen(mut self, count: u64) -> Self {
         self.maxlen = Some((false, count));
         self.minid = None;
@@ -117,11 +124,14 @@ impl Command for XAdd {
 /// XLEN key
 ///
 /// Returns the number of entries in a stream.
+///
+/// See: <https://redis.io/commands/xlen>
 pub struct XLen {
     key: String,
 }
 
 impl XLen {
+    /// Creates a new [`XLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -152,6 +162,8 @@ impl Command for XLen {
 /// XRANGE key start end \[COUNT count\]
 ///
 /// Returns entries in a stream within a range of IDs.
+///
+/// See: <https://redis.io/commands/xrange>
 pub struct XRange {
     key: String,
     start: String,
@@ -181,6 +193,7 @@ impl XRange {
     }
 
     /// Limit the number of returned entries.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -216,6 +229,8 @@ impl Command for XRange {
 /// XREVRANGE key end start \[COUNT count\]
 ///
 /// Like XRANGE but in reverse order.
+///
+/// See: <https://redis.io/commands/xrevrange>
 pub struct XRevRange {
     key: String,
     end: String,
@@ -224,6 +239,7 @@ pub struct XRevRange {
 }
 
 impl XRevRange {
+    /// Creates a new [`XRevRange`] command reading all entries from `+` down to `-`.
     pub fn all(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -233,6 +249,7 @@ impl XRevRange {
         }
     }
 
+    /// Creates a new [`XRevRange`] command reading `key` from `end` down to `start`.
     pub fn new(key: impl Into<String>, end: impl Into<String>, start: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -242,6 +259,8 @@ impl XRevRange {
         }
     }
 
+    /// Limit the number of returned entries.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -277,12 +296,15 @@ impl Command for XRevRange {
 /// XDEL key id \[id ...\]
 ///
 /// Removes entries from a stream. Returns the number deleted.
+///
+/// See: <https://redis.io/commands/xdel>
 pub struct XDel {
     key: String,
     ids: Vec<String>,
 }
 
 impl XDel {
+    /// Creates a new [`XDel`] command.
     pub fn new(key: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -327,6 +349,8 @@ impl Command for XDel {
 /// XTRIM key MAXLEN|MINID \[=|~\] threshold
 ///
 /// Trims a stream. Returns the number of entries deleted.
+///
+/// See: <https://redis.io/commands/xtrim>
 pub struct XTrim {
     key: String,
     maxlen: Option<(bool, u64)>,
@@ -399,6 +423,8 @@ impl Command for XTrim {
 /// XACK key group id \[id ...\]
 ///
 /// Acknowledges stream entries in a consumer group. Returns count acknowledged.
+///
+/// See: <https://redis.io/commands/xack>
 pub struct XAck {
     key: String,
     group: String,
@@ -406,6 +432,7 @@ pub struct XAck {
 }
 
 impl XAck {
+    /// Creates a new [`XAck`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -460,6 +487,8 @@ impl Command for XAck {
 /// XGROUP CREATE key group id \[MKSTREAM\]
 ///
 /// Creates a consumer group.
+///
+/// See: <https://redis.io/commands/xgroup-create>
 pub struct XGroupCreate {
     key: String,
     group: String,
@@ -480,6 +509,7 @@ impl XGroupCreate {
     }
 
     /// Create the stream if it doesn't exist.
+    #[must_use]
     pub fn mkstream(mut self) -> Self {
         self.mkstream = true;
         self
@@ -521,12 +551,15 @@ impl Command for XGroupCreate {
 /// XGROUP DESTROY key group
 ///
 /// Destroys a consumer group.
+///
+/// See: <https://redis.io/commands/xgroup-destroy>
 pub struct XGroupDestroy {
     key: String,
     group: String,
 }
 
 impl XGroupDestroy {
+    /// Creates a new [`XGroupDestroy`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -565,6 +598,8 @@ impl Command for XGroupDestroy {
 /// XREADGROUP GROUP group consumer \[COUNT count\] \[BLOCK ms\] STREAMS key \[key ...\] id \[id ...\]
 ///
 /// Read from streams as a consumer group member.
+///
+/// See: <https://redis.io/commands/xreadgroup>
 pub struct XReadGroup {
     group: String,
     consumer: String,
@@ -590,18 +625,21 @@ impl XReadGroup {
     }
 
     /// Add another stream to read from.
+    #[must_use]
     pub fn stream(mut self, key: impl Into<String>, id: impl Into<String>) -> Self {
         self.streams.push((key.into(), id.into()));
         self
     }
 
     /// Limit the number of entries returned per stream.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
     }
 
     /// Block for up to `ms` milliseconds. 0 = block indefinitely.
+    #[must_use]
     pub fn block(mut self, ms: u64) -> Self {
         self.block = Some(ms);
         self
@@ -610,6 +648,7 @@ impl XReadGroup {
     /// Override the ID for all streams already added.
     ///
     /// Use `"0"` to read pending entries or `">"` for new entries.
+    #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         let id = id.into();
         for stream in &mut self.streams {
@@ -663,6 +702,8 @@ impl Command for XReadGroup {
 /// XREAD \[COUNT count\] \[BLOCK ms\] STREAMS key \[key ...\] id \[id ...\]
 ///
 /// Read from one or more streams.
+///
+/// See: <https://redis.io/commands/xread>
 pub struct XRead {
     streams: Vec<(String, String)>,
     count: Option<u64>,
@@ -680,16 +721,21 @@ impl XRead {
     }
 
     /// Add another stream to read from.
+    #[must_use]
     pub fn stream(mut self, key: impl Into<String>, id: impl Into<String>) -> Self {
         self.streams.push((key.into(), id.into()));
         self
     }
 
+    /// Limit the number of entries returned per stream.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
     }
 
+    /// Block for up to `ms` milliseconds. 0 = block indefinitely.
+    #[must_use]
     pub fn block(mut self, ms: u64) -> Self {
         self.block = Some(ms);
         self
@@ -734,6 +780,8 @@ impl Command for XRead {
 /// XGROUP SETID key group id
 ///
 /// Sets the last-delivered ID for a consumer group.
+///
+/// See: <https://redis.io/commands/xgroup-setid>
 pub struct XGroupSetId {
     key: String,
     group: String,
@@ -741,6 +789,7 @@ pub struct XGroupSetId {
 }
 
 impl XGroupSetId {
+    /// Creates a new [`XGroupSetId`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -781,6 +830,8 @@ impl Command for XGroupSetId {
 /// XGROUP CREATECONSUMER key group consumer
 ///
 /// Creates a consumer in a consumer group. Returns 1 if created, 0 if already existed.
+///
+/// See: <https://redis.io/commands/xgroup-createconsumer>
 pub struct XGroupCreateConsumer {
     key: String,
     group: String,
@@ -788,6 +839,7 @@ pub struct XGroupCreateConsumer {
 }
 
 impl XGroupCreateConsumer {
+    /// Creates a new [`XGroupCreateConsumer`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -832,6 +884,8 @@ impl Command for XGroupCreateConsumer {
 /// XGROUP DELCONSUMER key group consumer
 ///
 /// Deletes a consumer from a consumer group. Returns the number of pending entries the consumer had.
+///
+/// See: <https://redis.io/commands/xgroup-delconsumer>
 pub struct XGroupDelConsumer {
     key: String,
     group: String,
@@ -839,6 +893,7 @@ pub struct XGroupDelConsumer {
 }
 
 impl XGroupDelConsumer {
+    /// Creates a new [`XGroupDelConsumer`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -883,6 +938,8 @@ impl Command for XGroupDelConsumer {
 /// XCLAIM key group consumer min-idle-time id \[id ...\] \[IDLE ms\] \[TIME ms\] \[RETRYCOUNT count\] \[FORCE\] \[JUSTID\]
 ///
 /// Claims ownership of pending stream entries.
+///
+/// See: <https://redis.io/commands/xclaim>
 pub struct XClaim {
     key: String,
     group: String,
@@ -897,6 +954,7 @@ pub struct XClaim {
 }
 
 impl XClaim {
+    /// Creates a new [`XClaim`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -919,30 +977,35 @@ impl XClaim {
     }
 
     /// Set the idle time (ms) for the claimed entries.
+    #[must_use]
     pub fn idle(mut self, ms: u64) -> Self {
         self.idle = Some(ms);
         self
     }
 
     /// Set the last delivery time (ms unix timestamp).
+    #[must_use]
     pub fn time(mut self, ms: u64) -> Self {
         self.time = Some(ms);
         self
     }
 
     /// Set the retry counter.
+    #[must_use]
     pub fn retrycount(mut self, count: u64) -> Self {
         self.retrycount = Some(count);
         self
     }
 
     /// Force claim even if the entry is not in the PEL.
+    #[must_use]
     pub fn force(mut self) -> Self {
         self.force = true;
         self
     }
 
     /// Return only IDs, not full entries.
+    #[must_use]
     pub fn justid(mut self) -> Self {
         self.justid = true;
         self
@@ -1004,6 +1067,8 @@ pub struct AutoClaimResult {
 /// XAUTOCLAIM key group consumer min-idle-time start \[COUNT count\] \[JUSTID\]
 ///
 /// Automatically claims pending entries that have been idle for at least min-idle-time.
+///
+/// See: <https://redis.io/commands/xautoclaim>
 pub struct XAutoClaim {
     key: String,
     group: String,
@@ -1014,6 +1079,7 @@ pub struct XAutoClaim {
 }
 
 impl XAutoClaim {
+    /// Creates a new [`XAutoClaim`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1032,6 +1098,7 @@ impl XAutoClaim {
     }
 
     /// Limit the number of entries to claim.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -1078,12 +1145,15 @@ pub struct PendingSummary {
 /// XPENDING key group (summary form)
 ///
 /// Returns a summary of pending entries for a consumer group.
+///
+/// See: <https://redis.io/commands/xpending>
 pub struct XPendingSummary {
     key: String,
     group: String,
 }
 
 impl XPendingSummary {
+    /// Creates a new [`XPendingSummary`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1124,6 +1194,8 @@ pub struct PendingEntry {
 /// XPENDING key group \[IDLE min-idle\] start end count \[consumer\]
 ///
 /// Returns detailed pending entries for a consumer group.
+///
+/// See: <https://redis.io/commands/xpending>
 pub struct XPendingRange {
     key: String,
     group: String,
@@ -1135,6 +1207,7 @@ pub struct XPendingRange {
 }
 
 impl XPendingRange {
+    /// Creates a new [`XPendingRange`] command reading `key`/`group` pending entries from `start` to `end`.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1154,12 +1227,14 @@ impl XPendingRange {
     }
 
     /// Filter by consumer name.
+    #[must_use]
     pub fn consumer(mut self, consumer: impl Into<String>) -> Self {
         self.consumer = Some(consumer.into());
         self
     }
 
     /// Filter entries idle for at least `ms` milliseconds.
+    #[must_use]
     pub fn idle(mut self, ms: u64) -> Self {
         self.idle = Some(ms);
         self
@@ -1212,11 +1287,14 @@ pub struct StreamInfo {
 /// XINFO STREAM key
 ///
 /// Returns information about a stream.
+///
+/// See: <https://redis.io/commands/xinfo-stream>
 pub struct XInfoStream {
     key: String,
 }
 
 impl XInfoStream {
+    /// Creates a new [`XInfoStream`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1250,11 +1328,14 @@ pub struct GroupInfo {
 /// XINFO GROUPS key
 ///
 /// Returns information about the consumer groups of a stream.
+///
+/// See: <https://redis.io/commands/xinfo-groups>
 pub struct XInfoGroups {
     key: String,
 }
 
 impl XInfoGroups {
+    /// Creates a new [`XInfoGroups`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1287,12 +1368,15 @@ pub struct ConsumerInfo {
 /// XINFO CONSUMERS key group
 ///
 /// Returns information about the consumers of a consumer group.
+///
+/// See: <https://redis.io/commands/xinfo-consumers>
 pub struct XInfoConsumers {
     key: String,
     group: String,
 }
 
 impl XInfoConsumers {
+    /// Creates a new [`XInfoConsumers`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),

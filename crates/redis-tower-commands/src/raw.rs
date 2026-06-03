@@ -11,6 +11,8 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// ```ignore
 /// let result = conn.execute(RawCommand::new("CUSTOM.CMD").arg("key").arg("val")).await?;
 /// ```
+///
+/// See: <https://redis.io/commands>
 pub struct RawCommand {
     name_str: String,
     args: Vec<Vec<u8>>,
@@ -27,6 +29,7 @@ impl RawCommand {
     }
 
     /// Append an argument to this command.
+    #[must_use]
     pub fn arg(mut self, arg: impl AsRef<[u8]>) -> Self {
         self.args.push(arg.as_ref().to_vec());
         self

@@ -31,6 +31,8 @@ impl GeoUnit {
 /// Adds the specified geospatial items (longitude, latitude, name) to the
 /// specified key. Returns the number of elements added to the sorted set
 /// (excluding score updates when `CH` is not set).
+///
+/// See: <https://redis.io/commands/geoadd>
 pub struct GeoAdd {
     key: String,
     members: Vec<(f64, f64, String)>,
@@ -40,6 +42,7 @@ pub struct GeoAdd {
 }
 
 impl GeoAdd {
+    /// Creates a new [`GeoAdd`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -51,12 +54,14 @@ impl GeoAdd {
     }
 
     /// Adds a member with the given longitude and latitude.
+    #[must_use]
     pub fn member(mut self, longitude: f64, latitude: f64, name: impl Into<String>) -> Self {
         self.members.push((longitude, latitude, name.into()));
         self
     }
 
     /// Only add new elements. Do not update already existing elements.
+    #[must_use]
     pub fn nx(mut self) -> Self {
         self.nx = true;
         self.xx = false;
@@ -64,6 +69,7 @@ impl GeoAdd {
     }
 
     /// Only update elements that already exist. Do not add new elements.
+    #[must_use]
     pub fn xx(mut self) -> Self {
         self.xx = true;
         self.nx = false;
@@ -72,6 +78,7 @@ impl GeoAdd {
 
     /// Modify the return value from the number of new elements added to the
     /// total number of elements changed (including score updates).
+    #[must_use]
     pub fn ch(mut self) -> Self {
         self.ch = true;
         self
@@ -119,6 +126,8 @@ impl Command for GeoAdd {
 /// Returns the distance between two members of a geospatial index. The
 /// distance is returned as a floating-point number in the specified unit,
 /// or `None` if one or both members are missing.
+///
+/// See: <https://redis.io/commands/geodist>
 pub struct GeoDist {
     key: String,
     member1: String,
@@ -127,6 +136,7 @@ pub struct GeoDist {
 }
 
 impl GeoDist {
+    /// Creates a new [`GeoDist`] command.
     pub fn new(
         key: impl Into<String>,
         member1: impl Into<String>,
@@ -141,6 +151,7 @@ impl GeoDist {
     }
 
     /// Sets the unit of the returned distance.
+    #[must_use]
     pub fn unit(mut self, unit: GeoUnit) -> Self {
         self.unit = Some(unit);
         self
@@ -194,12 +205,15 @@ impl Command for GeoDist {
 /// Returns the Geohash strings representing the position of each member.
 /// Each element is `Some(hash)` if the member exists, or `None` if it
 /// does not.
+///
+/// See: <https://redis.io/commands/geohash>
 pub struct GeoHash {
     key: String,
     members: Vec<String>,
 }
 
 impl GeoHash {
+    /// Creates a new [`GeoHash`] command for a single member.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -262,12 +276,15 @@ impl Command for GeoHash {
 /// Returns the longitude and latitude of each specified member. Each
 /// element is `Some((longitude, latitude))` if the member exists, or
 /// `None` if it does not.
+///
+/// See: <https://redis.io/commands/geopos>
 pub struct GeoPos {
     key: String,
     members: Vec<String>,
 }
 
 impl GeoPos {
+    /// Creates a new [`GeoPos`] command for a single member.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -380,6 +397,8 @@ enum GeoSearchOrder {
 ///
 /// Returns the members of a sorted set populated with geospatial data
 /// that are within the borders of the area specified by a given shape.
+///
+/// See: <https://redis.io/commands/geosearch>
 pub struct GeoSearch {
     key: String,
     origin: GeoSearchOrigin,
@@ -412,30 +431,35 @@ impl GeoSearch {
     }
 
     /// Searches within a circular area of the given radius.
+    #[must_use]
     pub fn by_radius(mut self, radius: f64, unit: GeoUnit) -> Self {
         self.shape = GeoSearchShape::Radius(radius, unit);
         self
     }
 
     /// Searches within a rectangular area of the given width and height.
+    #[must_use]
     pub fn by_box(mut self, width: f64, height: f64, unit: GeoUnit) -> Self {
         self.shape = GeoSearchShape::Box(width, height, unit);
         self
     }
 
     /// Sorts results from nearest to farthest.
+    #[must_use]
     pub fn asc(mut self) -> Self {
         self.order = Some(GeoSearchOrder::Asc);
         self
     }
 
     /// Sorts results from farthest to nearest.
+    #[must_use]
     pub fn desc(mut self) -> Self {
         self.order = Some(GeoSearchOrder::Desc);
         self
     }
 
     /// Limits the number of results to `count`.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self.any = false;
@@ -445,6 +469,7 @@ impl GeoSearch {
     /// Limits the number of results to `count`, but allows returning
     /// results as soon as enough matches are found (not necessarily the
     /// closest ones).
+    #[must_use]
     pub fn count_any(mut self, count: i64) -> Self {
         self.count = Some(count);
         self.any = true;
@@ -534,6 +559,8 @@ impl Command for GeoSearch {
 /// Like \[`GeoSearch`\], but stores the result in `destination`. Returns the
 /// number of elements stored. When `store_dist` is set, the sorted set
 /// stores distances instead of geospatial data.
+///
+/// See: <https://redis.io/commands/geosearchstore>
 pub struct GeoSearchStore {
     destination: String,
     source: String,
@@ -587,30 +614,35 @@ impl GeoSearchStore {
     }
 
     /// Searches within a circular area of the given radius.
+    #[must_use]
     pub fn by_radius(mut self, radius: f64, unit: GeoUnit) -> Self {
         self.shape = GeoSearchShape::Radius(radius, unit);
         self
     }
 
     /// Searches within a rectangular area of the given width and height.
+    #[must_use]
     pub fn by_box(mut self, width: f64, height: f64, unit: GeoUnit) -> Self {
         self.shape = GeoSearchShape::Box(width, height, unit);
         self
     }
 
     /// Sorts results from nearest to farthest.
+    #[must_use]
     pub fn asc(mut self) -> Self {
         self.order = Some(GeoSearchOrder::Asc);
         self
     }
 
     /// Sorts results from farthest to nearest.
+    #[must_use]
     pub fn desc(mut self) -> Self {
         self.order = Some(GeoSearchOrder::Desc);
         self
     }
 
     /// Limits the number of results to `count`.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self.any = false;
@@ -620,6 +652,7 @@ impl GeoSearchStore {
     /// Limits the number of results to `count`, but allows returning
     /// results as soon as enough matches are found (not necessarily the
     /// closest ones).
+    #[must_use]
     pub fn count_any(mut self, count: i64) -> Self {
         self.count = Some(count);
         self.any = true;
@@ -628,6 +661,7 @@ impl GeoSearchStore {
 
     /// Stores distances in the destination sorted set instead of
     /// geospatial data.
+    #[must_use]
     pub fn store_dist(mut self) -> Self {
         self.store_dist = true;
         self

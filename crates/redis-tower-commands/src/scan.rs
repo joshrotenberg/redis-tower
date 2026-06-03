@@ -23,6 +23,8 @@ impl<T> ScanResult<T> {
 /// SCAN cursor \[MATCH pattern\] \[COUNT count\] \[TYPE type\]
 ///
 /// Iterates over all keys in the database.
+///
+/// See: <https://redis.io/commands/scan>
 pub struct Scan {
     cursor: String,
     pattern: Option<String>,
@@ -42,24 +44,28 @@ impl Scan {
     }
 
     /// Continue a scan from a specific cursor.
+    #[must_use]
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
     /// Filter keys matching a glob pattern.
+    #[must_use]
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
     /// Hint for how many elements to return per iteration.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
     }
 
     /// Filter by key type (string, list, set, zset, hash, stream).
+    #[must_use]
     pub fn key_type(mut self, t: impl Into<String>) -> Self {
         self.key_type = Some(t.into());
         self
@@ -104,6 +110,8 @@ impl Command for Scan {
 /// SSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over members of a set.
+///
+/// See: <https://redis.io/commands/sscan>
 pub struct SScan {
     key: String,
     cursor: String,
@@ -112,6 +120,7 @@ pub struct SScan {
 }
 
 impl SScan {
+    /// Creates a new [`SScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -121,16 +130,22 @@ impl SScan {
         }
     }
 
+    /// Continue a scan from a specific cursor.
+    #[must_use]
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Filter members matching a glob pattern.
+    #[must_use]
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Hint for how many elements to return per iteration.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -169,6 +184,8 @@ impl Command for SScan {
 /// HSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over fields and values of a hash. Returns (field, value) pairs.
+///
+/// See: <https://redis.io/commands/hscan>
 pub struct HScan {
     key: String,
     cursor: String,
@@ -177,6 +194,7 @@ pub struct HScan {
 }
 
 impl HScan {
+    /// Creates a new [`HScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -186,16 +204,22 @@ impl HScan {
         }
     }
 
+    /// Continue a scan from a specific cursor.
+    #[must_use]
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Filter fields matching a glob pattern.
+    #[must_use]
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Hint for how many elements to return per iteration.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -234,6 +258,8 @@ impl Command for HScan {
 /// ZSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over members and scores of a sorted set. Returns (member, score) pairs.
+///
+/// See: <https://redis.io/commands/zscan>
 pub struct ZScan {
     key: String,
     cursor: String,
@@ -242,6 +268,7 @@ pub struct ZScan {
 }
 
 impl ZScan {
+    /// Creates a new [`ZScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -251,16 +278,22 @@ impl ZScan {
         }
     }
 
+    /// Continue a scan from a specific cursor.
+    #[must_use]
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Filter members matching a glob pattern.
+    #[must_use]
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Hint for how many elements to return per iteration.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self

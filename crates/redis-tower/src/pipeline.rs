@@ -68,6 +68,7 @@ impl Pipeline {
     }
 
     /// Add a command to the pipeline. Returns `self` for chaining.
+    #[must_use]
     pub fn push<Cmd: Command + 'static>(mut self, cmd: Cmd) -> Self {
         let frame = cmd.to_frame();
         let parser = Box::new(

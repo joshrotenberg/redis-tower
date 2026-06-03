@@ -6,6 +6,8 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Adds a suggestion string to an auto-complete dictionary. Returns the
 /// current size of the dictionary.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.sugadd/>
 pub struct FtSugAdd {
     key: String,
     string: String,
@@ -15,6 +17,7 @@ pub struct FtSugAdd {
 }
 
 impl FtSugAdd {
+    /// Creates a new [`FtSugAdd`] command.
     pub fn new(key: impl Into<String>, string: impl Into<String>, score: f64) -> Self {
         Self {
             key: key.into(),
@@ -26,12 +29,14 @@ impl FtSugAdd {
     }
 
     /// Increment the existing score instead of replacing it.
+    #[must_use]
     pub fn incr(mut self) -> Self {
         self.incr = true;
         self
     }
 
     /// Set an opaque payload to store with the suggestion.
+    #[must_use]
     pub fn payload(mut self, payload: impl Into<String>) -> Self {
         self.payload = Some(payload.into());
         self
@@ -77,6 +82,8 @@ impl Command for FtSugAdd {
 ///
 /// Gets completion suggestions for a prefix from an auto-complete dictionary.
 /// The response structure varies based on options, so it returns a raw `Frame`.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.sugget/>
 pub struct FtSugGet {
     key: String,
     prefix: String,
@@ -87,6 +94,7 @@ pub struct FtSugGet {
 }
 
 impl FtSugGet {
+    /// Creates a new [`FtSugGet`] command.
     pub fn new(key: impl Into<String>, prefix: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -99,24 +107,28 @@ impl FtSugGet {
     }
 
     /// Enable fuzzy matching.
+    #[must_use]
     pub fn fuzzy(mut self) -> Self {
         self.fuzzy = true;
         self
     }
 
     /// Include scores in the results.
+    #[must_use]
     pub fn withscores(mut self) -> Self {
         self.withscores = true;
         self
     }
 
     /// Include payloads in the results.
+    #[must_use]
     pub fn withpayloads(mut self) -> Self {
         self.withpayloads = true;
         self
     }
 
     /// Limit the number of results.
+    #[must_use]
     pub fn max(mut self, num: u64) -> Self {
         self.max = Some(num);
         self
@@ -161,12 +173,15 @@ impl Command for FtSugGet {
 ///
 /// Deletes a string from an auto-complete dictionary. Returns `true` if the
 /// string was found and deleted.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.sugdel/>
 pub struct FtSugDel {
     key: String,
     string: String,
 }
 
 impl FtSugDel {
+    /// Creates a new [`FtSugDel`] command.
     pub fn new(key: impl Into<String>, string: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -205,11 +220,14 @@ impl Command for FtSugDel {
 /// FT.SUGLEN key
 ///
 /// Returns the number of entries in an auto-complete dictionary.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.suglen/>
 pub struct FtSugLen {
     key: String,
 }
 
 impl FtSugLen {
+    /// Creates a new [`FtSugLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -240,6 +258,8 @@ impl Command for FtSugLen {
 /// FT.SYNUPDATE index group_id term \[term ...\]
 ///
 /// Updates a synonym group with additional terms.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.synupdate/>
 pub struct FtSynUpdate {
     index: String,
     group_id: String,
@@ -247,6 +267,7 @@ pub struct FtSynUpdate {
 }
 
 impl FtSynUpdate {
+    /// Creates a new [`FtSynUpdate`] command.
     pub fn new(
         index: impl Into<String>,
         group_id: impl Into<String>,
@@ -294,11 +315,14 @@ impl Command for FtSynUpdate {
 ///
 /// Dumps the contents of a synonym group. Returns a raw `Frame` containing
 /// alternating term and group ID pairs.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.syndump/>
 pub struct FtSynDump {
     index: String,
 }
 
 impl FtSynDump {
+    /// Creates a new [`FtSynDump`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -325,12 +349,15 @@ impl Command for FtSynDump {
 /// FT.DICTADD dict term \[term ...\]
 ///
 /// Adds terms to a dictionary. Returns the number of new terms added.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.dictadd/>
 pub struct FtDictAdd {
     dict: String,
     terms: Vec<String>,
 }
 
 impl FtDictAdd {
+    /// Creates a new [`FtDictAdd`] command.
     pub fn new(
         dict: impl Into<String>,
         terms: impl IntoIterator<Item = impl Into<String>>,
@@ -371,12 +398,15 @@ impl Command for FtDictAdd {
 /// FT.DICTDEL dict term \[term ...\]
 ///
 /// Deletes terms from a dictionary. Returns the number of terms deleted.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.dictdel/>
 pub struct FtDictDel {
     dict: String,
     terms: Vec<String>,
 }
 
 impl FtDictDel {
+    /// Creates a new [`FtDictDel`] command.
     pub fn new(
         dict: impl Into<String>,
         terms: impl IntoIterator<Item = impl Into<String>>,
@@ -417,11 +447,14 @@ impl Command for FtDictDel {
 /// FT.DICTDUMP dict
 ///
 /// Returns all terms in a dictionary.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.dictdump/>
 pub struct FtDictDump {
     dict: String,
 }
 
 impl FtDictDump {
+    /// Creates a new [`FtDictDump`] command.
     pub fn new(dict: impl Into<String>) -> Self {
         Self { dict: dict.into() }
     }
@@ -470,6 +503,8 @@ pub enum SpellCheckTerms {
 ///
 /// Performs spelling correction on a query. Returns suggestions for
 /// misspelled terms as a raw `Frame`.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.spellcheck/>
 pub struct FtSpellCheck {
     index: String,
     query: String,
@@ -478,6 +513,7 @@ pub struct FtSpellCheck {
 }
 
 impl FtSpellCheck {
+    /// Creates a new [`FtSpellCheck`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -488,18 +524,21 @@ impl FtSpellCheck {
     }
 
     /// Set the maximum Levenshtein distance for spelling suggestions (1-4).
+    #[must_use]
     pub fn distance(mut self, dist: u64) -> Self {
         self.distance = Some(dist);
         self
     }
 
     /// Include terms from the given dictionary in spell checking.
+    #[must_use]
     pub fn include_terms(mut self, dict: impl Into<String>) -> Self {
         self.terms = Some(SpellCheckTerms::Include(dict.into()));
         self
     }
 
     /// Exclude terms from the given dictionary in spell checking.
+    #[must_use]
     pub fn exclude_terms(mut self, dict: impl Into<String>) -> Self {
         self.terms = Some(SpellCheckTerms::Exclude(dict.into()));
         self
@@ -547,12 +586,15 @@ impl Command for FtSpellCheck {
 /// FT.CONFIG SET option value
 ///
 /// Sets a RediSearch configuration option.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.config-set/>
 pub struct FtConfigSet {
     option: String,
     value: String,
 }
 
 impl FtConfigSet {
+    /// Creates a new [`FtConfigSet`] command.
     pub fn new(option: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             option: option.into(),
@@ -591,11 +633,14 @@ impl Command for FtConfigSet {
 /// FT.CONFIG GET option
 ///
 /// Gets the value of a RediSearch configuration option. Returns a raw `Frame`.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.config-get/>
 pub struct FtConfigGet {
     option: String,
 }
 
 impl FtConfigGet {
+    /// Creates a new [`FtConfigGet`] command.
     pub fn new(option: impl Into<String>) -> Self {
         Self {
             option: option.into(),

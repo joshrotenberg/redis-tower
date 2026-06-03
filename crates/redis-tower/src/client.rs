@@ -42,12 +42,20 @@ pub struct RedisClient {
 
 impl RedisClient {
     /// Connect to a Redis server at `host:port`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect(addr).await?;
         Ok(Self::from_connection(conn))
     }
 
     /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
+    ///
+    /// # Errors
+    ///
+    /// See [`RedisConnection::connect_url`].
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
         Ok(Self::from_connection(conn))
@@ -61,6 +69,10 @@ impl RedisClient {
     }
 
     /// Execute a command against the Redis server.
+    ///
+    /// # Errors
+    ///
+    /// See [`RedisConnection::execute`].
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let mut conn = self.inner.lock().await;
         conn.execute(cmd).await

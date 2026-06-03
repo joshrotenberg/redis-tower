@@ -72,6 +72,8 @@ fn parse_optional_bytes_array(frame: Frame) -> Result<Vec<Option<Bytes>>, RedisE
 /// CMS.INITBYDIM key width depth
 ///
 /// Initializes a Count-Min Sketch with the given width and depth.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.initbydim/>
 pub struct CmsInitByDim {
     key: String,
     width: i64,
@@ -79,6 +81,7 @@ pub struct CmsInitByDim {
 }
 
 impl CmsInitByDim {
+    /// Creates a new [`CmsInitByDim`] command.
     pub fn new(key: impl Into<String>, width: i64, depth: i64) -> Self {
         Self {
             key: key.into(),
@@ -118,6 +121,8 @@ impl Command for CmsInitByDim {
 /// CMS.INITBYPROB key error probability
 ///
 /// Initializes a Count-Min Sketch with the given error rate and probability.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.initbyprob/>
 pub struct CmsInitByProb {
     key: String,
     error: f64,
@@ -125,6 +130,7 @@ pub struct CmsInitByProb {
 }
 
 impl CmsInitByProb {
+    /// Creates a new [`CmsInitByProb`] command.
     pub fn new(key: impl Into<String>, error: f64, probability: f64) -> Self {
         Self {
             key: key.into(),
@@ -165,12 +171,15 @@ impl Command for CmsInitByProb {
 ///
 /// Increments one or more items in the Count-Min Sketch. Returns the
 /// estimated count for each item after incrementing.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.incrby/>
 pub struct CmsIncrBy {
     key: String,
     items: Vec<(String, i64)>,
 }
 
 impl CmsIncrBy {
+    /// Creates a new [`CmsIncrBy`] command.
     pub fn new(
         key: impl Into<String>,
         items: impl IntoIterator<Item = (impl Into<String>, i64)>,
@@ -206,12 +215,15 @@ impl Command for CmsIncrBy {
 /// CMS.QUERY key item \[item ...\]
 ///
 /// Returns the estimated count for one or more items in the Count-Min Sketch.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.query/>
 pub struct CmsQuery {
     key: String,
     items: Vec<String>,
 }
 
 impl CmsQuery {
+    /// Creates a new [`CmsQuery`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -243,6 +255,8 @@ impl Command for CmsQuery {
 /// CMS.MERGE destination numkeys source \[source ...\] \[WEIGHTS weight ...\]
 ///
 /// Merges several Count-Min Sketches into a destination sketch.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.merge/>
 pub struct CmsMerge {
     destination: String,
     sources: Vec<String>,
@@ -250,6 +264,7 @@ pub struct CmsMerge {
 }
 
 impl CmsMerge {
+    /// Creates a new [`CmsMerge`] command.
     pub fn new(
         destination: impl Into<String>,
         sources: impl IntoIterator<Item = impl Into<String>>,
@@ -262,6 +277,7 @@ impl CmsMerge {
     }
 
     /// Set weights for the source sketches.
+    #[must_use]
     pub fn weights(mut self, weights: impl IntoIterator<Item = i64>) -> Self {
         self.weights = weights.into_iter().collect();
         self
@@ -307,11 +323,14 @@ impl Command for CmsMerge {
 /// CMS.INFO key
 ///
 /// Returns information about the Count-Min Sketch at `key` as a raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/cms.info/>
 pub struct CmsInfo {
     key: String,
 }
 
 impl CmsInfo {
+    /// Creates a new [`CmsInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -340,6 +359,8 @@ impl Command for CmsInfo {
 /// TOPK.RESERVE key topk \[width depth decay\]
 ///
 /// Initializes a Top-K data structure with the given parameters.
+///
+/// See: <https://redis.io/docs/latest/commands/topk.reserve/>
 pub struct TopkReserve {
     key: String,
     topk: i64,
@@ -349,6 +370,7 @@ pub struct TopkReserve {
 }
 
 impl TopkReserve {
+    /// Creates a new [`TopkReserve`] command.
     pub fn new(key: impl Into<String>, topk: i64) -> Self {
         Self {
             key: key.into(),
@@ -360,6 +382,7 @@ impl TopkReserve {
     }
 
     /// Set the width, depth, and decay parameters.
+    #[must_use]
     pub fn params(mut self, width: i64, depth: i64, decay: f64) -> Self {
         self.width = Some(width);
         self.depth = Some(depth);
@@ -404,12 +427,15 @@ impl Command for TopkReserve {
 ///
 /// Adds one or more items to the Top-K. Returns a vector of evicted items
 /// (or None for items that did not cause an eviction).
+///
+/// See: <https://redis.io/docs/latest/commands/topk.add/>
 pub struct TopkAdd {
     key: String,
     items: Vec<String>,
 }
 
 impl TopkAdd {
+    /// Creates a new [`TopkAdd`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -442,12 +468,15 @@ impl Command for TopkAdd {
 ///
 /// Increments the score of one or more items in the Top-K. Returns a vector
 /// of evicted items (or None for items that did not cause an eviction).
+///
+/// See: <https://redis.io/docs/latest/commands/topk.incrby/>
 pub struct TopkIncrBy {
     key: String,
     items: Vec<(String, i64)>,
 }
 
 impl TopkIncrBy {
+    /// Creates a new [`TopkIncrBy`] command.
     pub fn new(
         key: impl Into<String>,
         items: impl IntoIterator<Item = (impl Into<String>, i64)>,
@@ -483,12 +512,15 @@ impl Command for TopkIncrBy {
 /// TOPK.QUERY key item \[item ...\]
 ///
 /// Checks whether one or more items are in the Top-K.
+///
+/// See: <https://redis.io/docs/latest/commands/topk.query/>
 pub struct TopkQuery {
     key: String,
     items: Vec<String>,
 }
 
 impl TopkQuery {
+    /// Creates a new [`TopkQuery`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -520,12 +552,15 @@ impl Command for TopkQuery {
 /// TOPK.COUNT key item \[item ...\]
 ///
 /// Returns the approximate count for one or more items in the Top-K.
+///
+/// See: <https://redis.io/docs/latest/commands/topk.count/>
 pub struct TopkCount {
     key: String,
     items: Vec<String>,
 }
 
 impl TopkCount {
+    /// Creates a new [`TopkCount`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -558,12 +593,15 @@ impl Command for TopkCount {
 ///
 /// Returns the list of top-k items. When called with WITHCOUNT, the response
 /// includes counts interleaved with items, returned as a raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/topk.list/>
 pub struct TopkList {
     key: String,
     withcount: bool,
 }
 
 impl TopkList {
+    /// Creates a new [`TopkList`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -572,6 +610,7 @@ impl TopkList {
     }
 
     /// Include counts in the response.
+    #[must_use]
     pub fn withcount(mut self) -> Self {
         self.withcount = true;
         self
@@ -601,11 +640,14 @@ impl Command for TopkList {
 /// TOPK.INFO key
 ///
 /// Returns information about the Top-K at `key` as a raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/topk.info/>
 pub struct TopkInfo {
     key: String,
 }
 
 impl TopkInfo {
+    /// Creates a new [`TopkInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }

@@ -54,6 +54,8 @@ pub enum OnType {
 ///
 /// Creates a new search index with the given schema. Uses a builder pattern
 /// for constructing the index definition.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.create/>
 pub struct FtCreate {
     index: String,
     on_type: Option<OnType>,
@@ -62,6 +64,7 @@ pub struct FtCreate {
 }
 
 impl FtCreate {
+    /// Creates a new [`FtCreate`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -72,24 +75,28 @@ impl FtCreate {
     }
 
     /// Index HASH keys.
+    #[must_use]
     pub fn on_hash(mut self) -> Self {
         self.on_type = Some(OnType::Hash);
         self
     }
 
     /// Index JSON keys.
+    #[must_use]
     pub fn on_json(mut self) -> Self {
         self.on_type = Some(OnType::Json);
         self
     }
 
     /// Add a key prefix filter.
+    #[must_use]
     pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefixes.push(prefix.into());
         self
     }
 
     /// Add a field to the schema.
+    #[must_use]
     pub fn field(mut self, name: impl Into<String>, field_type: FieldType) -> Self {
         self.fields.push(SchemaField {
             name: name.into(),
@@ -101,6 +108,7 @@ impl FtCreate {
     }
 
     /// Add a sortable field to the schema.
+    #[must_use]
     pub fn sortable_field(mut self, name: impl Into<String>, field_type: FieldType) -> Self {
         self.fields.push(SchemaField {
             name: name.into(),
@@ -112,6 +120,7 @@ impl FtCreate {
     }
 
     /// Add a field with full options.
+    #[must_use]
     pub fn schema_field(mut self, field: SchemaField) -> Self {
         self.fields.push(field);
         self
@@ -173,12 +182,15 @@ impl Command for FtCreate {
 /// FT.DROPINDEX index \[DD\]
 ///
 /// Deletes a search index. With `DD`, also deletes the indexed documents.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.dropindex/>
 pub struct FtDropIndex {
     index: String,
     dd: bool,
 }
 
 impl FtDropIndex {
+    /// Creates a new [`FtDropIndex`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -187,6 +199,7 @@ impl FtDropIndex {
     }
 
     /// Also delete the indexed documents.
+    #[must_use]
     pub fn dd(mut self) -> Self {
         self.dd = true;
         self
@@ -222,12 +235,15 @@ impl Command for FtDropIndex {
 /// FT.ALTER index SCHEMA ADD field type ...
 ///
 /// Adds new fields to an existing index schema.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.alter/>
 pub struct FtAlter {
     index: String,
     fields: Vec<SchemaField>,
 }
 
 impl FtAlter {
+    /// Creates a new [`FtAlter`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -236,6 +252,7 @@ impl FtAlter {
     }
 
     /// Add a field to the schema.
+    #[must_use]
     pub fn field(mut self, name: impl Into<String>, field_type: FieldType) -> Self {
         self.fields.push(SchemaField {
             name: name.into(),
@@ -247,6 +264,7 @@ impl FtAlter {
     }
 
     /// Add a field with full options.
+    #[must_use]
     pub fn schema_field(mut self, field: SchemaField) -> Self {
         self.fields.push(field);
         self
@@ -295,11 +313,14 @@ impl Command for FtAlter {
 ///
 /// Returns information and statistics about a search index. The response is
 /// a complex nested structure returned as a raw `Frame`.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.info/>
 pub struct FtInfo {
     index: String,
 }
 
 impl FtInfo {
+    /// Creates a new [`FtInfo`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -326,9 +347,12 @@ impl Command for FtInfo {
 /// FT._LIST
 ///
 /// Returns a list of all existing search index names.
+///
+/// See: <https://redis.io/docs/latest/commands/ft._list/>
 pub struct FtList;
 
 impl FtList {
+    /// Creates a new [`FtList`] command.
     pub fn new() -> Self {
         Self
     }
@@ -377,6 +401,8 @@ impl Command for FtList {
 /// Searches the index with the given query. Uses a builder pattern for
 /// optional parameters. Returns a raw `Frame` containing the result count
 /// and document array.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.search/>
 pub struct FtSearch {
     index: String,
     query: String,
@@ -390,6 +416,7 @@ pub struct FtSearch {
 }
 
 impl FtSearch {
+    /// Creates a new [`FtSearch`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -405,6 +432,7 @@ impl FtSearch {
     }
 
     /// Set the LIMIT clause with offset and number of results.
+    #[must_use]
     pub fn limit(mut self, offset: u64, num: u64) -> Self {
         self.limit_offset = Some(offset);
         self.limit_num = Some(num);
@@ -412,30 +440,35 @@ impl FtSearch {
     }
 
     /// Set the fields to return.
+    #[must_use]
     pub fn return_fields(mut self, fields: &[impl AsRef<str>]) -> Self {
         self.return_fields = fields.iter().map(|f| f.as_ref().to_string()).collect();
         self
     }
 
     /// Sort results by a field.
+    #[must_use]
     pub fn sortby(mut self, field: impl Into<String>, order: SortOrder) -> Self {
         self.sortby = Some((field.into(), order));
         self
     }
 
     /// Return only document IDs, not content.
+    #[must_use]
     pub fn nocontent(mut self) -> Self {
         self.nocontent = true;
         self
     }
 
     /// Do not try to use stemming for query expansion.
+    #[must_use]
     pub fn verbatim(mut self) -> Self {
         self.verbatim = true;
         self
     }
 
     /// Include scores in the results.
+    #[must_use]
     pub fn withscores(mut self) -> Self {
         self.withscores = true;
         self
@@ -504,6 +537,8 @@ impl Command for FtSearch {
 /// \[LIMIT offset num\] \[APPLY expr AS alias\]
 ///
 /// Runs an aggregation query against the index. Returns a raw `Frame`.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.aggregate/>
 pub struct FtAggregate {
     index: String,
     query: String,
@@ -516,6 +551,7 @@ pub struct FtAggregate {
 }
 
 impl FtAggregate {
+    /// Creates a new [`FtAggregate`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -530,12 +566,14 @@ impl FtAggregate {
     }
 
     /// Add a GROUPBY property.
+    #[must_use]
     pub fn groupby(mut self, properties: &[impl AsRef<str>]) -> Self {
         self.groupby = properties.iter().map(|p| p.as_ref().to_string()).collect();
         self
     }
 
     /// Add a REDUCE function with arguments and optional alias.
+    #[must_use]
     pub fn reduce(
         mut self,
         func: impl Into<String>,
@@ -551,12 +589,14 @@ impl FtAggregate {
     }
 
     /// Add a SORTBY field with order.
+    #[must_use]
     pub fn sortby(mut self, field: impl Into<String>, order: SortOrder) -> Self {
         self.sortby.push((field.into(), order));
         self
     }
 
     /// Set the LIMIT clause.
+    #[must_use]
     pub fn limit(mut self, offset: u64, num: u64) -> Self {
         self.limit_offset = Some(offset);
         self.limit_num = Some(num);
@@ -564,6 +604,7 @@ impl FtAggregate {
     }
 
     /// Add an APPLY expression with an alias.
+    #[must_use]
     pub fn apply(mut self, expr: impl Into<String>, alias: impl Into<String>) -> Self {
         self.apply.push((expr.into(), alias.into()));
         self
@@ -644,12 +685,15 @@ impl Command for FtAggregate {
 /// FT.ALIASADD alias index
 ///
 /// Adds an alias to a search index.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.aliasadd/>
 pub struct FtAliasAdd {
     alias: String,
     index: String,
 }
 
 impl FtAliasAdd {
+    /// Creates a new [`FtAliasAdd`] command.
     pub fn new(alias: impl Into<String>, index: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),
@@ -687,11 +731,14 @@ impl Command for FtAliasAdd {
 /// FT.ALIASDEL alias
 ///
 /// Removes an alias from a search index.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.aliasdel/>
 pub struct FtAliasDel {
     alias: String,
 }
 
 impl FtAliasDel {
+    /// Creates a new [`FtAliasDel`] command.
     pub fn new(alias: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),
@@ -724,12 +771,15 @@ impl Command for FtAliasDel {
 /// FT.ALIASUPDATE alias index
 ///
 /// Updates an alias to point to a different search index.
+///
+/// See: <https://redis.io/docs/latest/commands/ft.aliasupdate/>
 pub struct FtAliasUpdate {
     alias: String,
     index: String,
 }
 
 impl FtAliasUpdate {
+    /// Creates a new [`FtAliasUpdate`] command.
     pub fn new(alias: impl Into<String>, index: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),

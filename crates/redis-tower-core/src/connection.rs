@@ -79,6 +79,10 @@ impl RedisConnection {
     }
 
     /// Connect to a Redis server over TCP.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr).await?;
         stream.set_nodelay(true)?;
@@ -90,6 +94,10 @@ impl RedisConnection {
     /// Connect over TLS using the provided configuration.
     ///
     /// Requires either the `tls-native-tls` or `tls-rustls` feature.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP or TLS connection fails.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     pub async fn connect_tls(
         addr: &str,
@@ -110,6 +118,12 @@ impl RedisConnection {
     ///
     /// For `rediss://` URLs, a TLS backend feature must be enabled.
     /// The `tls-rustls` backend is preferred if both are enabled.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::InvalidUrl`] if the URL is malformed.
+    /// - Returns [`RedisError::Connection`] if the TCP or TLS connection fails.
+    /// - Returns [`RedisError::Redis`] if AUTH or SELECT is rejected by the server.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let parsed = parse_redis_url(url)?;
 
@@ -160,6 +174,11 @@ impl RedisConnection {
     ///
     /// Sends `HELLO 3` after connecting. The server will respond with
     /// RESP3 frames for all subsequent commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if the TCP connection fails, or
+    /// [`RedisError::Redis`] if the server rejects the HELLO command.
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
         // connect() already sends CLIENT SETINFO, then we upgrade to RESP3.
         let mut conn = Self::connect(addr).await?;
@@ -170,6 +189,16 @@ impl RedisConnection {
     /// Send HELLO to negotiate protocol version.
     ///
     /// `HELLO 3` switches to RESP3, `HELLO 2` switches back to RESP2.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::Connection`] on I/O failure.
+    /// - Returns [`RedisError::Redis`] if the server rejects the protocol version.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `framed` is `None`, i.e. called while a `Service::call` future
+    /// is in flight (`expect("connection not in flight")`).
     pub async fn hello(&mut self, version: u8) -> Result<Frame, RedisError> {
         let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
         let framed = self.framed.as_mut().expect("connection not in flight");
@@ -261,6 +290,14 @@ impl RedisConnection {
     /// response starts being read. Consider using `AutoPipelineService`
     /// for large-value workloads, or splitting large values across
     /// multiple keys.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::ConnectionClosed`] if the connection is closed.
+    /// - Returns [`RedisError::Connection`] on I/O failure.
+    /// - Returns [`RedisError::Protocol`] on framing errors.
+    /// - Returns [`RedisError::Redis`] if the server returns an error response.
+    /// - May return any error produced by `Cmd::parse_response`.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         self.ensure_framed().await?;
         let frame = cmd.to_frame();
@@ -278,6 +315,11 @@ impl RedisConnection {
     /// Send multiple command frames and read all responses in a single roundtrip.
     ///
     /// Used by pipeline and transaction implementations.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::ConnectionClosed`] if the connection is closed.
+    /// - Returns [`RedisError::Connection`] on I/O failure.
     pub async fn execute_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
         self.ensure_framed().await?;
         let count = frames.len();

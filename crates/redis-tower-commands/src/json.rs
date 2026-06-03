@@ -14,6 +14,8 @@ pub enum JsonSetCondition {
 ///
 /// Sets the JSON value at `path` in the key. Creates the key if it does not
 /// exist. Returns `Ok(())` on success.
+///
+/// See: <https://redis.io/docs/latest/commands/json.set/>
 pub struct JsonSet {
     key: String,
     path: String,
@@ -22,6 +24,7 @@ pub struct JsonSet {
 }
 
 impl JsonSet {
+    /// Creates a new [`JsonSet`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -32,12 +35,14 @@ impl JsonSet {
     }
 
     /// Only set if the path does not already exist.
+    #[must_use]
     pub fn nx(mut self) -> Self {
         self.condition = Some(JsonSetCondition::Nx);
         self
     }
 
     /// Only set if the path already exists.
+    #[must_use]
     pub fn xx(mut self) -> Self {
         self.condition = Some(JsonSetCondition::Xx);
         self
@@ -82,12 +87,15 @@ impl Command for JsonSet {
 ///
 /// Returns the JSON value at one or more paths. When multiple paths are given,
 /// returns a JSON object mapping each path to its value.
+///
+/// See: <https://redis.io/docs/latest/commands/json.get/>
 pub struct JsonGet {
     key: String,
     paths: Vec<String>,
 }
 
 impl JsonGet {
+    /// Creates a new [`JsonGet`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -96,12 +104,14 @@ impl JsonGet {
     }
 
     /// Add a path to retrieve.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.paths.push(path.into());
         self
     }
 
     /// Add multiple paths to retrieve.
+    #[must_use]
     pub fn paths(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.paths.extend(paths.into_iter().map(Into::into));
         self
@@ -139,12 +149,15 @@ impl Command for JsonGet {
 ///
 /// Deletes a value at `path` in the JSON document stored at `key`. Returns
 /// the number of paths deleted.
+///
+/// See: <https://redis.io/docs/latest/commands/json.del/>
 pub struct JsonDel {
     key: String,
     path: Option<String>,
 }
 
 impl JsonDel {
+    /// Creates a new [`JsonDel`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -153,6 +166,7 @@ impl JsonDel {
     }
 
     /// Set the path to delete. If omitted, the entire key is deleted.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -189,12 +203,15 @@ impl Command for JsonDel {
 ///
 /// Returns the values at `path` from multiple keys. Returns `None` for keys
 /// where the path does not exist.
+///
+/// See: <https://redis.io/docs/latest/commands/json.mget/>
 pub struct JsonMGet {
     keys: Vec<String>,
     path: String,
 }
 
 impl JsonMGet {
+    /// Creates a new [`JsonMGet`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>, path: impl Into<String>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -243,12 +260,15 @@ impl Command for JsonMGet {
 /// JSON.TYPE key \[path\]
 ///
 /// Returns the type of the JSON value at `path`.
+///
+/// See: <https://redis.io/docs/latest/commands/json.type/>
 pub struct JsonType {
     key: String,
     path: Option<String>,
 }
 
 impl JsonType {
+    /// Creates a new [`JsonType`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -257,6 +277,7 @@ impl JsonType {
     }
 
     /// Set the path to query. If omitted, returns the type of the root.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -294,6 +315,8 @@ impl Command for JsonType {
 ///
 /// Increments the numeric value at `path` by `value`. Returns the new value
 /// as a string.
+///
+/// See: <https://redis.io/docs/latest/commands/json.numincrby/>
 pub struct JsonNumIncrBy {
     key: String,
     path: String,
@@ -301,6 +324,7 @@ pub struct JsonNumIncrBy {
 }
 
 impl JsonNumIncrBy {
+    /// Creates a new [`JsonNumIncrBy`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -341,12 +365,15 @@ impl Command for JsonNumIncrBy {
 ///
 /// Returns the length of the JSON string at `path`. For multiple matches,
 /// returns an array of integers.
+///
+/// See: <https://redis.io/docs/latest/commands/json.strlen/>
 pub struct JsonStrLen {
     key: String,
     path: Option<String>,
 }
 
 impl JsonStrLen {
+    /// Creates a new [`JsonStrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -355,6 +382,7 @@ impl JsonStrLen {
     }
 
     /// Set the path to query.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -384,6 +412,8 @@ impl Command for JsonStrLen {
 /// JSON.STRAPPEND key \[path\] value
 ///
 /// Appends a string to the JSON string at `path`. Returns the new length(s).
+///
+/// See: <https://redis.io/docs/latest/commands/json.strappend/>
 pub struct JsonStrAppend {
     key: String,
     path: Option<String>,
@@ -391,6 +421,7 @@ pub struct JsonStrAppend {
 }
 
 impl JsonStrAppend {
+    /// Creates a new [`JsonStrAppend`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -400,6 +431,7 @@ impl JsonStrAppend {
     }
 
     /// Set the path to append to.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -431,6 +463,8 @@ impl Command for JsonStrAppend {
 ///
 /// Appends one or more values to the array at `path`. Returns the new
 /// length(s) of the array.
+///
+/// See: <https://redis.io/docs/latest/commands/json.arrappend/>
 pub struct JsonArrAppend {
     key: String,
     path: String,
@@ -438,6 +472,7 @@ pub struct JsonArrAppend {
 }
 
 impl JsonArrAppend {
+    /// Creates a new [`JsonArrAppend`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -447,12 +482,14 @@ impl JsonArrAppend {
     }
 
     /// Add a JSON value to append.
+    #[must_use]
     pub fn value(mut self, value: impl Into<String>) -> Self {
         self.values.push(value.into());
         self
     }
 
     /// Add multiple JSON values to append.
+    #[must_use]
     pub fn values(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.values.extend(values.into_iter().map(Into::into));
         self
@@ -486,12 +523,15 @@ impl Command for JsonArrAppend {
 /// JSON.ARRLEN key \[path\]
 ///
 /// Returns the length of the JSON array at `path`.
+///
+/// See: <https://redis.io/docs/latest/commands/json.arrlen/>
 pub struct JsonArrLen {
     key: String,
     path: Option<String>,
 }
 
 impl JsonArrLen {
+    /// Creates a new [`JsonArrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -500,6 +540,7 @@ impl JsonArrLen {
     }
 
     /// Set the path to query.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -530,6 +571,8 @@ impl Command for JsonArrLen {
 ///
 /// Searches for the first occurrence of `value` in the array at `path`.
 /// Returns the index, or -1 if not found.
+///
+/// See: <https://redis.io/docs/latest/commands/json.arrindex/>
 pub struct JsonArrIndex {
     key: String,
     path: String,
@@ -539,6 +582,7 @@ pub struct JsonArrIndex {
 }
 
 impl JsonArrIndex {
+    /// Creates a new [`JsonArrIndex`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -550,12 +594,14 @@ impl JsonArrIndex {
     }
 
     /// Set the start index for the search.
+    #[must_use]
     pub fn start(mut self, start: i64) -> Self {
         self.start = Some(start);
         self
     }
 
     /// Set the stop index for the search. Requires `start` to be set.
+    #[must_use]
     pub fn stop(mut self, stop: i64) -> Self {
         self.stop = Some(stop);
         self
@@ -594,6 +640,8 @@ impl Command for JsonArrIndex {
 ///
 /// Removes and returns the element at `index` from the array at `path`.
 /// Defaults to the last element (-1).
+///
+/// See: <https://redis.io/docs/latest/commands/json.arrpop/>
 pub struct JsonArrPop {
     key: String,
     path: Option<String>,
@@ -601,6 +649,7 @@ pub struct JsonArrPop {
 }
 
 impl JsonArrPop {
+    /// Creates a new [`JsonArrPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -610,12 +659,14 @@ impl JsonArrPop {
     }
 
     /// Set the path of the array to pop from.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
     }
 
     /// Set the index of the element to pop. Defaults to -1 (last element).
+    #[must_use]
     pub fn index(mut self, index: i64) -> Self {
         self.index = Some(index);
         self
@@ -655,12 +706,15 @@ impl Command for JsonArrPop {
 /// JSON.OBJKEYS key \[path\]
 ///
 /// Returns the keys of the JSON object at `path`.
+///
+/// See: <https://redis.io/docs/latest/commands/json.objkeys/>
 pub struct JsonObjKeys {
     key: String,
     path: Option<String>,
 }
 
 impl JsonObjKeys {
+    /// Creates a new [`JsonObjKeys`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -669,6 +723,7 @@ impl JsonObjKeys {
     }
 
     /// Set the path to query.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self
@@ -698,12 +753,15 @@ impl Command for JsonObjKeys {
 /// JSON.OBJLEN key \[path\]
 ///
 /// Returns the number of keys in the JSON object at `path`.
+///
+/// See: <https://redis.io/docs/latest/commands/json.objlen/>
 pub struct JsonObjLen {
     key: String,
     path: Option<String>,
 }
 
 impl JsonObjLen {
+    /// Creates a new [`JsonObjLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -712,6 +770,7 @@ impl JsonObjLen {
     }
 
     /// Set the path to query.
+    #[must_use]
     pub fn path(mut self, path: impl Into<String>) -> Self {
         self.path = Some(path.into());
         self

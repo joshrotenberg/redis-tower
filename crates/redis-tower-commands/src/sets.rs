@@ -6,12 +6,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Adds the specified members to the set stored at `key`. Returns the number
 /// of members that were added (excluding members already present).
+///
+/// See: <https://redis.io/commands/sadd>
 pub struct SAdd {
     key: String,
     members: Vec<String>,
 }
 
 impl SAdd {
+    /// Creates a new [`SAdd`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -60,12 +63,15 @@ impl Command for SAdd {
 ///
 /// Removes the specified members from the set stored at `key`. Returns the
 /// number of members that were removed.
+///
+/// See: <https://redis.io/commands/srem>
 pub struct SRem {
     key: String,
     members: Vec<String>,
 }
 
 impl SRem {
+    /// Creates a new [`SRem`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -113,11 +119,14 @@ impl Command for SRem {
 /// SMEMBERS key
 ///
 /// Returns all the members of the set stored at `key`.
+///
+/// See: <https://redis.io/commands/smembers>
 pub struct SMembers {
     key: String,
 }
 
 impl SMembers {
+    /// Creates a new [`SMembers`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -167,12 +176,15 @@ impl Command for SMembers {
 /// SISMEMBER key member
 ///
 /// Returns whether `member` is a member of the set stored at `key`.
+///
+/// See: <https://redis.io/commands/sismember>
 pub struct SIsMember {
     key: String,
     member: String,
 }
 
 impl SIsMember {
+    /// Creates a new [`SIsMember`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -211,11 +223,14 @@ impl Command for SIsMember {
 /// SCARD key
 ///
 /// Returns the number of members in the set stored at `key`.
+///
+/// See: <https://redis.io/commands/scard>
 pub struct SCard {
     key: String,
 }
 
 impl SCard {
+    /// Creates a new [`SCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -247,11 +262,14 @@ impl Command for SCard {
 ///
 /// Returns the members of the set resulting from the intersection of all
 /// the given sets.
+///
+/// See: <https://redis.io/commands/sinter>
 pub struct SInter {
     keys: Vec<String>,
 }
 
 impl SInter {
+    /// Creates a new [`SInter`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -315,12 +333,15 @@ impl Command for SInter {
 /// Returns one or more random members from the set stored at `key`. When called
 /// without `count`, returns a single member. When `count` is provided, returns
 /// up to that many members. A negative count allows duplicates.
+///
+/// See: <https://redis.io/commands/srandmember>
 pub struct SRandMember {
     key: String,
     count: Option<i64>,
 }
 
 impl SRandMember {
+    /// Creates a new [`SRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -328,6 +349,7 @@ impl SRandMember {
         }
     }
 
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -377,12 +399,15 @@ impl Command for SRandMember {
 /// Removes and returns one or more random members from the set stored at `key`.
 /// Without `count`, removes and returns a single member. With `count`, removes
 /// and returns up to that many members.
+///
+/// See: <https://redis.io/commands/spop>
 pub struct SPop {
     key: String,
     count: Option<u64>,
 }
 
 impl SPop {
+    /// Creates a new [`SPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -390,6 +415,7 @@ impl SPop {
         }
     }
 
+    #[must_use]
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
@@ -438,11 +464,14 @@ impl Command for SPop {
 ///
 /// Returns the members of the set resulting from the difference between the
 /// first set and all the successive sets.
+///
+/// See: <https://redis.io/commands/sdiff>
 pub struct SDiff {
     keys: Vec<String>,
 }
 
 impl SDiff {
+    /// Creates a new [`SDiff`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -506,12 +535,15 @@ impl Command for SDiff {
 /// Stores the members of the set resulting from the difference between the
 /// first set and all the successive sets into `destination`. Returns the number
 /// of elements in the resulting set.
+///
+/// See: <https://redis.io/commands/sdiffstore>
 pub struct SDiffStore {
     destination: String,
     keys: Vec<String>,
 }
 
 impl SDiffStore {
+    /// Creates a new [`SDiffStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -553,11 +585,14 @@ impl Command for SDiffStore {
 ///
 /// Returns the members of the set resulting from the union of all the given
 /// sets.
+///
+/// See: <https://redis.io/commands/sunion>
 pub struct SUnion {
     keys: Vec<String>,
 }
 
 impl SUnion {
+    /// Creates a new [`SUnion`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -620,12 +655,15 @@ impl Command for SUnion {
 ///
 /// Stores the members of the set resulting from the union of all the given
 /// sets into `destination`. Returns the number of elements in the resulting set.
+///
+/// See: <https://redis.io/commands/sunionstore>
 pub struct SUnionStore {
     destination: String,
     keys: Vec<String>,
 }
 
 impl SUnionStore {
+    /// Creates a new [`SUnionStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -668,6 +706,8 @@ impl Command for SUnionStore {
 /// Moves `member` from the set at `source` to the set at `destination`.
 /// Returns `true` if the member was moved, `false` if it was not a member of
 /// the source set.
+///
+/// See: <https://redis.io/commands/smove>
 pub struct SMove {
     source: String,
     destination: String,
@@ -675,6 +715,7 @@ pub struct SMove {
 }
 
 impl SMove {
+    /// Creates a new [`SMove`] command.
     pub fn new(
         source: impl Into<String>,
         destination: impl Into<String>,
@@ -720,12 +761,15 @@ impl Command for SMove {
 ///
 /// Returns whether each member is a member of the set stored at `key`. For
 /// each member, returns `true` if the member exists, `false` otherwise.
+///
+/// See: <https://redis.io/commands/smismember>
 pub struct SMisMember {
     key: String,
     members: Vec<String>,
 }
 
 impl SMisMember {
+    /// Creates a new [`SMisMember`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -785,12 +829,15 @@ impl Command for SMisMember {
 /// Stores the members of the set resulting from the intersection of all the
 /// given sets into `destination`. Returns the number of elements in the
 /// resulting set.
+///
+/// See: <https://redis.io/commands/sinterstore>
 pub struct SInterStore {
     destination: String,
     keys: Vec<String>,
 }
 
 impl SInterStore {
+    /// Creates a new [`SInterStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -833,12 +880,15 @@ impl Command for SInterStore {
 /// Returns the cardinality of the intersection of the given sets, without
 /// actually computing the full intersection. An optional `LIMIT` caps the
 /// work done when the cardinality reaches the specified value.
+///
+/// See: <https://redis.io/commands/sintercard>
 pub struct SInterCard {
     keys: Vec<String>,
     limit: Option<u64>,
 }
 
 impl SInterCard {
+    /// Creates a new [`SInterCard`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -847,6 +897,7 @@ impl SInterCard {
     }
 
     /// Set the LIMIT option to cap computation early.
+    #[must_use]
     pub fn limit(mut self, limit: u64) -> Self {
         self.limit = Some(limit);
         self

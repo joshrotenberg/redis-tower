@@ -62,12 +62,15 @@ fn parse_i64_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
 /// TDIGEST.CREATE key \[COMPRESSION compression\]
 ///
 /// Creates an empty T-Digest sketch at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.create/>
 pub struct TdigestCreate {
     key: String,
     compression: Option<i64>,
 }
 
 impl TdigestCreate {
+    /// Creates a new [`TdigestCreate`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -76,6 +79,7 @@ impl TdigestCreate {
     }
 
     /// Set the compression parameter.
+    #[must_use]
     pub fn compression(mut self, compression: i64) -> Self {
         self.compression = Some(compression);
         self
@@ -112,12 +116,15 @@ impl Command for TdigestCreate {
 /// TDIGEST.ADD key value \[value ...\]
 ///
 /// Adds one or more values to the T-Digest sketch at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.add/>
 pub struct TdigestAdd {
     key: String,
     values: Vec<f64>,
 }
 
 impl TdigestAdd {
+    /// Creates a new [`TdigestAdd`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -156,6 +163,8 @@ impl Command for TdigestAdd {
 /// \[COMPRESSION compression\] \[OVERRIDE\]
 ///
 /// Merges one or more T-Digest sketches into a destination key.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.merge/>
 pub struct TdigestMerge {
     destination: String,
     sources: Vec<String>,
@@ -164,6 +173,7 @@ pub struct TdigestMerge {
 }
 
 impl TdigestMerge {
+    /// Creates a new [`TdigestMerge`] command.
     pub fn new(
         destination: impl Into<String>,
         sources: impl IntoIterator<Item = impl Into<String>>,
@@ -177,12 +187,14 @@ impl TdigestMerge {
     }
 
     /// Set the compression parameter for the merged result.
+    #[must_use]
     pub fn compression(mut self, compression: i64) -> Self {
         self.compression = Some(compression);
         self
     }
 
     /// Override the destination if it already exists.
+    #[must_use]
     pub fn override_dest(mut self) -> Self {
         self.override_flag = true;
         self
@@ -229,12 +241,15 @@ impl Command for TdigestMerge {
 /// TDIGEST.CDF key value \[value ...\]
 ///
 /// Returns the cumulative distribution function value for each given value.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.cdf/>
 pub struct TdigestCdf {
     key: String,
     values: Vec<f64>,
 }
 
 impl TdigestCdf {
+    /// Creates a new [`TdigestCdf`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -266,12 +281,15 @@ impl Command for TdigestCdf {
 /// TDIGEST.QUANTILE key quantile \[quantile ...\]
 ///
 /// Returns the estimated value at each given quantile.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.quantile/>
 pub struct TdigestQuantile {
     key: String,
     quantiles: Vec<f64>,
 }
 
 impl TdigestQuantile {
+    /// Creates a new [`TdigestQuantile`] command.
     pub fn new(key: impl Into<String>, quantiles: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -303,11 +321,14 @@ impl Command for TdigestQuantile {
 /// TDIGEST.MIN key
 ///
 /// Returns the minimum value observed by the T-Digest.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.min/>
 pub struct TdigestMin {
     key: String,
 }
 
 impl TdigestMin {
+    /// Creates a new [`TdigestMin`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -332,11 +353,14 @@ impl Command for TdigestMin {
 /// TDIGEST.MAX key
 ///
 /// Returns the maximum value observed by the T-Digest.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.max/>
 pub struct TdigestMax {
     key: String,
 }
 
 impl TdigestMax {
+    /// Creates a new [`TdigestMax`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -361,11 +385,14 @@ impl Command for TdigestMax {
 /// TDIGEST.INFO key
 ///
 /// Returns information about the T-Digest at `key` as a raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.info/>
 pub struct TdigestInfo {
     key: String,
 }
 
 impl TdigestInfo {
+    /// Creates a new [`TdigestInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -390,11 +417,14 @@ impl Command for TdigestInfo {
 /// TDIGEST.RESET key
 ///
 /// Resets the T-Digest sketch at `key`, discarding all observed values.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.reset/>
 pub struct TdigestReset {
     key: String,
 }
 
 impl TdigestReset {
+    /// Creates a new [`TdigestReset`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -425,6 +455,8 @@ impl Command for TdigestReset {
 /// TDIGEST.TRIMMED_MEAN key low_quantile high_quantile
 ///
 /// Returns the trimmed mean between the given quantile bounds.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.trimmed_mean/>
 pub struct TdigestTrimmedMean {
     key: String,
     low_quantile: f64,
@@ -432,6 +464,7 @@ pub struct TdigestTrimmedMean {
 }
 
 impl TdigestTrimmedMean {
+    /// Creates a new [`TdigestTrimmedMean`] command.
     pub fn new(key: impl Into<String>, low_quantile: f64, high_quantile: f64) -> Self {
         Self {
             key: key.into(),
@@ -465,12 +498,15 @@ impl Command for TdigestTrimmedMean {
 /// TDIGEST.RANK key value \[value ...\]
 ///
 /// Returns the estimated rank of each given value.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.rank/>
 pub struct TdigestRank {
     key: String,
     values: Vec<f64>,
 }
 
 impl TdigestRank {
+    /// Creates a new [`TdigestRank`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -502,12 +538,15 @@ impl Command for TdigestRank {
 /// TDIGEST.REVRANK key value \[value ...\]
 ///
 /// Returns the estimated reverse rank of each given value.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.revrank/>
 pub struct TdigestRevRank {
     key: String,
     values: Vec<f64>,
 }
 
 impl TdigestRevRank {
+    /// Creates a new [`TdigestRevRank`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -539,12 +578,15 @@ impl Command for TdigestRevRank {
 /// TDIGEST.BYRANK key rank \[rank ...\]
 ///
 /// Returns the estimated value at each given rank.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.byrank/>
 pub struct TdigestByRank {
     key: String,
     ranks: Vec<i64>,
 }
 
 impl TdigestByRank {
+    /// Creates a new [`TdigestByRank`] command.
     pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),
@@ -576,12 +618,15 @@ impl Command for TdigestByRank {
 /// TDIGEST.BYREVRANK key rank \[rank ...\]
 ///
 /// Returns the estimated value at each given reverse rank.
+///
+/// See: <https://redis.io/docs/latest/commands/tdigest.byrevrank/>
 pub struct TdigestByRevRank {
     key: String,
     ranks: Vec<i64>,
 }
 
 impl TdigestByRevRank {
+    /// Creates a new [`TdigestByRevRank`] command.
     pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),

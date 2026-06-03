@@ -33,12 +33,15 @@ fn parse_bool_array(frame: Frame) -> Result<Vec<bool>, RedisError> {
 ///
 /// Adds an item to the Bloom filter at `key`. Returns `true` if the item was
 /// newly added, `false` if it may have existed previously.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.add/>
 pub struct BfAdd {
     key: String,
     item: String,
 }
 
 impl BfAdd {
+    /// Creates a new [`BfAdd`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -77,12 +80,15 @@ impl Command for BfAdd {
 /// BF.EXISTS key item
 ///
 /// Checks whether an item may exist in the Bloom filter at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.exists/>
 pub struct BfExists {
     key: String,
     item: String,
 }
 
 impl BfExists {
+    /// Creates a new [`BfExists`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -122,12 +128,15 @@ impl Command for BfExists {
 ///
 /// Adds one or more items to the Bloom filter at `key`. Returns a vector of
 /// booleans indicating whether each item was newly added.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.madd/>
 pub struct BfMAdd {
     key: String,
     items: Vec<String>,
 }
 
 impl BfMAdd {
+    /// Creates a new [`BfMAdd`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -159,12 +168,15 @@ impl Command for BfMAdd {
 /// BF.MEXISTS key item \[item ...\]
 ///
 /// Checks whether one or more items may exist in the Bloom filter at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.mexists/>
 pub struct BfMExists {
     key: String,
     items: Vec<String>,
 }
 
 impl BfMExists {
+    /// Creates a new [`BfMExists`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -197,6 +209,8 @@ impl Command for BfMExists {
 ///
 /// Creates an empty Bloom filter with the given error rate and initial
 /// capacity.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.reserve/>
 pub struct BfReserve {
     key: String,
     error_rate: f64,
@@ -206,6 +220,7 @@ pub struct BfReserve {
 }
 
 impl BfReserve {
+    /// Creates a new [`BfReserve`] command.
     pub fn new(key: impl Into<String>, error_rate: f64, capacity: i64) -> Self {
         Self {
             key: key.into(),
@@ -217,12 +232,14 @@ impl BfReserve {
     }
 
     /// Set the expansion factor for sub-filters.
+    #[must_use]
     pub fn expansion(mut self, expansion: i64) -> Self {
         self.expansion = Some(expansion);
         self
     }
 
     /// Prevent the filter from scaling (no additional sub-filters).
+    #[must_use]
     pub fn nonscaling(mut self) -> Self {
         self.nonscaling = true;
         self
@@ -268,11 +285,14 @@ impl Command for BfReserve {
 ///
 /// Returns information about the Bloom filter at `key` as a raw Frame
 /// (key-value pairs).
+///
+/// See: <https://redis.io/docs/latest/commands/bf.info/>
 pub struct BfInfo {
     key: String,
 }
 
 impl BfInfo {
+    /// Creates a new [`BfInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -299,6 +319,8 @@ impl Command for BfInfo {
 ///
 /// Adds one or more items to a Bloom filter, creating it if it does not exist.
 /// Supports builder-style configuration.
+///
+/// See: <https://redis.io/docs/latest/commands/bf.insert/>
 pub struct BfInsert {
     key: String,
     capacity: Option<i64>,
@@ -310,6 +332,7 @@ pub struct BfInsert {
 }
 
 impl BfInsert {
+    /// Creates a new [`BfInsert`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -323,30 +346,35 @@ impl BfInsert {
     }
 
     /// Set the desired capacity for auto-created filters.
+    #[must_use]
     pub fn capacity(mut self, cap: i64) -> Self {
         self.capacity = Some(cap);
         self
     }
 
     /// Set the desired error rate for auto-created filters.
+    #[must_use]
     pub fn error(mut self, error: f64) -> Self {
         self.error = Some(error);
         self
     }
 
     /// Set the expansion factor for auto-created filters.
+    #[must_use]
     pub fn expansion(mut self, exp: i64) -> Self {
         self.expansion = Some(exp);
         self
     }
 
     /// Do not create the filter if it does not exist.
+    #[must_use]
     pub fn nocreate(mut self) -> Self {
         self.nocreate = true;
         self
     }
 
     /// Prevent the auto-created filter from scaling.
+    #[must_use]
     pub fn nonscaling(mut self) -> Self {
         self.nonscaling = true;
         self
@@ -400,12 +428,15 @@ impl Command for BfInsert {
 ///
 /// Adds an item to the Cuckoo filter at `key`. Returns `true` if the item was
 /// successfully added.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.add/>
 pub struct CfAdd {
     key: String,
     item: String,
 }
 
 impl CfAdd {
+    /// Creates a new [`CfAdd`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -445,12 +476,15 @@ impl Command for CfAdd {
 ///
 /// Adds an item to the Cuckoo filter only if it does not already exist.
 /// Returns `true` if the item was added, `false` if it may already exist.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.addnx/>
 pub struct CfAddNx {
     key: String,
     item: String,
 }
 
 impl CfAddNx {
+    /// Creates a new [`CfAddNx`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -489,12 +523,15 @@ impl Command for CfAddNx {
 /// CF.EXISTS key item
 ///
 /// Checks whether an item may exist in the Cuckoo filter at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.exists/>
 pub struct CfExists {
     key: String,
     item: String,
 }
 
 impl CfExists {
+    /// Creates a new [`CfExists`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -533,12 +570,15 @@ impl Command for CfExists {
 /// CF.MEXISTS key item \[item ...\]
 ///
 /// Checks whether one or more items may exist in the Cuckoo filter at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.mexists/>
 pub struct CfMExists {
     key: String,
     items: Vec<String>,
 }
 
 impl CfMExists {
+    /// Creates a new [`CfMExists`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -571,12 +611,15 @@ impl Command for CfMExists {
 ///
 /// Deletes an item from the Cuckoo filter at `key`. Returns `true` if the
 /// item was found and deleted, `false` otherwise.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.del/>
 pub struct CfDel {
     key: String,
     item: String,
 }
 
 impl CfDel {
+    /// Creates a new [`CfDel`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -615,12 +658,15 @@ impl Command for CfDel {
 /// CF.COUNT key item
 ///
 /// Returns the number of times an item may be in the Cuckoo filter.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.count/>
 pub struct CfCount {
     key: String,
     item: String,
 }
 
 impl CfCount {
+    /// Creates a new [`CfCount`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -659,6 +705,8 @@ impl Command for CfCount {
 /// \[EXPANSION exp\]
 ///
 /// Creates an empty Cuckoo filter with the given capacity.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.reserve/>
 pub struct CfReserve {
     key: String,
     capacity: i64,
@@ -668,6 +716,7 @@ pub struct CfReserve {
 }
 
 impl CfReserve {
+    /// Creates a new [`CfReserve`] command.
     pub fn new(key: impl Into<String>, capacity: i64) -> Self {
         Self {
             key: key.into(),
@@ -679,18 +728,21 @@ impl CfReserve {
     }
 
     /// Set the number of items per bucket.
+    #[must_use]
     pub fn bucketsize(mut self, size: i64) -> Self {
         self.bucketsize = Some(size);
         self
     }
 
     /// Set the maximum number of cuckoo kicks before declaring failure.
+    #[must_use]
     pub fn maxiterations(mut self, iter: i64) -> Self {
         self.maxiterations = Some(iter);
         self
     }
 
     /// Set the expansion factor when the filter is full.
+    #[must_use]
     pub fn expansion(mut self, exp: i64) -> Self {
         self.expansion = Some(exp);
         self
@@ -739,11 +791,14 @@ impl Command for CfReserve {
 /// CF.INFO key
 ///
 /// Returns information about the Cuckoo filter at `key` as a raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.info/>
 pub struct CfInfo {
     key: String,
 }
 
 impl CfInfo {
+    /// Creates a new [`CfInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -769,6 +824,8 @@ impl Command for CfInfo {
 ///
 /// Adds one or more items to a Cuckoo filter, creating it if it does not
 /// exist. Returns a vector of booleans.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.insert/>
 pub struct CfInsert {
     key: String,
     capacity: Option<i64>,
@@ -777,6 +834,7 @@ pub struct CfInsert {
 }
 
 impl CfInsert {
+    /// Creates a new [`CfInsert`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -787,12 +845,14 @@ impl CfInsert {
     }
 
     /// Set the desired capacity for auto-created filters.
+    #[must_use]
     pub fn capacity(mut self, cap: i64) -> Self {
         self.capacity = Some(cap);
         self
     }
 
     /// Do not create the filter if it does not exist.
+    #[must_use]
     pub fn nocreate(mut self) -> Self {
         self.nocreate = true;
         self
@@ -831,6 +891,8 @@ impl Command for CfInsert {
 ///
 /// Adds one or more items to a Cuckoo filter only if they do not already
 /// exist, creating the filter if needed. Returns a vector of booleans.
+///
+/// See: <https://redis.io/docs/latest/commands/cf.insertnx/>
 pub struct CfInsertNx {
     key: String,
     capacity: Option<i64>,
@@ -839,6 +901,7 @@ pub struct CfInsertNx {
 }
 
 impl CfInsertNx {
+    /// Creates a new [`CfInsertNx`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -849,12 +912,14 @@ impl CfInsertNx {
     }
 
     /// Set the desired capacity for auto-created filters.
+    #[must_use]
     pub fn capacity(mut self, cap: i64) -> Self {
         self.capacity = Some(cap);
         self
     }
 
     /// Do not create the filter if it does not exist.
+    #[must_use]
     pub fn nocreate(mut self) -> Self {
         self.nocreate = true;
         self

@@ -17,6 +17,8 @@ pub enum VQuantization {
 ///
 /// Adds an element with its vector to the vector set at `key`. Returns `true`
 /// if the element was added, `false` if it already existed (and was updated).
+///
+/// See: <https://redis.io/docs/latest/commands/vadd/>
 pub struct VAdd {
     key: String,
     vector: Vec<f32>,
@@ -30,6 +32,7 @@ pub struct VAdd {
 }
 
 impl VAdd {
+    /// Creates a new [`VAdd`] command.
     pub fn new(
         key: impl Into<String>,
         vector: impl Into<Vec<f32>>,
@@ -49,36 +52,42 @@ impl VAdd {
     }
 
     /// Reduce the vector to `dim` dimensions.
+    #[must_use]
     pub fn reduce(mut self, dim: u64) -> Self {
         self.reduce = Some(dim);
         self
     }
 
     /// Enable check-and-set semantics.
+    #[must_use]
     pub fn cas(mut self) -> Self {
         self.cas = true;
         self
     }
 
     /// Set the maximum number of links per node.
+    #[must_use]
     pub fn m(mut self, cap: u64) -> Self {
         self.m = Some(cap);
         self
     }
 
     /// Set the EF construction parameter.
+    #[must_use]
     pub fn ef(mut self, build: u64) -> Self {
         self.ef = Some(build);
         self
     }
 
     /// Set a JSON attribute on the element.
+    #[must_use]
     pub fn setattr(mut self, json: impl Into<String>) -> Self {
         self.setattr = Some(json.into());
         self
     }
 
     /// Set the quantization type.
+    #[must_use]
     pub fn quant(mut self, q: VQuantization) -> Self {
         self.quant = Some(q);
         self
@@ -150,12 +159,15 @@ impl Command for VAdd {
 ///
 /// Removes an element from the vector set at `key`. Returns `true` if the
 /// element was removed, `false` if it did not exist.
+///
+/// See: <https://redis.io/docs/latest/commands/vrem/>
 pub struct VRem {
     key: String,
     element: String,
 }
 
 impl VRem {
+    /// Creates a new [`VRem`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -195,11 +207,14 @@ impl Command for VRem {
 /// VCARD key
 ///
 /// Returns the number of elements in the vector set at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/vcard/>
 pub struct VCard {
     key: String,
 }
 
 impl VCard {
+    /// Creates a new [`VCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -230,11 +245,14 @@ impl Command for VCard {
 /// VDIM key
 ///
 /// Returns the dimensionality of the vectors in the vector set at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/vdim/>
 pub struct VDim {
     key: String,
 }
 
 impl VDim {
+    /// Creates a new [`VDim`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -267,6 +285,8 @@ impl Command for VDim {
 /// Returns the vector embedding for `element` in the vector set at `key`.
 /// Without RAW, returns an array of doubles. With RAW, returns the raw FP32
 /// binary blob.
+///
+/// See: <https://redis.io/docs/latest/commands/vemb/>
 pub struct VEmb {
     key: String,
     element: String,
@@ -274,6 +294,7 @@ pub struct VEmb {
 }
 
 impl VEmb {
+    /// Creates a new [`VEmb`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -283,6 +304,7 @@ impl VEmb {
     }
 
     /// Request the raw FP32 binary blob instead of parsed doubles.
+    #[must_use]
     pub fn raw(mut self) -> Self {
         self.raw = true;
         self
@@ -342,6 +364,8 @@ impl Command for VEmb {
 /// Finds the most similar elements to the given vector or element in the
 /// vector set. Returns element names, or (element, score) pairs when
 /// WITHSCORES is specified.
+///
+/// See: <https://redis.io/docs/latest/commands/vsim/>
 pub struct VSim {
     key: String,
     target: VSimTarget,
@@ -394,42 +418,49 @@ impl VSim {
     }
 
     /// Limit the number of results.
+    #[must_use]
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
     }
 
     /// Set the EF search parameter.
+    #[must_use]
     pub fn ef(mut self, n: u64) -> Self {
         self.ef = Some(n);
         self
     }
 
     /// Filter results by attribute expression.
+    #[must_use]
     pub fn filter(mut self, expr: impl Into<String>) -> Self {
         self.filter = Some(expr.into());
         self
     }
 
     /// Set the EF parameter for filtered search.
+    #[must_use]
     pub fn filter_ef(mut self, n: u64) -> Self {
         self.filter_ef = Some(n);
         self
     }
 
     /// Include similarity scores in the response.
+    #[must_use]
     pub fn withscores(mut self) -> Self {
         self.withscores = true;
         self
     }
 
     /// Disable multi-threading for this query.
+    #[must_use]
     pub fn nothread(mut self) -> Self {
         self.nothread = true;
         self
     }
 
     /// Use brute-force (exact) search instead of approximate.
+    #[must_use]
     pub fn truth(mut self) -> Self {
         self.truth = true;
         self
@@ -557,12 +588,15 @@ impl Command for VSim {
 /// VRANDMEMBER key \[COUNT n\]
 ///
 /// Returns one or more random elements from the vector set at `key`.
+///
+/// See: <https://redis.io/docs/latest/commands/vrandmember/>
 pub struct VRandMember {
     key: String,
     count: Option<i64>,
 }
 
 impl VRandMember {
+    /// Creates a new [`VRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -571,6 +605,7 @@ impl VRandMember {
     }
 
     /// Return `n` random elements. Negative values allow duplicates.
+    #[must_use]
     pub fn count(mut self, n: i64) -> Self {
         self.count = Some(n);
         self
@@ -619,12 +654,15 @@ impl Command for VRandMember {
 ///
 /// Returns the JSON attribute string for `element` in the vector set at `key`,
 /// or `None` if no attribute is set.
+///
+/// See: <https://redis.io/docs/latest/commands/vgetattr/>
 pub struct VGetAttr {
     key: String,
     element: String,
 }
 
 impl VGetAttr {
+    /// Creates a new [`VGetAttr`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -672,6 +710,8 @@ impl Command for VGetAttr {
 ///
 /// Sets a JSON attribute on `element` in the vector set at `key`. Returns
 /// `true` on success.
+///
+/// See: <https://redis.io/docs/latest/commands/vsetattr/>
 pub struct VSetAttr {
     key: String,
     element: String,
@@ -679,6 +719,7 @@ pub struct VSetAttr {
 }
 
 impl VSetAttr {
+    /// Creates a new [`VSetAttr`] command.
     pub fn new(
         key: impl Into<String>,
         element: impl Into<String>,
@@ -726,12 +767,15 @@ impl Command for VSetAttr {
 ///
 /// Deletes the JSON attribute from `element` in the vector set at `key`.
 /// Returns `true` if the attribute was removed, `false` if no attribute existed.
+///
+/// See: <https://redis.io/docs/latest/commands/vdelattr/>
 pub struct VDelAttr {
     key: String,
     element: String,
 }
 
 impl VDelAttr {
+    /// Creates a new [`VDelAttr`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -772,11 +816,14 @@ impl Command for VDelAttr {
 ///
 /// Returns information about the vector set at `key` as a flat array of
 /// alternating field names and values.
+///
+/// See: <https://redis.io/docs/latest/commands/vinfo/>
 pub struct VInfo {
     key: String,
 }
 
 impl VInfo {
+    /// Creates a new [`VInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -817,6 +864,8 @@ impl Command for VInfo {
 ///
 /// Returns the neighbor links of `element` in the vector set at `key`.
 /// With WITHSCORES, returns (element, score) pairs.
+///
+/// See: <https://redis.io/docs/latest/commands/vlinks/>
 pub struct VLinks {
     key: String,
     element: String,
@@ -824,6 +873,7 @@ pub struct VLinks {
 }
 
 impl VLinks {
+    /// Creates a new [`VLinks`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -833,6 +883,7 @@ impl VLinks {
     }
 
     /// Include similarity scores in the response.
+    #[must_use]
     pub fn withscores(mut self) -> Self {
         self.withscores = true;
         self

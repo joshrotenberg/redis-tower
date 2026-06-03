@@ -6,9 +6,12 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns information and statistics about the cluster.
 /// The response is a bulk string of key-value pairs separated by `\r\n`.
+///
+/// See: <https://redis.io/commands/cluster-info>
 pub struct ClusterInfo;
 
 impl ClusterInfo {
+    /// Creates a new [`ClusterInfo`] command.
     pub fn new() -> Self {
         Self
     }
@@ -46,9 +49,12 @@ impl Command for ClusterInfo {
 ///
 /// Returns the cluster configuration as seen by the current node,
 /// in a format that can be used as a node configuration file.
+///
+/// See: <https://redis.io/commands/cluster-nodes>
 pub struct ClusterNodes;
 
 impl ClusterNodes {
+    /// Creates a new [`ClusterNodes`] command.
     pub fn new() -> Self {
         Self
     }
@@ -89,9 +95,12 @@ impl Command for ClusterNodes {
 ///
 /// Returns an array of slot ranges, each containing:
 /// `[start_slot, end_slot, [ip, port, node_id], ...]`
+///
+/// See: <https://redis.io/commands/cluster-slots>
 pub struct ClusterSlots;
 
 impl ClusterSlots {
+    /// Creates a new [`ClusterSlots`] command.
     pub fn new() -> Self {
         Self
     }
@@ -129,9 +138,12 @@ impl Command for ClusterSlots {
 ///
 /// Returns information about the shards of the cluster (Redis 7.0+).
 /// This is the replacement for the deprecated CLUSTER SLOTS command.
+///
+/// See: <https://redis.io/commands/cluster-shards>
 pub struct ClusterShards;
 
 impl ClusterShards {
+    /// Creates a new [`ClusterShards`] command.
     pub fn new() -> Self {
         Self
     }
@@ -168,9 +180,12 @@ impl Command for ClusterShards {
 /// CLUSTER MYID
 ///
 /// Returns the node's ID as a 40-character hex string.
+///
+/// See: <https://redis.io/commands/cluster-myid>
 pub struct ClusterMyId;
 
 impl ClusterMyId {
+    /// Creates a new [`ClusterMyId`] command.
     pub fn new() -> Self {
         Self
     }
@@ -209,12 +224,15 @@ impl Command for ClusterMyId {
 ///
 /// Introduces a new node to the cluster by connecting to the specified
 /// address. The node will join the cluster handshake.
+///
+/// See: <https://redis.io/commands/cluster-meet>
 pub struct ClusterMeet {
     ip: String,
     port: u16,
 }
 
 impl ClusterMeet {
+    /// Creates a new [`ClusterMeet`] command.
     pub fn new(ip: impl Into<String>, port: u16) -> Self {
         Self {
             ip: ip.into(),
@@ -253,11 +271,14 @@ impl Command for ClusterMeet {
 /// CLUSTER FORGET node-id
 ///
 /// Removes a node from the cluster's nodes table.
+///
+/// See: <https://redis.io/commands/cluster-forget>
 pub struct ClusterForget {
     node_id: String,
 }
 
 impl ClusterForget {
+    /// Creates a new [`ClusterForget`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -294,11 +315,14 @@ impl Command for ClusterForget {
 /// CLUSTER REPLICATE node-id
 ///
 /// Configures the current node as a replica of the specified master node.
+///
+/// See: <https://redis.io/commands/cluster-replicate>
 pub struct ClusterReplicate {
     node_id: String,
 }
 
 impl ClusterReplicate {
+    /// Creates a new [`ClusterReplicate`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -336,6 +360,8 @@ impl Command for ClusterReplicate {
 ///
 /// Triggers a manual failover of the master the current replica is
 /// replicating from.
+///
+/// See: <https://redis.io/commands/cluster-failover>
 pub struct ClusterFailover {
     option: Option<FailoverOption>,
 }
@@ -349,6 +375,7 @@ pub enum FailoverOption {
 }
 
 impl ClusterFailover {
+    /// Creates a new [`ClusterFailover`] command.
     pub fn new() -> Self {
         Self { option: None }
     }
@@ -404,6 +431,8 @@ impl Command for ClusterFailover {
 ///
 /// Resets the cluster state. SOFT (default) resets the cluster
 /// configuration. HARD also generates a new node ID.
+///
+/// See: <https://redis.io/commands/cluster-reset>
 pub struct ClusterReset {
     hard: bool,
 }
@@ -455,11 +484,14 @@ impl Command for ClusterReset {
 /// CLUSTER COUNTKEYSINSLOT slot
 ///
 /// Returns the number of keys in the specified hash slot.
+///
+/// See: <https://redis.io/commands/cluster-countkeysinslot>
 pub struct ClusterCountKeysInSlot {
     slot: u16,
 }
 
 impl ClusterCountKeysInSlot {
+    /// Creates a new [`ClusterCountKeysInSlot`] command.
     pub fn new(slot: u16) -> Self {
         Self { slot }
     }
@@ -494,12 +526,15 @@ impl Command for ClusterCountKeysInSlot {
 /// CLUSTER GETKEYSINSLOT slot count
 ///
 /// Returns up to `count` key names in the specified hash slot.
+///
+/// See: <https://redis.io/commands/cluster-getkeysinslot>
 pub struct ClusterGetKeysInSlot {
     slot: u16,
     count: u32,
 }
 
 impl ClusterGetKeysInSlot {
+    /// Creates a new [`ClusterGetKeysInSlot`] command.
     pub fn new(slot: u16, count: u32) -> Self {
         Self { slot, count }
     }
@@ -550,11 +585,14 @@ impl Command for ClusterGetKeysInSlot {
 /// CLUSTER KEYSLOT key
 ///
 /// Returns the hash slot number for the given key.
+///
+/// See: <https://redis.io/commands/cluster-keyslot>
 pub struct ClusterKeySlot {
     key: String,
 }
 
 impl ClusterKeySlot {
+    /// Creates a new [`ClusterKeySlot`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }

@@ -106,6 +106,8 @@ fn push_labels(args: &mut Vec<Frame>, labels: &[(String, String)]) {
 /// \[DUPLICATE_POLICY policy\] \[LABELS label value ...\]
 ///
 /// Creates a new TimeSeries key.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.create/>
 pub struct TsCreate {
     key: String,
     retention: Option<u64>,
@@ -116,6 +118,7 @@ pub struct TsCreate {
 }
 
 impl TsCreate {
+    /// Creates a new [`TsCreate`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -128,30 +131,35 @@ impl TsCreate {
     }
 
     /// Set the retention period in milliseconds.
+    #[must_use]
     pub fn retention(mut self, ms: u64) -> Self {
         self.retention = Some(ms);
         self
     }
 
     /// Set the encoding type.
+    #[must_use]
     pub fn encoding(mut self, enc: TsEncoding) -> Self {
         self.encoding = Some(enc);
         self
     }
 
     /// Set the chunk size in bytes.
+    #[must_use]
     pub fn chunk_size(mut self, bytes: u64) -> Self {
         self.chunk_size = Some(bytes);
         self
     }
 
     /// Set the duplicate policy.
+    #[must_use]
     pub fn duplicate_policy(mut self, policy: TsDuplicatePolicy) -> Self {
         self.duplicate_policy = Some(policy);
         self
     }
 
     /// Add a label key-value pair.
+    #[must_use]
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
@@ -206,6 +214,8 @@ impl Command for TsCreate {
 /// \[DUPLICATE_POLICY policy\] \[LABELS label value ...\]
 ///
 /// Alters an existing TimeSeries key configuration.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.alter/>
 pub struct TsAlter {
     key: String,
     retention: Option<u64>,
@@ -215,6 +225,7 @@ pub struct TsAlter {
 }
 
 impl TsAlter {
+    /// Creates a new [`TsAlter`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -226,24 +237,28 @@ impl TsAlter {
     }
 
     /// Set the retention period in milliseconds.
+    #[must_use]
     pub fn retention(mut self, ms: u64) -> Self {
         self.retention = Some(ms);
         self
     }
 
     /// Set the chunk size in bytes.
+    #[must_use]
     pub fn chunk_size(mut self, bytes: u64) -> Self {
         self.chunk_size = Some(bytes);
         self
     }
 
     /// Set the duplicate policy.
+    #[must_use]
     pub fn duplicate_policy(mut self, policy: TsDuplicatePolicy) -> Self {
         self.duplicate_policy = Some(policy);
         self
     }
 
     /// Add a label key-value pair.
+    #[must_use]
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
@@ -294,6 +309,8 @@ impl Command for TsAlter {
 ///
 /// Deletes samples between two timestamps (inclusive). Returns the number
 /// of samples deleted.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.del/>
 pub struct TsDel {
     key: String,
     from: i64,
@@ -301,6 +318,7 @@ pub struct TsDel {
 }
 
 impl TsDel {
+    /// Creates a new [`TsDel`] command.
     pub fn new(key: impl Into<String>, from: i64, to: i64) -> Self {
         Self {
             key: key.into(),
@@ -371,6 +389,8 @@ impl From<i64> for TsTimestamp {
 ///
 /// Appends a sample to a TimeSeries key. Returns the timestamp of the
 /// added sample.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.add/>
 pub struct TsAdd {
     key: String,
     timestamp: TsTimestamp,
@@ -383,6 +403,7 @@ pub struct TsAdd {
 }
 
 impl TsAdd {
+    /// Creates a new [`TsAdd`] command.
     pub fn new(key: impl Into<String>, timestamp: impl Into<TsTimestamp>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -397,30 +418,35 @@ impl TsAdd {
     }
 
     /// Set the retention period in milliseconds.
+    #[must_use]
     pub fn retention(mut self, ms: u64) -> Self {
         self.retention = Some(ms);
         self
     }
 
     /// Set the encoding type.
+    #[must_use]
     pub fn encoding(mut self, enc: TsEncoding) -> Self {
         self.encoding = Some(enc);
         self
     }
 
     /// Set the chunk size in bytes.
+    #[must_use]
     pub fn chunk_size(mut self, bytes: u64) -> Self {
         self.chunk_size = Some(bytes);
         self
     }
 
     /// Set the on-duplicate policy.
+    #[must_use]
     pub fn on_duplicate(mut self, policy: TsDuplicatePolicy) -> Self {
         self.on_duplicate = Some(policy);
         self
     }
 
     /// Add a label key-value pair.
+    #[must_use]
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
@@ -480,11 +506,14 @@ impl Command for TsAdd {
 ///
 /// Appends samples to multiple TimeSeries keys. Returns the raw array of
 /// timestamps (or errors per sample).
+///
+/// See: <https://redis.io/docs/latest/commands/ts.madd/>
 pub struct TsMAdd {
     samples: Vec<(String, TsTimestamp, f64)>,
 }
 
 impl TsMAdd {
+    /// Creates a new [`TsMAdd`] command.
     pub fn new() -> Self {
         Self {
             samples: Vec::new(),
@@ -492,6 +521,7 @@ impl TsMAdd {
     }
 
     /// Add a sample (key, timestamp, value) to the batch.
+    #[must_use]
     pub fn sample(
         mut self,
         key: impl Into<String>,
@@ -545,6 +575,8 @@ impl Command for TsMAdd {
 ///
 /// Increments the value of the latest sample in a TimeSeries key.
 /// Creates the key if it does not exist. Returns the timestamp.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.incrby/>
 pub struct TsIncrBy {
     key: String,
     value: f64,
@@ -554,6 +586,7 @@ pub struct TsIncrBy {
 }
 
 impl TsIncrBy {
+    /// Creates a new [`TsIncrBy`] command.
     pub fn new(key: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -565,18 +598,21 @@ impl TsIncrBy {
     }
 
     /// Set an explicit timestamp.
+    #[must_use]
     pub fn timestamp(mut self, ts: impl Into<TsTimestamp>) -> Self {
         self.timestamp = Some(ts.into());
         self
     }
 
     /// Set the retention period in milliseconds.
+    #[must_use]
     pub fn retention(mut self, ms: u64) -> Self {
         self.retention = Some(ms);
         self
     }
 
     /// Add a label key-value pair.
+    #[must_use]
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
@@ -623,6 +659,8 @@ impl Command for TsIncrBy {
 ///
 /// Decrements the value of the latest sample in a TimeSeries key.
 /// Creates the key if it does not exist. Returns the timestamp.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.decrby/>
 pub struct TsDecrBy {
     key: String,
     value: f64,
@@ -632,6 +670,7 @@ pub struct TsDecrBy {
 }
 
 impl TsDecrBy {
+    /// Creates a new [`TsDecrBy`] command.
     pub fn new(key: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -643,18 +682,21 @@ impl TsDecrBy {
     }
 
     /// Set an explicit timestamp.
+    #[must_use]
     pub fn timestamp(mut self, ts: impl Into<TsTimestamp>) -> Self {
         self.timestamp = Some(ts.into());
         self
     }
 
     /// Set the retention period in milliseconds.
+    #[must_use]
     pub fn retention(mut self, ms: u64) -> Self {
         self.retention = Some(ms);
         self
     }
 
     /// Add a label key-value pair.
+    #[must_use]
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
@@ -705,12 +747,15 @@ impl Command for TsDecrBy {
 ///
 /// Returns the last sample of a TimeSeries key as a raw Frame
 /// (timestamp-value pair, or empty if the key has no samples).
+///
+/// See: <https://redis.io/docs/latest/commands/ts.get/>
 pub struct TsGet {
     key: String,
     latest: bool,
 }
 
 impl TsGet {
+    /// Creates a new [`TsGet`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -719,6 +764,7 @@ impl TsGet {
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.latest = true;
         self
@@ -753,6 +799,8 @@ impl Command for TsGet {
 ///
 /// Returns the last sample of multiple TimeSeries keys matching the given
 /// filter expressions. Returns the raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.mget/>
 pub struct TsMGet {
     latest: bool,
     withlabels: bool,
@@ -760,6 +808,7 @@ pub struct TsMGet {
 }
 
 impl TsMGet {
+    /// Creates a new [`TsMGet`] command with an initial filter expression.
     pub fn new(filter: impl Into<String>) -> Self {
         Self {
             latest: false,
@@ -769,18 +818,21 @@ impl TsMGet {
     }
 
     /// Add an additional filter expression.
+    #[must_use]
     pub fn filter(mut self, expr: impl Into<String>) -> Self {
         self.filters.push(expr.into());
         self
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.latest = true;
         self
     }
 
     /// Include labels in the response.
+    #[must_use]
     pub fn withlabels(mut self) -> Self {
         self.withlabels = true;
         self
@@ -835,6 +887,8 @@ struct TsRangeOptions {
 ///
 /// Queries a range of samples from a TimeSeries key in chronological
 /// order. Returns the raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.range/>
 pub struct TsRange {
     opts: TsRangeOptions,
 }
@@ -858,30 +912,35 @@ impl TsRange {
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.opts.latest = true;
         self
     }
 
     /// Filter results to specific timestamps.
+    #[must_use]
     pub fn filter_by_ts(mut self, timestamps: impl IntoIterator<Item = i64>) -> Self {
         self.opts.filter_by_ts = timestamps.into_iter().collect();
         self
     }
 
     /// Filter results to a value range.
+    #[must_use]
     pub fn filter_by_value(mut self, min: f64, max: f64) -> Self {
         self.opts.filter_by_value = Some((min, max));
         self
     }
 
     /// Limit the number of returned samples.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.opts.count = Some(count);
         self
     }
 
     /// Apply an aggregation with the given time bucket (in milliseconds).
+    #[must_use]
     pub fn aggregation(mut self, agg: TsAggregation, time_bucket: i64) -> Self {
         self.opts.aggregation = Some((agg, time_bucket));
         self
@@ -940,6 +999,8 @@ impl Command for TsRange {
 ///
 /// Queries a range of samples from a TimeSeries key in reverse
 /// chronological order. Returns the raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.revrange/>
 pub struct TsRevRange {
     opts: TsRangeOptions,
 }
@@ -963,30 +1024,35 @@ impl TsRevRange {
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.opts.latest = true;
         self
     }
 
     /// Filter results to specific timestamps.
+    #[must_use]
     pub fn filter_by_ts(mut self, timestamps: impl IntoIterator<Item = i64>) -> Self {
         self.opts.filter_by_ts = timestamps.into_iter().collect();
         self
     }
 
     /// Filter results to a value range.
+    #[must_use]
     pub fn filter_by_value(mut self, min: f64, max: f64) -> Self {
         self.opts.filter_by_value = Some((min, max));
         self
     }
 
     /// Limit the number of returned samples.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.opts.count = Some(count);
         self
     }
 
     /// Apply an aggregation with the given time bucket (in milliseconds).
+    #[must_use]
     pub fn aggregation(mut self, agg: TsAggregation, time_bucket: i64) -> Self {
         self.opts.aggregation = Some((agg, time_bucket));
         self
@@ -1069,6 +1135,8 @@ fn push_mrange_args(args: &mut Vec<Frame>, opts: &TsMRangeOptions) {
 ///
 /// Queries a range of samples from multiple TimeSeries keys matching
 /// the given filter expressions. Returns the raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.mrange/>
 pub struct TsMRange {
     opts: TsMRangeOptions,
 }
@@ -1092,42 +1160,49 @@ impl TsMRange {
     }
 
     /// Add an additional filter expression.
+    #[must_use]
     pub fn filter(mut self, expr: impl Into<String>) -> Self {
         self.opts.filters.push(expr.into());
         self
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.opts.latest = true;
         self
     }
 
     /// Include labels in the response.
+    #[must_use]
     pub fn withlabels(mut self) -> Self {
         self.opts.withlabels = true;
         self
     }
 
     /// Filter results to specific timestamps.
+    #[must_use]
     pub fn filter_by_ts(mut self, timestamps: impl IntoIterator<Item = i64>) -> Self {
         self.opts.filter_by_ts = timestamps.into_iter().collect();
         self
     }
 
     /// Filter results to a value range.
+    #[must_use]
     pub fn filter_by_value(mut self, min: f64, max: f64) -> Self {
         self.opts.filter_by_value = Some((min, max));
         self
     }
 
     /// Limit the number of returned samples per key.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.opts.count = Some(count);
         self
     }
 
     /// Apply an aggregation with the given time bucket (in milliseconds).
+    #[must_use]
     pub fn aggregation(mut self, agg: TsAggregation, time_bucket: i64) -> Self {
         self.opts.aggregation = Some((agg, time_bucket));
         self
@@ -1158,6 +1233,8 @@ impl Command for TsMRange {
 ///
 /// Queries a range of samples from multiple TimeSeries keys in reverse
 /// chronological order. Returns the raw Frame.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.mrevrange/>
 pub struct TsMRevRange {
     opts: TsMRangeOptions,
 }
@@ -1181,42 +1258,49 @@ impl TsMRevRange {
     }
 
     /// Add an additional filter expression.
+    #[must_use]
     pub fn filter(mut self, expr: impl Into<String>) -> Self {
         self.opts.filters.push(expr.into());
         self
     }
 
     /// Include the latest (possibly un-compacted) bucket.
+    #[must_use]
     pub fn latest(mut self) -> Self {
         self.opts.latest = true;
         self
     }
 
     /// Include labels in the response.
+    #[must_use]
     pub fn withlabels(mut self) -> Self {
         self.opts.withlabels = true;
         self
     }
 
     /// Filter results to specific timestamps.
+    #[must_use]
     pub fn filter_by_ts(mut self, timestamps: impl IntoIterator<Item = i64>) -> Self {
         self.opts.filter_by_ts = timestamps.into_iter().collect();
         self
     }
 
     /// Filter results to a value range.
+    #[must_use]
     pub fn filter_by_value(mut self, min: f64, max: f64) -> Self {
         self.opts.filter_by_value = Some((min, max));
         self
     }
 
     /// Limit the number of returned samples per key.
+    #[must_use]
     pub fn count(mut self, count: i64) -> Self {
         self.opts.count = Some(count);
         self
     }
 
     /// Apply an aggregation with the given time bucket (in milliseconds).
+    #[must_use]
     pub fn aggregation(mut self, agg: TsAggregation, time_bucket: i64) -> Self {
         self.opts.aggregation = Some((agg, time_bucket));
         self
@@ -1249,12 +1333,15 @@ impl Command for TsMRevRange {
 ///
 /// Returns information and statistics about a TimeSeries key. Returns
 /// the raw Frame (complex nested structure).
+///
+/// See: <https://redis.io/docs/latest/commands/ts.info/>
 pub struct TsInfo {
     key: String,
     debug: bool,
 }
 
 impl TsInfo {
+    /// Creates a new [`TsInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1263,6 +1350,7 @@ impl TsInfo {
     }
 
     /// Include debug information in the response.
+    #[must_use]
     pub fn debug(mut self) -> Self {
         self.debug = true;
         self
@@ -1296,11 +1384,14 @@ impl Command for TsInfo {
 /// TS.QUERYINDEX filter_expr \[filter_expr ...\]
 ///
 /// Returns the keys matching the given filter expressions.
+///
+/// See: <https://redis.io/docs/latest/commands/ts.queryindex/>
 pub struct TsQueryIndex {
     filters: Vec<String>,
 }
 
 impl TsQueryIndex {
+    /// Creates a new [`TsQueryIndex`] command with an initial filter expression.
     pub fn new(filter: impl Into<String>) -> Self {
         Self {
             filters: vec![filter.into()],
@@ -1308,6 +1399,7 @@ impl TsQueryIndex {
     }
 
     /// Add an additional filter expression.
+    #[must_use]
     pub fn filter(mut self, expr: impl Into<String>) -> Self {
         self.filters.push(expr.into());
         self

@@ -5,11 +5,14 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// DEL key [key ...]
 ///
 /// Removes the specified keys. Returns the number of keys removed.
+///
+/// See: <https://redis.io/commands/del>
 pub struct Del {
     keys: Vec<String>,
 }
 
 impl Del {
+    /// Creates a new [`Del`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -52,11 +55,14 @@ impl Command for Del {
 /// EXISTS key [key ...]
 ///
 /// Returns the number of specified keys that exist.
+///
+/// See: <https://redis.io/commands/exists>
 pub struct Exists {
     keys: Vec<String>,
 }
 
 impl Exists {
+    /// Creates a new [`Exists`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -99,12 +105,15 @@ impl Command for Exists {
 /// EXPIRE key seconds
 ///
 /// Sets a timeout on `key`. Returns `true` if the timeout was set.
+///
+/// See: <https://redis.io/commands/expire>
 pub struct Expire {
     key: String,
     seconds: u64,
 }
 
 impl Expire {
+    /// Creates a new [`Expire`] command.
     pub fn new(key: impl Into<String>, seconds: u64) -> Self {
         Self {
             key: key.into(),
@@ -144,11 +153,14 @@ impl Command for Expire {
 ///
 /// Returns the remaining time to live of a key in seconds.
 /// Returns -2 if the key does not exist, -1 if no expiry is set.
+///
+/// See: <https://redis.io/commands/ttl>
 pub struct Ttl {
     key: String,
 }
 
 impl Ttl {
+    /// Creates a new [`Ttl`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -179,12 +191,15 @@ impl Command for Ttl {
 /// RENAME key newkey
 ///
 /// Renames `key` to `newkey`. Errors if `key` does not exist.
+///
+/// See: <https://redis.io/commands/rename>
 pub struct Rename {
     key: String,
     new_key: String,
 }
 
 impl Rename {
+    /// Creates a new [`Rename`] command.
     pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -223,11 +238,14 @@ impl Command for Rename {
 ///
 /// Returns the type of the value stored at `key` as a string
 /// (e.g., "string", "list", "set", "zset", "hash", "none").
+///
+/// See: <https://redis.io/commands/type>
 pub struct Type {
     key: String,
 }
 
 impl Type {
+    /// Creates a new [`Type`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -259,11 +277,14 @@ impl Command for Type {
 ///
 /// Removes the specified keys without blocking the server.
 /// Returns the number of keys removed.
+///
+/// See: <https://redis.io/commands/unlink>
 pub struct Unlink {
     keys: Vec<String>,
 }
 
 impl Unlink {
+    /// Creates a new [`Unlink`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -306,11 +327,14 @@ impl Command for Unlink {
 /// PERSIST key
 ///
 /// Removes the existing timeout on `key`. Returns `true` if the timeout was removed.
+///
+/// See: <https://redis.io/commands/persist>
 pub struct Persist {
     key: String,
 }
 
 impl Persist {
+    /// Creates a new [`Persist`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -342,12 +366,15 @@ impl Command for Persist {
 /// PEXPIRE key milliseconds
 ///
 /// Sets a timeout on `key` in milliseconds. Returns `true` if the timeout was set.
+///
+/// See: <https://redis.io/commands/pexpire>
 pub struct PExpire {
     key: String,
     milliseconds: u64,
 }
 
 impl PExpire {
+    /// Creates a new [`PExpire`] command.
     pub fn new(key: impl Into<String>, milliseconds: u64) -> Self {
         Self {
             key: key.into(),
@@ -387,12 +414,15 @@ impl Command for PExpire {
 ///
 /// Sets an expiry on `key` as an absolute Unix timestamp in milliseconds.
 /// Returns `true` if the timeout was set.
+///
+/// See: <https://redis.io/commands/pexpireat>
 pub struct PExpireAt {
     key: String,
     ms_timestamp: i64,
 }
 
 impl PExpireAt {
+    /// Creates a new [`PExpireAt`] command.
     pub fn new(key: impl Into<String>, ms_timestamp: i64) -> Self {
         Self {
             key: key.into(),
@@ -432,6 +462,8 @@ impl Command for PExpireAt {
 ///
 /// Copies the value stored at `source` to `destination`.
 /// Returns `true` if the key was copied.
+///
+/// See: <https://redis.io/commands/copy>
 pub struct Copy {
     source: String,
     destination: String,
@@ -439,6 +471,7 @@ pub struct Copy {
 }
 
 impl Copy {
+    /// Creates a new [`Copy`] command.
     pub fn new(source: impl Into<String>, destination: impl Into<String>) -> Self {
         Self {
             source: source.into(),
@@ -447,6 +480,7 @@ impl Copy {
         }
     }
 
+    #[must_use]
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
@@ -487,11 +521,14 @@ impl Command for Copy {
 /// KEYS pattern
 ///
 /// Returns all keys matching `pattern`.
+///
+/// See: <https://redis.io/commands/keys>
 pub struct Keys {
     pattern: String,
 }
 
 impl Keys {
+    /// Creates a new [`Keys`] command.
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -533,9 +570,12 @@ impl Command for Keys {
 /// RANDOMKEY
 ///
 /// Returns a random key from the keyspace, or `None` if the database is empty.
+///
+/// See: <https://redis.io/commands/randomkey>
 pub struct RandomKey;
 
 impl RandomKey {
+    /// Creates a new [`RandomKey`] command.
     pub fn new() -> Self {
         Self
     }
@@ -574,11 +614,14 @@ impl Command for RandomKey {
 ///
 /// Alters the last access time of the specified keys.
 /// Returns the number of keys that were touched.
+///
+/// See: <https://redis.io/commands/touch>
 pub struct Touch {
     keys: Vec<String>,
 }
 
 impl Touch {
+    /// Creates a new [`Touch`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
@@ -622,11 +665,14 @@ impl Command for Touch {
 ///
 /// Returns the absolute Unix timestamp (in seconds) at which the key will expire.
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
+///
+/// See: <https://redis.io/commands/expiretime>
 pub struct ExpireTime {
     key: String,
 }
 
 impl ExpireTime {
+    /// Creates a new [`ExpireTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -658,11 +704,14 @@ impl Command for ExpireTime {
 ///
 /// Returns the absolute Unix timestamp (in milliseconds) at which the key will expire.
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
+///
+/// See: <https://redis.io/commands/pexpiretime>
 pub struct PExpireTime {
     key: String,
 }
 
 impl PExpireTime {
+    /// Creates a new [`PExpireTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -694,11 +743,14 @@ impl Command for PExpireTime {
 ///
 /// Returns a serialized version of the value stored at the specified key.
 /// Returns `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/dump>
 pub struct Dump {
     key: String,
 }
 
 impl Dump {
+    /// Creates a new [`Dump`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -731,6 +783,8 @@ impl Command for Dump {
 ///
 /// Deserializes a previously-dumped value and associates it with a key.
 /// The `ttl_ms` argument sets the time-to-live in milliseconds (0 for no expiry).
+///
+/// See: <https://redis.io/commands/restore>
 pub struct Restore {
     key: String,
     ttl_ms: u64,
@@ -742,6 +796,7 @@ pub struct Restore {
 }
 
 impl Restore {
+    /// Creates a new [`Restore`] command. `ttl_ms` is the TTL in milliseconds (0 = no expiry).
     pub fn new(key: impl Into<String>, ttl_ms: u64, serialized_value: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),
@@ -754,21 +809,25 @@ impl Restore {
         }
     }
 
+    #[must_use]
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
     }
 
+    #[must_use]
     pub fn absttl(mut self) -> Self {
         self.absttl = true;
         self
     }
 
+    #[must_use]
     pub fn idletime(mut self, seconds: u64) -> Self {
         self.idletime = Some(seconds);
         self
     }
 
+    #[must_use]
     pub fn freq(mut self, frequency: u64) -> Self {
         self.freq = Some(frequency);
         self
@@ -828,6 +887,8 @@ pub enum SortOrder {
 /// Sorts the elements in a list, set, or sorted set. When STORE is used, the
 /// response is an integer (number of elements stored); otherwise it is an array
 /// of bulk strings. The response type is `Frame` to accommodate both cases.
+///
+/// See: <https://redis.io/commands/sort>
 pub struct Sort {
     key: String,
     by: Option<String>,
@@ -839,6 +900,7 @@ pub struct Sort {
 }
 
 impl Sort {
+    /// Creates a new [`Sort`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -851,31 +913,37 @@ impl Sort {
         }
     }
 
+    #[must_use]
     pub fn by(mut self, pattern: impl Into<String>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
+    #[must_use]
     pub fn get(mut self, pattern: impl Into<String>) -> Self {
         self.get.push(pattern.into());
         self
     }
 
+    #[must_use]
     pub fn limit(mut self, offset: i64, count: i64) -> Self {
         self.limit = Some((offset, count));
         self
     }
 
+    #[must_use]
     pub fn order(mut self, order: SortOrder) -> Self {
         self.order = Some(order);
         self
     }
 
+    #[must_use]
     pub fn alpha(mut self) -> Self {
         self.alpha = true;
         self
     }
 
+    #[must_use]
     pub fn store(mut self, destination: impl Into<String>) -> Self {
         self.store = Some(destination.into());
         self
@@ -930,6 +998,8 @@ impl Command for Sort {
 /// Read-only variant of SORT. Returns the sorted elements without the STORE
 /// option. Each element is returned as an `Option<Bytes>` (nil for missing
 /// GET references).
+///
+/// See: <https://redis.io/commands/sort_ro>
 pub struct SortRo {
     key: String,
     by: Option<String>,
@@ -940,6 +1010,7 @@ pub struct SortRo {
 }
 
 impl SortRo {
+    /// Creates a new [`SortRo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -951,26 +1022,31 @@ impl SortRo {
         }
     }
 
+    #[must_use]
     pub fn by(mut self, pattern: impl Into<String>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
+    #[must_use]
     pub fn get(mut self, pattern: impl Into<String>) -> Self {
         self.get.push(pattern.into());
         self
     }
 
+    #[must_use]
     pub fn limit(mut self, offset: i64, count: i64) -> Self {
         self.limit = Some((offset, count));
         self
     }
 
+    #[must_use]
     pub fn order(mut self, order: SortOrder) -> Self {
         self.order = Some(order);
         self
     }
 
+    #[must_use]
     pub fn alpha(mut self) -> Self {
         self.alpha = true;
         self
@@ -1035,11 +1111,14 @@ impl Command for SortRo {
 /// OBJECT ENCODING key
 ///
 /// Returns the internal encoding of the Redis object stored at the key.
+///
+/// See: <https://redis.io/commands/object-encoding>
 pub struct ObjectEncoding {
     key: String,
 }
 
 impl ObjectEncoding {
+    /// Creates a new [`ObjectEncoding`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1075,11 +1154,14 @@ impl Command for ObjectEncoding {
 ///
 /// Returns the logarithmic access frequency counter of a key (requires
 /// maxmemory-policy to be set to an LFU policy).
+///
+/// See: <https://redis.io/commands/object-freq>
 pub struct ObjectFreq {
     key: String,
 }
 
 impl ObjectFreq {
+    /// Creates a new [`ObjectFreq`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1110,9 +1192,12 @@ impl Command for ObjectFreq {
 /// OBJECT HELP
 ///
 /// Returns helpful text about the OBJECT subcommands.
+///
+/// See: <https://redis.io/commands/object-help>
 pub struct ObjectHelp;
 
 impl ObjectHelp {
+    /// Creates a new [`ObjectHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1161,11 +1246,14 @@ impl Command for ObjectHelp {
 ///
 /// Returns the number of seconds since the object stored at the key is idle
 /// (not accessed by read or write operations).
+///
+/// See: <https://redis.io/commands/object-idletime>
 pub struct ObjectIdleTime {
     key: String,
 }
 
 impl ObjectIdleTime {
+    /// Creates a new [`ObjectIdleTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1200,11 +1288,14 @@ impl Command for ObjectIdleTime {
 /// OBJECT REFCOUNT key
 ///
 /// Returns the number of references of the object stored at the key.
+///
+/// See: <https://redis.io/commands/object-refcount>
 pub struct ObjectRefCount {
     key: String,
 }
 
 impl ObjectRefCount {
+    /// Creates a new [`ObjectRefCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }

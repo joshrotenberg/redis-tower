@@ -5,11 +5,14 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// GET key
 ///
 /// Returns the value of `key`, or `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/get>
 pub struct Get {
     key: String,
 }
 
 impl Get {
+    /// Creates a new [`Get`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -42,6 +45,8 @@ impl Command for Get {
 ///
 /// Sets `key` to hold `value`. Returns `Ok` on success, or the old value
 /// if `GET` is specified.
+///
+/// See: <https://redis.io/commands/set>
 pub struct Set {
     key: String,
     value: String,
@@ -60,6 +65,7 @@ pub enum SetCondition {
 }
 
 impl Set {
+    /// Creates a new [`Set`] command with the given key and value.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -72,6 +78,7 @@ impl Set {
     }
 
     /// Set expiration in seconds.
+    #[must_use]
     pub fn ex(mut self, seconds: u64) -> Self {
         self.ex = Some(seconds);
         self.px = None;
@@ -79,6 +86,7 @@ impl Set {
     }
 
     /// Set expiration in milliseconds.
+    #[must_use]
     pub fn px(mut self, milliseconds: u64) -> Self {
         self.px = Some(milliseconds);
         self.ex = None;
@@ -86,18 +94,21 @@ impl Set {
     }
 
     /// Only set if the key does not exist.
+    #[must_use]
     pub fn nx(mut self) -> Self {
         self.condition = Some(SetCondition::Nx);
         self
     }
 
     /// Only set if the key already exists.
+    #[must_use]
     pub fn xx(mut self) -> Self {
         self.condition = Some(SetCondition::Xx);
         self
     }
 
     /// Return the old value stored at `key`.
+    #[must_use]
     pub fn get(mut self) -> Self {
         self.get = true;
         self
@@ -154,11 +165,14 @@ impl Command for Set {
 /// INCR key
 ///
 /// Increments the integer value of `key` by one.
+///
+/// See: <https://redis.io/commands/incr>
 pub struct Incr {
     key: String,
 }
 
 impl Incr {
+    /// Creates a new [`Incr`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -189,11 +203,14 @@ impl Command for Incr {
 /// MGET key [key ...]
 ///
 /// Returns the values of all specified keys.
+///
+/// See: <https://redis.io/commands/mget>
 pub struct MGet {
     keys: Vec<String>,
 }
 
 impl MGet {
+    /// Creates a new [`MGet`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -241,12 +258,15 @@ impl Command for MGet {
 ///
 /// Appends `value` to the end of the string at `key`. Returns the length
 /// of the string after the append.
+///
+/// See: <https://redis.io/commands/append>
 pub struct Append {
     key: String,
     value: String,
 }
 
 impl Append {
+    /// Creates a new [`Append`] command with the given key and value.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -284,11 +304,14 @@ impl Command for Append {
 /// MSET key value \[key value ...\]
 ///
 /// Sets multiple keys to their respective values atomically.
+///
+/// See: <https://redis.io/commands/mset>
 pub struct MSet {
     pairs: Vec<(String, String)>,
 }
 
 impl MSet {
+    /// Creates a new [`MSet`] command.
     pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
         Self {
             pairs: pairs
@@ -330,6 +353,8 @@ impl Command for MSet {
 ///
 /// Gets the value of `key` and optionally sets its expiration.
 /// Returns `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/getex>
 pub struct GetEx {
     key: String,
     ex: Option<u64>,
@@ -340,6 +365,7 @@ pub struct GetEx {
 }
 
 impl GetEx {
+    /// Creates a new [`GetEx`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -352,6 +378,7 @@ impl GetEx {
     }
 
     /// Set expiration in seconds.
+    #[must_use]
     pub fn ex(mut self, seconds: u64) -> Self {
         self.ex = Some(seconds);
         self.px = None;
@@ -362,6 +389,7 @@ impl GetEx {
     }
 
     /// Set expiration in milliseconds.
+    #[must_use]
     pub fn px(mut self, milliseconds: u64) -> Self {
         self.px = Some(milliseconds);
         self.ex = None;
@@ -372,6 +400,7 @@ impl GetEx {
     }
 
     /// Set expiration as a Unix timestamp in seconds.
+    #[must_use]
     pub fn exat(mut self, timestamp: u64) -> Self {
         self.exat = Some(timestamp);
         self.ex = None;
@@ -382,6 +411,7 @@ impl GetEx {
     }
 
     /// Set expiration as a Unix timestamp in milliseconds.
+    #[must_use]
     pub fn pxat(mut self, timestamp: u64) -> Self {
         self.pxat = Some(timestamp);
         self.ex = None;
@@ -392,6 +422,7 @@ impl GetEx {
     }
 
     /// Remove the existing expiration on the key.
+    #[must_use]
     pub fn persist(mut self) -> Self {
         self.persist = true;
         self.ex = None;
@@ -451,11 +482,14 @@ impl Command for GetEx {
 ///
 /// Gets the value of `key` and deletes it. Returns `None` if the key does
 /// not exist.
+///
+/// See: <https://redis.io/commands/getdel>
 pub struct GetDel {
     key: String,
 }
 
 impl GetDel {
+    /// Creates a new [`GetDel`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -487,6 +521,8 @@ impl Command for GetDel {
 /// SETEX key seconds value
 ///
 /// Sets `key` to hold `value` with an expiration of `seconds`.
+///
+/// See: <https://redis.io/commands/setex>
 pub struct SetEx {
     key: String,
     seconds: u64,
@@ -494,6 +530,7 @@ pub struct SetEx {
 }
 
 impl SetEx {
+    /// Creates a new [`SetEx`] command with the given key, expiration in seconds, and value.
     pub fn new(key: impl Into<String>, seconds: u64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -533,6 +570,8 @@ impl Command for SetEx {
 /// PSETEX key milliseconds value
 ///
 /// Sets `key` to hold `value` with an expiration of `milliseconds`.
+///
+/// See: <https://redis.io/commands/psetex>
 pub struct PSetEx {
     key: String,
     milliseconds: u64,
@@ -540,6 +579,7 @@ pub struct PSetEx {
 }
 
 impl PSetEx {
+    /// Creates a new [`PSetEx`] command with the given key, expiration in milliseconds, and value.
     pub fn new(key: impl Into<String>, milliseconds: u64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -580,12 +620,15 @@ impl Command for PSetEx {
 ///
 /// Sets `key` to hold `value` if `key` does not exist. Returns `true` if
 /// the key was set, `false` if the key already existed.
+///
+/// See: <https://redis.io/commands/setnx>
 pub struct SetNx {
     key: String,
     value: String,
 }
 
 impl SetNx {
+    /// Creates a new [`SetNx`] command with the given key and value.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -625,12 +668,15 @@ impl Command for SetNx {
 ///
 /// Increments the floating-point value of `key` by `increment`. Returns the
 /// new value.
+///
+/// See: <https://redis.io/commands/incrbyfloat>
 pub struct IncrByFloat {
     key: String,
     increment: f64,
 }
 
 impl IncrByFloat {
+    /// Creates a new [`IncrByFloat`] command with the given key and increment.
     pub fn new(key: impl Into<String>, increment: f64) -> Self {
         Self {
             key: key.into(),
@@ -678,11 +724,14 @@ impl Command for IncrByFloat {
 /// DECR key
 ///
 /// Decrements the integer value of `key` by one.
+///
+/// See: <https://redis.io/commands/decr>
 pub struct Decr {
     key: String,
 }
 
 impl Decr {
+    /// Creates a new [`Decr`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -713,12 +762,15 @@ impl Command for Decr {
 /// DECRBY key decrement
 ///
 /// Decrements the integer value of `key` by `decrement`.
+///
+/// See: <https://redis.io/commands/decrby>
 pub struct DecrBy {
     key: String,
     decrement: i64,
 }
 
 impl DecrBy {
+    /// Creates a new [`DecrBy`] command with the given key and decrement.
     pub fn new(key: impl Into<String>, decrement: i64) -> Self {
         Self {
             key: key.into(),
@@ -757,6 +809,8 @@ impl Command for DecrBy {
 ///
 /// Returns the substring of the string value stored at `key`, determined
 /// by the offsets `start` and `end` (both inclusive).
+///
+/// See: <https://redis.io/commands/getrange>
 pub struct GetRange {
     key: String,
     start: i64,
@@ -764,6 +818,7 @@ pub struct GetRange {
 }
 
 impl GetRange {
+    /// Creates a new [`GetRange`] command to return the substring of `key` between `start` and `end` (inclusive).
     pub fn new(key: impl Into<String>, start: i64, end: i64) -> Self {
         Self {
             key: key.into(),
@@ -805,6 +860,8 @@ impl Command for GetRange {
 /// Overwrites part of the string stored at `key`, starting at the
 /// specified byte `offset`. Returns the length of the string after the
 /// modification.
+///
+/// See: <https://redis.io/commands/setrange>
 pub struct SetRange {
     key: String,
     offset: i64,
@@ -812,6 +869,7 @@ pub struct SetRange {
 }
 
 impl SetRange {
+    /// Creates a new [`SetRange`] command to overwrite bytes in `key` at `offset` with `value`.
     pub fn new(key: impl Into<String>, offset: i64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -852,11 +910,14 @@ impl Command for SetRange {
 ///
 /// Returns the length of the string value stored at `key`, or 0 if the
 /// key does not exist.
+///
+/// See: <https://redis.io/commands/strlen>
 pub struct StrLen {
     key: String,
 }
 
 impl StrLen {
+    /// Creates a new [`StrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -888,12 +949,15 @@ impl Command for StrLen {
 ///
 /// Increments the integer value of `key` by `increment`. Returns the new
 /// value after the increment.
+///
+/// See: <https://redis.io/commands/incrby>
 pub struct IncrBy {
     key: String,
     increment: i64,
 }
 
 impl IncrBy {
+    /// Creates a new [`IncrBy`] command with the given key and increment.
     pub fn new(key: impl Into<String>, increment: i64) -> Self {
         Self {
             key: key.into(),
@@ -933,11 +997,14 @@ impl Command for IncrBy {
 /// Sets the given keys to their respective values, but only if none of the
 /// keys already exist. Returns `true` if all keys were set, `false` if no
 /// key was set (at least one already existed).
+///
+/// See: <https://redis.io/commands/msetnx>
 pub struct MSetNx {
     pairs: Vec<(String, String)>,
 }
 
 impl MSetNx {
+    /// Creates a new [`MSetNx`] command.
     pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
         Self {
             pairs: pairs
@@ -996,6 +1063,8 @@ pub enum LcsMode {
 /// keys. The response type depends on the selected mode: a bulk string for
 /// the default mode, an integer for LEN mode, or a raw Frame for IDX mode
 /// (which returns a complex nested structure).
+///
+/// See: <https://redis.io/commands/lcs>
 pub struct Lcs {
     key1: String,
     key2: String,
@@ -1013,12 +1082,14 @@ impl Lcs {
     }
 
     /// Switch to LEN mode -- returns only the length.
+    #[must_use]
     pub fn len(mut self) -> Self {
         self.mode = LcsMode::Len;
         self
     }
 
     /// Switch to IDX mode -- returns match positions.
+    #[must_use]
     pub fn idx(mut self) -> Self {
         self.mode = LcsMode::Idx {
             min_match_len: None,
@@ -1028,6 +1099,7 @@ impl Lcs {
     }
 
     /// Set the MINMATCHLEN option (only meaningful in IDX mode).
+    #[must_use]
     pub fn min_match_len(mut self, len: u64) -> Self {
         match &mut self.mode {
             LcsMode::Idx { min_match_len, .. } => *min_match_len = Some(len),
@@ -1042,6 +1114,7 @@ impl Lcs {
     }
 
     /// Enable WITHMATCHLEN (only meaningful in IDX mode).
+    #[must_use]
     pub fn with_match_len(mut self) -> Self {
         match &mut self.mode {
             LcsMode::Idx { with_match_len, .. } => *with_match_len = true,
@@ -1108,12 +1181,15 @@ impl Command for Lcs {
 ///
 /// Note: GETSET is deprecated in favor of `SET key value GET`, but remains
 /// widely used.
+///
+/// See: <https://redis.io/commands/getset>
 pub struct GetSet {
     key: String,
     value: String,
 }
 
 impl GetSet {
+    /// Creates a new [`GetSet`] command with the given key and value.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),

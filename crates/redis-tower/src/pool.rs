@@ -84,12 +84,14 @@ impl Default for PoolConfig {
 
 impl PoolConfig {
     /// Set the pool size.
+    #[must_use]
     pub fn size(mut self, size: usize) -> Self {
         self.size = size;
         self
     }
 
     /// Set the dispatch strategy.
+    #[must_use]
     pub fn dispatch(mut self, strategy: DispatchStrategy) -> Self {
         self.dispatch = strategy;
         self
@@ -99,6 +101,7 @@ impl PoolConfig {
     ///
     /// If set, connections idle longer than this are PINGed before use
     /// to verify they are still alive.
+    #[must_use]
     pub fn health_check_interval(mut self, interval: Duration) -> Self {
         self.health_check_interval = Some(interval);
         self
@@ -157,6 +160,10 @@ where
     ///
     /// Each call to `factory` should return a new, independent connection.
     /// For cluster connections, each entry will discover its own topology.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if any factory call fails.
     pub async fn connect<F, Fut>(size: usize, factory: F) -> Result<Self, RedisError>
     where
         F: Fn() -> Fut,
@@ -166,6 +173,14 @@ where
     }
 
     /// Create a pool with custom configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::Connection`] if any factory call fails.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `config.size` is 0 (`assert!(config.size > 0, "pool size must be at least 1")`).
     pub async fn connect_with_config<F, Fut>(
         config: PoolConfig,
         factory: F,
@@ -207,6 +222,10 @@ where
     }
 
     /// Build a pool from pre-created connections.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `conns` is empty.
     pub fn from_connections(
         connections: Vec<S>,
         dispatch: DispatchStrategy,
@@ -215,6 +234,10 @@ where
     }
 
     /// Build a pool from pre-created connections with a health check interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `conns` is empty.
     pub fn from_connections_with_config(
         connections: Vec<S>,
         dispatch: DispatchStrategy,
@@ -347,6 +370,12 @@ where
     /// If `health_check_interval` is configured and the selected connection
     /// has been idle longer than the interval, a PING is sent first to
     /// verify the connection is alive.
+    ///
+    /// # Errors
+    ///
+    /// - Returns [`RedisError::ConnectionClosed`] if the selected connection is closed.
+    /// - Returns [`RedisError::Connection`] on I/O or health-check failure.
+    /// - Returns [`RedisError::Redis`] if the server returns an error response.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let idx = self.next_index();
         // inflight already incremented by next_index()

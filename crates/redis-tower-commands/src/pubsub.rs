@@ -6,12 +6,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Posts a message to the given channel. Returns the number of clients
 /// that received the message.
+///
+/// See: <https://redis.io/commands/publish>
 pub struct Publish {
     channel: String,
     message: String,
 }
 
 impl Publish {
+    /// Creates a new [`Publish`] command.
     pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             channel: channel.into(),
@@ -50,12 +53,15 @@ impl Command for Publish {
 ///
 /// Posts a message to the given shard channel. Returns the number of
 /// clients that received the message.
+///
+/// See: <https://redis.io/commands/spublish>
 pub struct SPublish {
     channel: String,
     message: String,
 }
 
 impl SPublish {
+    /// Creates a new [`SPublish`] command.
     pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             channel: channel.into(),
@@ -96,11 +102,14 @@ impl Command for SPublish {
 /// channel with one or more subscribers (excluding clients subscribed
 /// to patterns). If no pattern is specified, all active channels are
 /// listed. Glob-style patterns are supported.
+///
+/// See: <https://redis.io/commands/pubsub-channels>
 pub struct PubSubChannels {
     pattern: Option<String>,
 }
 
 impl PubSubChannels {
+    /// Creates a new [`PubSubChannels`] command listing all active channels.
     pub fn new() -> Self {
         Self { pattern: None }
     }
@@ -164,11 +173,14 @@ impl Command for PubSubChannels {
 /// Returns the number of subscribers (not counting clients subscribed
 /// to patterns) for the specified channels. The response is a flat
 /// array of channel/count pairs in RESP2, or a map in RESP3.
+///
+/// See: <https://redis.io/commands/pubsub-numsub>
 pub struct PubSubNumSub {
     channels: Vec<String>,
 }
 
 impl PubSubNumSub {
+    /// Creates a new [`PubSubNumSub`] command with no channels (returns all).
     pub fn new() -> Self {
         Self {
             channels: Vec::new(),
@@ -277,9 +289,12 @@ impl Command for PubSubNumSub {
 ///
 /// Returns the number of unique patterns that are subscribed to by
 /// clients (via PSUBSCRIBE).
+///
+/// See: <https://redis.io/commands/pubsub-numpat>
 pub struct PubSubNumPat;
 
 impl PubSubNumPat {
+    /// Creates a new [`PubSubNumPat`] command.
     pub fn new() -> Self {
         Self
     }
@@ -319,11 +334,14 @@ impl Command for PubSubNumPat {
 /// is a Pub/Sub shard channel with one or more subscribers. If no
 /// pattern is specified, all active shard channels are listed.
 /// Glob-style patterns are supported. (Redis 7.0+)
+///
+/// See: <https://redis.io/commands/pubsub-shardchannels>
 pub struct PubSubShardChannels {
     pattern: Option<String>,
 }
 
 impl PubSubShardChannels {
+    /// Creates a new [`PubSubShardChannels`] command listing all active shard channels.
     pub fn new() -> Self {
         Self { pattern: None }
     }
@@ -387,11 +405,14 @@ impl Command for PubSubShardChannels {
 /// Returns the number of subscribers for the specified shard channels.
 /// The response is a flat array of channel/count pairs in RESP2, or a
 /// map in RESP3. (Redis 7.0+)
+///
+/// See: <https://redis.io/commands/pubsub-shardnumsub>
 pub struct PubSubShardNumSub {
     channels: Vec<String>,
 }
 
 impl PubSubShardNumSub {
+    /// Creates a new [`PubSubShardNumSub`] command with no channels (returns all).
     pub fn new() -> Self {
         Self {
             channels: Vec::new(),

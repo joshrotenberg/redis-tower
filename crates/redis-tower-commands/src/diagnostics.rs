@@ -9,12 +9,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns the number of bytes that a key and its value require to be stored
 /// in RAM. Returns `None` if the key does not exist.
+///
+/// See: <https://redis.io/commands/memory-usage>
 pub struct MemoryUsage {
     key: String,
     samples: Option<u64>,
 }
 
 impl MemoryUsage {
+    /// Creates a new [`MemoryUsage`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -23,6 +26,7 @@ impl MemoryUsage {
     }
 
     /// Set the number of nested values to sample (default 5).
+    #[must_use]
     pub fn samples(mut self, count: u64) -> Self {
         self.samples = Some(count);
         self
@@ -61,9 +65,12 @@ impl Command for MemoryUsage {
 /// MEMORY DOCTOR
 ///
 /// Returns a diagnostic report about memory issues the server may have.
+///
+/// See: <https://redis.io/commands/memory-doctor>
 pub struct MemoryDoctor;
 
 impl MemoryDoctor {
+    /// Creates a new [`MemoryDoctor`] command.
     pub fn new() -> Self {
         Self
     }
@@ -101,9 +108,12 @@ impl Command for MemoryDoctor {
 ///
 /// Returns detailed memory consumption statistics as a complex nested
 /// key-value response.
+///
+/// See: <https://redis.io/commands/memory-stats>
 pub struct MemoryStats;
 
 impl MemoryStats {
+    /// Creates a new [`MemoryStats`] command.
     pub fn new() -> Self {
         Self
     }
@@ -139,12 +149,14 @@ impl Command for MemoryStats {
 ///
 /// Returns entries from the slow log. Each entry is an array containing
 /// the log id, timestamp, execution time, command array, client info, etc.
+///
+/// See: <https://redis.io/commands/slowlog-get>
 pub struct SlowlogGet {
     count: Option<u64>,
 }
 
 impl SlowlogGet {
-    /// Return all slow log entries.
+    /// Creates a new [`SlowlogGet`] command returning all slow log entries.
     pub fn new() -> Self {
         Self { count: None }
     }
@@ -184,9 +196,12 @@ impl Command for SlowlogGet {
 /// SLOWLOG LEN
 ///
 /// Returns the number of entries in the slow log.
+///
+/// See: <https://redis.io/commands/slowlog-len>
 pub struct SlowlogLen;
 
 impl SlowlogLen {
+    /// Creates a new [`SlowlogLen`] command.
     pub fn new() -> Self {
         Self
     }
@@ -223,9 +238,12 @@ impl Command for SlowlogLen {
 /// SLOWLOG RESET
 ///
 /// Clears all entries from the slow log.
+///
+/// See: <https://redis.io/commands/slowlog-reset>
 pub struct SlowlogReset;
 
 impl SlowlogReset {
+    /// Creates a new [`SlowlogReset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -267,9 +285,12 @@ impl Command for SlowlogReset {
 ///
 /// Returns the latest latency samples for all monitored events. Each entry
 /// is an array of [event-name, timestamp, latest-latency-ms, max-latency-ms].
+///
+/// See: <https://redis.io/commands/latency-latest>
 pub struct LatencyLatest;
 
 impl LatencyLatest {
+    /// Creates a new [`LatencyLatest`] command.
     pub fn new() -> Self {
         Self
     }
@@ -301,11 +322,14 @@ impl Command for LatencyLatest {
 ///
 /// Returns latency time-series data for the specified event. Each entry
 /// is an array of [timestamp, latency-ms].
+///
+/// See: <https://redis.io/commands/latency-history>
 pub struct LatencyHistory {
     event: String,
 }
 
 impl LatencyHistory {
+    /// Creates a new [`LatencyHistory`] command.
     pub fn new(event: impl Into<String>) -> Self {
         Self {
             event: event.into(),
@@ -337,23 +361,27 @@ impl Command for LatencyHistory {
 ///
 /// Resets latency data for the specified events, or all events if none given.
 /// Returns the number of events that were reset.
+///
+/// See: <https://redis.io/commands/latency-reset>
 pub struct LatencyReset {
     events: Vec<String>,
 }
 
 impl LatencyReset {
-    /// Reset all latency events.
+    /// Creates a new [`LatencyReset`] command resetting all latency events.
     pub fn new() -> Self {
         Self { events: Vec::new() }
     }
 
     /// Reset a specific latency event.
+    #[must_use]
     pub fn event(mut self, event: impl Into<String>) -> Self {
         self.events.push(event.into());
         self
     }
 
     /// Reset multiple latency events.
+    #[must_use]
     pub fn events(mut self, events: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.events.extend(events.into_iter().map(Into::into));
         self
