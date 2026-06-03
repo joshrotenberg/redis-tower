@@ -407,5 +407,95 @@ macro_rules! __command_tests_inner {
             assert!(!info.is_empty());
             c.execute(Del::new(&k)).await.unwrap();
         }
+
+        // -- Bitmap --
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_setbit_getbit() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("bitmap", "setbit");
+            c.execute(Del::new(&k)).await.unwrap();
+            let old = c.execute(SetBit::new(&k, 7, 1)).await.unwrap();
+            assert_eq!(old, 0);
+            let val = c.execute(GetBit::new(&k, 7)).await.unwrap();
+            assert_eq!(val, 1);
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_bitcount() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("bitmap", "bitcount");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(SetBit::new(&k, 0, 1)).await.unwrap();
+            c.execute(SetBit::new(&k, 7, 1)).await.unwrap();
+            let count = c.execute(BitCount::new(&k)).await.unwrap();
+            assert_eq!(count, 2);
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        // -- Geo --
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_geoadd_geopos_geodist() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("geo", "sf");
+            c.execute(Del::new(&k)).await.unwrap();
+            let added = c.execute(
+                GeoAdd::new(&k).member(-122.4194, 37.7749, "sf")
+            ).await.unwrap();
+            assert_eq!(added, 1);
+            let pos = c.execute(GeoPos::new(&k, "sf")).await.unwrap();
+            assert_eq!(pos.len(), 1);
+            assert!(pos[0].is_some());
+            let (lon, lat) = pos[0].unwrap();
+            assert!((lon - (-122.4194)).abs() < 0.001);
+            assert!((lat - 37.7749).abs() < 0.001);
+            c.execute(GeoAdd::new(&k).member(-118.2437, 34.0522, "la")).await.unwrap();
+            let dist = c.execute(
+                GeoDist::new(&k, "sf", "la").unit(GeoUnit::Kilometers)
+            ).await.unwrap();
+            assert!(dist.is_some());
+            let d = dist.unwrap();
+            assert!((500.0..700.0).contains(&d), "SF-LA distance should be ~560km, got {d}");
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        // -- HyperLogLog --
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_pfadd_pfcount() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("hll", "pfadd");
+            c.execute(Del::new(&k)).await.unwrap();
+            c.execute(PfAdd::elements(&k, ["a", "b", "c", "d", "e"])).await.unwrap();
+            let count = c.execute(PfCount::new(&k)).await.unwrap();
+            assert!((4..=6).contains(&count), "HLL cardinality should be ~5, got {count}");
+            c.execute(Del::new(&k)).await.unwrap();
+        }
+
+        // -- Streams --
+
+        #[tokio::test]
+        $(#[$attr])*
+        async fn cmd_xadd_xlen_xrange() {
+            let mut c = $conn_fn().await;
+            let k = _cmd_key("stream", "basic");
+            c.execute(Del::new(&k)).await.unwrap();
+            let id = c.execute(XAdd::new(&k).field("sensor", "temp").field("value", "22"))
+                .await.unwrap();
+            assert!(!id.is_empty());
+            let len = c.execute(XLen::new(&k)).await.unwrap();
+            assert_eq!(len, 1);
+            let entries = c.execute(XRange::all(&k)).await.unwrap();
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].id, id);
+            assert_eq!(entries[0].fields[0].0, "sensor");
+            c.execute(Del::new(&k)).await.unwrap();
+        }
     };
 }
