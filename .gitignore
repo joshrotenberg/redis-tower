@@ -24,7 +24,6 @@ tmp/
 dump.rdb
 
 # Local context
-CLAUDE.md
 comparisons/*/target/
 comparisons/*/Cargo.lock
 comparisons/
