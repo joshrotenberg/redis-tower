@@ -23,10 +23,16 @@
 //! [`SentinelClient`] provides a higher-level API on top of
 //! [`SentinelConnection`] for users who prefer the `execute`-style interface
 //! rather than working with `tower::Service` directly.
+//!
+//! For high-concurrency workloads, [`MultiplexedSentinelClient`] batches
+//! concurrent requests into pipelines automatically using a single shared
+//! connection.
 
 mod client;
 mod connection;
 pub mod discovery;
+mod multiplexed;
 
 pub use client::SentinelClient;
 pub use connection::SentinelConnection;
+pub use multiplexed::MultiplexedSentinelClient;
