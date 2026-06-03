@@ -67,11 +67,48 @@ pub struct Transaction {
 }
 
 /// The outcome of a transaction execution.
+#[must_use = "transaction result must be handled"]
 pub enum TransactionResult {
     /// Transaction committed successfully. Results can be extracted by index.
     Committed(PipelineResults),
     /// Transaction was aborted because a WATCHed key was modified.
     Aborted,
+}
+
+impl TransactionResult {
+    /// Returns `Some(results)` if the transaction committed, `None` if aborted.
+    pub fn committed(self) -> Option<PipelineResults> {
+        match self {
+            TransactionResult::Committed(results) => Some(results),
+            TransactionResult::Aborted => None,
+        }
+    }
+
+    /// Returns `true` if the transaction was aborted due to a WATCH violation.
+    pub fn is_aborted(&self) -> bool {
+        matches!(self, TransactionResult::Aborted)
+    }
+
+    /// Returns `true` if the transaction committed successfully.
+    pub fn is_committed(&self) -> bool {
+        matches!(self, TransactionResult::Committed(_))
+    }
+
+    /// Unwraps the committed results, panicking if the transaction was aborted.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the transaction was aborted. Use this only in tests or when
+    /// the transaction cannot possibly be aborted (no WATCH keys).
+    #[track_caller]
+    pub fn unwrap(self) -> PipelineResults {
+        match self {
+            TransactionResult::Committed(results) => results,
+            TransactionResult::Aborted => {
+                panic!("called `TransactionResult::unwrap()` on an `Aborted` value")
+            }
+        }
+    }
 }
 
 impl Transaction {
@@ -164,5 +201,48 @@ impl Transaction {
 impl Default for Transaction {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn committed() -> TransactionResult {
+        TransactionResult::Committed(PipelineResults::from_raw(Vec::new()))
+    }
+
+    #[test]
+    fn committed_returns_some_for_committed() {
+        assert!(committed().committed().is_some());
+    }
+
+    #[test]
+    fn committed_returns_none_for_aborted() {
+        assert!(TransactionResult::Aborted.committed().is_none());
+    }
+
+    #[test]
+    fn is_aborted_reports_correctly() {
+        assert!(TransactionResult::Aborted.is_aborted());
+        assert!(!committed().is_aborted());
+    }
+
+    #[test]
+    fn is_committed_reports_correctly() {
+        assert!(committed().is_committed());
+        assert!(!TransactionResult::Aborted.is_committed());
+    }
+
+    #[test]
+    fn unwrap_succeeds_on_committed() {
+        let results = committed().unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "Aborted")]
+    fn unwrap_panics_on_aborted() {
+        let _ = TransactionResult::Aborted.unwrap();
     }
 }
