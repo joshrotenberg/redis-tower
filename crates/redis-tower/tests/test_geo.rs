@@ -105,3 +105,38 @@ async fn geosearch() {
     assert!(members.contains(&Bytes::from("Palermo")));
     assert!(members.contains(&Bytes::from("Catania")));
 }
+
+#[tokio::test]
+async fn geosearchstore() {
+    let mut c = conn().await;
+    let src = "cover2:geo:geosearchstore:src";
+    let dst = "cover2:geo:geosearchstore:dst";
+
+    c.execute(Del::new(src)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+    c.execute(
+        GeoAdd::new(src)
+            .member(13.361389, 38.115556, "Palermo")
+            .member(15.087269, 37.502669, "Catania")
+            .member(2.349014, 48.864716, "Paris"),
+    )
+    .await
+    .unwrap();
+
+    // Store members within 200 km of Palermo into the destination key.
+    let stored = c
+        .execute(
+            GeoSearchStore::from_member(dst, src, "Palermo")
+                .by_radius(200.0, GeoUnit::Kilometers)
+                .asc(),
+        )
+        .await
+        .unwrap();
+    assert!(stored >= 2);
+
+    // Verify the destination contains the expected members via ZRANGE.
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert!(members.contains(&Bytes::from("Palermo")));
+    assert!(members.contains(&Bytes::from("Catania")));
+    assert!(!members.contains(&Bytes::from("Paris")));
+}
