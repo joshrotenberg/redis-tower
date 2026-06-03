@@ -58,6 +58,15 @@ pub enum RedisError {
         attempts: usize,
         last_error: Box<RedisError>,
     },
+
+    /// Timed out waiting to acquire a connection from the pool.
+    #[error("pool acquisition timeout after {waited:?} waiting for 1 of {pool_size} connections")]
+    PoolAcquisitionTimeout {
+        /// How long the caller waited before the timeout fired.
+        waited: std::time::Duration,
+        /// Number of connections in the pool.
+        pool_size: usize,
+    },
 }
 
 impl RedisError {
