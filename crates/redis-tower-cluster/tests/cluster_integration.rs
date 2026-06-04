@@ -5,7 +5,7 @@
 use bytes::Bytes;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
 use redis_tower::pool::ConnectionPool;
-use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient};
+use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient, slot_for_key};
 use redis_tower_commands::*;
 use tokio::sync::OnceCell;
 
@@ -99,6 +99,187 @@ async fn cluster_hash_tag_same_slot() {
 
     cluster.execute(Del::new(k1)).await.unwrap();
     cluster.execute(Del::new(k2)).await.unwrap();
+}
+
+// -- MOVED redirect tests (#327) --
+
+#[tokio::test]
+#[ignore]
+async fn cluster_moved_redirect_transparent() {
+    // "foo", "hello", and "bar" hash to distinct slots. With 3 masters
+    // covering ~5461 slots each, ClusterConnection.execute() routes by slot
+    // and follows MOVED transparently if any routing decision is stale.
+    let mut conn = cluster_conn().await;
+
+    // Write keys known to be on different slots.
+    conn.execute(Set::new("foo", "foo_val")).await.unwrap();
+    conn.execute(Set::new("hello", "hello_val")).await.unwrap();
+    conn.execute(Set::new("bar", "bar_val")).await.unwrap();
+
+    // Read them back -- any routing error returns a MOVED which execute() follows.
+    let v1: Option<Bytes> = conn.execute(Get::new("foo")).await.unwrap();
+    let v2: Option<Bytes> = conn.execute(Get::new("hello")).await.unwrap();
+    let v3: Option<Bytes> = conn.execute(Get::new("bar")).await.unwrap();
+
+    assert_eq!(v1, Some(Bytes::from("foo_val")));
+    assert_eq!(v2, Some(Bytes::from("hello_val")));
+    assert_eq!(v3, Some(Bytes::from("bar_val")));
+
+    // Verify the three keys land on different slots.
+    let s1 = slot_for_key(b"foo");
+    let s2 = slot_for_key(b"hello");
+    let s3 = slot_for_key(b"bar");
+    assert_ne!(s1, s2);
+    assert_ne!(s2, s3);
+    assert_ne!(s1, s3);
+
+    // Cleanup.
+    conn.execute(Del::new("foo")).await.unwrap();
+    conn.execute(Del::new("hello")).await.unwrap();
+    conn.execute(Del::new("bar")).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_moved_updates_topology() {
+    let mut conn = cluster_conn().await;
+    let key = "cluster_topo_update_test";
+
+    // Write via correct routing.
+    conn.execute(Set::new(key, "val")).await.unwrap();
+
+    // Find which node currently owns this key's slot.
+    let slot = slot_for_key(key.as_bytes());
+    let original_master = conn.topology().master_for_slot(slot).unwrap().clone();
+
+    // Find a master that is NOT the current owner of this slot.
+    let wrong_master = conn
+        .topology()
+        .master_addrs()
+        .into_iter()
+        .find(|addr| **addr != original_master)
+        .unwrap()
+        .clone();
+
+    // Corrupt the topology: point this slot's range at the wrong master.
+    for range in conn.topology_mut().slot_ranges.iter_mut() {
+        if slot >= range.start && slot <= range.end {
+            range.master = wrong_master.clone();
+            break;
+        }
+    }
+
+    // Topology is now stale (pointing at the wrong node).
+    assert_eq!(
+        conn.topology().master_for_slot(slot).unwrap(),
+        &wrong_master
+    );
+
+    // Execute should succeed: the wrong node returns MOVED and execute()
+    // follows it, patching the slot map back to the real owner.
+    let v: Option<Bytes> = conn.execute(Get::new(key)).await.unwrap();
+    assert_eq!(v, Some(Bytes::from("val")));
+
+    // After the redirect, topology should reflect the real owner again.
+    let updated_master = conn.topology().master_for_slot(slot).unwrap().clone();
+    assert_eq!(updated_master, original_master);
+
+    // Cleanup.
+    conn.execute(Del::new(key)).await.unwrap();
+}
+
+// -- CROSSSLOT tests (#333) --
+
+#[tokio::test]
+#[ignore]
+async fn cluster_crossslot_mget_returns_error() {
+    let mut conn = cluster_conn().await;
+    // "foo" and "hello" land on different slots/shards.
+    let result = conn.execute(MGet::new(["foo", "hello"])).await;
+    assert!(result.is_err(), "expected CROSSSLOT error, got Ok");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("CROSSSLOT"),
+        "expected CROSSSLOT in error, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_crossslot_mset_returns_error() {
+    let mut conn = cluster_conn().await;
+    let result = conn
+        .execute(MSet::new([("foo", "v1"), ("hello", "v2")]))
+        .await;
+    assert!(result.is_err(), "expected CROSSSLOT error, got Ok");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("CROSSSLOT"),
+        "expected CROSSSLOT in error, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_crossslot_del_returns_error() {
+    let mut conn = cluster_conn().await;
+    // Multi-key Del uses Del::keys (Del::new takes a single key).
+    let result = conn.execute(Del::keys(["foo", "hello"])).await;
+    assert!(result.is_err(), "expected CROSSSLOT error, got Ok");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("CROSSSLOT"),
+        "expected CROSSSLOT in error, got: {err}"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_hash_tag_mget_same_slot_succeeds() {
+    let mut conn = cluster_conn().await;
+    let k1 = "{crossslot_tag}:key1";
+    let k2 = "{crossslot_tag}:key2";
+
+    conn.execute(Set::new(k1, "v1")).await.unwrap();
+    conn.execute(Set::new(k2, "v2")).await.unwrap();
+
+    let result = conn.execute(MGet::new([k1, k2])).await;
+    assert!(
+        result.is_ok(),
+        "hash-tag MGet should succeed: {:?}",
+        result.err()
+    );
+    let vals = result.unwrap();
+    assert_eq!(vals[0], Some(Bytes::from("v1")));
+    assert_eq!(vals[1], Some(Bytes::from("v2")));
+
+    conn.execute(Del::new(k1)).await.unwrap();
+    conn.execute(Del::new(k2)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn cluster_hash_tag_mset_same_slot_succeeds() {
+    let mut conn = cluster_conn().await;
+    let k1 = "{mset_tag}:a";
+    let k2 = "{mset_tag}:b";
+
+    let result = conn
+        .execute(MSet::new([(k1, "hello"), (k2, "world")]))
+        .await;
+    assert!(
+        result.is_ok(),
+        "hash-tag MSet should succeed: {:?}",
+        result.err()
+    );
+
+    let v1: Option<Bytes> = conn.execute(Get::new(k1)).await.unwrap();
+    let v2: Option<Bytes> = conn.execute(Get::new(k2)).await.unwrap();
+    assert_eq!(v1, Some(Bytes::from("hello")));
+    assert_eq!(v2, Some(Bytes::from("world")));
+
+    conn.execute(Del::new(k1)).await.unwrap();
+    conn.execute(Del::new(k2)).await.unwrap();
 }
 
 // -- MultiplexedClusterClient-specific tests --

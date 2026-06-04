@@ -132,8 +132,12 @@ pub enum ReadPreference {
 /// Discovers the cluster topology via CLUSTER SLOTS on the seed node,
 /// then maintains connections to masters (and optionally replicas).
 ///
-/// Handles MOVED and ASK redirects automatically. Supports read
-/// preference for routing read-only commands to replicas.
+/// Handles MOVED and ASK redirects automatically via [`ClusterConnection::execute`].
+/// Supports read preference for routing read-only commands to replicas.
+///
+/// Note that the Tower [`tower_service::Service`] implementation routes by the
+/// current topology snapshot but does **not** follow MOVED/ASK redirects -- use
+/// [`ClusterConnection::execute`] when transparent redirect handling is needed.
 ///
 /// # Example
 ///
@@ -165,6 +169,9 @@ pub struct ClusterConnection {
     read_preference: ReadPreference,
     /// Strategy for selecting which replica to read from.
     read_routing: Arc<dyn ReadRoutingStrategy>,
+    /// When true, the first MOVED redirect in `execute` triggers a full
+    /// topology refresh rather than a point patch of the slot map.
+    auto_refresh_on_moved: bool,
     /// TLS configuration for node connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -177,6 +184,7 @@ pub struct ClusterConnectionBuilder {
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+    auto_refresh_on_moved: bool,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
@@ -218,6 +226,20 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Refresh the full topology on the first MOVED redirect.
+    ///
+    /// When `false` (the default), a MOVED redirect patches only the
+    /// affected slot in the local slot map via `update_slot_owner`. When
+    /// `true`, the first MOVED redirect encountered while executing a
+    /// command triggers a full [`ClusterConnection::refresh_topology`]
+    /// instead, re-reading the cluster's slot map from a live node before
+    /// retrying. This is more expensive but recovers the entire slot map
+    /// after a large reshard in a single round trip.
+    pub fn auto_refresh_on_moved(mut self, val: bool) -> Self {
+        self.auto_refresh_on_moved = val;
+        self
+    }
+
     /// Set the TLS configuration for cluster connections.
     ///
     /// When set, all connections to cluster nodes (seed, masters, and
@@ -239,6 +261,7 @@ impl ClusterConnectionBuilder {
             self.address_map,
             self.read_preference,
             self.read_routing,
+            self.auto_refresh_on_moved,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -262,6 +285,7 @@ impl ClusterConnection {
             None,
             ReadPreference::Master,
             None,
+            false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -279,6 +303,7 @@ impl ClusterConnection {
             None,
             ReadPreference::Master,
             None,
+            false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -293,6 +318,7 @@ impl ClusterConnection {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: None,
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -304,6 +330,7 @@ impl ClusterConnection {
         address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+        auto_refresh_on_moved: bool,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
             Arc<redis_tower_core::tls::TlsConfig>,
         >,
@@ -378,6 +405,7 @@ impl ClusterConnection {
             address_map,
             read_preference,
             read_routing,
+            auto_refresh_on_moved,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
@@ -406,9 +434,20 @@ impl ClusterConnection {
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
                     let addr = self.remap_addr(&addr);
-                    self.ensure_connection(&addr).await?;
-                    self.update_slot_owner(slot, &addr);
-                    target_node = addr;
+                    if self.auto_refresh_on_moved {
+                        // Refresh the entire slot map from a live node. This
+                        // implicitly adds connections for all masters and
+                        // rewrites the slot ranges, so the point patch via
+                        // `update_slot_owner` + `ensure_connection` is
+                        // redundant. Re-route the command against the fresh
+                        // topology to find the new target node.
+                        self.refresh_topology().await?;
+                        target_node = self.route_command(&cmd_frame).to_string();
+                    } else {
+                        self.ensure_connection(&addr).await?;
+                        self.update_slot_owner(slot, &addr);
+                        target_node = addr;
+                    }
                     continue;
                 }
                 Some(Redirect::Ask { addr }) => {
@@ -441,6 +480,14 @@ impl ClusterConnection {
                 }
             }
         }
+
+        // The redirect loop was exhausted, which means the local topology is
+        // badly out of sync (e.g. a reshard touched more slots than a single
+        // command's worth of patches could keep up with). Refresh the full
+        // slot map so the next command starts from a clean topology. The
+        // refresh result is intentionally ignored -- the caller needs the
+        // original "too many redirects" error, not a refresh failure.
+        let _ = self.refresh_topology().await;
 
         Err(RedisError::Redis(format!(
             "too many redirects ({MAX_REDIRECTS})"
@@ -547,6 +594,15 @@ impl ClusterConnection {
         &self.topology
     }
 
+    /// Get mutable access to the current cluster topology.
+    ///
+    /// Primarily useful for tests that need to deliberately corrupt the
+    /// slot map (e.g. to verify MOVED redirect handling). Mutating the
+    /// topology does not open or close node connections; use with care.
+    pub fn topology_mut(&mut self) -> &mut ClusterTopology {
+        &mut self.topology
+    }
+
     /// Get the current read preference.
     pub fn read_preference(&self) -> ReadPreference {
         self.read_preference
@@ -617,9 +673,17 @@ impl redis_tower::RedisExecutor for ClusterConnection {
     }
 }
 
-// Note: Service::call routes to the correct node but does NOT handle
-// MOVED/ASK redirects. Use `execute()` for full redirect handling.
-// The Service impl enables Tower middleware composition (caching, timeouts).
+/// Tower `Service` implementation for `ClusterConnection`.
+///
+/// **Note:** `Service::call` routes to the correct node based on the current
+/// topology snapshot but does **not** handle MOVED or ASK redirects. If the
+/// topology is stale after a reshard, `call` will return the raw MOVED/ASK
+/// error to the caller. Use [`ClusterConnection::execute`] for full
+/// transparent redirect handling with automatic topology updates.
+///
+/// The `Service` impl exists to enable Tower middleware composition (caching,
+/// timeouts, and so on) where redirect handling is either not required or is
+/// layered in separately.
 impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
     type Response = Cmd::Response;
     type Error = RedisError;
@@ -850,6 +914,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -866,6 +931,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -892,6 +958,7 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -919,6 +986,7 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1008,6 +1076,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            auto_refresh_on_moved: false,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
