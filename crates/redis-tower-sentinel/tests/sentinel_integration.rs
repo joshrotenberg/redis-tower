@@ -264,6 +264,43 @@ async fn sentinel_pool_exhaustion_and_recovery() {
     }
 }
 
+// -- Quorum behavior --
+
+// This test runs before sentinel_failover_simulation because it needs the
+// master alive. It kills one sentinel process (not the master), leaving 2/3
+// sentinels alive. Discovery must still succeed using the remaining quorum.
+// The killed sentinel's address stays in sentinel_addrs, so discover_master
+// tries the dead one (failing fast via the per-sentinel timeout) before
+// falling back to a live sentinel.
+#[tokio::test]
+#[ignore]
+async fn sentinel_discovers_master_with_one_sentinel_down() {
+    let handle = ensure_sentinel().await;
+
+    // Kill one sentinel process. The topology has 3 sentinels; quorum is 2.
+    // Discovery should still succeed using the remaining 2 sentinels.
+    let pids = handle.pids();
+    // pids: [master, replica1, replica2, sentinel1, sentinel2, sentinel3]
+    let sentinel_pid = pids[3];
+    std::process::Command::new("kill")
+        .args(["-9", &sentinel_pid.to_string()])
+        .status()
+        .expect("kill failed");
+
+    // Give the OS a moment to reap the process.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // Discovery must succeed using the remaining 2/3 sentinels.
+    let addrs = sentinel_addrs().await;
+    let addr = redis_tower_sentinel::discovery::discover_master(&addrs, "mymaster")
+        .await
+        .expect("discovery should succeed with 2/3 sentinels alive");
+    assert!(
+        addr.contains("6390") || addr.contains("6391") || addr.contains("6392"),
+        "discovered address should be a known redis port, got: {addr}"
+    );
+}
+
 // -- Failover simulation --
 
 // This test is destructive: it kills the master process, leaving the topology
@@ -349,4 +386,31 @@ async fn sentinel_failover_simulation() {
         initial_master, new_master,
         "expected a different master after failover"
     );
+}
+
+// -- Reconnect after failover --
+
+// This test runs after sentinel_failover_simulation has killed the original
+// master. The sentinel topology still has 2 remaining sentinel processes
+// (after sentinel_discovers_master_with_one_sentinel_down killed one).
+// A fresh SentinelConnection should discover the newly elected master
+// and execute commands successfully without calling rediscover() manually.
+#[tokio::test]
+#[ignore]
+async fn sentinel_reconnects_after_failover() {
+    let addrs = sentinel_addrs().await;
+    let mut conn = SentinelConnection::connect(&addrs, "mymaster")
+        .await
+        .expect("fresh connection should discover the current master");
+
+    let k = key("reconnect_after_failover", "k");
+    conn.execute(Set::new(&k, "rediscovered"))
+        .await
+        .expect("set should succeed on new master");
+    let val: Option<bytes::Bytes> = conn
+        .execute(Get::new(&k))
+        .await
+        .expect("get should succeed on new master");
+    assert_eq!(val, Some(bytes::Bytes::from("rediscovered")));
+    conn.execute(Del::new(&k)).await.ok();
 }

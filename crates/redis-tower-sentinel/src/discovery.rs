@@ -1,5 +1,7 @@
 //! Sentinel discovery: find the current master and replicas.
 
+use std::time::Duration;
+
 use redis_tower_core::{Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -7,14 +9,32 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Tries each sentinel in order until one responds. Returns the
 /// master's `"host:port"` address.
+///
+/// Uses a default per-sentinel timeout of 1 second so that an
+/// unreachable sentinel fails fast rather than blocking on the OS TCP
+/// connect timeout. See [`discover_master_with_timeout`] to customize.
 pub async fn discover_master(
     sentinel_addrs: &[String],
     master_name: &str,
 ) -> Result<String, RedisError> {
+    discover_master_with_timeout(sentinel_addrs, master_name, Duration::from_millis(1000)).await
+}
+
+/// Discover the current master address, with a per-sentinel timeout.
+///
+/// Like [`discover_master`], but each sentinel query is bounded by
+/// `timeout`. A sentinel that does not respond within the timeout is
+/// skipped and the next sentinel is tried. This prevents an unreachable
+/// sentinel from blocking discovery on the OS TCP connect timeout.
+pub async fn discover_master_with_timeout(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    timeout: Duration,
+) -> Result<String, RedisError> {
     for addr in sentinel_addrs {
-        match query_master_addr(addr, master_name).await {
-            Ok(master_addr) => return Ok(master_addr),
-            Err(_) => continue,
+        match tokio::time::timeout(timeout, query_master_addr(addr, master_name)).await {
+            Ok(Ok(master_addr)) => return Ok(master_addr),
+            Ok(Err(_)) | Err(_) => continue,
         }
     }
     Err(RedisError::Redis(format!(

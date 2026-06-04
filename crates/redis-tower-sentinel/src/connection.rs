@@ -11,8 +11,9 @@ use crate::discovery;
 /// A Redis connection managed by Sentinel.
 ///
 /// Discovers the current master via Sentinel and connects to it.
-/// When a command fails with a connection error, the next call
-/// rediscovers the master (which may have changed due to failover).
+/// When a command fails with a connection error, the connection
+/// immediately rediscovers the master (which may have changed due to
+/// failover). The caller should retry the command.
 ///
 /// # Example
 ///
@@ -62,6 +63,13 @@ impl SentinelConnection {
     ///
     /// If the connection was marked as needing rediscovery (after a
     /// previous connection error), rediscovers the master first.
+    ///
+    /// On a connection error during execution (which may indicate a
+    /// failover), the master is rediscovered eagerly so that the next
+    /// `execute()` call connects to the new master without an additional
+    /// rediscovery round-trip. The current command cannot be retried here
+    /// because it has already been consumed; the caller should retry if
+    /// appropriate.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         if self.needs_rediscovery {
             self.rediscover().await?;
@@ -71,7 +79,13 @@ impl SentinelConnection {
         if let Err(ref e) = result
             && e.is_connection_error()
         {
-            self.needs_rediscovery = true;
+            // Failover may have occurred. Eagerly rediscover the new master
+            // so the next execute() call connects immediately without an
+            // additional rediscovery round-trip. The current command cannot
+            // be retried here because it has been consumed; the caller should
+            // retry if appropriate. If rediscovery fails, fall back to the
+            // deferred path so the next call tries again.
+            self.needs_rediscovery = self.rediscover().await.is_err();
         }
         result
     }
