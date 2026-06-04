@@ -110,8 +110,7 @@ impl<C: RedisExecutor> JsonClient<C> {
         path: impl Into<String>,
         value: &T,
     ) -> Result<(), RedisError> {
-        let json_str = serde_json::to_string(value)
-            ?;
+        let json_str = serde_json::to_string(value)?;
         self.client
             .execute(JsonSet::new(key.into(), path.into(), json_str))
             .await
@@ -235,8 +234,7 @@ impl<C: RedisExecutor> JsonClient<C> {
         path: impl Into<String>,
         value: &T,
     ) -> Result<(), RedisError> {
-        let json_str = serde_json::to_string(value)
-            ?;
+        let json_str = serde_json::to_string(value)?;
         self.client
             .execute(JsonMerge::new(key.into(), path.into(), json_str))
             .await
@@ -265,8 +263,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     ) -> Result<Vec<Option<i64>>, RedisError> {
         let mut cmd = JsonArrAppend::new(key.into(), path.into());
         for v in values {
-            let json_str = serde_json::to_string(v)
-                ?;
+            let json_str = serde_json::to_string(v)?;
             cmd = cmd.value(json_str);
         }
         let frame = self.client.execute(cmd).await?;
