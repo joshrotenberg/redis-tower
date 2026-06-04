@@ -57,6 +57,23 @@ pub trait PoolFactory: Send + Sync + 'static {
     fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>>;
 }
 
+/// A snapshot of current [`ConnectionPool`] utilization.
+///
+/// Obtained via [`ConnectionPool::stats`]. All values are point-in-time
+/// reads of the underlying atomic counters; concurrent commands may cause
+/// values to change between calls.
+#[derive(Debug, Clone)]
+pub struct PoolStats {
+    /// Total number of connections in the pool.
+    pub size: usize,
+    /// Number of connections with zero in-flight commands (idle).
+    pub idle_count: usize,
+    /// Total in-flight command count across all connections.
+    pub total_inflight: usize,
+    /// Highest in-flight count on a single connection.
+    pub max_inflight: usize,
+}
+
 /// Dispatch strategy for distributing commands across pooled connections.
 #[derive(Debug, Clone, Copy, Default)]
 pub enum DispatchStrategy {
@@ -386,6 +403,37 @@ where
         self.inner.dispatch
     }
 
+    /// Returns a snapshot of current pool utilization.
+    ///
+    /// Reads the per-connection in-flight atomic counters to compute idle
+    /// and active connection counts. This is a non-blocking, snapshot-in-
+    /// time read — values may have changed by the time the caller acts on
+    /// them.
+    ///
+    /// Useful for emitting `redis_pool_connections_active` /
+    /// `redis_pool_connections_idle` Prometheus metrics.
+    pub fn stats(&self) -> PoolStats {
+        let mut total_inflight = 0usize;
+        let mut max_inflight = 0usize;
+        let mut idle_count = 0usize;
+        for counter in &self.inner.inflight {
+            let v = counter.load(Ordering::Relaxed);
+            total_inflight += v;
+            if v > max_inflight {
+                max_inflight = v;
+            }
+            if v == 0 {
+                idle_count += 1;
+            }
+        }
+        PoolStats {
+            size: self.inner.connections.len(),
+            idle_count,
+            total_inflight,
+            max_inflight,
+        }
+    }
+
     /// Select the next connection index based on dispatch strategy.
     ///
     /// This also increments the inflight counter for the chosen connection.
@@ -562,6 +610,24 @@ where
         drop(conn);
         self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result
+    }
+
+    /// Send a PING to every connection in the pool.
+    ///
+    /// Acquires each connection sequentially and sends `PING`. Returns
+    /// `Ok(())` if all connections respond successfully. Returns the first
+    /// error encountered if any connection is unhealthy.
+    ///
+    /// Useful for Kubernetes readiness probes and `/health` endpoints. For
+    /// a fast single-connection liveness check, call
+    /// [`execute`](ConnectionPool::execute) with [`Ping`]
+    /// directly.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        for i in 0..self.inner.connections.len() {
+            let mut conn = self.inner.connections[i].lock().await;
+            conn.execute(Ping::new()).await?;
+        }
+        Ok(())
     }
 }
 
@@ -1145,5 +1211,68 @@ mod tests {
         // execute() should block until the background task releases, then succeed.
         let result: String = pool.execute(Ping::new()).await.unwrap();
         assert_eq!(result, "PONG");
+    }
+
+    #[tokio::test]
+    async fn pool_stats_all_idle_on_fresh_pool() {
+        let conns = vec![
+            MockConn::new(0, vec![]),
+            MockConn::new(1, vec![]),
+            MockConn::new(2, vec![]),
+        ];
+
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        let stats = pool.stats();
+
+        assert_eq!(stats.size, 3);
+        assert_eq!(stats.idle_count, 3);
+        assert_eq!(stats.total_inflight, 0);
+        assert_eq!(stats.max_inflight, 0);
+    }
+
+    #[tokio::test]
+    async fn pool_stats_size_matches_pool_size() {
+        let conns = vec![MockConn::new(0, vec![]), MockConn::new(1, vec![])];
+
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+
+        assert_eq!(pool.stats().size, pool.size());
+    }
+
+    #[tokio::test]
+    async fn pool_health_check_all_healthy() {
+        use redis_tower_commands::Ping;
+
+        // 2 connections, each with a PONG response for the health check.
+        let conns = vec![
+            MockConn::new(0, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+            MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+        ];
+
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        let result = pool.health_check().await;
+        assert!(result.is_ok());
+
+        // Both connections should have received one PING call each.
+        let c0 = pool.inner.connections[0].lock().await;
+        let c1 = pool.inner.connections[1].lock().await;
+        assert_eq!(c0.calls(), 1);
+        assert_eq!(c1.calls(), 1);
+
+        // Suppress unused import warning in test.
+        let _: std::marker::PhantomData<Ping> = std::marker::PhantomData;
+    }
+
+    #[tokio::test]
+    async fn pool_health_check_returns_first_error() {
+        // Connection 0 returns an error frame (no healthy response).
+        let conns = vec![
+            MockConn::new(0, vec![Frame::Error(Bytes::from("ERR connection dead"))]),
+            MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+        ];
+
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        let result = pool.health_check().await;
+        assert!(result.is_err());
     }
 }
