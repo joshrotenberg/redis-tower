@@ -49,9 +49,9 @@ impl ScanStream {
     /// ```
     pub fn scan<'a>(
         conn: &'a mut RedisConnection,
-        pattern: &str,
+        pattern: impl Into<String>,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
-        let pattern = pattern.to_string();
+        let pattern = pattern.into();
         async_stream::try_stream! {
             let mut cursor = "0".to_string();
             loop {
@@ -76,10 +76,10 @@ impl ScanStream {
     /// per iteration. Redis may return more or fewer.
     pub fn scan_with_count<'a>(
         conn: &'a mut RedisConnection,
-        pattern: &str,
+        pattern: impl Into<String>,
         count: u64,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
-        let pattern = pattern.to_string();
+        let pattern = pattern.into();
         async_stream::try_stream! {
             let mut cursor = "0".to_string();
             loop {
@@ -119,11 +119,11 @@ impl ScanStream {
     /// ```
     pub fn hscan<'a>(
         conn: &'a mut RedisConnection,
-        key: &str,
-        pattern: &str,
+        key: impl Into<String>,
+        pattern: impl Into<String>,
     ) -> impl Stream<Item = Result<(Bytes, Bytes), RedisError>> + 'a {
-        let key = key.to_string();
-        let pattern = pattern.to_string();
+        let key = key.into();
+        let pattern = pattern.into();
         async_stream::try_stream! {
             let mut cursor = "0".to_string();
             loop {
@@ -160,11 +160,11 @@ impl ScanStream {
     /// ```
     pub fn sscan<'a>(
         conn: &'a mut RedisConnection,
-        key: &str,
-        pattern: &str,
+        key: impl Into<String>,
+        pattern: impl Into<String>,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
-        let key = key.to_string();
-        let pattern = pattern.to_string();
+        let key = key.into();
+        let pattern = pattern.into();
         async_stream::try_stream! {
             let mut cursor = "0".to_string();
             loop {
@@ -201,11 +201,11 @@ impl ScanStream {
     /// ```
     pub fn zscan<'a>(
         conn: &'a mut RedisConnection,
-        key: &str,
-        pattern: &str,
+        key: impl Into<String>,
+        pattern: impl Into<String>,
     ) -> impl Stream<Item = Result<(Bytes, f64), RedisError>> + 'a {
-        let key = key.to_string();
-        let pattern = pattern.to_string();
+        let key = key.into();
+        let pattern = pattern.into();
         async_stream::try_stream! {
             let mut cursor = "0".to_string();
             loop {
