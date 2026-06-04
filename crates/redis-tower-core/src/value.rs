@@ -311,22 +311,12 @@ impl RedisConvert<bool> for String {
 
 // -- RedisConvert from Vec<Bytes> --
 
-impl RedisConvert<Vec<Bytes>> for Vec<Bytes> {
+/// Blanket impl: any `Vec<T>` where `T: FromRedisBytes` can be parsed from a
+/// `Vec<Bytes>` Redis response.  This covers `Vec<Bytes>`, `Vec<String>`,
+/// `Vec<u32>`, etc. without requiring a separate impl for each type.
+impl<T: FromRedisBytes> RedisConvert<Vec<Bytes>> for Vec<T> {
     fn redis_convert(value: Vec<Bytes>) -> Result<Self, RedisError> {
-        Ok(value)
-    }
-}
-
-impl RedisConvert<Vec<Bytes>> for Vec<String> {
-    fn redis_convert(value: Vec<Bytes>) -> Result<Self, RedisError> {
-        value
-            .into_iter()
-            .map(|b| {
-                String::from_utf8(b.to_vec()).map_err(|_| RedisError::TypeMismatch {
-                    expected: "valid UTF-8 string",
-                })
-            })
-            .collect()
+        value.into_iter().map(T::from_redis_bytes).collect()
     }
 }
 
@@ -379,10 +369,21 @@ impl RedisConvert<Vec<(Bytes, Bytes)>> for Vec<(String, String)> {
     }
 }
 
-impl RedisConvert<Vec<(Bytes, Bytes)>> for std::collections::HashMap<String, String> {
+/// Blanket impl: `HashMap<String, V>` where `V: FromRedisBytes` can be parsed
+/// from a `Vec<(Bytes, Bytes)>` Redis response (e.g. HGETALL results).
+/// This covers `HashMap<String, String>`, `HashMap<String, f64>`, etc.
+impl<V: FromRedisBytes> RedisConvert<Vec<(Bytes, Bytes)>> for std::collections::HashMap<String, V> {
     fn redis_convert(value: Vec<(Bytes, Bytes)>) -> Result<Self, RedisError> {
-        let pairs: Vec<(String, String)> = RedisConvert::redis_convert(value)?;
-        Ok(pairs.into_iter().collect())
+        value
+            .into_iter()
+            .map(|(k, v)| {
+                let key = String::from_utf8(k.to_vec()).map_err(|_| RedisError::TypeMismatch {
+                    expected: "valid UTF-8 key",
+                })?;
+                let val = V::from_redis_bytes(v)?;
+                Ok((key, val))
+            })
+            .collect()
     }
 }
 
@@ -542,6 +543,52 @@ mod tests {
         let m: std::collections::HashMap<String, String> = v.parse_into().unwrap();
         assert_eq!(m.get("k1").unwrap(), "v1");
         assert_eq!(m.get("k2").unwrap(), "v2");
+    }
+
+    // -- Blanket impl tests --
+
+    #[test]
+    fn vec_bytes_to_vec_u32() {
+        // blanket impl: Vec<u32> via FromRedisBytes
+        let v = vec![Bytes::from("1"), Bytes::from("2"), Bytes::from("42")];
+        let ns: Vec<u32> = v.parse_into().unwrap();
+        assert_eq!(ns, vec![1u32, 2, 42]);
+    }
+
+    #[test]
+    fn vec_bytes_to_vec_bytes_blanket() {
+        // blanket impl also covers Vec<Bytes> (Bytes: FromRedisBytes)
+        let v = vec![Bytes::from("a"), Bytes::from("b")];
+        let r: Vec<Bytes> = v.parse_into().unwrap();
+        assert_eq!(r, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    #[test]
+    fn vec_pairs_to_hashmap_f64() {
+        // blanket HashMap<String, V> impl: V=f64
+        let v = vec![
+            (Bytes::from("score1"), Bytes::from("1.5")),
+            (Bytes::from("score2"), Bytes::from("2.5")),
+        ];
+        let m: std::collections::HashMap<String, f64> = v.parse_into().unwrap();
+        assert!((m["score1"] - 1.5).abs() < f64::EPSILON);
+        assert!((m["score2"] - 2.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn vec_pairs_to_hashmap_u64() {
+        // blanket HashMap<String, V> impl: V=u64
+        let v = vec![(Bytes::from("count"), Bytes::from("42"))];
+        let m: std::collections::HashMap<String, u64> = v.parse_into().unwrap();
+        assert_eq!(m["count"], 42u64);
+    }
+
+    #[test]
+    fn vec_pairs_to_hashmap_invalid_value_fails() {
+        // blanket HashMap<String, V> impl: invalid V parse returns error
+        let v = vec![(Bytes::from("key"), Bytes::from("not_a_number"))];
+        let r: Result<std::collections::HashMap<String, u32>, _> = v.parse_into();
+        assert!(r.is_err());
     }
 
     // -- Edge cases: numeric bounds --
