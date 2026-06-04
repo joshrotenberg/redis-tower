@@ -30,6 +30,10 @@
 //! }
 //! ```
 
+// `Search` is deprecated in favor of `redis_tower_modules::search::SearchClient`,
+// but its own impl blocks and tests still reference it internally.
+#![allow(deprecated)]
+
 use redis_tower_commands::{FtSearch, SortOrder};
 use redis_tower_core::{Frame, RedisError};
 use serde::de::DeserializeOwned;
@@ -82,6 +86,10 @@ pub struct SearchDoc<T> {
 ///     .search(&mut conn)
 ///     .await?;
 /// ```
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `redis_tower_modules::search::SearchClient` instead. This type will be removed in a future release."
+)]
 pub struct Search {
     index: String,
     query: String,

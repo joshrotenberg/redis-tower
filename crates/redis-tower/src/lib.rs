@@ -321,8 +321,10 @@ pub use tracing_layer::{TracingLayer, TracingService};
 pub use transaction::{Transaction, TransactionExecutor, TransactionResult};
 
 #[cfg(feature = "serde")]
+#[allow(deprecated)]
 pub use json_api::Json;
 #[cfg(feature = "serde")]
+#[allow(deprecated)]
 pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 
 // Re-export core types.

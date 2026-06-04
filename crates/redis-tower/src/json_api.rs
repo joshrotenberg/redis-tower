@@ -25,6 +25,10 @@
 //! json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
 //! ```
 
+// `Json` is deprecated in favor of `redis_tower_modules::json::JsonClient`, but
+// its own impl blocks and tests still reference it internally.
+#![allow(deprecated)]
+
 use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,6 +67,10 @@ use crate::RedisExecutor;
 /// let mut json = Json::new(client.clone());
 /// json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
 /// ```
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `redis_tower_modules::json::JsonClient` instead. This type will be removed in a future release."
+)]
 pub struct Json<C> {
     conn: C,
 }
