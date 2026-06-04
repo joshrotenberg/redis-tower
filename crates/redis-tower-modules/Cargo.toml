@@ -1,0 +1,29 @@
+[package]
+name = "redis-tower-modules"
+version = "0.1.0"
+description = "High-level ergonomic client interfaces for Redis Stack modules"
+documentation = "https://docs.rs/redis-tower-modules"
+keywords = ["redis", "tower", "async", "json", "search"]
+categories = ["database", "asynchronous", "network-programming"]
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+
+[features]
+default = ["full"]
+json         = ["redis-tower/commands-json", "dep:serde", "dep:serde_json"]
+search       = ["redis-tower/commands-search", "dep:serde", "dep:serde_json"]
+timeseries   = ["redis-tower/commands-timeseries"]
+probabilistic = ["redis-tower/commands-bloom", "redis-tower/commands-sketch", "redis-tower/commands-tdigest"]
+vector       = ["redis-tower/commands-vector-sets"]
+full         = ["json", "search", "timeseries", "probabilistic", "vector"]
+
+[dependencies]
+redis-tower = { workspace = true }
+redis-tower-core = { workspace = true }
+serde     = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }

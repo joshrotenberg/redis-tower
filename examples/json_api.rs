@@ -10,6 +10,10 @@
 //! **Feature flags required:** `serde` (enables `Json`, `Search`, and serde
 //! integration for the JSON and Search APIs).
 
+// This example intentionally demonstrates the deprecated `Json<>` wrapper.
+// New code should use `redis_tower_modules::json::JsonClient`.
+#![allow(deprecated)]
+
 use redis_tower::commands::*;
 use redis_tower::{Json, RedisConnection};
 use serde::{Deserialize, Serialize};
