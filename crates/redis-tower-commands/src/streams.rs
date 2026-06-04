@@ -1895,6 +1895,70 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
     Ok(result)
 }
 
+/// XSETID key last-id [ENTRIESADDED entries-added]
+///
+/// Sets the last entry ID of a stream. Used for stream replication and
+/// management. Returns OK.
+///
+/// The optional `ENTRIESADDED` flag (Redis 7.0+) sets the total number of
+/// entries ever added to the stream.
+pub struct XSetId {
+    key: String,
+    last_id: String,
+    entries_added: Option<u64>,
+}
+
+impl XSetId {
+    /// Create an XSETID command.
+    pub fn new(key: impl Into<String>, last_id: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            last_id: last_id.into(),
+            entries_added: None,
+        }
+    }
+
+    /// Set the `ENTRIESADDED` option (Redis 7.0+).
+    ///
+    /// Records the total number of entries ever added to the stream, used
+    /// when replicating or restoring a stream with a known history.
+    pub fn entries_added(mut self, count: u64) -> Self {
+        self.entries_added = Some(count);
+        self
+    }
+}
+
+impl Command for XSetId {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("XSETID"),
+            bulk(self.key.as_str()),
+            bulk(self.last_id.as_str()),
+        ];
+        if let Some(n) = self.entries_added {
+            args.push(bulk("ENTRIESADDED"));
+            args.push(bulk(n.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "XSETID"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2201,6 +2265,46 @@ mod tests {
                 bulk("mygroup"),
             ])
         );
+    }
+
+    // -- XSetId --
+
+    #[test]
+    fn xsetid_basic_to_frame() {
+        let cmd = XSetId::new("mystream", "1-0");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("XSETID"), bulk("mystream"), bulk("1-0"),])
+        );
+    }
+
+    #[test]
+    fn xsetid_with_entries_added_to_frame() {
+        let cmd = XSetId::new("mystream", "5-0").entries_added(100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XSETID"),
+                bulk("mystream"),
+                bulk("5-0"),
+                bulk("ENTRIESADDED"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xsetid_parse_ok() {
+        let cmd = XSetId::new("mystream", "1-0");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    #[test]
+    fn xsetid_parse_unexpected_fails() {
+        let cmd = XSetId::new("mystream", "1-0");
+        let result = cmd.parse_response(Frame::Integer(1));
+        assert!(result.is_err());
     }
 
     // -- XRevRange --
