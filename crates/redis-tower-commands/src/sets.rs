@@ -162,6 +162,10 @@ impl Command for SMembers {
     fn name(&self) -> &str {
         "SMEMBERS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SISMEMBER key member
@@ -206,6 +210,10 @@ impl Command for SIsMember {
     fn name(&self) -> &str {
         "SISMEMBER"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SCARD key
@@ -240,6 +248,10 @@ impl Command for SCard {
 
     fn name(&self) -> &str {
         "SCARD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -308,6 +320,10 @@ impl Command for SInter {
     fn name(&self) -> &str {
         "SINTER"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SRANDMEMBER key \[count\]
@@ -369,6 +385,10 @@ impl Command for SRandMember {
 
     fn name(&self) -> &str {
         "SRANDMEMBER"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -499,6 +519,10 @@ impl Command for SDiff {
     fn name(&self) -> &str {
         "SDIFF"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SDIFFSTORE destination key \[key ...\]
@@ -613,6 +637,10 @@ impl Command for SUnion {
 
     fn name(&self) -> &str {
         "SUNION"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -778,6 +806,10 @@ impl Command for SMisMember {
     fn name(&self) -> &str {
         "SMISMEMBER"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SINTERSTORE destination key \[key ...\]
@@ -880,6 +912,10 @@ impl Command for SInterCard {
 
     fn name(&self) -> &str {
         "SINTERCARD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

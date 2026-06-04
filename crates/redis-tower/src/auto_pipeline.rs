@@ -672,4 +672,23 @@ mod tests {
         let svc = make_test_svc(tx, tokio::spawn(async {}));
         assert_eq!(svc.queue_depth(), 0);
     }
+
+    #[tokio::test]
+    async fn queue_depth_increases_with_pending_requests() {
+        // With no receiver draining, each enqueued request raises the depth.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(10);
+        let svc = make_test_svc(tx.clone(), tokio::spawn(async {}));
+
+        assert_eq!(svc.queue_depth(), 0);
+
+        // Manually enqueue a request to simulate a queued, unconsumed item.
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        tx.try_send(WorkerRequest::Single {
+            frame: Frame::SimpleString(b"PING"[..].into()),
+            response_tx: dummy_tx,
+        })
+        .unwrap();
+
+        assert_eq!(svc.queue_depth(), 1);
+    }
 }

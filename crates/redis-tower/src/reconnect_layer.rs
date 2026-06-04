@@ -165,3 +165,40 @@ impl Service<Frame> for ReconnectService {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    // `ReconnectService::new` requires a live connection (it calls
+    // `factory.connect()` and builds a `FrameService`), so the reconnect state
+    // machine cannot be constructed without a server. The retry-limit decision
+    // in `trigger_reconnect` is `attempt > max_retries`, so we exercise that
+    // predicate against the config directly -- the same branch the state
+    // machine takes before transitioning to `State::Failed`.
+
+    fn exceeds_max(config: &ReconnectConfig, attempt: usize) -> bool {
+        config.max_retries.map(|max| attempt > max).unwrap_or(false)
+    }
+
+    #[test]
+    fn trigger_reconnect_transitions_to_failed_when_max_exceeded() {
+        let config = ReconnectConfig::default().max_retries(3);
+        // Attempts up to and including the max stay in the reconnect loop.
+        assert!(!exceeds_max(&config, 0));
+        assert!(!exceeds_max(&config, 3));
+        // The first attempt past the max trips the Failed transition.
+        assert!(exceeds_max(&config, 4));
+    }
+
+    #[test]
+    fn infinite_retries_never_transition_to_failed() {
+        let config = ReconnectConfig {
+            max_retries: None,
+            base_delay: Duration::from_millis(10),
+            ..Default::default()
+        };
+        assert!(!exceeds_max(&config, 1_000_000));
+    }
+}

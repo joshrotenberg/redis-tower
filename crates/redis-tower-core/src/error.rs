@@ -98,6 +98,17 @@ impl RedisError {
     ///
     /// Note: `TransactionAborted` is retryable at the transaction level
     /// (rebuild and re-execute) but not at the command level.
+    ///
+    /// # Safety Warning
+    ///
+    /// For connection errors ([`RedisError::Connection`] and
+    /// [`RedisError::ConnectionClosed`]), the command may have been received
+    /// and executed by Redis before the connection dropped. Retrying a
+    /// non-idempotent write (INCR, LPUSH, ZADD, etc.) can silently duplicate
+    /// data. Always check [`Command::idempotent`] before retrying on a
+    /// connection error.
+    ///
+    /// [`Command::idempotent`]: crate::Command::idempotent
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,

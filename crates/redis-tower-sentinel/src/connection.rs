@@ -41,6 +41,11 @@ pub struct SentinelConnection {
     sentinel_addrs: Vec<String>,
     /// Monitored master name.
     master_name: String,
+    /// Address of the master this connection is currently bound to.
+    ///
+    /// Tracked so that rediscovery can log the old -> new master transition
+    /// after a failover.
+    current_addr: String,
     /// Whether the connection needs rediscovery.
     needs_rediscovery: bool,
 }
@@ -62,6 +67,7 @@ impl SentinelConnection {
             conn,
             sentinel_addrs: addrs,
             master_name: master_name.to_string(),
+            current_addr: master_addr,
             needs_rediscovery: false,
         })
     }
@@ -86,6 +92,11 @@ impl SentinelConnection {
         if let Err(ref e) = result
             && e.is_connection_error()
         {
+            tracing::warn!(
+                error = %e,
+                master_name = %self.master_name,
+                "sentinel: connection error, rediscovering master"
+            );
             // Failover may have occurred. Eagerly rediscover the new master
             // so the next execute() call connects immediately without an
             // additional rediscovery round-trip. The current command cannot
@@ -101,7 +112,14 @@ impl SentinelConnection {
     pub async fn rediscover(&mut self) -> Result<(), RedisError> {
         let master_addr =
             discovery::discover_master(&self.sentinel_addrs, &self.master_name).await?;
+        tracing::info!(
+            old_addr = %self.current_addr,
+            new_addr = %master_addr,
+            master_name = %self.master_name,
+            "sentinel: master rediscovered"
+        );
         self.conn = RedisConnection::connect(&master_addr).await?;
+        self.current_addr = master_addr;
         self.needs_rediscovery = false;
         Ok(())
     }

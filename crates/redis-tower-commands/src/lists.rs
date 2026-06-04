@@ -252,6 +252,10 @@ impl Command for LRange {
     fn name(&self) -> &str {
         "LRANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// LLEN key
@@ -287,6 +291,10 @@ impl Command for LLen {
 
     fn name(&self) -> &str {
         "LLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -333,6 +341,10 @@ impl Command for LIndex {
 
     fn name(&self) -> &str {
         "LINDEX"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -794,6 +806,10 @@ impl Command for LPos {
 
     fn name(&self) -> &str {
         "LPOS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

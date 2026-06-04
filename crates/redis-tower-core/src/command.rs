@@ -51,4 +51,16 @@ pub trait Command: Send + 'static {
 
     /// The Redis command name, for observability (metrics, tracing spans).
     fn name(&self) -> &str;
+
+    /// Whether this command is safe to retry on connection errors.
+    ///
+    /// Returns `true` for read-only commands (GET, HGET, LRANGE, etc.) and
+    /// commands where re-execution produces the same result (e.g. SET without
+    /// side-effect sub-commands). Returns `false` (the default) for all other
+    /// write commands where retrying may cause silent data duplication.
+    ///
+    /// Override this method in command implementations to declare idempotency.
+    fn idempotent(&self) -> bool {
+        false
+    }
 }

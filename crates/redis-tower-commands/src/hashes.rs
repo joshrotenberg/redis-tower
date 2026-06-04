@@ -45,6 +45,10 @@ impl Command for HGet {
     fn name(&self) -> &str {
         "HGET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HSET key field value \[field value ...\]
@@ -221,6 +225,10 @@ impl Command for HExists {
     fn name(&self) -> &str {
         "HEXISTS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HGETALL key
@@ -313,6 +321,10 @@ impl Command for HGetAll {
     fn name(&self) -> &str {
         "HGETALL"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HINCRBY key field increment
@@ -404,6 +416,10 @@ impl Command for HKeys {
     fn name(&self) -> &str {
         "HKEYS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HVALS key
@@ -448,6 +464,10 @@ impl Command for HVals {
     fn name(&self) -> &str {
         "HVALS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HLEN key
@@ -482,6 +502,10 @@ impl Command for HLen {
 
     fn name(&self) -> &str {
         "HLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -754,6 +778,10 @@ impl Command for HTtl {
     fn name(&self) -> &str {
         "HTTL"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HPTTL key FIELDS numfields field [field ...]
@@ -799,6 +827,10 @@ impl Command for HPTtl {
 
     fn name(&self) -> &str {
         "HPTTL"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1014,6 +1046,10 @@ impl Command for HRandField {
     fn name(&self) -> &str {
         "HRANDFIELD"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HEXPIRETIME key FIELDS numfields field [field ...]
@@ -1059,6 +1095,10 @@ impl Command for HExpireTime {
 
     fn name(&self) -> &str {
         "HEXPIRETIME"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1131,6 +1171,10 @@ impl Command for HMGet {
     fn name(&self) -> &str {
         "HMGET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// HSTRLEN key field
@@ -1174,6 +1218,10 @@ impl Command for HStrLen {
 
     fn name(&self) -> &str {
         "HSTRLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1220,6 +1268,10 @@ impl Command for HPExpireTime {
 
     fn name(&self) -> &str {
         "HPEXPIRETIME"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

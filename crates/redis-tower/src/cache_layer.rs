@@ -267,4 +267,124 @@ mod tests {
         ]);
         assert_eq!(parse_invalidation(&frame), Some(vec![]));
     }
+
+    // -- behavioral tests with a mock inner Frame service --
+
+    use std::sync::Mutex;
+
+    /// A `Service<Frame>` that counts how many times `call` is invoked and
+    /// returns a fixed response. Used to assert cache hit/miss behavior.
+    struct CountingService {
+        call_count: Arc<Mutex<usize>>,
+        response: Frame,
+    }
+
+    impl Service<Frame> for CountingService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Frame) -> Self::Future {
+            let count = Arc::clone(&self.call_count);
+            let resp = self.response.clone();
+            Box::pin(async move {
+                *count.lock().unwrap() += 1;
+                Ok(resp)
+            })
+        }
+    }
+
+    fn make_get_frame(key: &str) -> Frame {
+        Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("GET"))),
+            Frame::BulkString(Some(Bytes::from(key.to_string()))),
+        ]))
+    }
+
+    fn make_set_frame(key: &str, val: &str) -> Frame {
+        Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("SET"))),
+            Frame::BulkString(Some(Bytes::from(key.to_string()))),
+            Frame::BulkString(Some(Bytes::from(val.to_string()))),
+        ]))
+    }
+
+    #[tokio::test]
+    async fn cache_miss_calls_inner_service() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let svc = CountingService {
+            call_count: Arc::clone(&call_count),
+            response: Frame::BulkString(Some(Bytes::from("world"))),
+        };
+        let mut cache_svc = CacheService::new(svc, CacheConfig::default());
+
+        let req = make_get_frame("hello");
+        let resp = cache_svc.call(req).await.unwrap();
+        assert!(matches!(resp, Frame::BulkString(_)));
+        assert_eq!(*call_count.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_skips_inner_service() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let svc = CountingService {
+            call_count: Arc::clone(&call_count),
+            response: Frame::BulkString(Some(Bytes::from("world"))),
+        };
+        let mut cache_svc = CacheService::new(svc, CacheConfig::default());
+
+        let req1 = make_get_frame("hello");
+        cache_svc.call(req1).await.unwrap();
+
+        // Second GET of the same key should be served from the cache.
+        let req2 = make_get_frame("hello");
+        let resp2 = cache_svc.call(req2).await.unwrap();
+        assert!(matches!(resp2, Frame::BulkString(_)));
+        assert_eq!(
+            *call_count.lock().unwrap(),
+            1,
+            "inner service should not be called on cache hit"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_is_not_cached() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let svc = CountingService {
+            call_count: Arc::clone(&call_count),
+            response: Frame::SimpleString(Bytes::from("OK")),
+        };
+        let mut cache_svc = CacheService::new(svc, CacheConfig::default());
+
+        let req = make_set_frame("hello", "world");
+        cache_svc.call(req.clone()).await.unwrap();
+        cache_svc.call(req).await.unwrap();
+        // SET is not cacheable, so the inner service is called every time.
+        assert_eq!(*call_count.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_max_size_evicts_oldest() {
+        let call_count = Arc::new(Mutex::new(0usize));
+        let svc = CountingService {
+            call_count: Arc::clone(&call_count),
+            response: Frame::BulkString(Some(Bytes::from("v"))),
+        };
+        let mut cache_svc = CacheService::new(svc, CacheConfig { max_size: 1 });
+
+        // Fill the cache with key "a".
+        cache_svc.call(make_get_frame("a")).await.unwrap();
+        assert_eq!(cache_svc.cache_size().await, 1);
+
+        // Add key "b" -- the single-entry cache evicts "a".
+        cache_svc.call(make_get_frame("b")).await.unwrap();
+        assert_eq!(cache_svc.cache_size().await, 1);
+
+        // One miss per distinct key.
+        assert_eq!(*call_count.lock().unwrap(), 2);
+    }
 }
