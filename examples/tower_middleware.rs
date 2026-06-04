@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use redis_tower::commands::*;
-use redis_tower::metrics_layer::{MetricsLayer, MetricsRecorder};
+use redis_tower::metrics_layer::{ErrorKind, MetricsLayer, MetricsRecorder};
 use redis_tower::{CommandAdapter, FrameService, TracingLayer};
 use tower::ServiceBuilder;
 use tower_service::Service;
@@ -16,8 +16,11 @@ use tower_service::Service;
 struct PrintRecorder;
 
 impl MetricsRecorder for PrintRecorder {
-    fn command_completed(&self, command: &str, duration: Duration, success: bool) {
-        println!("  {command} took {duration:?} (ok={success})");
+    fn command_completed(&self, command: &str, duration: Duration, error: Option<ErrorKind>) {
+        match error {
+            None => println!("  {command} took {duration:?} (ok)"),
+            Some(kind) => println!("  {command} took {duration:?} (error: {kind:?})"),
+        }
     }
 }
 

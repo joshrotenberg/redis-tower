@@ -31,6 +31,7 @@
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
 //! ```
 
+use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
@@ -135,6 +136,15 @@ impl MultiplexedClient {
         })
         .await?;
         tower_service::Service::call(&mut svc, cmd).await
+    }
+
+    /// Send a PING to verify the connection is alive.
+    ///
+    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
+    /// and `/health` endpoints.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        self.execute(Ping::new()).await?;
+        Ok(())
     }
 
     /// Gracefully shut down the multiplexed client.

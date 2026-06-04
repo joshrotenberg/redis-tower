@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::Mutex;
 
@@ -54,5 +55,15 @@ impl SentinelClient {
     pub async fn rediscover(&self) -> Result<(), RedisError> {
         let mut conn = self.inner.lock().await;
         conn.rediscover().await
+    }
+
+    /// Send a PING to the current master.
+    ///
+    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
+    /// and `/health` endpoints.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        let mut conn = self.inner.lock().await;
+        conn.execute(Ping::new()).await?;
+        Ok(())
     }
 }

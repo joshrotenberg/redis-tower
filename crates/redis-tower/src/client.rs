@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 
@@ -64,5 +65,14 @@ impl RedisClient {
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let mut conn = self.inner.lock().await;
         conn.execute(cmd).await
+    }
+
+    /// Send a PING to verify the connection is alive.
+    ///
+    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
+    /// and `/health` endpoints.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        self.execute(Ping::new()).await?;
+        Ok(())
     }
 }

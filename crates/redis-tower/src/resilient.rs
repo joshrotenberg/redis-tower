@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 
@@ -77,6 +78,16 @@ impl ResilientRedisClient {
         }
 
         result
+    }
+
+    /// Send a PING to verify the connection is alive.
+    ///
+    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
+    /// and `/health` endpoints.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        let mut conn = self.conn.lock().await;
+        conn.execute(Ping::new()).await?;
+        Ok(())
     }
 
     /// Attempt to reconnect with exponential backoff.
