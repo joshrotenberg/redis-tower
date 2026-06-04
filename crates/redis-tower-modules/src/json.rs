@@ -2,7 +2,7 @@
 //!
 //! Ergonomic, typed client over RedisJSON. Values are serialized to and from
 //! JSON with `serde_json`, so callers work with their own Rust types rather
-//! than raw JSON strings or [`Frame`](redis_tower::Frame) values.
+//! than raw JSON strings or [`Frame`] values.
 //!
 //! # Example
 //!
