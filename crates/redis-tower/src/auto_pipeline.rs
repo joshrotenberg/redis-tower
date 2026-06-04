@@ -394,42 +394,60 @@ async fn pipeline_worker(
 /// other caller's frames in between. Responses are partitioned back to the
 /// originating request.
 ///
+/// Takes ownership of `batch` in a single pass to move frames directly into
+/// the pipeline vec, avoiding per-Frame clones. A `Responder` enum tracks
+/// response routing alongside the frame vec so both the success and error
+/// paths can notify all senders without a second iteration.
+///
 /// Returns `Ok(())` on success and `Err(())` on pipeline failure so the
 /// worker can decide whether to reconnect. All individual response channels
 /// are always notified before this returns.
 async fn flush_batch(conn: &mut RedisConnection, batch: Vec<WorkerRequest>) -> Result<(), ()> {
-    // Flatten all frames in order.
+    // Owned single-pass: move frames out of each request directly into the
+    // pipeline vec, and collect response senders into a parallel `responders`
+    // vec. This eliminates the per-Frame clone that the previous two-pass
+    // implementation (borrow to build frames, then own to route responses)
+    // required.
     let total_frames: usize = batch.iter().map(|r| r.frame_count()).sum();
     let mut frames: Vec<Frame> = Vec::with_capacity(total_frames);
-    for req in &batch {
+
+    enum Responder {
+        Single(oneshot::Sender<Result<Frame, RedisError>>),
+        Multi(usize, oneshot::Sender<Result<Vec<Frame>, RedisError>>),
+    }
+    let mut responders: Vec<Responder> = Vec::with_capacity(batch.len());
+
+    for req in batch {
         match req {
-            WorkerRequest::Single { frame, .. } => frames.push(frame.clone()),
-            WorkerRequest::Multi { frames: fs, .. } => frames.extend(fs.iter().cloned()),
+            WorkerRequest::Single { frame, response_tx } => {
+                frames.push(frame);
+                responders.push(Responder::Single(response_tx));
+            }
+            WorkerRequest::Multi {
+                frames: fs,
+                response_tx,
+            } => {
+                let count = fs.len();
+                frames.extend(fs);
+                responders.push(Responder::Multi(count, response_tx));
+            }
         }
     }
 
     match conn.execute_pipeline(frames).await {
         Ok(responses) => {
             let mut iter = responses.into_iter();
-            for req in batch {
-                match req {
-                    WorkerRequest::Single { response_tx, .. } => {
-                        if let Some(resp) = iter.next() {
-                            let _ = response_tx.send(Ok(resp));
-                        } else {
-                            let _ = response_tx.send(Err(RedisError::ConnectionClosed));
-                        }
+            for responder in responders {
+                match responder {
+                    Responder::Single(tx) => {
+                        let _ = tx.send(iter.next().ok_or(RedisError::ConnectionClosed));
                     }
-                    WorkerRequest::Multi {
-                        frames: fs,
-                        response_tx,
-                    } => {
-                        let count = fs.len();
+                    Responder::Multi(count, tx) => {
                         let collected: Vec<Frame> = iter.by_ref().take(count).collect();
                         if collected.len() == count {
-                            let _ = response_tx.send(Ok(collected));
+                            let _ = tx.send(Ok(collected));
                         } else {
-                            let _ = response_tx.send(Err(RedisError::ConnectionClosed));
+                            let _ = tx.send(Err(RedisError::ConnectionClosed));
                         }
                     }
                 }
@@ -437,8 +455,15 @@ async fn flush_batch(conn: &mut RedisConnection, batch: Vec<WorkerRequest>) -> R
             Ok(())
         }
         Err(_) => {
-            for req in batch {
-                req.fail(RedisError::ConnectionClosed);
+            for responder in responders {
+                match responder {
+                    Responder::Single(tx) => {
+                        let _ = tx.send(Err(RedisError::ConnectionClosed));
+                    }
+                    Responder::Multi(_, tx) => {
+                        let _ = tx.send(Err(RedisError::ConnectionClosed));
+                    }
+                }
             }
             Err(())
         }

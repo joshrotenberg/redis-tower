@@ -1,4 +1,4 @@
-use bytes::{Buf, Bytes, BytesMut};
+use bytes::{Buf, BytesMut};
 use resp_rs::resp3;
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -18,7 +18,12 @@ impl Decoder for RespCodec {
             return Ok(None);
         }
 
-        let input = Bytes::copy_from_slice(src);
+        // Use clone().freeze() for a zero-copy Bytes view instead of copy_from_slice.
+        // BytesMut::clone() is copy-on-write; freeze() converts to immutable Bytes
+        // without allocating a new buffer. This avoids copying the entire receive
+        // buffer on every decode call (particularly expensive under pipelining where
+        // decode is called once per response frame from the same buffer).
+        let input = src.clone().freeze();
         match resp3::parse_frame(input) {
             Ok((frame, remaining)) => {
                 let consumed = src.len() - remaining.len();
@@ -44,6 +49,7 @@ impl Encoder<Frame> for RespCodec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn decode_simple_string() {
