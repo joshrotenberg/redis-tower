@@ -25,6 +25,15 @@ use crate::connection::{ClusterConnection, ClusterConnectionBuilder, ReadPrefere
 /// maintains per-node connections with automatic pipelining and delivers
 /// ~35x higher throughput under load.
 ///
+/// # Concurrency
+///
+/// `ClusterClient` is `Clone + Send + Sync`. All clones share a single
+/// `Arc<Mutex<ClusterConnection>>`, serializing every command through one
+/// cluster-wide lock. Throughput does not scale with concurrency beyond the
+/// latency of one in-flight request. For high-concurrency workloads, use
+/// [`MultiplexedClusterClient`](crate::MultiplexedClusterClient), which
+/// maintains per-node auto-pipelining with no global lock.
+///
 /// # Example
 ///
 /// ```ignore

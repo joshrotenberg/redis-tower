@@ -38,6 +38,8 @@
 //! [`FromRedisBytes`] traits for ergonomic conversion between RESP frames and
 //! Rust types.
 
+#![deny(missing_docs)]
+
 mod command;
 mod connection;
 mod error;

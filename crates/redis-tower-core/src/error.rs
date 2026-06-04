@@ -24,7 +24,9 @@ pub enum RedisError {
     /// Response frame did not match the expected type.
     #[error("unexpected response: expected {expected}, got {actual}")]
     UnexpectedResponse {
+        /// The expected frame type name.
         expected: &'static str,
+        /// A debug representation of the actual frame received.
         actual: String,
     },
 
@@ -46,16 +48,26 @@ pub enum RedisError {
 
     /// Type mismatch when extracting a pipeline/transaction result.
     #[error("type mismatch: expected {expected}")]
-    TypeMismatch { expected: &'static str },
+    TypeMismatch {
+        /// The expected Rust type name.
+        expected: &'static str,
+    },
 
     /// Index out of bounds when accessing a pipeline or transaction result.
     #[error("index {index} out of bounds (len {len})")]
-    IndexOutOfBounds { index: usize, len: usize },
+    IndexOutOfBounds {
+        /// The index that was out of bounds.
+        index: usize,
+        /// The length of the collection.
+        len: usize,
+    },
 
     /// Reconnection failed after exhausting all retries.
     #[error("reconnect failed after {attempts} attempts: {last_error}")]
     ReconnectFailed {
+        /// The number of reconnection attempts made.
         attempts: usize,
+        /// The last error that caused the reconnection to fail.
         last_error: Box<RedisError>,
     },
 

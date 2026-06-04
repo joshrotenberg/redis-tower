@@ -20,6 +20,15 @@ use tokio::sync::Mutex;
 /// - **[`RedisConnection`]** -- Direct, exclusive access. Implements
 ///   `tower::Service`. Use with `tower::buffer::Buffer` for sharing.
 ///
+/// # Concurrency
+///
+/// `RedisClient` is `Clone + Send + Sync`. All clones share the same
+/// `Arc<Mutex<RedisConnection>>`, so concurrent callers are serialized:
+/// only one command is in flight at a time. For concurrent workloads,
+/// prefer [`MultiplexedClient`](crate::MultiplexedClient) (single connection,
+/// auto-pipelining) or [`ConnectionPool`](crate::pool::ConnectionPool)
+/// (N parallel connections).
+///
 /// # Example
 ///
 /// ```ignore

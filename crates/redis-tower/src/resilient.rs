@@ -19,6 +19,17 @@ use crate::reconnect::{
 /// Wraps a [`RedisConnection`] with automatic reconnection on connection
 /// loss. Uses `Arc<Mutex<>>` for cross-task sharing.
 ///
+/// # Concurrency
+///
+/// `ResilientRedisClient` is `Clone + Send + Sync`. All clones share the same
+/// `Arc<Mutex<RedisConnection>>`, serializing commands one at a time.
+/// Reconnection is triggered only when a command fails with a connection error
+/// (`is_connection_error()` returns true); non-connection errors (WRONGTYPE,
+/// etc.) are returned to the caller without triggering reconnection. After
+/// `max_retries` reconnect attempts are exhausted, the error propagates to the
+/// caller; the client is not permanently broken and will attempt reconnection
+/// on the next command.
+///
 /// # Example
 ///
 /// ```ignore
