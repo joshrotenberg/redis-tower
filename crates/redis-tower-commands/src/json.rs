@@ -737,3 +737,53 @@ impl Command for JsonObjLen {
         "JSON.OBJLEN"
     }
 }
+
+/// JSON.MERGE key path value
+///
+/// Merges a JSON value into the existing document at `path` in `key`. The
+/// value is merged recursively: existing keys are overwritten, new keys are
+/// added, and setting a key to `null` removes it. Returns `Ok(())` on success.
+pub struct JsonMerge {
+    key: String,
+    path: String,
+    value: String,
+}
+
+impl JsonMerge {
+    /// Create a new `JSON.MERGE` command.
+    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            path: path.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Command for JsonMerge {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("JSON.MERGE"),
+            bulk(self.key.as_str()),
+            bulk(self.path.as_str()),
+            bulk(self.value.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            Frame::Null => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.MERGE"
+    }
+}
