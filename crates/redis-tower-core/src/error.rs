@@ -90,7 +90,7 @@ pub enum RedisError {
 
     /// TCP connection attempt timed out before the OS completed the handshake.
     ///
-    /// Returned by [`RedisConnection::connect_with_timeout`] and by
+    /// Returned by [`crate::RedisConnection::connect_with_timeout`] and by
     /// [`ResilientConnection`](https://docs.rs/redis-tower) when a
     /// `connect_timeout` is configured on [`ReconnectConfig`](https://docs.rs/redis-tower).
     #[error("connect timeout")]

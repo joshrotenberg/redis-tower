@@ -22,7 +22,7 @@ use crate::url::{RedisUrl, parse_redis_url};
 /// Configuration for TCP keepalive probes.
 ///
 /// Controls `SO_KEEPALIVE` on TCP connections created by
-/// [`RedisConnection::connect`] and [`RedisConnection::connect_tls`].
+/// [`RedisConnection::connect`] and `RedisConnection::connect_tls` (TLS features).
 ///
 /// When the connection has been idle for `idle` seconds, the OS begins
 /// sending keepalive probes every `interval` seconds. If `probes` consecutive
