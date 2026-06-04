@@ -87,6 +87,22 @@ pub enum RedisError {
     /// The internal command queue is full; the caller should shed load.
     #[error("queue full: the auto-pipeline channel is at capacity")]
     QueueFull,
+
+    /// TCP connection attempt timed out before the OS completed the handshake.
+    ///
+    /// Returned by [`crate::RedisConnection::connect_with_timeout`] and by
+    /// [`ResilientConnection`](https://docs.rs/redis-tower) when a
+    /// `connect_timeout` is configured on [`ReconnectConfig`](https://docs.rs/redis-tower).
+    #[error("connect timeout")]
+    ConnectTimeout,
+
+    /// A command exceeded its configured per-command deadline.
+    ///
+    /// Returned by [`CommandTimeoutService`](https://docs.rs/redis-tower) when
+    /// the inner service does not complete within the configured
+    /// [`CommandTimeoutLayer`](https://docs.rs/redis-tower) duration.
+    #[error("command timeout")]
+    CommandTimeout,
 }
 
 impl RedisError {
