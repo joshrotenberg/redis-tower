@@ -612,7 +612,7 @@ where
     ///
     /// Useful for Kubernetes readiness probes and `/health` endpoints. For
     /// a fast single-connection liveness check, call
-    /// [`execute`](ConnectionPool::execute) with [`Ping`](redis_tower_commands::Ping)
+    /// [`execute`](ConnectionPool::execute) with [`Ping`]
     /// directly.
     pub async fn health_check(&self) -> Result<(), RedisError> {
         for i in 0..self.inner.connections.len() {
