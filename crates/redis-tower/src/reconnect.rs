@@ -154,6 +154,7 @@ impl ConnectionFactory for Resp3AddrConnectionFactory {
 /// - `base_delay`: 100ms
 /// - `max_delay`: 5s
 /// - `jitter`: `true`
+/// - `connect_timeout`: `None` (no timeout)
 ///
 /// # Jitter
 ///
@@ -179,6 +180,17 @@ pub struct ReconnectConfig {
     /// value in `[0, cap)` rather than the deterministic exponential value,
     /// spreading reconnect attempts across time.
     pub jitter: bool,
+    /// Per-attempt connect timeout applied to each `factory.connect()` call.
+    ///
+    /// When `Some`, each call to the [`ConnectionFactory`] is wrapped in
+    /// `tokio::time::timeout`. If the factory does not complete within this
+    /// duration the attempt is treated as a failure, and the reconnect loop
+    /// waits for the next backoff delay before trying again.
+    ///
+    /// When `None` (the default), connection attempts run without a timeout
+    /// and may block for the OS-default TCP timeout — potentially several
+    /// minutes on an unreachable host.
+    pub connect_timeout: Option<Duration>,
 }
 
 impl Default for ReconnectConfig {
@@ -188,6 +200,7 @@ impl Default for ReconnectConfig {
             base_delay: Duration::from_millis(100),
             max_delay: Duration::from_secs(5),
             jitter: true,
+            connect_timeout: None,
         }
     }
 }
@@ -228,6 +241,22 @@ impl ReconnectConfig {
     #[must_use]
     pub fn jitter(mut self, enabled: bool) -> Self {
         self.jitter = enabled;
+        self
+    }
+
+    /// Set a timeout for each individual connection attempt.
+    ///
+    /// When set, each call to [`ConnectionFactory::connect`] is wrapped in
+    /// [`tokio::time::timeout`]. If the factory does not complete within
+    /// this duration the attempt is counted as a failure and the reconnect
+    /// loop retries after the next backoff delay.
+    ///
+    /// When not set (the default), connection attempts run without a timeout
+    /// and may block for the OS-default TCP timeout — potentially several
+    /// minutes on an unreachable host.
+    #[must_use]
+    pub fn connect_timeout(mut self, d: Duration) -> Self {
+        self.connect_timeout = Some(d);
         self
     }
 
@@ -384,7 +413,14 @@ impl ResilientConnection {
         config: ReconnectConfig,
     ) -> Result<Self, RedisError> {
         let factory = Arc::new(factory);
-        let conn = factory.connect().await?;
+        let conn = if let Some(t) = config.connect_timeout {
+            let r = tokio::time::timeout(t, factory.connect())
+                .await
+                .map_err(|_| RedisError::ConnectTimeout)?;
+            r?
+        } else {
+            factory.connect().await?
+        };
         Ok(Self {
             factory,
             config,
@@ -475,7 +511,17 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                 ConnState::WaitingToReconnect { attempt, sleep } => match sleep.as_mut().poll(cx) {
                     Poll::Ready(()) => {
                         let attempt = *attempt;
-                        let future = self.factory.connect();
+                        let connect_timeout = self.config.connect_timeout;
+                        let future: ReconnectFuture = if let Some(t) = connect_timeout {
+                            let inner = self.factory.connect();
+                            Box::pin(async move {
+                                tokio::time::timeout(t, inner)
+                                    .await
+                                    .map_err(|_| RedisError::ConnectTimeout)?
+                            })
+                        } else {
+                            self.factory.connect()
+                        };
                         self.state = ConnState::Reconnecting { attempt, future };
                     }
                     Poll::Pending => return Poll::Pending,
@@ -594,6 +640,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.delay_for_attempt(0), Duration::ZERO);
+    }
+
+    #[test]
+    fn reconnect_config_connect_timeout() {
+        let cfg = ReconnectConfig::default().connect_timeout(Duration::from_secs(2));
+        assert_eq!(cfg.connect_timeout, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn reconnect_config_connect_timeout_default_is_none() {
+        let cfg = ReconnectConfig::default();
+        assert_eq!(cfg.connect_timeout, None);
     }
 
     // -- retry-limit boundary tests --

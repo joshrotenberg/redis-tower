@@ -203,6 +203,40 @@ impl RedisConnection {
         Ok(conn)
     }
 
+    /// Connect to a Redis server over TCP with a connect timeout.
+    ///
+    /// If the TCP handshake is not completed within `timeout`, returns
+    /// [`RedisError::ConnectTimeout`] instead of waiting for the OS-default
+    /// timeout (which can be several minutes on unreachable hosts).
+    ///
+    /// TCP keepalive is enabled with sensible defaults after the connection is
+    /// established. Use [`connect_with_keepalive`](Self::connect_with_keepalive)
+    /// and wrap the call yourself with [`tokio::time::timeout`] if you need
+    /// custom keepalive parameters alongside a connect timeout.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use redis_tower_core::RedisConnection;
+    /// use std::time::Duration;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let conn = RedisConnection::connect_with_timeout("127.0.0.1:6379", Duration::from_secs(3)).await;
+    /// # });
+    /// ```
+    pub async fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<Self, RedisError> {
+        let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(RedisError::Connection(e)),
+            Err(_elapsed) => return Err(RedisError::ConnectTimeout),
+        };
+        let stream = apply_keepalive(stream, &KeepaliveConfig::default())?;
+        stream.set_nodelay(true)?;
+        let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
+        conn.identify_client().await;
+        Ok(conn)
+    }
+
     /// Connect over TLS using the provided configuration.
     ///
     /// Requires either the `tls-native-tls` or `tls-rustls` feature.
@@ -237,6 +271,40 @@ impl RedisConnection {
     ) -> Result<Self, RedisError> {
         let tcp = TcpStream::connect(addr).await?;
         let tcp = apply_keepalive(tcp, keepalive)?;
+        tcp.set_nodelay(true)?;
+        let stream = tls_config.connect(tcp, hostname).await?;
+        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
+        conn.identify_client().await;
+        Ok(conn)
+    }
+
+    /// Connect over TLS with a connect timeout.
+    ///
+    /// Requires either the `tls-native-tls` or `tls-rustls` feature.
+    ///
+    /// If the TCP handshake is not completed within `timeout`, returns
+    /// [`RedisError::ConnectTimeout`]. The timeout covers only the TCP
+    /// connection phase; the TLS handshake runs outside the timeout window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::ConnectTimeout`] if the TCP connect times out,
+    /// [`RedisError::Connection`] if the TCP connection or TLS handshake
+    /// fails, or [`RedisError::Connection`] if keepalive socket options
+    /// cannot be applied.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    pub async fn connect_tls_with_timeout(
+        addr: &str,
+        hostname: &str,
+        tls_config: &crate::tls::TlsConfig,
+        timeout: Duration,
+    ) -> Result<Self, RedisError> {
+        let tcp = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => return Err(RedisError::Connection(e)),
+            Err(_elapsed) => return Err(RedisError::ConnectTimeout),
+        };
+        let tcp = apply_keepalive(tcp, &KeepaliveConfig::default())?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
         let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));

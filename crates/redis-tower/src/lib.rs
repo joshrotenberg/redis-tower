@@ -273,6 +273,7 @@ pub mod caching;
 pub mod circuit_breaker;
 mod client;
 pub mod command_adapter;
+pub mod command_timeout;
 pub mod consumer;
 pub mod credentials;
 mod executor;
@@ -300,6 +301,7 @@ pub use caching::CachedClient;
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerLayer, CircuitBreakerService};
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
+pub use command_timeout::CommandTimeoutLayer;
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
     AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
