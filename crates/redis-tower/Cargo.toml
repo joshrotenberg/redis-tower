@@ -26,7 +26,7 @@ commands-sketch = ["redis-tower-commands/sketch"]
 commands-tdigest = ["redis-tower-commands/tdigest"]
 commands-timeseries = ["redis-tower-commands/timeseries"]
 commands-vector-sets = ["redis-tower-commands/vector-sets"]
-serde = ["dep:serde", "dep:serde_json", "commands-json"]
+serde = ["dep:serde", "dep:serde_json", "commands-json", "redis-tower-core/serde"]
 
 [dependencies]
 serde = { workspace = true, optional = true }

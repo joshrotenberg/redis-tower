@@ -14,6 +14,8 @@ categories = ["database", "asynchronous", "network-programming"]
 
 [features]
 default = []
+# Enables the RedisError::Json variant and From<serde_json::Error> impl.
+serde = ["dep:serde_json"]
 tls-native-tls = ["dep:native-tls", "dep:tokio-native-tls"]
 tls-rustls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-native-certs", "dep:webpki-roots"]
 
@@ -31,6 +33,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 socket2 = { version = "0.5", features = ["all"] }
+serde_json = { workspace = true, optional = true }
 
 # Optional TLS backends
 native-tls = { version = "0.2", optional = true }
