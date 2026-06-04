@@ -1,7 +1,7 @@
 //! # TimeSeries Client
 //!
-//! Ergonomic, typed client over RedisTimeSeries. Values are exchanged as
-//! [`TsSample`] pairs rather than raw [`Frame`] values.
+//! Ergonomic, typed client over [RedisTimeSeries](https://redis.io/docs/data-types/timeseries/).
+//! Values are exchanged as [`TsSample`] pairs rather than raw [`Frame`] values.
 //!
 //! # Example
 //!
