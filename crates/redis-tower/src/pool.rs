@@ -194,6 +194,14 @@ impl<F: PoolFactory> ErasedPoolFactory for F {
 ///
 /// The pool implements `Clone` via `Arc` for cross-task sharing and
 /// implements `RedisExecutor` itself for composability.
+///
+/// # Concurrency
+///
+/// `ConnectionPool<S>` is `Clone + Send + Sync` when `S: Send`. All clones
+/// share the same pool via `Arc`. Each individual connection is protected by
+/// its own `Mutex`, so up to N commands can execute in parallel (one per
+/// pooled connection). The dispatch strategy controls which connection handles
+/// each command.
 pub struct ConnectionPool<S> {
     inner: Arc<PoolInner<S>>,
 }

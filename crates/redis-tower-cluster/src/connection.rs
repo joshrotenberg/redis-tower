@@ -135,6 +135,15 @@ pub enum ReadPreference {
 /// Handles MOVED and ASK redirects automatically. Supports read
 /// preference for routing read-only commands to replicas.
 ///
+/// # Concurrency
+///
+/// `ClusterConnection` requires exclusive (`&mut self`) access for all
+/// operations. It is NOT `Clone`. Share it via
+/// [`ClusterClient`](crate::client::ClusterClient)
+/// (`Arc<Mutex<ClusterConnection>>`) or use it directly in a single task.
+/// For high-concurrency sharing, use
+/// [`MultiplexedClusterClient`](crate::multiplexed::MultiplexedClusterClient).
+///
 /// # Example
 ///
 /// ```ignore

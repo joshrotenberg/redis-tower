@@ -5,14 +5,17 @@ edition.workspace = true
 publish = false
 
 [dependencies]
-redis-tower = { workspace = true }
+redis-tower = { workspace = true, features = ["serde"] }
 redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true }
+redis-tower-cluster = { workspace = true }
+redis-tower-sentinel = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
 tower-service = { workspace = true }
 bytes = { workspace = true }
+serde = { workspace = true }
 
 [[example]]
 name = "basic"
@@ -53,3 +56,23 @@ path = "script.rs"
 [[example]]
 name = "auto_pipeline"
 path = "auto_pipeline.rs"
+
+[[example]]
+name = "connection_pool"
+path = "connection_pool.rs"
+
+[[example]]
+name = "cluster"
+path = "cluster.rs"
+
+[[example]]
+name = "sentinel"
+path = "sentinel.rs"
+
+[[example]]
+name = "json_api"
+path = "json_api.rs"
+
+[[example]]
+name = "tls"
+path = "tls.rs"

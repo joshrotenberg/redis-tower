@@ -265,6 +265,8 @@
 //! - `redis-tower-sentinel` -- Sentinel discovery and failover
 //! - `redis-tower-sync` -- blocking wrapper with internal tokio runtime
 
+#![deny(missing_docs)]
+
 pub mod auto_pipeline;
 pub mod cache_layer;
 pub mod caching;
@@ -331,7 +333,10 @@ pub use redis_tower_core::{
 #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 pub use redis_tower_core::tls::TlsConfig;
 
-// Re-export commands under a `commands` module.
+/// All typed Redis command structs, re-exported from `redis-tower-commands`.
+///
+/// Import everything with `use redis_tower::commands::*` for convenient access
+/// to the full command set including both core Redis and Redis Stack commands.
 pub mod commands {
     pub use redis_tower_commands::*;
 }

@@ -22,6 +22,8 @@
 //! command frames: [`helpers::bulk`] for bulk strings, [`helpers::array`] for
 //! arrays, and [`helpers::null_bulk`] for null bulk strings.
 
+#![deny(missing_docs)]
+
 mod codec;
 mod error;
 pub mod helpers;

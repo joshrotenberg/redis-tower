@@ -14,6 +14,13 @@ use crate::discovery;
 /// When a command fails with a connection error, the next call
 /// rediscovers the master (which may have changed due to failover).
 ///
+/// # Concurrency
+///
+/// `SentinelConnection` requires exclusive (`&mut self`) access for all
+/// operations. It is NOT `Clone`. Share it via
+/// [`SentinelClient`](crate::client::SentinelClient)
+/// (`Arc<Mutex<SentinelConnection>>`) or use it directly in a single task.
+///
 /// # Example
 ///
 /// ```ignore

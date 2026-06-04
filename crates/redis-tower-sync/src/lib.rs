@@ -28,6 +28,13 @@ use redis_tower_core::{Command, RedisError};
 /// and reused for all operations.
 ///
 /// For concurrent workloads, use the async [`RedisClient`] directly.
+///
+/// # Thread Safety
+///
+/// `SyncClient` is `Send` but NOT `Sync`. It must not be used from an async
+/// context — calling any method will panic if invoked from within a running
+/// Tokio runtime. It is designed for synchronous CLI tools, migration scripts,
+/// and integration tests where async is not needed.
 pub struct SyncClient {
     rt: tokio::runtime::Runtime,
     inner: RedisClient,

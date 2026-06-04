@@ -45,6 +45,15 @@ use crate::reconnect::ConnectionFactory;
 ///
 /// Concurrent requests from multiple tasks are batched into Redis pipelines
 /// automatically. Single requests flush immediately with no batching delay.
+///
+/// # Concurrency
+///
+/// `MultiplexedClient` is `Clone + Send + Sync`. All clones share the same
+/// background worker task and a single TCP connection. Concurrent callers from
+/// any number of tasks are safe; their commands are automatically batched into
+/// pipelines. For workloads requiring exclusive connection access (transactions,
+/// blocking commands), use [`RedisConnection`] directly or
+/// [`ConnectionPool`](crate::pool::ConnectionPool).
 #[derive(Clone)]
 pub struct MultiplexedClient {
     inner: CommandAdapter<AutoPipelineService>,

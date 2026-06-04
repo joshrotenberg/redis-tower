@@ -12,6 +12,13 @@ use crate::connection::SentinelConnection;
 /// Wraps a [`SentinelConnection`] in `Arc<Mutex<>>` for cross-task sharing.
 /// Automatically rediscovers the master on connection failure.
 ///
+/// # Concurrency
+///
+/// `SentinelClient` is `Clone + Send + Sync`. All clones share the same
+/// `Arc<Mutex<SentinelConnection>>`, serializing all commands through one lock.
+/// For higher concurrency, use
+/// [`MultiplexedSentinelClient`](crate::MultiplexedSentinelClient).
+///
 /// # Example
 ///
 /// ```ignore
