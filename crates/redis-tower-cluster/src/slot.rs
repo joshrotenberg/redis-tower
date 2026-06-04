@@ -141,4 +141,36 @@ mod tests {
     fn slot_count_constant() {
         assert_eq!(SLOT_COUNT, 16384);
     }
+
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn slot_always_in_range(key in prop::collection::vec(any::<u8>(), 0..=128)) {
+                let slot = slot_for_key(&key);
+                prop_assert!(slot < SLOT_COUNT, "slot {slot} out of range");
+            }
+
+            #[test]
+            fn hash_tag_consistency(
+                tag in "[a-zA-Z0-9_]{1,16}",
+                suffix1 in "[a-zA-Z0-9_]{0,16}",
+                suffix2 in "[a-zA-Z0-9_]{0,16}",
+            ) {
+                let key1 = format!("{{{tag}}}{suffix1}");
+                let key2 = format!("{{{tag}}}{suffix2}");
+                let slot1 = slot_for_key(key1.as_bytes());
+                let slot2 = slot_for_key(key2.as_bytes());
+                prop_assert_eq!(
+                    slot1,
+                    slot2,
+                    "keys {:?} and {:?} should map to the same slot",
+                    key1,
+                    key2
+                );
+            }
+        }
+    }
 }

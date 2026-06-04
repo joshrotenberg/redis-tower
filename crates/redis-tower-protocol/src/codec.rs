@@ -236,4 +236,158 @@ mod tests {
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(original, decoded);
     }
+
+    // -- Edge-case tests --
+
+    #[test]
+    fn decode_large_bulk_string() {
+        let payload = vec![b'x'; 1024 * 1024];
+        let header = format!("${}\r\n", payload.len());
+        let mut wire = BytesMut::from(header.as_bytes());
+        wire.extend_from_slice(&payload);
+        wire.extend_from_slice(b"\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut wire).unwrap().unwrap();
+        assert_eq!(frame, Frame::BulkString(Some(Bytes::from(payload))));
+    }
+
+    #[test]
+    fn decode_fragmented() {
+        let wire = b"$5\r\nhello\r\n";
+        let mut codec = RespCodec;
+        let mut buf = BytesMut::new();
+        let mut result = None;
+        for &byte in wire.iter() {
+            buf.extend_from_slice(&[byte]);
+            if let Some(frame) = codec.decode(&mut buf).unwrap() {
+                result = Some(frame);
+                break;
+            }
+        }
+        assert_eq!(
+            result.unwrap(),
+            Frame::BulkString(Some(Bytes::from("hello")))
+        );
+    }
+
+    #[test]
+    fn decode_zero_length_bulk_string() {
+        let mut buf = BytesMut::from("$0\r\n\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::BulkString(Some(Bytes::new())));
+    }
+
+    #[test]
+    fn decode_null_array() {
+        let mut buf = BytesMut::from("*-1\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Array(None));
+    }
+
+    #[test]
+    fn decode_empty_array() {
+        let mut buf = BytesMut::from("*0\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame, Frame::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn decode_nested_array() {
+        let mut buf = BytesMut::from("*2\r\n*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n$3\r\nbaz\r\n");
+        let mut codec = RespCodec;
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(
+            frame,
+            Frame::Array(Some(vec![
+                Frame::Array(Some(vec![
+                    Frame::BulkString(Some(Bytes::from("foo"))),
+                    Frame::BulkString(Some(Bytes::from("bar"))),
+                ])),
+                Frame::BulkString(Some(Bytes::from("baz"))),
+            ]))
+        );
+    }
+
+    #[test]
+    fn decode_incomplete_no_crlf() {
+        // Missing trailing \r\n — should return Ok(None), not an error.
+        let mut buf = BytesMut::from("$5\r\nhello");
+        let mut codec = RespCodec;
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn encode_null_bulk_string() {
+        let mut buf = BytesMut::new();
+        let mut codec = RespCodec;
+        codec.encode(Frame::BulkString(None), &mut buf).unwrap();
+        assert_eq!(&buf[..], b"$-1\r\n");
+    }
+
+    #[test]
+    fn encode_empty_array() {
+        let mut buf = BytesMut::new();
+        let mut codec = RespCodec;
+        codec.encode(Frame::Array(Some(vec![])), &mut buf).unwrap();
+        assert_eq!(&buf[..], b"*0\r\n");
+    }
+
+    #[test]
+    fn encode_nested_array() {
+        let mut buf = BytesMut::new();
+        let mut codec = RespCodec;
+        codec
+            .encode(
+                Frame::Array(Some(vec![
+                    Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from("a")))])),
+                    Frame::Integer(1),
+                ])),
+                &mut buf,
+            )
+            .unwrap();
+        assert_eq!(&buf[..], b"*2\r\n*1\r\n$1\r\na\r\n:1\r\n");
+    }
+
+    // -- Property-based tests --
+
+    #[cfg(test)]
+    mod prop_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        fn arb_leaf_frame() -> impl Strategy<Value = Frame> {
+            prop_oneof![
+                "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Frame::SimpleString(Bytes::from(s))),
+                any::<i64>().prop_map(Frame::Integer),
+                prop::collection::vec(any::<u8>(), 0..=64)
+                    .prop_map(|v| Frame::BulkString(Some(Bytes::from(v)))),
+                Just(Frame::BulkString(None)),
+                any::<bool>().prop_map(Frame::Boolean),
+                Just(Frame::Null),
+            ]
+        }
+
+        fn arb_frame() -> impl Strategy<Value = Frame> {
+            arb_leaf_frame().prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    inner.clone(),
+                    prop::collection::vec(inner.clone(), 0..=4).prop_map(|v| Frame::Array(Some(v))),
+                ]
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn codec_roundtrip(frame in arb_frame()) {
+                let mut codec = RespCodec;
+                let mut buf = BytesMut::new();
+                codec.encode(frame.clone(), &mut buf).unwrap();
+                let decoded = codec.decode(&mut buf).unwrap().unwrap();
+                prop_assert_eq!(frame, decoded);
+            }
+        }
+    }
 }
