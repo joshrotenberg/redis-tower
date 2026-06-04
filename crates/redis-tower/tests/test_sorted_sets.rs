@@ -527,3 +527,106 @@ async fn zmpop_empty_sources() {
         .unwrap();
     assert!(result.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Additional sorted set coverage (issue #349)
+// ---------------------------------------------------------------------------
+
+/// ZRank returns the rank of a member (0-indexed, lowest score = 0).
+/// This test fills the gap noted in #349 (ZRank was not in command_tests!).
+#[tokio::test]
+async fn zrank_basic() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zrank_basic";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(
+        ZAdd::new(key)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c"),
+    )
+    .await
+    .unwrap();
+
+    let rank_a = c.execute(ZRank::new(key, "a")).await.unwrap();
+    assert_eq!(rank_a, Some(0), "\"a\" should be rank 0 (lowest score)");
+
+    let rank_b = c.execute(ZRank::new(key, "b")).await.unwrap();
+    assert_eq!(rank_b, Some(1));
+
+    let rank_c = c.execute(ZRank::new(key, "c")).await.unwrap();
+    assert_eq!(rank_c, Some(2));
+
+    let missing = c.execute(ZRank::new(key, "nope")).await.unwrap();
+    assert_eq!(missing, None);
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// ZRangeByScore returns members within a score range.
+/// Covers the parse path noted as untested in #349.
+#[tokio::test]
+async fn zrangebyscore_basic() {
+    let mut c = conn().await;
+    let key = "cover2:zset:zrangebyscore";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(
+        ZAdd::new(key)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Range 2 to 3 inclusive should return "b" and "c".
+    let members = c.execute(ZRangeByScore::new(key, "2", "3")).await.unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.contains(&Bytes::from("b")));
+    assert!(members.contains(&Bytes::from("c")));
+
+    // "-inf" to "+inf" returns all members.
+    let all = c
+        .execute(ZRangeByScore::new(key, "-inf", "+inf"))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4);
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// ZRangeStore with BYSCORE variant.
+#[tokio::test]
+async fn zrangestore_byscore() {
+    let mut c = conn().await;
+    let src = "cover2:zset:zrangestore_byscore:src";
+    let dst = "cover2:zset:zrangestore_byscore:dst";
+
+    c.execute(Del::keys([src, dst])).await.unwrap();
+    c.execute(
+        ZAdd::new(src)
+            .member(1.0, "a")
+            .member(2.0, "b")
+            .member(3.0, "c")
+            .member(4.0, "d"),
+    )
+    .await
+    .unwrap();
+
+    // Copy members with scores 2..3 using BYSCORE + REV.
+    let count = c
+        .execute(ZRangeStore::new(dst, src, "2", "3").by_score())
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+
+    let members = c.execute(ZRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.contains(&Bytes::from("b")));
+    assert!(members.contains(&Bytes::from("c")));
+
+    c.execute(Del::keys([src, dst])).await.unwrap();
+}

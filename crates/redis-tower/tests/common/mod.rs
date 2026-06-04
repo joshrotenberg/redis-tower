@@ -28,6 +28,7 @@ pub async fn redis_addr() -> &'static str {
         .await
 }
 
+#[allow(dead_code)]
 pub async fn conn() -> RedisConnection {
     let addr = redis_addr().await;
     RedisConnection::connect(addr)

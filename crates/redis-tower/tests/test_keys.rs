@@ -231,3 +231,113 @@ async fn cover_sort_ro_basic() {
     assert_eq!(items, vec![1, 2, 3]);
     c.execute(Del::new(k)).await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Additional SORT coverage (issue #352)
+// ---------------------------------------------------------------------------
+
+/// SORT with STORE returns an integer (number of elements stored) and writes
+/// the sorted result to a destination key.
+#[tokio::test]
+async fn cover_sort_store() {
+    let mut c = conn().await;
+    let src = "cover:keys:sort_store:src";
+    let dst = "cover:keys:sort_store:dst";
+    c.execute(Del::new(src)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+    for v in ["3", "1", "2"] {
+        c.execute(RPush::new(src, v)).await.unwrap();
+    }
+
+    // SORT … STORE returns an integer frame, not an array.
+    let result = c.execute(Sort::new(src).store(dst)).await.unwrap();
+    match result {
+        redis_tower::Frame::Integer(n) => assert_eq!(n, 3),
+        other => panic!("expected Frame::Integer, got {other:?}"),
+    }
+
+    // The stored list should be in sorted (ascending) order.
+    let stored = c.execute(LRange::new(dst, 0, -1)).await.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[0], Bytes::from("1"));
+    assert_eq!(stored[1], Bytes::from("2"));
+    assert_eq!(stored[2], Bytes::from("3"));
+
+    c.execute(Del::new(src)).await.unwrap();
+    c.execute(Del::new(dst)).await.unwrap();
+}
+
+/// SORT BY uses external weight keys to determine sort order.
+#[tokio::test]
+async fn cover_sort_by_pattern() {
+    let mut c = conn().await;
+    let k = "cover:keys:sort_by:list";
+    let w1 = "cover:keys:sort_by:weight_1";
+    let w2 = "cover:keys:sort_by:weight_2";
+    let w3 = "cover:keys:sort_by:weight_3";
+
+    c.execute(Del::new(k)).await.unwrap();
+    for v in ["1", "2", "3"] {
+        c.execute(RPush::new(k, v)).await.unwrap();
+    }
+    // weight_3 = 10 (sorts first), weight_1 = 20, weight_2 = 30.
+    c.execute(Set::new(w1, "20")).await.unwrap();
+    c.execute(Set::new(w2, "30")).await.unwrap();
+    c.execute(Set::new(w3, "10")).await.unwrap();
+
+    let result = c
+        .execute(Sort::new(k).by("cover:keys:sort_by:weight_*"))
+        .await
+        .unwrap();
+    let items = extract_sort_strings(result);
+    // Sorted by weight: 3(10), 1(20), 2(30).
+    assert_eq!(items, vec!["3", "1", "2"]);
+
+    c.execute(Del::new(k)).await.unwrap();
+    c.execute(Del::new(w1)).await.unwrap();
+    c.execute(Del::new(w2)).await.unwrap();
+    c.execute(Del::new(w3)).await.unwrap();
+}
+
+/// SORT GET # returns the element itself (exercises the GET path in the frame
+/// builder).
+#[tokio::test]
+async fn cover_sort_get_hash() {
+    let mut c = conn().await;
+    let k = "cover:keys:sort_get";
+    c.execute(Del::new(k)).await.unwrap();
+    for v in ["3", "1", "2"] {
+        c.execute(RPush::new(k, v)).await.unwrap();
+    }
+
+    // GET # returns the element value itself, sorted ascending.
+    let result = c.execute(Sort::new(k).get("#")).await.unwrap();
+    let items = extract_sort_strings(result);
+    assert_eq!(items, vec!["1", "2", "3"]);
+
+    c.execute(Del::new(k)).await.unwrap();
+}
+
+/// SORT_RO with DESC order and LIMIT.
+#[tokio::test]
+async fn cover_sort_ro_desc_limit() {
+    let mut c = conn().await;
+    let k = "cover:keys:sort_ro_desc";
+    c.execute(Del::new(k)).await.unwrap();
+    for v in 1..=5_i32 {
+        c.execute(RPush::new(k, v.to_string())).await.unwrap();
+    }
+
+    // DESC LIMIT 0 3 → [5, 4, 3].
+    let result = c
+        .execute(SortRo::new(k).order(SortOrder::Desc).limit(0, 3))
+        .await
+        .unwrap();
+    let items: Vec<i64> = result
+        .into_iter()
+        .filter_map(|opt| opt.map(|b| String::from_utf8_lossy(&b).parse().unwrap()))
+        .collect();
+    assert_eq!(items, vec![5, 4, 3]);
+
+    c.execute(Del::new(k)).await.unwrap();
+}
