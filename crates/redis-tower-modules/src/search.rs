@@ -2,7 +2,7 @@
 //!
 //! Ergonomic, typed client over RediSearch. Query results are deserialized
 //! into caller-supplied Rust types with `serde_json`, hiding the raw
-//! [`Frame`](redis_tower::Frame) reply structure.
+//! [`Frame`] reply structure.
 //!
 //! # Example
 //!
