@@ -191,3 +191,59 @@ async fn cover_wait_zero() {
 //
 // Skipped: REPLICAOF, FAILOVER -- require a primary+replica setup that the
 // standalone test harness does not provide.
+
+// ---------------------------------------------------------------------------
+// CLIENT command coverage (issue #353)
+// ---------------------------------------------------------------------------
+
+/// CLIENT SETNAME sets the connection name; CLIENT GETNAME retrieves it.
+#[tokio::test]
+async fn cover_client_setname_getname() {
+    use bytes::Bytes;
+
+    let mut c = conn().await;
+
+    c.execute(ClientSetName::new("test-conn-name"))
+        .await
+        .unwrap();
+    let name = c.execute(ClientGetName::new()).await.unwrap();
+    assert_eq!(
+        name,
+        Some(Bytes::from("test-conn-name")),
+        "CLIENT GETNAME should return the name set by CLIENT SETNAME"
+    );
+
+    // Clear the name so this connection doesn't pollute CLIENT LIST output
+    // in other tests.  An empty string resets the name.
+    c.execute(ClientSetName::new("")).await.unwrap_or(());
+}
+
+/// CLIENT ID returns a positive integer for the current connection.
+#[tokio::test]
+async fn cover_client_id() {
+    let mut c = conn().await;
+    let id = c.execute(ClientId::new()).await.unwrap();
+    assert!(id > 0, "CLIENT ID should return a positive integer");
+}
+
+/// CLIENT INFO returns a text blob describing the current connection.
+#[tokio::test]
+async fn cover_client_info() {
+    let mut c = conn().await;
+    let info = c.execute(ClientInfo::new()).await.unwrap();
+    let text = String::from_utf8_lossy(&info);
+    assert!(
+        text.contains("id="),
+        "CLIENT INFO should contain 'id=', got: {text}"
+    );
+}
+
+/// SELECT switches the active database; switching back to 0 must succeed.
+#[tokio::test]
+async fn cover_select() {
+    let mut c = conn().await;
+    // Switch to db 1.
+    c.execute(Select::new(1)).await.unwrap();
+    // Switch back to db 0.
+    c.execute(Select::new(0)).await.unwrap();
+}
