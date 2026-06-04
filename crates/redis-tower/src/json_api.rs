@@ -13,12 +13,16 @@
 //! #[derive(Serialize, Deserialize, Debug, PartialEq)]
 //! struct User { name: String, age: u32 }
 //!
+//! // With a mutable reference (standalone/client):
 //! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //! let mut json = Json::new(&mut conn);
-//!
 //! json.set("user:1", "$", &User { name: "Alice".into(), age: 30 }).await?;
 //! let user: User = json.get("user:1", "$").await?;
-//! assert_eq!(user, User { name: "Alice".into(), age: 30 });
+//!
+//! // With a MultiplexedClient (owned, Clone-friendly):
+//! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let mut json = Json::new(client.clone());
+//! json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
 //! ```
 
 use bytes::Bytes;
@@ -32,8 +36,12 @@ use crate::RedisExecutor;
 
 /// High-level RedisJSON API with automatic serde serialization.
 ///
-/// Wraps a mutable reference to any [`RedisExecutor`] and provides typed
-/// `set`/`get`/`del` methods that handle JSON serialization transparently.
+/// Wraps any [`RedisExecutor`] by value and provides typed `set`/`get`/`del`
+/// methods that handle JSON serialization transparently.
+///
+/// Accepts both owned executors (e.g. `MultiplexedClient`, which is `Clone`)
+/// and mutable references (e.g. `&mut RedisConnection`, `&mut RedisClient`),
+/// thanks to the blanket `impl RedisExecutor for &mut C`.
 ///
 /// # Example
 ///
@@ -44,19 +52,29 @@ use crate::RedisExecutor;
 /// #[derive(Serialize, Deserialize, Debug, PartialEq)]
 /// struct User { name: String, age: u32 }
 ///
+/// // Mutable reference (single-connection or shared clients):
 /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 /// let mut json = Json::new(&mut conn);
-///
 /// json.set("user:1", "$", &User { name: "Alice".into(), age: 30 }).await?;
 /// let user: User = json.get("user:1", "$").await?;
+///
+/// // Owned multiplexed client (Clone + Send + Sync):
+/// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+/// let mut json = Json::new(client.clone());
+/// json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
 /// ```
-pub struct Json<'a, C> {
-    conn: &'a mut C,
+pub struct Json<C> {
+    conn: C,
 }
 
-impl<'a, C: RedisExecutor> Json<'a, C> {
+impl<C: RedisExecutor> Json<C> {
     /// Create a new JSON API handle wrapping the given executor.
-    pub fn new(conn: &'a mut C) -> Self {
+    ///
+    /// Accepts any `C: RedisExecutor` by value. Use `Json::new(&mut conn)`
+    /// for mutable-reference ergonomics (supported via the blanket
+    /// `impl RedisExecutor for &mut C`), or `Json::new(client.clone())`
+    /// for `Clone`-able shared clients like `MultiplexedClient`.
+    pub fn new(conn: C) -> Self {
         Self { conn }
     }
 
@@ -232,7 +250,29 @@ mod tests {
             Frame::BulkString(Some(Bytes::from(get_response))),
         ]);
 
+        // Json::new(&mut mock) -- mutable reference path
         let mut json = Json::new(&mut mock);
+        json.set("user:1", "$", &user).await.unwrap();
+        let result: User = json.get("user:1", "$").await.unwrap();
+        assert_eq!(result, user);
+    }
+
+    #[tokio::test]
+    async fn set_get_owned_executor() {
+        let user = User {
+            name: "Alice".into(),
+            age: 30,
+        };
+        let serialized = serde_json::to_string(&user).unwrap();
+        let get_response = format!("[{serialized}]");
+
+        let mock = MockRedis::new(vec![
+            Frame::SimpleString(Bytes::from("OK")),
+            Frame::BulkString(Some(Bytes::from(get_response))),
+        ]);
+
+        // Json::new(mock) -- owned executor path (e.g. MultiplexedClient)
+        let mut json = Json::new(mock);
         json.set("user:1", "$", &user).await.unwrap();
         let result: User = json.get("user:1", "$").await.unwrap();
         assert_eq!(result, user);

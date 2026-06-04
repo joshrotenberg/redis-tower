@@ -21,8 +21,62 @@
 //! ```
 
 use std::any::Any;
+use std::future::Future;
+use std::sync::Arc;
 
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use tokio::sync::Mutex;
+
+use crate::client::RedisClient;
+
+/// A connection type that can execute a batch of Redis frames in a single
+/// roundtrip (pipelining).
+///
+/// Implemented by [`RedisConnection`]. The `Arc<Mutex<C>>` blanket impl and
+/// the [`RedisClient`] impl allow pool-managed and shared clients to be passed
+/// directly to [`Pipeline::execute`].
+///
+/// # Note on transactions
+///
+/// Transactions require exclusive connection access for the duration of
+/// MULTI/EXEC. See [`TransactionExecutor`](crate::transaction::TransactionExecutor)
+/// for that variant.
+pub trait PipelineExecutor {
+    /// Send `frames` as a pipelined batch and return the responses in order.
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send;
+}
+
+impl PipelineExecutor for RedisConnection {
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+        RedisConnection::execute_pipeline(self, frames)
+    }
+}
+
+impl<C: PipelineExecutor + Send> PipelineExecutor for Arc<Mutex<C>> {
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+        let arc = Arc::clone(self);
+        async move { arc.lock().await.execute_pipeline(frames).await }
+    }
+}
+
+impl PipelineExecutor for RedisClient {
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+        let arc = Arc::clone(&self.inner);
+        async move { arc.lock().await.execute_pipeline(frames).await }
+    }
+}
 
 /// Type-erased response parser: takes a Frame, returns a boxed Any result.
 pub(crate) type ResponseParser =
@@ -38,6 +92,10 @@ struct PipelineEntry {
 ///
 /// Each command's response type is preserved and can be extracted from
 /// the [`PipelineResults`] by index.
+///
+/// Accepts any type that implements [`PipelineExecutor`], including
+/// [`RedisConnection`], [`RedisClient`], and `Arc<Mutex<C>>` for any
+/// `C: PipelineExecutor + Send`.
 ///
 /// # Example
 ///
@@ -81,7 +139,13 @@ impl Pipeline {
     }
 
     /// Execute all queued commands in a single roundtrip.
-    pub async fn execute(self, conn: &mut RedisConnection) -> Result<PipelineResults, RedisError> {
+    ///
+    /// Accepts any [`PipelineExecutor`]: [`RedisConnection`], [`RedisClient`],
+    /// `Arc<Mutex<RedisConnection>>`, etc.
+    pub async fn execute<E: PipelineExecutor>(
+        self,
+        conn: &mut E,
+    ) -> Result<PipelineResults, RedisError> {
         let frames: Vec<Frame> = self.entries.iter().map(|e| e.frame.clone()).collect();
         let responses = conn.execute_pipeline(frames).await?;
 
@@ -273,5 +337,54 @@ mod tests {
             }
             other => panic!("expected IndexOutOfBounds, got {other:?}"),
         }
+    }
+
+    /// A mock pipeline executor for unit tests.
+    struct MockPipelineConn {
+        count: usize,
+    }
+
+    impl PipelineExecutor for MockPipelineConn {
+        fn execute_pipeline(
+            &mut self,
+            frames: Vec<Frame>,
+        ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+            let responses: Vec<Frame> = frames
+                .iter()
+                .map(|_| Frame::SimpleString(bytes::Bytes::from("OK")))
+                .collect();
+            self.count += frames.len();
+            async move { Ok(responses) }
+        }
+    }
+
+    #[tokio::test]
+    async fn pipeline_execute_accepts_pipeline_executor() {
+        use redis_tower_commands::Set;
+
+        let mut conn = MockPipelineConn { count: 0 };
+        let results = Pipeline::new()
+            .push(Set::new("a", "1"))
+            .push(Set::new("b", "2"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(conn.count, 2);
+    }
+
+    #[tokio::test]
+    async fn pipeline_execute_accepts_arc_mutex_executor() {
+        use redis_tower_commands::Set;
+
+        let conn = Arc::new(Mutex::new(MockPipelineConn { count: 0 }));
+        let mut executor = Arc::clone(&conn);
+        let results = Pipeline::new()
+            .push(Set::new("a", "1"))
+            .execute(&mut executor)
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(conn.lock().await.count, 1);
     }
 }

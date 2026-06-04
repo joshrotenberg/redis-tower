@@ -307,7 +307,7 @@ pub use credentials::{
 pub use executor::RedisExecutor;
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use multiplexed::MultiplexedClient;
-pub use pipeline::{Pipeline, PipelineResults};
+pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
 pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
 pub use reconnect::ResilientConnection;
@@ -316,7 +316,7 @@ pub use resilient::ResilientRedisClient;
 pub use scan_stream::ScanStream;
 pub use script::Script;
 pub use tracing_layer::{TracingLayer, TracingService};
-pub use transaction::{Transaction, TransactionResult};
+pub use transaction::{Transaction, TransactionExecutor, TransactionResult};
 
 #[cfg(feature = "serde")]
 pub use json_api::Json;

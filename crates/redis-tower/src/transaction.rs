@@ -20,11 +20,84 @@
 //! ```
 
 use std::any::Any;
+use std::future::Future;
+use std::sync::Arc;
 
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
+use tokio::sync::Mutex;
 
+use crate::client::RedisClient;
 use crate::pipeline::{PipelineResults, ResponseParser};
+
+/// A connection type that can execute a WATCH/MULTI/EXEC transaction.
+///
+/// Implemented by [`RedisConnection`]. The `Arc<Mutex<C>>` blanket impl
+/// and the [`RedisClient`] impl allow shared clients to be passed directly
+/// to [`Transaction::execute`].
+///
+/// ## Exclusive access
+///
+/// Transactions require exclusive access to a single connection for the
+/// duration of WATCH/MULTI/EXEC. The `Arc<Mutex<C>>` blanket impl satisfies
+/// this automatically: the mutex is locked for the entire transaction call,
+/// preventing any other caller from interleaving commands.
+pub trait TransactionExecutor {
+    /// Execute a WATCH/MULTI/EXEC transaction.
+    ///
+    /// `watch_frames` is the serialized WATCH command (empty if no WATCH keys).
+    /// `command_frames` are the commands to queue between MULTI and EXEC.
+    ///
+    /// Returns `Ok(Some(responses))` if the transaction committed,
+    /// `Ok(None)` if it was aborted by a WATCH violation.
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send;
+}
+
+impl TransactionExecutor for RedisConnection {
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        RedisConnection::execute_transaction(self, watch_frames, command_frames)
+    }
+}
+
+impl<C: TransactionExecutor + Send> TransactionExecutor for Arc<Mutex<C>> {
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        let arc = Arc::clone(self);
+        async move {
+            arc.lock()
+                .await
+                .execute_transaction(watch_frames, command_frames)
+                .await
+        }
+    }
+}
+
+impl TransactionExecutor for RedisClient {
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        let arc = Arc::clone(&self.inner);
+        async move {
+            arc.lock()
+                .await
+                .execute_transaction(watch_frames, command_frames)
+                .await
+        }
+    }
+}
 
 /// A type-erased command entry for transactions.
 struct TransactionEntry {
@@ -37,6 +110,10 @@ struct TransactionEntry {
 /// Supports optional WATCH keys for optimistic locking. If a watched key
 /// is modified by another client before EXEC, the transaction is aborted
 /// and [`TransactionResult::Aborted`] is returned.
+///
+/// Accepts any type that implements [`TransactionExecutor`], including
+/// [`RedisConnection`], [`RedisClient`], and `Arc<Mutex<C>>` for any
+/// `C: TransactionExecutor + Send`.
 ///
 /// # Example
 ///
@@ -144,11 +221,16 @@ impl Transaction {
 
     /// Execute the transaction.
     ///
+    /// Accepts any [`TransactionExecutor`]: [`RedisConnection`], [`RedisClient`],
+    /// `Arc<Mutex<RedisConnection>>`, etc.
+    ///
     /// Sends WATCH (if any), MULTI, all queued commands, and EXEC
-    /// atomically under a single connection lock.
-    pub async fn execute(
+    /// atomically under a single connection lock. For `Arc<Mutex<C>>`-based
+    /// executors, the mutex is held for the entire WATCH/MULTI/EXEC sequence,
+    /// preventing any interleaving with other callers.
+    pub async fn execute<E: TransactionExecutor>(
         self,
-        conn: &mut RedisConnection,
+        conn: &mut E,
     ) -> Result<TransactionResult, RedisError> {
         // Build WATCH frames.
         let watch_frames: Vec<Frame> = if self.watch_keys.is_empty() {
@@ -244,5 +326,59 @@ mod tests {
     #[should_panic(expected = "Aborted")]
     fn unwrap_panics_on_aborted() {
         let _ = TransactionResult::Aborted.unwrap();
+    }
+
+    /// A mock transaction executor for unit tests.
+    struct MockTransactionConn {
+        /// Simulates committed responses (one per command frame).
+        responses: Option<Vec<Frame>>,
+    }
+
+    impl TransactionExecutor for MockTransactionConn {
+        fn execute_transaction(
+            &mut self,
+            _watch_frames: Vec<Frame>,
+            command_frames: Vec<Frame>,
+        ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+            let responses = self.responses.take().map(|_| {
+                // Return one SimpleString "OK" per queued command.
+                command_frames
+                    .iter()
+                    .map(|_| Frame::SimpleString(bytes::Bytes::from("OK")))
+                    .collect::<Vec<_>>()
+            });
+            async move { Ok(responses) }
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_accepts_transaction_executor() {
+        use redis_tower_commands::Set;
+
+        let mut conn = MockTransactionConn {
+            responses: Some(vec![]),
+        };
+        let result = Transaction::new()
+            .push(Set::new("x", "1"))
+            .execute(&mut conn)
+            .await
+            .unwrap();
+        assert!(result.is_committed());
+    }
+
+    #[tokio::test]
+    async fn transaction_execute_accepts_arc_mutex_executor() {
+        use redis_tower_commands::Set;
+
+        let conn = Arc::new(Mutex::new(MockTransactionConn {
+            responses: Some(vec![]),
+        }));
+        let mut executor = Arc::clone(&conn);
+        let result = Transaction::new()
+            .push(Set::new("x", "1"))
+            .execute(&mut executor)
+            .await
+            .unwrap();
+        assert!(result.is_committed());
     }
 }
