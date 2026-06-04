@@ -7,7 +7,7 @@
 //!
 //! Clients under test:
 //!
-//! - `RedisTower`    -- redis-tower `RedisClient` (Arc<Mutex<RedisConnection>>, baseline)
+//! - `RedisTower`    -- redis-tower `RedisClient` (`Arc<Mutex<RedisConnection>>`, baseline)
 //! - `RedisTowerMux` -- redis-tower `MultiplexedClient` (AutoPipeline, high-concurrency path)
 //! - `RedisRsSync`   -- redis 1.2 sync client, one persistent connection per worker thread
 //! - `RedisRsAsync`  -- redis 1.2 async `MultiplexedConnection`

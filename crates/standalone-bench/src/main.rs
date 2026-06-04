@@ -4,7 +4,7 @@
 //! workloads across several concurrency levels, and prints a comparison table.
 //!
 //! Clients under test:
-//! - `RedisTower`    -- redis-tower `RedisClient` (Arc<Mutex<RedisConnection>>)
+//! - `RedisTower`    -- redis-tower `RedisClient` (`Arc<Mutex<RedisConnection>>`)
 //! - `RedisTowerMux` -- redis-tower `MultiplexedClient` (AutoPipeline)
 //! - `RedisRsSync`   -- redis-rs sync client (one conn per thread)
 //! - `RedisRsAsync`  -- redis-rs async `MultiplexedConnection`
