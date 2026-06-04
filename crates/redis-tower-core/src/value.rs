@@ -568,11 +568,11 @@ mod tests {
         // blanket HashMap<String, V> impl: V=f64
         let v = vec![
             (Bytes::from("score1"), Bytes::from("1.5")),
-            (Bytes::from("score2"), Bytes::from("3.14")),
+            (Bytes::from("score2"), Bytes::from("2.5")),
         ];
         let m: std::collections::HashMap<String, f64> = v.parse_into().unwrap();
         assert!((m["score1"] - 1.5).abs() < f64::EPSILON);
-        assert!((m["score2"] - 3.14).abs() < 1e-10);
+        assert!((m["score2"] - 2.5).abs() < f64::EPSILON);
     }
 
     #[test]
