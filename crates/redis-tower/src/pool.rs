@@ -505,34 +505,41 @@ where
             };
 
             // Lazy health check: PING if idle beyond the threshold.
-            let last = inner.last_used[idx].load(Ordering::Acquire);
-            let now = now_millis();
-            if inner.health_check_interval_ms > 0
-                && now.saturating_sub(last) >= inner.health_check_interval_ms
-                && let Err(ping_err) = conn.execute(Ping::new()).await
-            {
-                // PING failed. Attempt to replace the dead slot via the factory.
-                if let Some(ref factory) = inner.factory {
-                    match factory.create().await {
-                        Ok(fresh) => {
-                            *conn = fresh;
-                            inner.last_used[idx].store(now_millis(), Ordering::Release);
+            // Gate the syscall behind the interval check to avoid calling
+            // SystemTime::now() on every execute when health checks are disabled.
+            if inner.health_check_interval_ms > 0 {
+                let last = inner.last_used[idx].load(Ordering::Acquire);
+                let now = now_millis();
+                if now.saturating_sub(last) >= inner.health_check_interval_ms
+                    && let Err(ping_err) = conn.execute(Ping::new()).await
+                {
+                    // PING failed. Attempt to replace the dead slot via the factory.
+                    if let Some(ref factory) = inner.factory {
+                        match factory.create().await {
+                            Ok(fresh) => {
+                                *conn = fresh;
+                                inner.last_used[idx].store(now_millis(), Ordering::Release);
+                            }
+                            Err(replace_err) => {
+                                drop(conn);
+                                inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                                return Err(replace_err);
+                            }
                         }
-                        Err(replace_err) => {
-                            drop(conn);
-                            inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                            return Err(replace_err);
-                        }
+                    } else {
+                        drop(conn);
+                        inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                        return Err(ping_err);
                     }
-                } else {
-                    drop(conn);
-                    inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                    return Err(ping_err);
                 }
             }
 
             let result = conn.execute(cmd).await;
-            inner.last_used[idx].store(now_millis(), Ordering::Release);
+            // Only update the last-used timestamp when health checks are enabled;
+            // when disabled the timestamp is never read, making the store dead work.
+            if inner.health_check_interval_ms > 0 {
+                inner.last_used[idx].store(now_millis(), Ordering::Release);
+            }
             drop(conn);
             inner.inflight[idx].fetch_sub(1, Ordering::Release);
             result
@@ -579,34 +586,41 @@ where
         };
 
         // Lazy health check: PING if idle beyond the threshold.
-        let last = self.inner.last_used[idx].load(Ordering::Acquire);
-        let now = now_millis();
-        if self.inner.health_check_interval_ms > 0
-            && now.saturating_sub(last) >= self.inner.health_check_interval_ms
-            && let Err(ping_err) = conn.execute(Ping::new()).await
-        {
-            // PING failed. Attempt to replace the dead slot via the factory.
-            if let Some(ref factory) = self.inner.factory {
-                match factory.create().await {
-                    Ok(fresh) => {
-                        *conn = fresh;
-                        self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+        // Gate the syscall behind the interval check to avoid calling
+        // SystemTime::now() on every execute when health checks are disabled.
+        if self.inner.health_check_interval_ms > 0 {
+            let last = self.inner.last_used[idx].load(Ordering::Acquire);
+            let now = now_millis();
+            if now.saturating_sub(last) >= self.inner.health_check_interval_ms
+                && let Err(ping_err) = conn.execute(Ping::new()).await
+            {
+                // PING failed. Attempt to replace the dead slot via the factory.
+                if let Some(ref factory) = self.inner.factory {
+                    match factory.create().await {
+                        Ok(fresh) => {
+                            *conn = fresh;
+                            self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+                        }
+                        Err(replace_err) => {
+                            drop(conn);
+                            self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                            return Err(replace_err);
+                        }
                     }
-                    Err(replace_err) => {
-                        drop(conn);
-                        self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                        return Err(replace_err);
-                    }
+                } else {
+                    drop(conn);
+                    self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
+                    return Err(ping_err);
                 }
-            } else {
-                drop(conn);
-                self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                return Err(ping_err);
             }
         }
 
         let result = conn.execute(cmd).await;
-        self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+        // Only update the last-used timestamp when health checks are enabled;
+        // when disabled the timestamp is never read, making the store dead work.
+        if self.inner.health_check_interval_ms > 0 {
+            self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+        }
         drop(conn);
         self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result

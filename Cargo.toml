@@ -10,6 +10,7 @@ members = [
     "crates/redis-tower-sync",
     "crates/redis-test-harness",
     "crates/cluster-bench",
+    "crates/standalone-bench",
     "examples",
 ]
 

@@ -1,6 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
+use redis_tower::auto_pipeline::AutoPipelineConfig;
 use redis_tower::commands::*;
-use redis_tower::{Pipeline, RedisClient, RedisConnection, Transaction, TransactionResult};
+use redis_tower::pool::{ConnectionPool, PoolConfig};
+use redis_tower::{
+    MultiplexedClient, Pipeline, RedisClient, RedisConnection, Transaction, TransactionResult,
+};
 
 fn bench_ping(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
@@ -234,6 +238,263 @@ fn bench_mixed_workload(c: &mut Criterion) {
     });
 }
 
+/// MultiplexedClient throughput under N concurrent tasks.
+///
+/// Demonstrates auto-pipeline batching benefit: at higher concurrency levels
+/// concurrent GET/SET ops are batched into a single pipeline round-trip.
+fn bench_multiplexed_concurrent(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let client = match rt.block_on(async { MultiplexedClient::connect("127.0.0.1:6379").await }) {
+        Ok(c) => c,
+        Err(_) => return, // skip if no server available
+    };
+
+    // Pre-populate keys used by the GET benchmarks.
+    rt.block_on(async {
+        for i in 0..128u32 {
+            client
+                .execute(Set::new(format!("bench:mux:{i}"), "value"))
+                .await
+                .ok();
+        }
+    });
+
+    let mut group = c.benchmark_group("multiplexed_concurrent");
+    group.measurement_time(std::time::Duration::from_secs(10));
+
+    for concurrency in [1usize, 8, 32, 128] {
+        group.bench_function(format!("get_c{concurrency}"), |b| {
+            b.to_async(&rt).iter(|| {
+                let client = client.clone();
+                async move {
+                    let handles: Vec<_> = (0..concurrency)
+                        .map(|i| {
+                            let c = client.clone();
+                            tokio::spawn(async move {
+                                c.execute(Get::new(format!("bench:mux:{}", i % 128)))
+                                    .await
+                                    .ok()
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.await.ok();
+                    }
+                }
+            });
+        });
+
+        group.bench_function(format!("set_c{concurrency}"), |b| {
+            b.to_async(&rt).iter(|| {
+                let client = client.clone();
+                async move {
+                    let handles: Vec<_> = (0..concurrency)
+                        .map(|i| {
+                            let c = client.clone();
+                            tokio::spawn(async move {
+                                c.execute(Set::new(format!("bench:mux:{}", i % 128), "value"))
+                                    .await
+                                    .ok()
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.await.ok();
+                    }
+                }
+            });
+        });
+    }
+
+    group.finish();
+
+    rt.block_on(async {
+        for i in 0..128u32 {
+            client
+                .execute(Del::new(format!("bench:mux:{i}")))
+                .await
+                .ok();
+        }
+        client.shutdown().await;
+    });
+}
+
+/// ConnectionPool throughput at varying pool sizes and fixed concurrency.
+///
+/// Shows the pool-size sweet spot: too small causes lock contention,
+/// too large wastes connections.
+fn bench_pool_throughput(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // Verify server is available before building the group.
+    if rt
+        .block_on(async { RedisConnection::connect("127.0.0.1:6379").await })
+        .is_err()
+    {
+        return;
+    }
+
+    let mut group = c.benchmark_group("pool_throughput");
+    group.measurement_time(std::time::Duration::from_secs(10));
+
+    for pool_size in [1usize, 4, 8] {
+        let pool: ConnectionPool<RedisConnection> = rt.block_on(async {
+            ConnectionPool::connect_with_config(PoolConfig::default().size(pool_size), || async {
+                RedisConnection::connect("127.0.0.1:6379").await
+            })
+            .await
+            .unwrap()
+        });
+
+        group.bench_function(format!("get_pool{pool_size}_c32"), |b| {
+            b.to_async(&rt).iter(|| {
+                let pool = pool.clone();
+                async move {
+                    let handles: Vec<_> = (0..32)
+                        .map(|i| {
+                            let p = pool.clone();
+                            tokio::spawn(async move {
+                                p.execute(Get::new(format!("bench:pool:{}", i % 128)))
+                                    .await
+                                    .ok()
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.await.ok();
+                    }
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
+/// GET/SET throughput with large value payloads.
+///
+/// Tests RESP codec encode/decode allocations at scale. Important for
+/// workloads using Redis as a cache for large objects.
+fn bench_large_values(c: &mut Criterion) {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let client = match rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await }) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let mut group = c.benchmark_group("large_values");
+    group.measurement_time(std::time::Duration::from_secs(10));
+
+    for size in [1_024usize, 10_240, 102_400] {
+        let payload = "x".repeat(size);
+        let key = format!("bench:large:{size}");
+
+        // Pre-set so GET benchmarks always hit.
+        rt.block_on(async {
+            client
+                .execute(Set::new(key.clone(), payload.clone()))
+                .await
+                .ok();
+        });
+
+        group.bench_function(format!("set_{size}b"), |b| {
+            let payload = payload.clone();
+            let key = key.clone();
+            b.to_async(&rt).iter(|| {
+                let client = client.clone();
+                let payload = payload.clone();
+                let key = key.clone();
+                async move { client.execute(Set::new(key, payload)).await.ok() }
+            });
+        });
+
+        group.bench_function(format!("get_{size}b"), |b| {
+            let key = key.clone();
+            b.to_async(&rt).iter(|| {
+                let client = client.clone();
+                let key = key.clone();
+                async move { client.execute(Get::new(key)).await.ok() }
+            });
+        });
+    }
+
+    group.finish();
+
+    rt.block_on(async {
+        for size in [1_024usize, 10_240, 102_400] {
+            client
+                .execute(Del::new(format!("bench:large:{size}")))
+                .await
+                .ok();
+        }
+    });
+}
+
+/// AutoPipelineConfig::batch_window tradeoff at high concurrency.
+///
+/// Quantifies when a non-zero window helps (write-heavy workloads) vs
+/// hurts (latency-sensitive workloads). Default is 0ms (flush immediately).
+fn bench_batch_window(c: &mut Criterion) {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    if rt
+        .block_on(async { RedisConnection::connect("127.0.0.1:6379").await })
+        .is_err()
+    {
+        return;
+    }
+
+    let mut group = c.benchmark_group("batch_window");
+    group.measurement_time(std::time::Duration::from_secs(10));
+
+    for window_ms in [0u64, 1, 5] {
+        let client = rt.block_on(async {
+            let conn = RedisConnection::connect("127.0.0.1:6379").await.unwrap();
+            let config = AutoPipelineConfig {
+                batch_window: std::time::Duration::from_millis(window_ms),
+                ..Default::default()
+            };
+            MultiplexedClient::from_connection_with_config(conn, config)
+        });
+
+        group.bench_function(format!("c32_window{window_ms}ms"), |b| {
+            b.to_async(&rt).iter(|| {
+                let client = client.clone();
+                async move {
+                    let handles: Vec<_> = (0..32usize)
+                        .map(|i| {
+                            let c = client.clone();
+                            tokio::spawn(async move {
+                                c.execute(Set::new(format!("bench:window:{}", i % 32), "v"))
+                                    .await
+                                    .ok()
+                            })
+                        })
+                        .collect();
+                    for h in handles {
+                        h.await.ok();
+                    }
+                }
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_ping,
@@ -246,5 +507,9 @@ criterion_group!(
     bench_pipeline,
     bench_transaction,
     bench_mixed_workload,
+    bench_multiplexed_concurrent,
+    bench_pool_throughput,
+    bench_large_values,
+    bench_batch_window,
 );
 criterion_main!(benches);
