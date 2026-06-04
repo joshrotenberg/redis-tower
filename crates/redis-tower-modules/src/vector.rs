@@ -2,7 +2,7 @@
 //!
 //! Ergonomic, typed client over Redis [Vector Sets]. Vectors are exchanged as
 //! `Vec<f32>` and named elements as strings, hiding the raw
-//! [`Frame`](redis_tower::Frame) reply structure. Similarity searches return
+//! [`Frame`] reply structure. Similarity searches return
 //! typed [`SimilarityResult`] values and introspection returns a structured
 //! [`VectorSetInfo`].
 //!
