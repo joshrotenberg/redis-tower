@@ -47,7 +47,7 @@ use tokio::sync::Mutex;
 /// ```
 #[derive(Clone)]
 pub struct RedisClient {
-    inner: Arc<Mutex<RedisConnection>>,
+    pub(crate) inner: Arc<Mutex<RedisConnection>>,
 }
 
 impl RedisClient {

@@ -5,11 +5,14 @@
 //! making it straightforward to substitute a mock in tests.
 
 use std::future::Future;
+use std::sync::Arc;
 
 use redis_tower_core::{Command, RedisConnection, RedisError};
+use tokio::sync::Mutex;
 
 use crate::caching::CachedClient;
 use crate::client::RedisClient;
+use crate::multiplexed::MultiplexedClient;
 use crate::resilient::ResilientRedisClient;
 
 /// Trait for executing Redis commands, enabling test mocking.
@@ -69,6 +72,45 @@ impl RedisExecutor for CachedClient {
     }
 }
 
+/// Blanket impl: any `Arc<Mutex<C>>` where `C: RedisExecutor + Send` is also
+/// a `RedisExecutor`. This makes `RedisClient` (which wraps `Arc<Mutex<RedisConnection>>`)
+/// and any user-defined Arc-wrapped executor automatically composable with
+/// generic API wrappers like [`Json`](crate::json_api::Json).
+impl<C: RedisExecutor + Send> RedisExecutor for Arc<Mutex<C>> {
+    fn execute<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        let arc = Arc::clone(self);
+        async move { arc.lock().await.execute(cmd).await }
+    }
+}
+
+/// Blanket impl: `&mut C` implements `RedisExecutor` when `C: RedisExecutor`.
+///
+/// This allows passing `&mut conn` or `&mut client` to APIs that accept
+/// `impl RedisExecutor` by value, e.g. `Json::new(&mut conn)`.
+impl<C: RedisExecutor + Send + ?Sized> RedisExecutor for &mut C {
+    fn execute<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        (**self).execute(cmd)
+    }
+}
+
+/// `MultiplexedClient` implements `RedisExecutor`. Internally its `execute`
+/// method takes `&self` (channel send -- no real mutation), but the trait's
+/// `&mut self` contract is satisfied trivially.
+impl RedisExecutor for MultiplexedClient {
+    fn execute<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        MultiplexedClient::execute(self, cmd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -106,5 +148,30 @@ mod tests {
         let mut mock = MockRedis::new(vec![Frame::BulkString(Some(Bytes::from("hello")))]);
         let result: Option<Bytes> = mock.execute(Get::new("key")).await.unwrap();
         assert_eq!(result, Some(Bytes::from("hello")));
+    }
+
+    #[tokio::test]
+    async fn arc_mutex_implements_executor() {
+        use bytes::Bytes;
+        use redis_tower_commands::Get;
+
+        // Verify Arc<Mutex<MockRedis>> implements RedisExecutor at runtime too.
+        let mock = Arc::new(Mutex::new(MockRedis::new(vec![Frame::BulkString(Some(
+            Bytes::from("world"),
+        ))])));
+        let mut executor = Arc::clone(&mock);
+        let result: Option<Bytes> = executor.execute(Get::new("key")).await.unwrap();
+        assert_eq!(result, Some(Bytes::from("world")));
+    }
+
+    #[tokio::test]
+    async fn mut_ref_implements_executor() {
+        use bytes::Bytes;
+        use redis_tower_commands::Get;
+
+        // Verify &mut MockRedis implements RedisExecutor (used by Json::new(&mut conn)).
+        let mut mock = MockRedis::new(vec![Frame::BulkString(Some(Bytes::from("ref")))]);
+        let result: Option<Bytes> = mock.execute(Get::new("key")).await.unwrap();
+        assert_eq!(result, Some(Bytes::from("ref")));
     }
 }
