@@ -17,3 +17,6 @@ resp-rs = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
