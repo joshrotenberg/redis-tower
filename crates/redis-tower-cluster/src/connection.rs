@@ -414,6 +414,7 @@ impl ClusterConnection {
 
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
+                    tracing::debug!(slot, from_addr = %target_node, to_addr = %addr, kind = "MOVED", "cluster redirect");
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
                     self.update_slot_owner(slot, &addr);
@@ -421,6 +422,7 @@ impl ClusterConnection {
                     continue;
                 }
                 Some(Redirect::Ask { addr }) => {
+                    tracing::debug!(to_addr = %addr, kind = "ASK", "cluster redirect");
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
                     let asking_conn = self.nodes.get_mut(&addr).ok_or_else(|| {

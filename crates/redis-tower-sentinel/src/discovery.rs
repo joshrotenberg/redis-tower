@@ -34,7 +34,23 @@ pub async fn discover_master_with_timeout(
     for addr in sentinel_addrs {
         match tokio::time::timeout(timeout, query_master_addr(addr, master_name)).await {
             Ok(Ok(master_addr)) => return Ok(master_addr),
-            Ok(Err(_)) | Err(_) => continue,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    sentinel_addr = %addr,
+                    master_name = %master_name,
+                    error = %e,
+                    "sentinel: failed to query sentinel"
+                );
+                continue;
+            }
+            Err(_timeout) => {
+                tracing::warn!(
+                    sentinel_addr = %addr,
+                    master_name = %master_name,
+                    "sentinel: timed out querying sentinel"
+                );
+                continue;
+            }
         }
     }
     Err(RedisError::Redis(format!(

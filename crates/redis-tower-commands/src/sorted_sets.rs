@@ -257,6 +257,10 @@ impl Command for ZRange {
     fn name(&self) -> &str {
         "ZRANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZSCORE key member
@@ -312,6 +316,10 @@ impl Command for ZScore {
     fn name(&self) -> &str {
         "ZSCORE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZCARD key
@@ -346,6 +354,10 @@ impl Command for ZCard {
 
     fn name(&self) -> &str {
         "ZCARD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -447,6 +459,10 @@ impl Command for ZRank {
     fn name(&self) -> &str {
         "ZRANK"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZRANGEBYSCORE key min max
@@ -503,6 +519,10 @@ impl Command for ZRangeByScore {
 
     fn name(&self) -> &str {
         "ZRANGEBYSCORE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -733,6 +753,10 @@ impl Command for ZCount {
     fn name(&self) -> &str {
         "ZCOUNT"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZLEXCOUNT key min max
@@ -781,6 +805,10 @@ impl Command for ZLexCount {
 
     fn name(&self) -> &str {
         "ZLEXCOUNT"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -843,6 +871,10 @@ impl Command for ZRandMember {
 
     fn name(&self) -> &str {
         "ZRANDMEMBER"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -918,6 +950,10 @@ impl Command for ZMScore {
 
     fn name(&self) -> &str {
         "ZMSCORE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1199,6 +1235,10 @@ impl Command for ZInterCard {
 
     fn name(&self) -> &str {
         "ZINTERCARD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1633,6 +1673,10 @@ impl Command for ZRevRank {
     fn name(&self) -> &str {
         "ZREVRANK"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// Parse a flat array of bulk-string members into a `Vec<Bytes>`.
@@ -1819,6 +1863,10 @@ impl Command for ZDiff {
     fn name(&self) -> &str {
         "ZDIFF"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZDIFF numkeys key \[key ...\] WITHSCORES
@@ -1855,6 +1903,10 @@ impl Command for ZDiffWithScores {
 
     fn name(&self) -> &str {
         "ZDIFF"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1917,6 +1969,10 @@ impl Command for ZUnion {
 
     fn name(&self) -> &str {
         "ZUNION"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1981,6 +2037,10 @@ impl Command for ZUnionWithScores {
     fn name(&self) -> &str {
         "ZUNION"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// ZINTER numkeys key \[key ...\] \[WEIGHTS weight ...\] \[AGGREGATE SUM|MIN|MAX\]
@@ -2042,6 +2102,10 @@ impl Command for ZInter {
 
     fn name(&self) -> &str {
         "ZINTER"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -2105,6 +2169,10 @@ impl Command for ZInterWithScores {
 
     fn name(&self) -> &str {
         "ZINTER"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

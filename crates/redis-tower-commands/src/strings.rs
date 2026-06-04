@@ -36,6 +36,10 @@ impl Command for Get {
     fn name(&self) -> &str {
         "GET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SET key value \[EX seconds\] \[PX milliseconds\] \[NX|XX\] \[GET\]
@@ -234,6 +238,10 @@ impl Command for MGet {
 
     fn name(&self) -> &str {
         "MGET"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -798,6 +806,10 @@ impl Command for GetRange {
     fn name(&self) -> &str {
         "GETRANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// SETRANGE key offset value
@@ -881,6 +893,10 @@ impl Command for StrLen {
 
     fn name(&self) -> &str {
         "STRLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1098,6 +1114,10 @@ impl Command for Lcs {
 
     fn name(&self) -> &str {
         "LCS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

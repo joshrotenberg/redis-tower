@@ -94,6 +94,10 @@ impl Command for Exists {
     fn name(&self) -> &str {
         "EXISTS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// Condition flag for the EXPIRE family of commands (Redis 7.0+).
@@ -210,6 +214,10 @@ impl Command for Ttl {
     fn name(&self) -> &str {
         "TTL"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// RENAME key newkey
@@ -288,6 +296,10 @@ impl Command for Type {
 
     fn name(&self) -> &str {
         "TYPE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -372,6 +384,10 @@ impl Command for Persist {
 
     fn name(&self) -> &str {
         "PERSIST"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -588,6 +604,10 @@ impl Command for Keys {
     fn name(&self) -> &str {
         "KEYS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// RANDOMKEY
@@ -627,6 +647,10 @@ impl Command for RandomKey {
 
     fn name(&self) -> &str {
         "RANDOMKEY"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -712,6 +736,10 @@ impl Command for ExpireTime {
     fn name(&self) -> &str {
         "EXPIRETIME"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// PEXPIRETIME key
@@ -747,6 +775,10 @@ impl Command for PExpireTime {
 
     fn name(&self) -> &str {
         "PEXPIRETIME"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -784,6 +816,10 @@ impl Command for Dump {
 
     fn name(&self) -> &str {
         "DUMP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1090,6 +1126,10 @@ impl Command for SortRo {
     fn name(&self) -> &str {
         "SORT_RO"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// OBJECT ENCODING key
@@ -1129,6 +1169,10 @@ impl Command for ObjectEncoding {
     fn name(&self) -> &str {
         "OBJECT ENCODING"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// OBJECT FREQ key
@@ -1164,6 +1208,10 @@ impl Command for ObjectFreq {
 
     fn name(&self) -> &str {
         "OBJECT FREQ"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1215,6 +1263,10 @@ impl Command for ObjectHelp {
     fn name(&self) -> &str {
         "OBJECT HELP"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// OBJECT IDLETIME key
@@ -1255,6 +1307,10 @@ impl Command for ObjectIdleTime {
     fn name(&self) -> &str {
         "OBJECT IDLETIME"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// OBJECT REFCOUNT key
@@ -1293,6 +1349,10 @@ impl Command for ObjectRefCount {
 
     fn name(&self) -> &str {
         "OBJECT REFCOUNT"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1386,6 +1446,10 @@ impl Command for Pttl {
 
     fn name(&self) -> &str {
         "PTTL"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 

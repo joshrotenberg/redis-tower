@@ -76,6 +76,14 @@ impl ResilientRedisClient {
     }
 
     /// Execute a command, reconnecting if the connection is lost.
+    ///
+    /// # Retry Safety
+    ///
+    /// If the command fails with a connection error, the connection is
+    /// reconnected automatically, but the error is returned to the caller.
+    /// If the caller retries the command, be aware that the original command
+    /// may have been executed by Redis before the connection dropped.
+    /// Only retry commands that are [`Command::idempotent`].
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let mut conn = self.conn.lock().await;
         let result = conn.execute(cmd).await;
@@ -95,15 +103,20 @@ impl ResilientRedisClient {
         let max = self.config.max_retries.unwrap_or(usize::MAX);
         for attempt in 0..=max {
             let delay = self.config.delay_for_attempt(attempt);
+            tracing::warn!(attempt, delay = ?delay, "redis: reconnecting");
             tokio::time::sleep(delay).await;
 
             match self.factory.connect().await {
                 Ok(new_conn) => {
                     let mut guard = self.conn.lock().await;
                     *guard = new_conn;
+                    tracing::info!(attempt, "redis: reconnected successfully");
                     return;
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!(attempt, error = %e, "redis: reconnect attempt failed");
+                    continue;
+                }
             }
         }
     }

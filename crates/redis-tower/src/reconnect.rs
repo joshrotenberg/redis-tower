@@ -438,6 +438,7 @@ impl ResilientConnection {
             return;
         }
         let delay = self.config.delay_for_attempt(attempt);
+        tracing::warn!(attempt, delay = ?delay, "redis: connection lost, reconnecting");
         self.state = ConnState::WaitingToReconnect {
             attempt,
             sleep: Box::pin(tokio::time::sleep(delay)),
@@ -483,6 +484,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                     Poll::Ready(Ok(conn)) => {
                         let attempt = *attempt;
                         self.state = ConnState::Connected(conn);
+                        tracing::info!(attempt, "redis: reconnected successfully");
                         if attempt > 0
                             && let Some(ref cb) = self.on_reconnect
                         {
@@ -493,9 +495,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                         }
                         return Poll::Ready(Ok(()));
                     }
-                    Poll::Ready(Err(_)) => {
-                        let next = *attempt + 1;
-                        self.trigger_reconnect(next);
+                    Poll::Ready(Err(e)) => {
+                        let attempt = *attempt;
+                        tracing::warn!(attempt, error = %e, "redis: reconnect attempt failed");
+                        self.trigger_reconnect(attempt + 1);
                     }
                     Poll::Pending => return Poll::Pending,
                 },
@@ -591,5 +594,30 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.delay_for_attempt(0), Duration::ZERO);
+    }
+
+    // -- retry-limit boundary tests --
+    //
+    // `trigger_reconnect` transitions to `ConnState::Failed` when
+    // `attempt > max_retries`. `ResilientConnection::new` requires a live
+    // connection, so we exercise the same predicate `trigger_reconnect` uses
+    // against the config directly.
+
+    #[test]
+    fn max_retries_zero_allows_one_attempt() {
+        // max_retries: Some(0) means attempt 0 is allowed but attempt 1 fails.
+        let config = ReconnectConfig::default().max_retries(0);
+        let should_fail =
+            |attempt: usize| config.max_retries.map(|max| attempt > max).unwrap_or(false);
+        assert!(!should_fail(0), "attempt 0 should be within max_retries 0");
+        assert!(should_fail(1), "attempt 1 should exceed max_retries 0");
+    }
+
+    #[test]
+    fn max_retries_none_never_fails() {
+        let config = ReconnectConfig::default(); // max_retries: None
+        let attempt = 9999usize;
+        let should_fail = config.max_retries.map(|max| attempt > max).unwrap_or(false);
+        assert!(!should_fail, "max_retries: None should never fail");
     }
 }
