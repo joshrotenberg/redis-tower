@@ -103,6 +103,15 @@ pub enum RedisError {
     /// [`CommandTimeoutLayer`](https://docs.rs/redis-tower) duration.
     #[error("command timeout")]
     CommandTimeout,
+
+    /// JSON serialization or deserialization error (serde_json).
+    ///
+    /// Only present when the `serde` feature is enabled. Allows callers to
+    /// distinguish serialization failures from network or server errors by
+    /// matching on `RedisError::Json(_)`.
+    #[cfg(feature = "serde")]
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 impl RedisError {

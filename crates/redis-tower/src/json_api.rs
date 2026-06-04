@@ -96,8 +96,7 @@ impl<C: RedisExecutor> Json<C> {
         path: &str,
         value: &T,
     ) -> Result<(), RedisError> {
-        let json_str = serde_json::to_string(value)
-            .map_err(|e| RedisError::Redis(format!("JSON serialization error: {e}")))?;
+        let json_str = serde_json::to_string(value)?;
         self.conn.execute(JsonSet::new(key, path, json_str)).await
     }
 
@@ -179,16 +178,13 @@ fn parse_json_response<T: DeserializeOwned>(bytes: &[u8], path: &str) -> Result<
 
     if path.starts_with('$') {
         // JSON.GET with $ paths returns "[value]" -- unwrap the outer array.
-        let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)
-            .map_err(|e| RedisError::Redis(format!("JSON parse error: {e}")))?;
+        let arr: Vec<serde_json::Value> = serde_json::from_str(json_str)?;
         let first = arr.into_iter().next().ok_or(RedisError::TypeMismatch {
             expected: "non-empty JSON array",
         })?;
-        serde_json::from_value(first)
-            .map_err(|e| RedisError::Redis(format!("JSON deserialize error: {e}")))
+        serde_json::from_value(first).map_err(Into::into)
     } else {
-        serde_json::from_str(json_str)
-            .map_err(|e| RedisError::Redis(format!("JSON deserialize error: {e}")))
+        serde_json::from_str(json_str).map_err(Into::into)
     }
 }
 
