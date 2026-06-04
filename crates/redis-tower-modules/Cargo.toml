@@ -20,6 +20,7 @@ search       = ["redis-tower/commands-search", "dep:serde", "dep:serde_json"]
 timeseries   = ["redis-tower/commands-timeseries"]
 probabilistic = ["redis-tower/commands-bloom", "redis-tower/commands-sketch", "redis-tower/commands-tdigest"]
 vector       = ["redis-tower/commands-vector-sets"]
+serde        = ["dep:serde", "dep:serde_json"]
 full         = ["json", "search", "timeseries", "probabilistic", "vector"]
 
 [dependencies]
@@ -27,3 +28,7 @@ redis-tower = { workspace = true }
 redis-tower-core = { workspace = true }
 serde     = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+bytes = { workspace = true }
+tokio = { workspace = true }
