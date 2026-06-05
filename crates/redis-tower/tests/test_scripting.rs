@@ -49,6 +49,62 @@ async fn script_load_evalsha() {
 }
 
 #[tokio::test]
+async fn eval_ro_reads_key() {
+    let mut c = conn().await;
+    let key = "cover2:scripting:eval_ro_reads";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(Set::new(key, "ro-hello")).await.unwrap();
+
+    // Read-only script: EVAL_RO rejects writes but permits GET.
+    let result = c
+        .execute(EvalRo::new("return redis.call('GET', KEYS[1])").key(key))
+        .await
+        .unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("ro-hello"))));
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn eval_ro_rejects_writes() {
+    let mut c = conn().await;
+    let key = "cover2:scripting:eval_ro_rejects";
+
+    c.execute(Del::new(key)).await.unwrap();
+
+    // A write command inside EVAL_RO must be rejected by the server.
+    let result = c
+        .execute(EvalRo::new("return redis.call('SET', KEYS[1], 'nope')").key(key))
+        .await;
+    assert!(
+        result.is_err(),
+        "EVAL_RO should reject a script that issues a write command"
+    );
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn script_load_evalsha_ro() {
+    let mut c = conn().await;
+    let key = "cover2:scripting:evalsha_ro";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(Set::new(key, "sha-hello")).await.unwrap();
+
+    // Load a read-only script and execute it by SHA via EVALSHA_RO.
+    let script = "return redis.call('GET', KEYS[1])";
+    let sha = c.execute(ScriptLoad::new(script)).await.unwrap();
+    assert!(!sha.is_empty(), "SCRIPT LOAD should return a SHA1 hash");
+
+    let result = c.execute(EvalShaRo::new(&sha).key(key)).await.unwrap();
+    assert_eq!(result, Frame::BulkString(Some(Bytes::from("sha-hello"))));
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
 async fn function_load() {
     let mut c = conn().await;
 

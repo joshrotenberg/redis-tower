@@ -155,3 +155,61 @@ async fn stream_group_setid() {
     c.execute(XGroupDestroy::new(key, group)).await.unwrap();
     c.execute(Del::new(key)).await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// XSETID integration tests (issue #391)
+// ---------------------------------------------------------------------------
+
+/// XSETID sets the stream's last-generated ID, observable via XINFO STREAM.
+#[tokio::test]
+async fn stream_xsetid_sets_last_id() {
+    let mut c = conn().await;
+    let key = "test:streams:xsetid:last_id";
+
+    c.execute(Del::new(key)).await.unwrap();
+
+    // Seed the stream with one entry at a known low ID.
+    c.execute(XAdd::new(key).id("1-0").field("f", "v"))
+        .await
+        .unwrap();
+
+    let before = c.execute(XInfoStream::new(key)).await.unwrap();
+    assert_eq!(before.last_generated_id, "1-0");
+
+    // Advance the stream's last-id to a higher value.
+    c.execute(XSetId::new(key, "5-0")).await.unwrap();
+
+    let after = c.execute(XInfoStream::new(key)).await.unwrap();
+    assert_eq!(
+        after.last_generated_id, "5-0",
+        "XSETID should update the last-generated ID reported by XINFO STREAM"
+    );
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// XSETID with the ENTRIESADDED option (Redis 7.0+) sets both the last-id and
+/// the recorded entries-added count. The last-id is verified via XINFO STREAM.
+#[tokio::test]
+async fn stream_xsetid_entries_added() {
+    let mut c = conn().await;
+    let key = "test:streams:xsetid:entries_added";
+
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(XAdd::new(key).id("1-0").field("f", "v"))
+        .await
+        .unwrap();
+
+    // Set last-id to 10-0 and record 100 total entries ever added.
+    c.execute(XSetId::new(key, "10-0").entries_added(100))
+        .await
+        .unwrap();
+
+    let info = c.execute(XInfoStream::new(key)).await.unwrap();
+    assert_eq!(
+        info.last_generated_id, "10-0",
+        "XSETID ... ENTRIESADDED should update the last-generated ID"
+    );
+
+    c.execute(Del::new(key)).await.unwrap();
+}
