@@ -1,6 +1,7 @@
 mod common;
 
 use common::conn;
+use redis_tower::Frame;
 use redis_tower::commands::*;
 
 #[tokio::test]
@@ -186,9 +187,6 @@ async fn cover_wait_zero() {
 // Skipped: CLIENT KILL -- killing the current connection or random connections
 // would disrupt other tests running in parallel.
 //
-// Skipped: CLIENT PAUSE / CLIENT UNPAUSE -- pausing all clients mid-test
-// suite would cause other tests to hang unpredictably.
-//
 // Skipped: REPLICAOF, FAILOVER -- require a primary+replica setup that the
 // standalone test harness does not provide.
 
@@ -246,4 +244,207 @@ async fn cover_select() {
     c.execute(Select::new(1)).await.unwrap();
     // Switch back to db 0.
     c.execute(Select::new(0)).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// HELLO + unverified SERVER/CLIENT commands (issue #390)
+// ---------------------------------------------------------------------------
+
+/// Extract the value associated with `key` from a HELLO response frame.
+///
+/// HELLO replies with a map of server properties: a RESP3 `Map` when the
+/// negotiated protocol is 3, or a flat key/value `Array` under RESP2. This
+/// walks either shape and returns the matching value frame.
+fn hello_field(frame: &Frame, key: &str) -> Option<Frame> {
+    match frame {
+        Frame::Map(pairs) => pairs
+            .iter()
+            .find(|(k, _)| k.as_str() == Some(key))
+            .map(|(_, v)| v.clone()),
+        Frame::Array(Some(items)) => items
+            .chunks_exact(2)
+            .find(|pair| pair[0].as_str() == Some(key))
+            .map(|pair| pair[1].clone()),
+        _ => None,
+    }
+}
+
+/// `HELLO` with no arguments returns the current connection's properties.
+///
+/// The harness uses `RedisConnection::connect`, which does not upgrade the
+/// protocol (only `connect_resp3` sends `HELLO 3`), so the connection defaults
+/// to RESP2 and a bare HELLO reports `proto` 2 alongside the `server` identity.
+#[tokio::test]
+async fn cover_hello_default() {
+    let mut c = conn().await;
+    let reply = c.execute(Hello::new()).await.unwrap();
+
+    let server =
+        hello_field(&reply, "server").expect("HELLO reply should contain a 'server' field");
+    assert_eq!(
+        server.as_str(),
+        Some("redis"),
+        "HELLO 'server' field should be 'redis'"
+    );
+
+    let proto = hello_field(&reply, "proto").expect("HELLO reply should contain a 'proto' field");
+    assert_eq!(
+        proto.as_integer(),
+        Some(2),
+        "default RedisConnection::connect stays on RESP2, so HELLO reports proto 2"
+    );
+}
+
+/// `HELLO 3` negotiates RESP3 and replies with a map whose `proto` is 3.
+#[tokio::test]
+async fn cover_hello_proto3() {
+    let mut c = conn().await;
+    let reply = c.execute(Hello::new().proto(3)).await.unwrap();
+
+    assert!(
+        matches!(reply, Frame::Map(_)),
+        "HELLO 3 should reply with a RESP3 map, got: {reply:?}"
+    );
+    let proto = hello_field(&reply, "proto").expect("HELLO 3 reply should contain 'proto'");
+    assert_eq!(proto.as_integer(), Some(3), "HELLO 3 should report proto 3");
+}
+
+/// `HELLO 2` negotiates RESP2 and replies with a flat array whose `proto` is 2.
+#[tokio::test]
+async fn cover_hello_proto2() {
+    // Use a dedicated connection: HELLO 2 switches this connection back to
+    // RESP2, and we don't want to leak that protocol state to other tests.
+    let mut c = conn().await;
+    let reply = c.execute(Hello::new().proto(2)).await.unwrap();
+
+    assert!(
+        matches!(reply, Frame::Array(Some(_))),
+        "HELLO 2 should reply with a flat RESP2 array, got: {reply:?}"
+    );
+    let proto = hello_field(&reply, "proto").expect("HELLO 2 reply should contain 'proto'");
+    assert_eq!(proto.as_integer(), Some(2), "HELLO 2 should report proto 2");
+}
+
+/// `HELLO ... SETNAME` sets the connection name as part of negotiation.
+#[tokio::test]
+async fn cover_hello_setname() {
+    let mut c = conn().await;
+    c.execute(Hello::new().proto(3).setname("hello-named-conn"))
+        .await
+        .unwrap();
+
+    // The name set during HELLO should be retrievable via CLIENT GETNAME.
+    let name = c.execute(ClientGetName::new()).await.unwrap();
+    assert_eq!(
+        name,
+        Some(bytes::Bytes::from("hello-named-conn")),
+        "HELLO SETNAME should set the connection name"
+    );
+}
+
+/// `FLUSHALL` deletes every key across all databases.
+///
+/// This test is destructive, so it uses its own dedicated connection, seeds a
+/// uniquely-named key, and asserts only on that key after the flush. The CI
+/// suite runs single-threaded, so no other test runs concurrently with this
+/// one. The standalone harness is shared, so we cannot assume the keyspace was
+/// empty before this ran.
+#[tokio::test]
+async fn cover_flushall() {
+    let mut c = conn().await;
+
+    // Seed a key, confirm it exists, then flush everything.
+    c.execute(Set::new("test:flushall:marker", "present"))
+        .await
+        .unwrap();
+    let before = c
+        .execute(Exists::new("test:flushall:marker"))
+        .await
+        .unwrap();
+    assert_eq!(before, 1, "seeded marker key should exist before FLUSHALL");
+
+    c.execute(FlushAll::new()).await.unwrap();
+
+    let after = c
+        .execute(Exists::new("test:flushall:marker"))
+        .await
+        .unwrap();
+    assert_eq!(after, 0, "FLUSHALL should delete all keys");
+
+    // DBSIZE must be zero immediately after a synchronous flush.
+    let size = c.execute(DbSize::new()).await.unwrap();
+    assert_eq!(size, 0, "DBSIZE should be 0 after FLUSHALL");
+}
+
+/// `FLUSHALL SYNC` flushes synchronously and also clears the keyspace.
+#[tokio::test]
+async fn cover_flushall_sync() {
+    let mut c = conn().await;
+    c.execute(Set::new("test:flushall:sync", "x"))
+        .await
+        .unwrap();
+    c.execute(FlushAll::new().sync_mode()).await.unwrap();
+    let exists = c.execute(Exists::new("test:flushall:sync")).await.unwrap();
+    assert_eq!(exists, 0, "FLUSHALL SYNC should delete all keys");
+}
+
+/// `BGREWRITEAOF` triggers a background AOF rewrite and returns a status string.
+#[tokio::test]
+async fn cover_bgrewriteaof() {
+    let mut c = conn().await;
+    let resp = c.execute(BgRewriteAof::new()).await.unwrap();
+    // Redis replies with a "Background append only file rewriting ..." status,
+    // or schedules one if a save is already in progress. Either mentions AOF.
+    let lower = resp.to_lowercase();
+    assert!(
+        lower.contains("append only file") || lower.contains("aof"),
+        "BGREWRITEAOF status should mention the AOF, got: {resp}"
+    );
+}
+
+/// `WAITAOF 0 0 0` returns immediately with (local, replicas) acknowledgement
+/// counts. With AOF disabled on the harness, the local count is 0.
+#[tokio::test]
+async fn cover_waitaof() {
+    let mut c = conn().await;
+    // numlocal=0, numreplicas=0, timeout=0 returns without blocking.
+    let (local, replicas) = c.execute(WaitAof::new(0, 0, 0)).await.unwrap();
+    assert!(local >= 0, "WAITAOF local count should be non-negative");
+    assert_eq!(
+        replicas, 0,
+        "WAITAOF on a standalone server should report 0 replica acks"
+    );
+}
+
+/// `CLIENT NO-EVICT ON` and `OFF` both succeed on the current connection.
+#[tokio::test]
+async fn cover_client_no_evict() {
+    let mut c = conn().await;
+    c.execute(ClientNoEvict::new(true)).await.unwrap();
+    c.execute(ClientNoEvict::new(false)).await.unwrap();
+}
+
+/// `CLIENT NO-TOUCH ON` and `OFF` both succeed on the current connection.
+#[tokio::test]
+async fn cover_client_no_touch() {
+    let mut c = conn().await;
+    c.execute(ClientNoTouch::new(true)).await.unwrap();
+    c.execute(ClientNoTouch::new(false)).await.unwrap();
+}
+
+/// `CLIENT PAUSE` then `CLIENT UNPAUSE` round-trip.
+///
+/// The pause is kept brief (10ms) and immediately lifted with UNPAUSE so the
+/// single-threaded suite never stalls. CLIENT PAUSE affects all clients on the
+/// server, but the short window plus the explicit unpause keeps the blast
+/// radius negligible.
+#[tokio::test]
+async fn cover_client_pause_unpause() {
+    let mut c = conn().await;
+    // Pause writes only, for a very short window.
+    c.execute(ClientPause::new(10).mode(ClientPauseMode::Write))
+        .await
+        .unwrap();
+    // Immediately resume so nothing else is held up.
+    c.execute(ClientUnpause::new()).await.unwrap();
 }
