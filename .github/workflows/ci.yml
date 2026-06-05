@@ -125,7 +125,7 @@ jobs:
           shared-key: integration-redis-${{ matrix.redis }}
 
       - name: Run standalone integration tests
-        run: cargo test -p redis-tower --test integration --all-features
+        run: cargo test -p redis-tower --test '*' --all-features -- --test-threads=1
 
       - name: Run cluster integration tests
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
