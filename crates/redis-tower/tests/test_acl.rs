@@ -6,8 +6,9 @@
 //! - `AclSave` and `AclLoad` require Redis to be started with an ACL file
 //!   (the `aclfile` directive). Without one they return an error, so they are
 //!   not tested here.
-//! - `AclDryRun` is not exercised directly; the SETUSER/GETUSER/DELUSER cycle
-//!   covers user lifecycle behaviour instead.
+//! - `AclDryRun` does not require an ACL file and is exercised below: a user is
+//!   created with a narrow permission set, then `ACL DRYRUN` confirms that an
+//!   allowed command is permitted and a disallowed command is rejected.
 
 mod common;
 use common::conn;
@@ -93,6 +94,50 @@ async fn acl_setuser_deluser() {
     c.execute(AclGetUser::new(user)).await.unwrap();
 
     // Delete it; exactly one user should be removed.
+    let deleted = c.execute(AclDelUser::new(user)).await.unwrap();
+    assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+async fn acl_dryrun_allows_and_denies() {
+    let mut c = conn().await;
+    let user = "redis_tower_dryrun_user";
+
+    // Clean up any leftover user from a prior interrupted run.
+    let _ = c.execute(AclDelUser::new(user)).await;
+
+    // Create an enabled user that may only run GET against keys under `dryrun:*`.
+    // It explicitly cannot run SET (or anything outside `+get`).
+    c.execute(
+        AclSetUser::new(user)
+            .rule("on")
+            .rule(">dryrunpass")
+            .rule("~dryrun:*")
+            .rule("+get"),
+    )
+    .await
+    .unwrap();
+
+    // GET is permitted: DRYRUN reports success with "OK".
+    let allowed = c
+        .execute(AclDryRun::new(user, "GET").arg("dryrun:key"))
+        .await
+        .unwrap();
+    assert_eq!(allowed, "OK", "GET should be permitted for {user}");
+
+    // SET is not permitted: DRYRUN returns a non-"OK" message explaining the
+    // denial rather than erroring (the command itself succeeds).
+    let denied = c
+        .execute(AclDryRun::new(user, "SET").arg("dryrun:key").arg("value"))
+        .await
+        .unwrap();
+    assert_ne!(allowed, denied);
+    assert!(
+        denied.to_lowercase().contains("set"),
+        "denial message should mention the SET command, got: {denied}"
+    );
+
+    // Clean up.
     let deleted = c.execute(AclDelUser::new(user)).await.unwrap();
     assert_eq!(deleted, 1);
 }
