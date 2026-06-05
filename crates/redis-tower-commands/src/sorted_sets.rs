@@ -2305,6 +2305,358 @@ impl Command for BZMPop {
     }
 }
 
+/// ZREVRANGE key start stop
+///
+/// Returns the specified range of members in the sorted set stored at `key`,
+/// ordered from highest to lowest score. `start` and `stop` are zero-based
+/// indices, where -1 is the last element.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... REV`, but still widely
+/// used. Use [`ZRevRangeWithScores`] to also return each member's score.
+pub struct ZRevRange {
+    key: String,
+    start: i64,
+    stop: i64,
+}
+
+impl ZRevRange {
+    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for ZRevRange {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREVRANGE"),
+            bulk(self.key.as_str()),
+            bulk(self.start.to_string()),
+            bulk(self.stop.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANGE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// ZREVRANGE key start stop WITHSCORES
+///
+/// Returns the specified range of members in the sorted set stored at `key`,
+/// ordered from highest to lowest score, including each member's score.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... REV WITHSCORES`.
+pub struct ZRevRangeWithScores {
+    key: String,
+    start: i64,
+    stop: i64,
+}
+
+impl ZRevRangeWithScores {
+    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for ZRevRangeWithScores {
+    type Response = Vec<(Bytes, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("ZREVRANGE"),
+            bulk(self.key.as_str()),
+            bulk(self.start.to_string()),
+            bulk(self.stop.to_string()),
+            bulk("WITHSCORES"),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_score_pairs(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANGE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// ZRANGEBYLEX key min max \[LIMIT offset count\]
+///
+/// Returns all members in the sorted set at `key` between the lexicographical
+/// range specified by `min` and `max`. Valid values for `min` and `max` are
+/// `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"` (exclusive). Assumes
+/// all members share the same score.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX`.
+pub struct ZRangeByLex {
+    key: String,
+    min: String,
+    max: String,
+    limit: Option<(i64, i64)>,
+}
+
+impl ZRangeByLex {
+    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            min: min.into(),
+            max: max.into(),
+            limit: None,
+        }
+    }
+
+    /// Limits the results to `count` elements starting at `offset`.
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRangeByLex {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZRANGEBYLEX"),
+            bulk(self.key.as_str()),
+            bulk(self.min.as_str()),
+            bulk(self.max.as_str()),
+        ];
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZRANGEBYLEX"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// ZREVRANGEBYLEX key max min \[LIMIT offset count\]
+///
+/// Returns all members in the sorted set at `key` between the lexicographical
+/// range specified by `max` and `min`, ordered from higher to lower. Note the
+/// reversed argument order: `max` comes before `min`. Valid values for `min`
+/// and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
+/// (exclusive). Assumes all members share the same score.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX REV`.
+pub struct ZRevRangeByLex {
+    key: String,
+    max: String,
+    min: String,
+    limit: Option<(i64, i64)>,
+}
+
+impl ZRevRangeByLex {
+    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            max: max.into(),
+            min: min.into(),
+            limit: None,
+        }
+    }
+
+    /// Limits the results to `count` elements starting at `offset`.
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRevRangeByLex {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZREVRANGEBYLEX"),
+            bulk(self.key.as_str()),
+            bulk(self.max.as_str()),
+            bulk(self.min.as_str()),
+        ];
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANGEBYLEX"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// ZREVRANGEBYSCORE key max min \[LIMIT offset count\]
+///
+/// Returns all members in the sorted set at `key` with a score between `min`
+/// and `max`, ordered from highest to lowest score. Note the reversed argument
+/// order: `max` comes before `min`. The `min` and `max` arguments can be
+/// `"-inf"`, `"+inf"`, or numeric strings (prefix with `"("` for exclusive
+/// bounds). Use [`ZRevRangeByScoreWithScores`] to also return each member's
+/// score.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV`.
+pub struct ZRevRangeByScore {
+    key: String,
+    max: String,
+    min: String,
+    limit: Option<(i64, i64)>,
+}
+
+impl ZRevRangeByScore {
+    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            max: max.into(),
+            min: min.into(),
+            limit: None,
+        }
+    }
+
+    /// Limits the results to `count` elements starting at `offset`.
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRevRangeByScore {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZREVRANGEBYSCORE"),
+            bulk(self.key.as_str()),
+            bulk(self.max.as_str()),
+            bulk(self.min.as_str()),
+        ];
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANGEBYSCORE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// ZREVRANGEBYSCORE key max min WITHSCORES \[LIMIT offset count\]
+///
+/// Returns all members in the sorted set at `key` with a score between `min`
+/// and `max`, ordered from highest to lowest score, including each member's
+/// score. Note the reversed argument order: `max` comes before `min`.
+///
+/// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV WITHSCORES`.
+pub struct ZRevRangeByScoreWithScores {
+    key: String,
+    max: String,
+    min: String,
+    limit: Option<(i64, i64)>,
+}
+
+impl ZRevRangeByScoreWithScores {
+    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            max: max.into(),
+            min: min.into(),
+            limit: None,
+        }
+    }
+
+    /// Limits the results to `count` elements starting at `offset`.
+    pub fn limit(mut self, offset: i64, count: i64) -> Self {
+        self.limit = Some((offset, count));
+        self
+    }
+}
+
+impl Command for ZRevRangeByScoreWithScores {
+    type Response = Vec<(Bytes, f64)>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("ZREVRANGEBYSCORE"),
+            bulk(self.key.as_str()),
+            bulk(self.max.as_str()),
+            bulk(self.min.as_str()),
+            bulk("WITHSCORES"),
+        ];
+        if let Some((offset, count)) = self.limit {
+            args.push(bulk("LIMIT"));
+            args.push(bulk(offset.to_string()));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_member_score_pairs(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ZREVRANGEBYSCORE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2839,5 +3191,221 @@ mod tests {
         assert_eq!(result.0, Bytes::from("k1"));
         assert_eq!(result.1[0].0, Bytes::from("a"));
         assert!((result.1[0].1 - 1.0).abs() < f64::EPSILON);
+    }
+
+    // -- ZRevRange --
+
+    #[test]
+    fn zrevrange_to_frame() {
+        let cmd = ZRevRange::new("myzset", 0, -1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGE"),
+                bulk("myzset"),
+                bulk("0"),
+                bulk("-1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrange_parse_members() {
+        let cmd = ZRevRange::new("myzset", 0, -1);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::BulkString(Some(Bytes::from("a"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("b"), Bytes::from("a")]);
+    }
+
+    #[test]
+    fn zrevrange_parse_error_on_integer() {
+        let cmd = ZRevRange::new("myzset", 0, -1);
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn zrevrange_with_scores_to_frame() {
+        let cmd = ZRevRangeWithScores::new("myzset", 0, -1);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGE"),
+                bulk("myzset"),
+                bulk("0"),
+                bulk("-1"),
+                bulk("WITHSCORES"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrange_with_scores_parse_flat() {
+        let cmd = ZRevRangeWithScores::new("myzset", 0, -1);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::BulkString(Some(Bytes::from("2.0"))),
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("1.0"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].0, Bytes::from("b"));
+        assert!((result[0].1 - 2.0).abs() < f64::EPSILON);
+        assert_eq!(result[1].0, Bytes::from("a"));
+    }
+
+    // -- ZRangeByLex --
+
+    #[test]
+    fn zrangebylex_to_frame() {
+        let cmd = ZRangeByLex::new("myzset", "-", "+");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZRANGEBYLEX"),
+                bulk("myzset"),
+                bulk("-"),
+                bulk("+"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrangebylex_with_limit_to_frame() {
+        let cmd = ZRangeByLex::new("myzset", "[a", "(c").limit(0, 10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZRANGEBYLEX"),
+                bulk("myzset"),
+                bulk("[a"),
+                bulk("(c"),
+                bulk("LIMIT"),
+                bulk("0"),
+                bulk("10"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrangebylex_parse_members() {
+        let cmd = ZRangeByLex::new("myzset", "-", "+");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("a"))),
+            Frame::BulkString(Some(Bytes::from("b"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("a"), Bytes::from("b")]);
+    }
+
+    // -- ZRevRangeByLex --
+
+    #[test]
+    fn zrevrangebylex_to_frame() {
+        let cmd = ZRevRangeByLex::new("myzset", "+", "-");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGEBYLEX"),
+                bulk("myzset"),
+                bulk("+"),
+                bulk("-"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrangebylex_with_limit_to_frame() {
+        let cmd = ZRevRangeByLex::new("myzset", "(c", "[a").limit(1, 5);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGEBYLEX"),
+                bulk("myzset"),
+                bulk("(c"),
+                bulk("[a"),
+                bulk("LIMIT"),
+                bulk("1"),
+                bulk("5"),
+            ])
+        );
+    }
+
+    // -- ZRevRangeByScore --
+
+    #[test]
+    fn zrevrangebyscore_to_frame() {
+        let cmd = ZRevRangeByScore::new("myzset", "+inf", "-inf");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGEBYSCORE"),
+                bulk("myzset"),
+                bulk("+inf"),
+                bulk("-inf"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrangebyscore_with_limit_to_frame() {
+        let cmd = ZRevRangeByScore::new("myzset", "10", "0").limit(2, 3);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGEBYSCORE"),
+                bulk("myzset"),
+                bulk("10"),
+                bulk("0"),
+                bulk("LIMIT"),
+                bulk("2"),
+                bulk("3"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrangebyscore_parse_members() {
+        let cmd = ZRevRangeByScore::new("myzset", "+inf", "-inf");
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::BulkString(Some(Bytes::from("a"))),
+        ]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result, vec![Bytes::from("b"), Bytes::from("a")]);
+    }
+
+    #[test]
+    fn zrevrangebyscore_with_scores_to_frame() {
+        let cmd = ZRevRangeByScoreWithScores::new("myzset", "+inf", "-inf").limit(0, 2);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("ZREVRANGEBYSCORE"),
+                bulk("myzset"),
+                bulk("+inf"),
+                bulk("-inf"),
+                bulk("WITHSCORES"),
+                bulk("LIMIT"),
+                bulk("0"),
+                bulk("2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn zrevrangebyscore_with_scores_parse_pairs_resp3() {
+        let cmd = ZRevRangeByScoreWithScores::new("myzset", "+inf", "-inf");
+        let frame = array(vec![array(vec![
+            Frame::BulkString(Some(Bytes::from("b"))),
+            Frame::Double(2.0),
+        ])]);
+        let result = cmd.parse_response(frame).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, Bytes::from("b"));
+        assert!((result[0].1 - 2.0).abs() < f64::EPSILON);
     }
 }
