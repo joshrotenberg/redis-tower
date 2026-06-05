@@ -126,7 +126,7 @@ cargo test --test '*' --all-features
 
 9 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6). All must be green before merge.
 
-Auto-merge on green is enabled (squash merge, branch deleted).
+Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` is rejected for this repo). Merge with `gh pr merge --squash`; merged head branches are auto-deleted.
 
 ## Executor Model
 
