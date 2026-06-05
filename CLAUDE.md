@@ -4,7 +4,7 @@ A Tower-based Redis client with strong typing, composable middleware, and resili
 
 ## Architecture
 
-Workspace of 9 crates with a clear dependency direction:
+Workspace of 11 crates with a clear dependency direction:
 
 ```
 redis-tower-protocol   (RESP2/3 codec, frame types)
@@ -14,11 +14,14 @@ redis-tower            (clients, middleware layers, pool, pipeline, pub/sub)
   redis-tower-cluster  (cluster topology, routing, MOVED/ASK handling)
   redis-tower-sentinel (sentinel discovery, failover)
   redis-tower-sync     (blocking wrapper around MultiplexedClient)
+  redis-tower-modules  (high-level module clients: JSON, Search, TimeSeries, Probabilistic, Vector)
 redis-test-harness     (test utilities: MockConnection, command_tests! macro)
 cluster-bench          (criterion benchmarks for cluster clients)
+standalone-bench       (redis-rs comparison benchmarks)
 ```
 
 `redis-tower-cluster` and `redis-tower-sentinel` both depend on `redis-tower`.
+`redis-tower-modules` depends on `redis-tower` and `redis-tower-commands`.
 
 ## Key Client Types
 
@@ -40,20 +43,38 @@ cluster-bench          (criterion benchmarks for cluster clients)
 ## Middleware Layers (Tower)
 
 All live in `redis-tower/src/`:
-- `reconnect_layer.rs` / `reconnect.rs` -- `ConnectionFactory`-based reconnect with backoff
-- `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls into pipelined requests
-- `tracing_layer.rs` -- span per command
-- `metrics_layer.rs` -- counter/histogram hooks
+- `reconnect_layer.rs` / `reconnect.rs` -- `ConnectionFactory`-based reconnect with exponential backoff + jitter
+- `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls; bounded queue with `QueueFull` back-pressure
+- `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`)
+- `metrics_layer.rs` -- `MetricsRecorder` hook with `ErrorKind` enum (7 variants, not just `bool`)
 - `cache_layer.rs` / `caching.rs` -- client-side caching
+- `circuit_breaker.rs` -- `CircuitBreakerLayer`: three-state machine, Arc-shared across clones
+- `command_timeout.rs` -- `CommandTimeoutLayer`: per-command deadline
 - `resilient.rs` -- `ResilientRedisClient` combining reconnect + auto-pipeline
 
 ## Command Groups
 
 `redis-tower-commands/src/` -- one file per group:
 
-`strings`, `keys`, `hashes`, `lists`, `sets`, `sorted_sets`, `bitmap`, `geo`, `hyperloglog`, `streams`, `pubsub`, `scan`, `scripting`, `blocking`, `server`, `diagnostics`, `acl`, `cluster`, `raw`, `search`, `search_util`, `json`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`
+`strings`, `keys`, `hashes`, `lists`, `sets`, `sorted_sets`, `bitmap`, `geo`, `hyperloglog`, `streams`, `pubsub`, `scan`, `scripting`, `blocking`, `server`, `diagnostics`, `acl`, `cluster`, `transaction`, `raw`, `search`, `search_util`, `json`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`
 
 Redis Stack commands (`json`, `search`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`) are behind feature flags, all enabled by default via `commands-stack`.
+
+Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands.
+
+## Module Clients (`redis-tower-modules`)
+
+High-level ergonomic clients for Redis Stack modules. Feature-gated; all enabled by default via `full`.
+
+| Client | Feature | Description |
+|--------|---------|-------------|
+| `JsonClient<C>` | `json` | Typed serde get/set/merge/arr/obj; requires `serde` |
+| `SearchClient<C>` | `search` | Index lifecycle, `SearchQuery` builder, typed `SearchResults<T>` |
+| `TimeSeriesClient<C>` | `timeseries` | `TsSample`, `TsLabel`, range/mrange queries |
+| `BloomFilter<C>`, `CuckooFilter<C>`, `CountMinSketch<C>`, `TopK<C>`, `TDigest<C>` | `probabilistic` | Key-bound ergonomic wrappers with typed `*Info` structs |
+| `VectorSetClient<C>` | `vector` | KNN search, `SimilarityResult`, VADD/VREM/VSIM |
+
+The old `Json<>` and `Search` prototypes in `redis-tower` are deprecated aliases — use `redis-tower-modules` instead.
 
 ## Test Infrastructure
 
@@ -66,7 +87,7 @@ cargo test --test test_strings --all-features
 cargo test --test '*' --all-features   # all standalone integration tests
 ```
 
-Test files: `integration.rs`, `test_acl.rs`, `test_bitmap.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_lists.rs`, `test_object.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_strings.rs`
+Test files: `integration.rs`, `test_acl.rs`, `test_bitmap.rs`, `test_errors.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_lists.rs`, `test_object.rs`, `test_pool.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
 
 ### Cluster tests (`crates/redis-tower-cluster/tests/`)
 
@@ -105,7 +126,15 @@ cargo test --test '*' --all-features
 
 9 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6). All must be green before merge.
 
-Auto-merge on green is enabled (squash merge, branch deleted).
+Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` is rejected for this repo). Merge with `gh pr merge --squash`; merged head branches are auto-deleted.
+
+## Executor Model
+
+`RedisExecutor` trait uses `&mut self`. Key impls:
+- `RedisConnection` -- direct `&mut self` access
+- `Arc<Mutex<C: RedisExecutor>>` -- blanket impl; locks to get `&mut C` (enables `RedisClient` to satisfy the trait)
+- `MultiplexedClient` -- direct impl; `&mut self` is the trait contract, internally uses `&self` channel send
+- `Pipeline::execute` and `Transaction::execute` accept `&mut impl PipelineExecutor` / `&mut impl TransactionExecutor` (separate traits with impls for `RedisConnection`, `Arc<Mutex<C>>`, `RedisClient`)
 
 ## Known Quirks
 
@@ -114,17 +143,23 @@ Auto-merge on green is enabled (squash merge, branch deleted).
 - **`BLMove` timeout response** -- Redis 7.4+ returns `Frame::Array(None)` on a blocking timeout for BLMOVE (not `Frame::Null`). Fixed in `blocking.rs`.
 - **Let-chains** -- MSRV is 1.88; clippy will suggest let-chains and they are valid.
 - **`FunctionFlush` ordering** -- global operation; tests using it should run with `--test-threads=1` to avoid interfering with function-load tests.
+- **Sentinel failover sim is destructive** -- `sentinel_failover_simulation` kills the shared topology. Run it last or alone; `sentinel_reconnects_after_failover` creates a fresh connection and works correctly after.
+- **`idempotent()` on `Command` trait** -- defaults to `false`. Read-only commands override to `true`. `ReconnectService` will not retry non-idempotent commands on `ConnectionClosed` to prevent silent data duplication.
 
 ## Current Status
 
-All planned issues from the initial audit (#249-#267, #282-#283) are closed. No open issues or PRs.
+All issues from the second audit (#289–#353) are closed except #382 (TimeSeriesClient — PR open, waiting on CI quota reset).
 
-The codebase has full integration test coverage across all command groups, all three client topologies (standalone, cluster, sentinel), and all three client variants (connection, client, multiplexed). The `ConnectionPool` is exercised with all backing connection types.
+**What's been hardened since the audit:**
+- Circuit breaker, command/connect timeouts, pool acquisition timeout, AutoPipeline back-pressure
+- TCP keepalive, reconnect backoff jitter, graceful `MultiplexedClient` shutdown
+- Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
+- Dead pool connection replacement after health check failure
+- Cluster MOVED/ASK refresh, CROSSSLOT errors, eager sentinel rediscovery on failover
 
-## What Is Not Yet Done
+**What Is Not Yet Done**
 
-- Sentinel failover simulation test runs but kills the shared topology -- run it in isolation
-- `ObjectFreq` integration test -- requires LFU `maxmemory-policy`, not tested
+- #382 TimeSeriesClient PR -- CI quota exhausted; implementation is complete locally
+- `ObjectFreq` integration test -- requires LFU `maxmemory-policy`
 - `ACL SAVE`/`ACL LOAD` -- require a Redis server started with an ACL file
 - `REPLICAOF`, `FAILOVER` -- require multi-server setups
-- `ConnectionPool` exhaustion behavior -- tested at single-connection level but not under sustained load
