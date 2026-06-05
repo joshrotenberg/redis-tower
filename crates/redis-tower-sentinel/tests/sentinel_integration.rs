@@ -39,12 +39,25 @@ async fn sentinel_conn() -> SentinelConnection {
         .expect("failed to connect via sentinel")
 }
 
+async fn mux_sentinel_conn() -> MultiplexedSentinelClient {
+    let addrs = sentinel_addrs().await;
+    MultiplexedSentinelClient::connect(&addrs, "mymaster")
+        .await
+        .expect("failed to connect via multiplexed sentinel")
+}
+
 fn key(test: &str, name: &str) -> String {
     format!("sentinel_test:{test}:{name}")
 }
 
 // Generate shared command tests for sentinel topology.
 redis_test_harness::command_tests!(sentinel_conn, "sentinel_cmd", ignored);
+
+// Replay the shared command tests against the multiplexed sentinel client.
+mod multiplexed {
+    use super::*;
+    redis_test_harness::command_tests!(mux_sentinel_conn, "mux_sentinel_cmd", ignored);
+}
 
 // -- Sentinel-specific tests --
 
