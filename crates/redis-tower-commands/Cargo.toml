@@ -30,3 +30,5 @@ bytes = { workspace = true }
 
 [dev-dependencies]
 redis-test-harness = { path = "../redis-test-harness" }
+proptest = { workspace = true }
+tokio-util = { workspace = true }
