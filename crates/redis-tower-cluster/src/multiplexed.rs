@@ -37,6 +37,17 @@
 //! [`AutoPipelineService::call_pipeline`], so the ASKING connection state
 //! set by the first frame is always consumed by our migrated command and
 //! not by another in-flight request from a concurrent task.
+//!
+//! # Transactions
+//!
+//! This client does **not** support MULTI/EXEC. Keyless transaction commands
+//! route to the default node while the queued commands route by their own
+//! keys, so a transaction would scatter across nodes and not execute
+//! atomically. Atomic cluster transactions require all keys in one hash slot
+//! plus a slot-pinned executor, which is not yet implemented. For a
+//! transaction, target a single-node [`MultiplexedClient`] (or
+//! [`RedisConnection`](redis_tower_core::RedisConnection)) for the node that
+//! owns the slot.
 
 use std::collections::HashMap;
 use std::future::Future;
