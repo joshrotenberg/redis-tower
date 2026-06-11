@@ -148,9 +148,11 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 
 ## Current Status
 
-All issues from the second audit (#289–#353) are closed except #382 (TimeSeriesClient — PR open, waiting on CI quota reset).
+All three audit passes are complete and merged: the initial audit, the second (#289–#353), and a third test-coverage/completeness pass (#390–#396). TimeSeriesClient (#344) and the high-level module clients (JSON/Search/TimeSeries/probabilistic/Vector) all shipped.
 
-**What's been hardened since the audit:**
+**Every per-file test suite now runs in CI.** As of #400 the standalone integration job runs `cargo test -p redis-tower --test '*' -- --test-threads=1` (all `tests/*.rs` suites, not just `integration.rs`; single-threaded for the `FunctionFlush` quirk above). The #390–#396 pass added: live-server circuit-breaker/command-timeout failure injection (`test_resilience_integration.rs`), `#[ignore]` module-client integration tests (need Redis Stack), server/CLIENT command coverage, EVAL_RO/EVALSHA_RO + XSETID, ACL DRYRUN, an `#[ignore]` ObjectFreq LFU fixture, and `command_tests!` applied to `MultiplexedSentinelClient`. Dead `todo!()` infra stubs were removed.
+
+**What's been hardened (since the second audit):**
 - Circuit breaker, command/connect timeouts, pool acquisition timeout, AutoPipeline back-pressure
 - TCP keepalive, reconnect backoff jitter, graceful `MultiplexedClient` shutdown
 - Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
@@ -159,7 +161,7 @@ All issues from the second audit (#289–#353) are closed except #382 (TimeSerie
 
 **What Is Not Yet Done**
 
-- #382 TimeSeriesClient PR -- CI quota exhausted; implementation is complete locally
-- `ObjectFreq` integration test -- requires LFU `maxmemory-policy`
+- **#399** -- adopt `tower-resilience-circuitbreaker` in place of the custom `CircuitBreakerLayer`. Recommendation posted on the issue (adopt behind a thin error-mapping adapter; its `failure_classifier` fixes the current "any `Err` trips the breaker" gap). Spike not yet started.
 - `ACL SAVE`/`ACL LOAD` -- require a Redis server started with an ACL file
 - `REPLICAOF`, `FAILOVER` -- require multi-server setups
+- Module-client integration tests are `#[ignore]` (require Redis Stack) -- run with `-- --ignored`
