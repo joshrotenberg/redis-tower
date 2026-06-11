@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use redis_tower_core::{Frame, RedisConnection, RedisError};
 use tokio::sync::{mpsc, oneshot};
+use tokio_util::sync::PollSender;
 use tower_service::Service;
 use tracing::warn;
 
@@ -42,13 +43,25 @@ pub struct AutoPipelineConfig {
     /// where batching reduces round-trips.
     pub batch_window: Duration,
     /// Capacity of the internal command queue (number of pending requests
-    /// that can be buffered before callers start receiving `QueueFull`).
+    /// that can be buffered).
     ///
-    /// When the queue is full and a caller issues a new request, the call
-    /// returns `RedisError::QueueFull` immediately instead of blocking.
+    /// When the queue is full, the default behavior is back-pressure: a new
+    /// request awaits a free slot (its `poll_ready` returns `Pending`). Set
+    /// [`shed_load_on_full`](Self::shed_load_on_full) to fail fast with
+    /// `RedisError::QueueFull` instead.
     ///
     /// Default: 1024.
     pub queue_capacity: usize,
+    /// Fail fast instead of applying back-pressure when the queue is full.
+    ///
+    /// When `false` (default), a caller awaits a free slot before its request
+    /// is accepted -- real back-pressure that paces producers to the worker's
+    /// drain rate. When `true`, a full queue makes the call return
+    /// `RedisError::QueueFull` immediately (load shedding), which suits callers
+    /// that prefer to reject rather than wait.
+    ///
+    /// Default: `false`.
+    pub shed_load_on_full: bool,
 }
 
 impl Default for AutoPipelineConfig {
@@ -57,6 +70,7 @@ impl Default for AutoPipelineConfig {
             max_batch_size: 100,
             batch_window: Duration::ZERO,
             queue_capacity: 1024,
+            shed_load_on_full: false,
         }
     }
 }
@@ -147,6 +161,14 @@ impl WorkerRequest {
 /// ```
 pub struct AutoPipelineService {
     tx: mpsc::Sender<WorkerRequest>,
+    /// Reservation-based view of the same channel, used for the back-pressure
+    /// path: `poll_ready` reserves a slot via [`PollSender::poll_reserve`] and
+    /// `call` fills it with [`PollSender::send_item`].
+    poll_tx: PollSender<WorkerRequest>,
+    /// When `true`, `call` uses `try_send` and a full queue yields `QueueFull`
+    /// instead of awaiting capacity. Mirrors
+    /// [`AutoPipelineConfig::shed_load_on_full`].
+    shed_load: bool,
     worker: Arc<WorkerHandle>,
 }
 
@@ -231,9 +253,13 @@ impl AutoPipelineService {
 
     fn from_parts(conn: RedisConnection, config: AutoPipelineConfig, source: ConnSource) -> Self {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
+        let poll_tx = PollSender::new(tx.clone());
+        let shed_load = config.shed_load_on_full;
         let handle = tokio::spawn(pipeline_worker(rx, conn, config, source));
         Self {
             tx,
+            poll_tx,
+            shed_load,
             worker: Arc::new(WorkerHandle::new(handle)),
         }
     }
@@ -255,15 +281,23 @@ impl AutoPipelineService {
             return Ok(Vec::new());
         }
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.tx
-            .try_send(WorkerRequest::Multi {
-                frames,
-                response_tx: resp_tx,
-            })
-            .map_err(|e| match e {
+        let request = WorkerRequest::Multi {
+            frames,
+            response_tx: resp_tx,
+        };
+        if self.shed_load {
+            self.tx.try_send(request).map_err(|e| match e {
                 tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
                 tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
             })?;
+        } else {
+            // Back-pressure: await a free slot rather than failing fast.
+            self.tx
+                .reserve()
+                .await
+                .map_err(|_| RedisError::ConnectionClosed)?
+                .send(request);
+        }
         resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
     }
 
@@ -281,10 +315,13 @@ impl AutoPipelineService {
     /// For clean application shutdown, prefer calling `shutdown()` over
     /// simply dropping the service.
     pub async fn shutdown(self) {
-        // Drop tx first: decrements the sender count. When all senders are
-        // gone the worker's `recv()` returns `None` and the worker exits
-        // after flushing any remaining batch.
+        // Drop both sender handles first: decrements the sender count. When all
+        // senders are gone the worker's `recv()` returns `None` and the worker
+        // exits after flushing any remaining batch. `poll_tx` holds its own
+        // clone of the sender, so it must be dropped too or the worker await
+        // below would hang.
         drop(self.tx);
+        drop(self.poll_tx);
         // Attempt to take sole ownership of the WorkerHandle Arc. Succeeds
         // only when we hold the last reference (all other clones have already
         // been dropped or shut down), in which case we await the worker to
@@ -507,26 +544,50 @@ impl Service<Frame> for AutoPipelineService {
     type Error = RedisError;
     type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
 
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        if self.tx.is_closed() {
-            Poll::Ready(Err(RedisError::ConnectionClosed))
-        } else {
-            Poll::Ready(Ok(()))
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.shed_load {
+            // Load-shedding: readiness only reflects channel liveness; `call`
+            // does the (possibly failing) `try_send`.
+            return if self.tx.is_closed() {
+                Poll::Ready(Err(RedisError::ConnectionClosed))
+            } else {
+                Poll::Ready(Ok(()))
+            };
         }
+        // Back-pressure: reserve a queue slot, pending until one is free.
+        self.poll_tx
+            .poll_reserve(cx)
+            .map_err(|_| RedisError::ConnectionClosed)
     }
 
     fn call(&mut self, frame: Frame) -> Self::Future {
         let (resp_tx, resp_rx) = oneshot::channel();
-        let tx = self.tx.clone();
+        let request = WorkerRequest::Single {
+            frame,
+            response_tx: resp_tx,
+        };
+
+        if self.shed_load {
+            let tx = self.tx.clone();
+            return Box::pin(async move {
+                tx.try_send(request).map_err(|e| match e {
+                    tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                    tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                        RedisError::ConnectionClosed
+                    }
+                })?;
+                resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
+            });
+        }
+
+        // Back-pressure: fill the slot reserved by `poll_ready`. Per the Tower
+        // contract, `poll_ready` must have returned `Ready(Ok)` first.
+        let send_result = self
+            .poll_tx
+            .send_item(request)
+            .map_err(|_| RedisError::ConnectionClosed);
         Box::pin(async move {
-            tx.try_send(WorkerRequest::Single {
-                frame,
-                response_tx: resp_tx,
-            })
-            .map_err(|e| match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
-            })?;
+            send_result?;
             resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
         })
     }
@@ -534,8 +595,11 @@ impl Service<Frame> for AutoPipelineService {
 
 impl Clone for AutoPipelineService {
     fn clone(&self) -> Self {
+        // Build a fresh PollSender so the clone starts with no reservation held.
         Self {
             tx: self.tx.clone(),
+            poll_tx: PollSender::new(self.tx.clone()),
+            shed_load: self.shed_load,
             worker: Arc::clone(&self.worker),
         }
     }
@@ -561,6 +625,10 @@ mod tests {
         assert_eq!(config.max_batch_size, 100);
         assert_eq!(config.batch_window, Duration::ZERO);
         assert_eq!(config.queue_capacity, 1024);
+        assert!(
+            !config.shed_load_on_full,
+            "back-pressure is the default; load shedding is opt-in"
+        );
     }
 
     #[test]
@@ -569,18 +637,23 @@ mod tests {
             max_batch_size: 50,
             batch_window: Duration::from_micros(500),
             queue_capacity: 512,
+            shed_load_on_full: true,
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
         assert_eq!(config.queue_capacity, 512);
+        assert!(config.shed_load_on_full);
     }
 
     fn make_test_svc(
         tx: mpsc::Sender<WorkerRequest>,
         handle: tokio::task::JoinHandle<()>,
+        shed_load: bool,
     ) -> AutoPipelineService {
         AutoPipelineService {
+            poll_tx: PollSender::new(tx.clone()),
             tx,
+            shed_load,
             worker: Arc::new(WorkerHandle::new(handle)),
         }
     }
@@ -591,7 +664,7 @@ mod tests {
         // must be retryable so upstream retry layers can reconnect.
         let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx);
-        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), true);
 
         let frame = Frame::SimpleString(b"PING"[..].into());
         let err = svc.call(frame).await.unwrap_err();
@@ -603,7 +676,7 @@ mod tests {
         // Create a service with a channel that we immediately close.
         let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
         drop(rx); // close the receiver
-        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), true);
 
         // poll_ready should report closed.
         let ready = futures::future::poll_fn(|cx| svc.poll_ready(cx)).await;
@@ -625,7 +698,7 @@ mod tests {
             let mut rx = rx;
             while rx.recv().await.is_some() {}
         });
-        let svc = make_test_svc(tx, handle);
+        let svc = make_test_svc(tx, handle, false);
 
         // shutdown() on the sole instance should drop tx, succeed in
         // Arc::try_unwrap, and await the worker to completion.
@@ -640,7 +713,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
         // Spawn a worker that never exits on its own.
         let handle = tokio::spawn(futures::future::pending::<()>());
-        let svc = make_test_svc(tx, handle);
+        let svc = make_test_svc(tx, handle, false);
 
         // Keep a second clone alive so Arc::try_unwrap will fail.
         let _clone = svc.clone();
@@ -664,13 +737,49 @@ mod tests {
         })
         .unwrap();
 
-        let mut svc = make_test_svc(tx, tokio::spawn(async {}));
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), true);
 
         let frame = Frame::SimpleString(b"PING"[..].into());
         let err = svc.call(frame).await.unwrap_err();
         assert!(
             matches!(err, RedisError::QueueFull),
             "expected QueueFull, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn backpressure_poll_ready_pends_when_full() {
+        // Default (back-pressure) mode: a full queue makes poll_ready pend
+        // rather than returning QueueFull.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
+        // Occupy the single slot without draining it.
+        let (dummy_tx, _dummy_rx) = oneshot::channel();
+        tx.try_send(WorkerRequest::Single {
+            frame: Frame::SimpleString(b"PING"[..].into()),
+            response_tx: dummy_tx,
+        })
+        .unwrap();
+
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), false);
+        let pending = std::future::poll_fn(|cx| Poll::Ready(svc.poll_ready(cx).is_pending())).await;
+        assert!(
+            pending,
+            "poll_ready must pend (back-pressure) when the queue is full"
+        );
+    }
+
+    #[tokio::test]
+    async fn backpressure_poll_ready_errors_when_closed() {
+        // A closed channel surfaces as a (retryable) connection error from
+        // poll_ready in back-pressure mode -- not a pend.
+        let (tx, rx) = mpsc::channel::<WorkerRequest>(1);
+        drop(rx);
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), false);
+        let ready = std::future::poll_fn(|cx| svc.poll_ready(cx)).await;
+        let err = ready.unwrap_err();
+        assert!(
+            err.is_retryable(),
+            "closed-channel error should be retryable"
         );
     }
 
@@ -694,7 +803,7 @@ mod tests {
     async fn queue_depth_zero_when_empty() {
         // A fresh channel with nothing sent should report depth 0.
         let (tx, _rx) = mpsc::channel::<WorkerRequest>(64);
-        let svc = make_test_svc(tx, tokio::spawn(async {}));
+        let svc = make_test_svc(tx, tokio::spawn(async {}), false);
         assert_eq!(svc.queue_depth(), 0);
     }
 
@@ -702,7 +811,7 @@ mod tests {
     async fn queue_depth_increases_with_pending_requests() {
         // With no receiver draining, each enqueued request raises the depth.
         let (tx, _rx) = mpsc::channel::<WorkerRequest>(10);
-        let svc = make_test_svc(tx.clone(), tokio::spawn(async {}));
+        let svc = make_test_svc(tx.clone(), tokio::spawn(async {}), false);
 
         assert_eq!(svc.queue_depth(), 0);
 
