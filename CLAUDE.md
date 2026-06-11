@@ -167,10 +167,13 @@ All three audit passes are complete and merged: the initial audit, the second (#
 
 ## Go-Hard Backlog (filed 2026-06-11)
 
-The lone open item used to be #399. It is now one of ~100 issues filed from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
+The lone open item used to be #399. It is now one of 107 issues filed from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
 
-- **Priority**: `priority: high` (P0, pitch-critical), `priority: medium` (P1, this-quarter differentiators), `priority: low` (P2, later).
+- **Kind** (the execution axis -- work in this order): `kind: architecture` (13, structural / awkward-by-design), then `kind: bug` (13), then `kind: feature` (42). Test/docs/chore/perf issues carry no kind label.
+- **Priority**: `priority: high` (P0), `priority: medium` (P1), `priority: low` (P2).
 - **Area**: `area: cluster`, `area: resilience`, `area: observability`, `area: client-caching`, `area: commands`, `area: performance`, `area: testing`, `area: tower`, `area: pubsub`, `area: transactions`, `documentation`.
+
+The agreed working sequence is **architecture first, then bugs, then features**. The `kind: architecture` queue opens with the composition foundation -- the ExecutorService bridge (#480) and middleware injection point (#482) that unblock wiring Tower layers into the real clients (#429); the rest of that queue is #417 #420 #421 #433 #442 #444 #448 #478 #505 plus the #399 circuit-breaker adapter.
 
 **P0 tracks, roughly in dependency order:**
 
