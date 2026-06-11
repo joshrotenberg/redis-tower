@@ -127,6 +127,9 @@ jobs:
       - name: Run standalone integration tests
         run: cargo test -p redis-tower --test '*' --all-features -- --test-threads=1
 
+      - name: Run universal-client integration tests
+        run: cargo test -p redis-tower-client --test '*' --all-features -- --test-threads=1
+
       - name: Run cluster integration tests
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
 

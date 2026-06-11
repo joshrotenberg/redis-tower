@@ -44,6 +44,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use redis_tower::AutoPipelineService;
+use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::credentials::CredentialProvider;
 use redis_tower::reconnect::ConnectionFactory;
@@ -857,5 +858,31 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for MultiplexedClusterC
 impl std::fmt::Debug for MultiplexedClusterClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MultiplexedClusterClient").finish()
+    }
+}
+
+/// `MultiplexedClusterClient` is a [`RedisExecutor`], so it composes with
+/// generic code (and [`ConnectionPool`](redis_tower::ConnectionPool)) that
+/// accepts `impl RedisExecutor` rather than a concrete client type. `execute`
+/// already takes `&self`; the trait's `&mut self` contract is satisfied
+/// trivially.
+impl RedisExecutor for MultiplexedClusterClient {
+    fn execute<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        MultiplexedClusterClient::execute(self, cmd)
+    }
+}
+
+#[cfg(test)]
+mod redis_executor_tests {
+    use super::*;
+
+    fn assert_redis_executor<T: RedisExecutor>() {}
+
+    #[test]
+    fn cluster_client_implements_redis_executor() {
+        assert_redis_executor::<MultiplexedClusterClient>();
     }
 }
