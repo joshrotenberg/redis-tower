@@ -1,9 +1,11 @@
 name: Release
 
+# Manual-only: releases are frozen during the current development push.
+# Trigger with: gh workflow run Release --ref main
+# Note: redis-tower-sync and redis-tower-modules 0.1.0 are tagged in
+# Cargo.toml but not yet on crates.io; the next dispatch publishes them.
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 permissions:
   pull-requests: write
