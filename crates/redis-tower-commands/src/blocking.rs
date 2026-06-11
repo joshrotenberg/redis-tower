@@ -11,6 +11,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Blocking left pop. Waits until an element is available or timeout.
 /// Returns `None` on timeout, `Some((key, value))` on success.
+#[derive(Clone)]
 pub struct BLPop {
     keys: Vec<String>,
     timeout: f64,
@@ -58,6 +59,7 @@ impl Command for BLPop {
 /// BRPOP key \[key ...\] timeout
 ///
 /// Blocking right pop. Same as BLPOP but pops from the tail.
+#[derive(Clone)]
 pub struct BRPop {
     keys: Vec<String>,
     timeout: f64,
@@ -103,6 +105,7 @@ impl Command for BRPop {
 /// BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout
 ///
 /// Blocking version of LMOVE.
+#[derive(Clone)]
 pub struct BLMove {
     source: String,
     destination: String,
@@ -178,6 +181,7 @@ impl Command for BLMove {
 /// BZPOPMIN key \[key ...\] timeout
 ///
 /// Blocking pop of the member with the lowest score from sorted sets.
+#[derive(Clone)]
 pub struct BZPopMin {
     keys: Vec<String>,
     timeout: f64,
@@ -223,6 +227,7 @@ impl Command for BZPopMin {
 /// BZPOPMAX key \[key ...\] timeout
 ///
 /// Blocking pop of the member with the highest score from sorted sets.
+#[derive(Clone)]
 pub struct BZPopMax {
     keys: Vec<String>,
     timeout: f64,

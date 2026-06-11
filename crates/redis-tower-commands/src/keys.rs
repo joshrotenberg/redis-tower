@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// DEL key [key ...]
 ///
 /// Removes the specified keys. Returns the number of keys removed.
+#[derive(Clone)]
 pub struct Del {
     keys: Vec<String>,
 }
@@ -52,6 +53,7 @@ impl Command for Del {
 /// EXISTS key [key ...]
 ///
 /// Returns the number of specified keys that exist.
+#[derive(Clone)]
 pub struct Exists {
     keys: Vec<String>,
 }
@@ -127,6 +129,7 @@ impl ExpireCondition {
 /// EXPIRE key seconds \[NX | XX | GT | LT\]
 ///
 /// Sets a timeout on `key`. Returns `true` if the timeout was set.
+#[derive(Clone)]
 pub struct Expire {
     key: String,
     seconds: u64,
@@ -184,6 +187,7 @@ impl Command for Expire {
 ///
 /// Returns the remaining time to live of a key in seconds.
 /// Returns -2 if the key does not exist, -1 if no expiry is set.
+#[derive(Clone)]
 pub struct Ttl {
     key: String,
 }
@@ -223,6 +227,7 @@ impl Command for Ttl {
 /// RENAME key newkey
 ///
 /// Renames `key` to `newkey`. Errors if `key` does not exist.
+#[derive(Clone)]
 pub struct Rename {
     key: String,
     new_key: String,
@@ -267,6 +272,7 @@ impl Command for Rename {
 ///
 /// Returns the type of the value stored at `key` as a string
 /// (e.g., "string", "list", "set", "zset", "hash", "none").
+#[derive(Clone)]
 pub struct Type {
     key: String,
 }
@@ -307,6 +313,7 @@ impl Command for Type {
 ///
 /// Removes the specified keys without blocking the server.
 /// Returns the number of keys removed.
+#[derive(Clone)]
 pub struct Unlink {
     keys: Vec<String>,
 }
@@ -354,6 +361,7 @@ impl Command for Unlink {
 /// PERSIST key
 ///
 /// Removes the existing timeout on `key`. Returns `true` if the timeout was removed.
+#[derive(Clone)]
 pub struct Persist {
     key: String,
 }
@@ -394,6 +402,7 @@ impl Command for Persist {
 /// PEXPIRE key milliseconds \[NX | XX | GT | LT\]
 ///
 /// Sets a timeout on `key` in milliseconds. Returns `true` if the timeout was set.
+#[derive(Clone)]
 pub struct PExpire {
     key: String,
     milliseconds: u64,
@@ -451,6 +460,7 @@ impl Command for PExpire {
 ///
 /// Sets an expiry on `key` as an absolute Unix timestamp in milliseconds.
 /// Returns `true` if the timeout was set.
+#[derive(Clone)]
 pub struct PExpireAt {
     key: String,
     ms_timestamp: i64,
@@ -508,6 +518,7 @@ impl Command for PExpireAt {
 ///
 /// Copies the value stored at `source` to `destination`.
 /// Returns `true` if the key was copied.
+#[derive(Clone)]
 pub struct Copy {
     source: String,
     destination: String,
@@ -563,6 +574,7 @@ impl Command for Copy {
 /// KEYS pattern
 ///
 /// Returns all keys matching `pattern`.
+#[derive(Clone)]
 pub struct Keys {
     pattern: String,
 }
@@ -613,6 +625,7 @@ impl Command for Keys {
 /// RANDOMKEY
 ///
 /// Returns a random key from the keyspace, or `None` if the database is empty.
+#[derive(Clone)]
 pub struct RandomKey;
 
 impl RandomKey {
@@ -658,6 +671,7 @@ impl Command for RandomKey {
 ///
 /// Alters the last access time of the specified keys.
 /// Returns the number of keys that were touched.
+#[derive(Clone)]
 pub struct Touch {
     keys: Vec<String>,
 }
@@ -706,6 +720,7 @@ impl Command for Touch {
 ///
 /// Returns the absolute Unix timestamp (in seconds) at which the key will expire.
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
+#[derive(Clone)]
 pub struct ExpireTime {
     key: String,
 }
@@ -746,6 +761,7 @@ impl Command for ExpireTime {
 ///
 /// Returns the absolute Unix timestamp (in milliseconds) at which the key will expire.
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
+#[derive(Clone)]
 pub struct PExpireTime {
     key: String,
 }
@@ -786,6 +802,7 @@ impl Command for PExpireTime {
 ///
 /// Returns a serialized version of the value stored at the specified key.
 /// Returns `None` if the key does not exist.
+#[derive(Clone)]
 pub struct Dump {
     key: String,
 }
@@ -827,6 +844,7 @@ impl Command for Dump {
 ///
 /// Deserializes a previously-dumped value and associates it with a key.
 /// The `ttl_ms` argument sets the time-to-live in milliseconds (0 for no expiry).
+#[derive(Clone)]
 pub struct Restore {
     key: String,
     ttl_ms: u64,
@@ -914,6 +932,7 @@ impl Command for Restore {
 }
 
 /// Sort order for SORT and SORT_RO commands.
+#[derive(Clone)]
 pub enum SortOrder {
     Asc,
     Desc,
@@ -924,6 +943,7 @@ pub enum SortOrder {
 /// Sorts the elements in a list, set, or sorted set. When STORE is used, the
 /// response is an integer (number of elements stored); otherwise it is an array
 /// of bulk strings. The response type is `Frame` to accommodate both cases.
+#[derive(Clone)]
 pub struct Sort {
     key: String,
     by: Option<String>,
@@ -1026,6 +1046,7 @@ impl Command for Sort {
 /// Read-only variant of SORT. Returns the sorted elements without the STORE
 /// option. Each element is returned as an `Option<Bytes>` (nil for missing
 /// GET references).
+#[derive(Clone)]
 pub struct SortRo {
     key: String,
     by: Option<String>,
@@ -1135,6 +1156,7 @@ impl Command for SortRo {
 /// OBJECT ENCODING key
 ///
 /// Returns the internal encoding of the Redis object stored at the key.
+#[derive(Clone)]
 pub struct ObjectEncoding {
     key: String,
 }
@@ -1179,6 +1201,7 @@ impl Command for ObjectEncoding {
 ///
 /// Returns the logarithmic access frequency counter of a key (requires
 /// maxmemory-policy to be set to an LFU policy).
+#[derive(Clone)]
 pub struct ObjectFreq {
     key: String,
 }
@@ -1218,6 +1241,7 @@ impl Command for ObjectFreq {
 /// OBJECT HELP
 ///
 /// Returns helpful text about the OBJECT subcommands.
+#[derive(Clone)]
 pub struct ObjectHelp;
 
 impl ObjectHelp {
@@ -1273,6 +1297,7 @@ impl Command for ObjectHelp {
 ///
 /// Returns the number of seconds since the object stored at the key is idle
 /// (not accessed by read or write operations).
+#[derive(Clone)]
 pub struct ObjectIdleTime {
     key: String,
 }
@@ -1316,6 +1341,7 @@ impl Command for ObjectIdleTime {
 /// OBJECT REFCOUNT key
 ///
 /// Returns the number of references of the object stored at the key.
+#[derive(Clone)]
 pub struct ObjectRefCount {
     key: String,
 }
@@ -1360,6 +1386,7 @@ impl Command for ObjectRefCount {
 ///
 /// Sets an expiry on `key` as an absolute Unix timestamp in seconds.
 /// Returns `true` if the timeout was set.
+#[derive(Clone)]
 pub struct ExpireAt {
     key: String,
     timestamp: i64,
@@ -1417,6 +1444,7 @@ impl Command for ExpireAt {
 ///
 /// Returns the remaining time to live of a key in milliseconds.
 /// Returns -2 if the key does not exist, -1 if no expiry is set.
+#[derive(Clone)]
 pub struct Pttl {
     key: String,
 }
@@ -1457,6 +1485,7 @@ impl Command for Pttl {
 ///
 /// Renames `key` to `newkey`, only if `newkey` does not yet exist.
 /// Returns `true` if the key was renamed.
+#[derive(Clone)]
 pub struct RenameNx {
     key: String,
     new_key: String,
@@ -1502,6 +1531,7 @@ impl Command for RenameNx {
 ///
 /// Moves `key` from the currently selected database to the specified
 /// destination database. Returns `true` if the key was moved.
+#[derive(Clone)]
 pub struct Move {
     key: String,
     db: u16,

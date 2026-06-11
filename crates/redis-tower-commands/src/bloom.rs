@@ -33,6 +33,7 @@ fn parse_bool_array(frame: Frame) -> Result<Vec<bool>, RedisError> {
 ///
 /// Adds an item to the Bloom filter at `key`. Returns `true` if the item was
 /// newly added, `false` if it may have existed previously.
+#[derive(Clone)]
 pub struct BfAdd {
     key: String,
     item: String,
@@ -77,6 +78,7 @@ impl Command for BfAdd {
 /// BF.EXISTS key item
 ///
 /// Checks whether an item may exist in the Bloom filter at `key`.
+#[derive(Clone)]
 pub struct BfExists {
     key: String,
     item: String,
@@ -122,6 +124,7 @@ impl Command for BfExists {
 ///
 /// Adds one or more items to the Bloom filter at `key`. Returns a vector of
 /// booleans indicating whether each item was newly added.
+#[derive(Clone)]
 pub struct BfMAdd {
     key: String,
     items: Vec<String>,
@@ -159,6 +162,7 @@ impl Command for BfMAdd {
 /// BF.MEXISTS key item \[item ...\]
 ///
 /// Checks whether one or more items may exist in the Bloom filter at `key`.
+#[derive(Clone)]
 pub struct BfMExists {
     key: String,
     items: Vec<String>,
@@ -197,6 +201,7 @@ impl Command for BfMExists {
 ///
 /// Creates an empty Bloom filter with the given error rate and initial
 /// capacity.
+#[derive(Clone)]
 pub struct BfReserve {
     key: String,
     error_rate: f64,
@@ -268,6 +273,7 @@ impl Command for BfReserve {
 ///
 /// Returns information about the Bloom filter at `key` as a raw Frame
 /// (key-value pairs).
+#[derive(Clone)]
 pub struct BfInfo {
     key: String,
 }
@@ -299,6 +305,7 @@ impl Command for BfInfo {
 ///
 /// Adds one or more items to a Bloom filter, creating it if it does not exist.
 /// Supports builder-style configuration.
+#[derive(Clone)]
 pub struct BfInsert {
     key: String,
     capacity: Option<i64>,
@@ -400,6 +407,7 @@ impl Command for BfInsert {
 ///
 /// Adds an item to the Cuckoo filter at `key`. Returns `true` if the item was
 /// successfully added.
+#[derive(Clone)]
 pub struct CfAdd {
     key: String,
     item: String,
@@ -445,6 +453,7 @@ impl Command for CfAdd {
 ///
 /// Adds an item to the Cuckoo filter only if it does not already exist.
 /// Returns `true` if the item was added, `false` if it may already exist.
+#[derive(Clone)]
 pub struct CfAddNx {
     key: String,
     item: String,
@@ -489,6 +498,7 @@ impl Command for CfAddNx {
 /// CF.EXISTS key item
 ///
 /// Checks whether an item may exist in the Cuckoo filter at `key`.
+#[derive(Clone)]
 pub struct CfExists {
     key: String,
     item: String,
@@ -533,6 +543,7 @@ impl Command for CfExists {
 /// CF.MEXISTS key item \[item ...\]
 ///
 /// Checks whether one or more items may exist in the Cuckoo filter at `key`.
+#[derive(Clone)]
 pub struct CfMExists {
     key: String,
     items: Vec<String>,
@@ -571,6 +582,7 @@ impl Command for CfMExists {
 ///
 /// Deletes an item from the Cuckoo filter at `key`. Returns `true` if the
 /// item was found and deleted, `false` otherwise.
+#[derive(Clone)]
 pub struct CfDel {
     key: String,
     item: String,
@@ -615,6 +627,7 @@ impl Command for CfDel {
 /// CF.COUNT key item
 ///
 /// Returns the number of times an item may be in the Cuckoo filter.
+#[derive(Clone)]
 pub struct CfCount {
     key: String,
     item: String,
@@ -659,6 +672,7 @@ impl Command for CfCount {
 /// \[EXPANSION exp\]
 ///
 /// Creates an empty Cuckoo filter with the given capacity.
+#[derive(Clone)]
 pub struct CfReserve {
     key: String,
     capacity: i64,
@@ -739,6 +753,7 @@ impl Command for CfReserve {
 /// CF.INFO key
 ///
 /// Returns information about the Cuckoo filter at `key` as a raw Frame.
+#[derive(Clone)]
 pub struct CfInfo {
     key: String,
 }
@@ -769,6 +784,7 @@ impl Command for CfInfo {
 ///
 /// Adds one or more items to a Cuckoo filter, creating it if it does not
 /// exist. Returns a vector of booleans.
+#[derive(Clone)]
 pub struct CfInsert {
     key: String,
     capacity: Option<i64>,
@@ -831,6 +847,7 @@ impl Command for CfInsert {
 ///
 /// Adds one or more items to a Cuckoo filter only if they do not already
 /// exist, creating the filter if needed. Returns a vector of booleans.
+#[derive(Clone)]
 pub struct CfInsertNx {
     key: String,
     capacity: Option<i64>,

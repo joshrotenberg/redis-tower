@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Posts a message to the given channel. Returns the number of clients
 /// that received the message.
+#[derive(Clone)]
 pub struct Publish {
     channel: String,
     message: String,
@@ -50,6 +51,7 @@ impl Command for Publish {
 ///
 /// Posts a message to the given shard channel. Returns the number of
 /// clients that received the message.
+#[derive(Clone)]
 pub struct SPublish {
     channel: String,
     message: String,
@@ -96,6 +98,7 @@ impl Command for SPublish {
 /// channel with one or more subscribers (excluding clients subscribed
 /// to patterns). If no pattern is specified, all active channels are
 /// listed. Glob-style patterns are supported.
+#[derive(Clone)]
 pub struct PubSubChannels {
     pattern: Option<String>,
 }
@@ -164,6 +167,7 @@ impl Command for PubSubChannels {
 /// Returns the number of subscribers (not counting clients subscribed
 /// to patterns) for the specified channels. The response is a flat
 /// array of channel/count pairs in RESP2, or a map in RESP3.
+#[derive(Clone)]
 pub struct PubSubNumSub {
     channels: Vec<String>,
 }
@@ -277,6 +281,7 @@ impl Command for PubSubNumSub {
 ///
 /// Returns the number of unique patterns that are subscribed to by
 /// clients (via PSUBSCRIBE).
+#[derive(Clone)]
 pub struct PubSubNumPat;
 
 impl PubSubNumPat {
@@ -319,6 +324,7 @@ impl Command for PubSubNumPat {
 /// is a Pub/Sub shard channel with one or more subscribers. If no
 /// pattern is specified, all active shard channels are listed.
 /// Glob-style patterns are supported. (Redis 7.0+)
+#[derive(Clone)]
 pub struct PubSubShardChannels {
     pattern: Option<String>,
 }
@@ -387,6 +393,7 @@ impl Command for PubSubShardChannels {
 /// Returns the number of subscribers for the specified shard channels.
 /// The response is a flat array of channel/count pairs in RESP2, or a
 /// map in RESP3. (Redis 7.0+)
+#[derive(Clone)]
 pub struct PubSubShardNumSub {
     channels: Vec<String>,
 }

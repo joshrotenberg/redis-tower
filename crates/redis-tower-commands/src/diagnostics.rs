@@ -9,6 +9,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns the number of bytes that a key and its value require to be stored
 /// in RAM. Returns `None` if the key does not exist.
+#[derive(Clone)]
 pub struct MemoryUsage {
     key: String,
     samples: Option<u64>,
@@ -61,6 +62,7 @@ impl Command for MemoryUsage {
 /// MEMORY DOCTOR
 ///
 /// Returns a diagnostic report about memory issues the server may have.
+#[derive(Clone)]
 pub struct MemoryDoctor;
 
 impl MemoryDoctor {
@@ -101,6 +103,7 @@ impl Command for MemoryDoctor {
 ///
 /// Returns detailed memory consumption statistics as a complex nested
 /// key-value response.
+#[derive(Clone)]
 pub struct MemoryStats;
 
 impl MemoryStats {
@@ -139,6 +142,7 @@ impl Command for MemoryStats {
 ///
 /// Returns entries from the slow log. Each entry is an array containing
 /// the log id, timestamp, execution time, command array, client info, etc.
+#[derive(Clone)]
 pub struct SlowlogGet {
     count: Option<u64>,
 }
@@ -184,6 +188,7 @@ impl Command for SlowlogGet {
 /// SLOWLOG LEN
 ///
 /// Returns the number of entries in the slow log.
+#[derive(Clone)]
 pub struct SlowlogLen;
 
 impl SlowlogLen {
@@ -223,6 +228,7 @@ impl Command for SlowlogLen {
 /// SLOWLOG RESET
 ///
 /// Clears all entries from the slow log.
+#[derive(Clone)]
 pub struct SlowlogReset;
 
 impl SlowlogReset {
@@ -267,6 +273,7 @@ impl Command for SlowlogReset {
 ///
 /// Returns the latest latency samples for all monitored events. Each entry
 /// is an array of [event-name, timestamp, latest-latency-ms, max-latency-ms].
+#[derive(Clone)]
 pub struct LatencyLatest;
 
 impl LatencyLatest {
@@ -301,6 +308,7 @@ impl Command for LatencyLatest {
 ///
 /// Returns latency time-series data for the specified event. Each entry
 /// is an array of [timestamp, latency-ms].
+#[derive(Clone)]
 pub struct LatencyHistory {
     event: String,
 }
@@ -337,6 +345,7 @@ impl Command for LatencyHistory {
 ///
 /// Resets latency data for the specified events, or all events if none given.
 /// Returns the number of events that were reset.
+#[derive(Clone)]
 pub struct LatencyReset {
     events: Vec<String>,
 }

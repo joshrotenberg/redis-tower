@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Marks the start of a transaction block. Subsequent commands are queued for
 /// atomic execution with EXEC.
+#[derive(Clone)]
 pub struct Multi;
 
 impl Multi {
@@ -46,6 +47,7 @@ impl Command for Multi {
 /// Executes all commands queued in a transaction. Returns `None` if the
 /// transaction was aborted (a watched key changed), or `Some(results)` with one
 /// frame per queued command otherwise.
+#[derive(Clone)]
 pub struct Exec;
 
 impl Exec {
@@ -87,6 +89,7 @@ impl Command for Exec {
 ///
 /// Discards all commands queued in a transaction and exits the transaction
 /// block.
+#[derive(Clone)]
 pub struct Discard;
 
 impl Discard {
@@ -127,6 +130,7 @@ impl Command for Discard {
 ///
 /// Marks the given keys to be watched for conditional execution of a
 /// transaction (optimistic locking).
+#[derive(Clone)]
 pub struct Watch {
     keys: Vec<String>,
 }
@@ -174,6 +178,7 @@ impl Command for Watch {
 /// UNWATCH
 ///
 /// Flushes all previously watched keys for a transaction.
+#[derive(Clone)]
 pub struct Unwatch;
 
 impl Unwatch {

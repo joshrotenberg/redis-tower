@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns information and statistics about the cluster.
 /// The response is a bulk string of key-value pairs separated by `\r\n`.
+#[derive(Clone)]
 pub struct ClusterInfo;
 
 impl ClusterInfo {
@@ -46,6 +47,7 @@ impl Command for ClusterInfo {
 ///
 /// Returns the cluster configuration as seen by the current node,
 /// in a format that can be used as a node configuration file.
+#[derive(Clone)]
 pub struct ClusterNodes;
 
 impl ClusterNodes {
@@ -89,6 +91,7 @@ impl Command for ClusterNodes {
 ///
 /// Returns an array of slot ranges, each containing:
 /// `[start_slot, end_slot, [ip, port, node_id], ...]`
+#[derive(Clone)]
 pub struct ClusterSlots;
 
 impl ClusterSlots {
@@ -129,6 +132,7 @@ impl Command for ClusterSlots {
 ///
 /// Returns information about the shards of the cluster (Redis 7.0+).
 /// This is the replacement for the deprecated CLUSTER SLOTS command.
+#[derive(Clone)]
 pub struct ClusterShards;
 
 impl ClusterShards {
@@ -168,6 +172,7 @@ impl Command for ClusterShards {
 /// CLUSTER MYID
 ///
 /// Returns the node's ID as a 40-character hex string.
+#[derive(Clone)]
 pub struct ClusterMyId;
 
 impl ClusterMyId {
@@ -209,6 +214,7 @@ impl Command for ClusterMyId {
 ///
 /// Introduces a new node to the cluster by connecting to the specified
 /// address. The node will join the cluster handshake.
+#[derive(Clone)]
 pub struct ClusterMeet {
     ip: String,
     port: u16,
@@ -253,6 +259,7 @@ impl Command for ClusterMeet {
 /// CLUSTER FORGET node-id
 ///
 /// Removes a node from the cluster's nodes table.
+#[derive(Clone)]
 pub struct ClusterForget {
     node_id: String,
 }
@@ -294,6 +301,7 @@ impl Command for ClusterForget {
 /// CLUSTER REPLICATE node-id
 ///
 /// Configures the current node as a replica of the specified master node.
+#[derive(Clone)]
 pub struct ClusterReplicate {
     node_id: String,
 }
@@ -336,11 +344,13 @@ impl Command for ClusterReplicate {
 ///
 /// Triggers a manual failover of the master the current replica is
 /// replicating from.
+#[derive(Clone)]
 pub struct ClusterFailover {
     option: Option<FailoverOption>,
 }
 
 /// Options for CLUSTER FAILOVER.
+#[derive(Clone)]
 pub enum FailoverOption {
     /// Force failover without agreement from the master.
     Force,
@@ -404,6 +414,7 @@ impl Command for ClusterFailover {
 ///
 /// Resets the cluster state. SOFT (default) resets the cluster
 /// configuration. HARD also generates a new node ID.
+#[derive(Clone)]
 pub struct ClusterReset {
     hard: bool,
 }
@@ -455,6 +466,7 @@ impl Command for ClusterReset {
 /// CLUSTER COUNTKEYSINSLOT slot
 ///
 /// Returns the number of keys in the specified hash slot.
+#[derive(Clone)]
 pub struct ClusterCountKeysInSlot {
     slot: u16,
 }
@@ -494,6 +506,7 @@ impl Command for ClusterCountKeysInSlot {
 /// CLUSTER GETKEYSINSLOT slot count
 ///
 /// Returns up to `count` key names in the specified hash slot.
+#[derive(Clone)]
 pub struct ClusterGetKeysInSlot {
     slot: u16,
     count: u32,
@@ -550,6 +563,7 @@ impl Command for ClusterGetKeysInSlot {
 /// CLUSTER KEYSLOT key
 ///
 /// Returns the hash slot number for the given key.
+#[derive(Clone)]
 pub struct ClusterKeySlot {
     key: String,
 }

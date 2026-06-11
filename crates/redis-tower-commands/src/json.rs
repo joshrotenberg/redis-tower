@@ -3,6 +3,7 @@ use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
 /// Condition for JSON.SET (NX or XX).
+#[derive(Clone)]
 pub enum JsonSetCondition {
     /// Only set if the path does not exist.
     Nx,
@@ -14,6 +15,7 @@ pub enum JsonSetCondition {
 ///
 /// Sets the JSON value at `path` in the key. Creates the key if it does not
 /// exist. Returns `Ok(())` on success.
+#[derive(Clone)]
 pub struct JsonSet {
     key: String,
     path: String,
@@ -82,6 +84,7 @@ impl Command for JsonSet {
 ///
 /// Returns the JSON value at one or more paths. When multiple paths are given,
 /// returns a JSON object mapping each path to its value.
+#[derive(Clone)]
 pub struct JsonGet {
     key: String,
     paths: Vec<String>,
@@ -139,6 +142,7 @@ impl Command for JsonGet {
 ///
 /// Deletes a value at `path` in the JSON document stored at `key`. Returns
 /// the number of paths deleted.
+#[derive(Clone)]
 pub struct JsonDel {
     key: String,
     path: Option<String>,
@@ -189,6 +193,7 @@ impl Command for JsonDel {
 ///
 /// Returns the values at `path` from multiple keys. Returns `None` for keys
 /// where the path does not exist.
+#[derive(Clone)]
 pub struct JsonMGet {
     keys: Vec<String>,
     path: String,
@@ -243,6 +248,7 @@ impl Command for JsonMGet {
 /// JSON.TYPE key \[path\]
 ///
 /// Returns the type of the JSON value at `path`.
+#[derive(Clone)]
 pub struct JsonType {
     key: String,
     path: Option<String>,
@@ -294,6 +300,7 @@ impl Command for JsonType {
 ///
 /// Increments the numeric value at `path` by `value`. Returns the new value
 /// as a string.
+#[derive(Clone)]
 pub struct JsonNumIncrBy {
     key: String,
     path: String,
@@ -341,6 +348,7 @@ impl Command for JsonNumIncrBy {
 ///
 /// Returns the length of the JSON string at `path`. For multiple matches,
 /// returns an array of integers.
+#[derive(Clone)]
 pub struct JsonStrLen {
     key: String,
     path: Option<String>,
@@ -384,6 +392,7 @@ impl Command for JsonStrLen {
 /// JSON.STRAPPEND key \[path\] value
 ///
 /// Appends a string to the JSON string at `path`. Returns the new length(s).
+#[derive(Clone)]
 pub struct JsonStrAppend {
     key: String,
     path: Option<String>,
@@ -431,6 +440,7 @@ impl Command for JsonStrAppend {
 ///
 /// Appends one or more values to the array at `path`. Returns the new
 /// length(s) of the array.
+#[derive(Clone)]
 pub struct JsonArrAppend {
     key: String,
     path: String,
@@ -486,6 +496,7 @@ impl Command for JsonArrAppend {
 /// JSON.ARRLEN key \[path\]
 ///
 /// Returns the length of the JSON array at `path`.
+#[derive(Clone)]
 pub struct JsonArrLen {
     key: String,
     path: Option<String>,
@@ -530,6 +541,7 @@ impl Command for JsonArrLen {
 ///
 /// Searches for the first occurrence of `value` in the array at `path`.
 /// Returns the index, or -1 if not found.
+#[derive(Clone)]
 pub struct JsonArrIndex {
     key: String,
     path: String,
@@ -594,6 +606,7 @@ impl Command for JsonArrIndex {
 ///
 /// Removes and returns the element at `index` from the array at `path`.
 /// Defaults to the last element (-1).
+#[derive(Clone)]
 pub struct JsonArrPop {
     key: String,
     path: Option<String>,
@@ -655,6 +668,7 @@ impl Command for JsonArrPop {
 /// JSON.OBJKEYS key \[path\]
 ///
 /// Returns the keys of the JSON object at `path`.
+#[derive(Clone)]
 pub struct JsonObjKeys {
     key: String,
     path: Option<String>,
@@ -698,6 +712,7 @@ impl Command for JsonObjKeys {
 /// JSON.OBJLEN key \[path\]
 ///
 /// Returns the number of keys in the JSON object at `path`.
+#[derive(Clone)]
 pub struct JsonObjLen {
     key: String,
     path: Option<String>,
@@ -743,6 +758,7 @@ impl Command for JsonObjLen {
 /// Merges a JSON value into the existing document at `path` in `key`. The
 /// value is merged recursively: existing keys are overwritten, new keys are
 /// added, and setting a key to `null` removes it. Returns `Ok(())` on success.
+#[derive(Clone)]
 pub struct JsonMerge {
     key: String,
     path: String,

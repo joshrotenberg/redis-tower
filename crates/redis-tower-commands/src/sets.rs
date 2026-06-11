@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Adds the specified members to the set stored at `key`. Returns the number
 /// of members that were added (excluding members already present).
+#[derive(Clone)]
 pub struct SAdd {
     key: String,
     members: Vec<String>,
@@ -60,6 +61,7 @@ impl Command for SAdd {
 ///
 /// Removes the specified members from the set stored at `key`. Returns the
 /// number of members that were removed.
+#[derive(Clone)]
 pub struct SRem {
     key: String,
     members: Vec<String>,
@@ -113,6 +115,7 @@ impl Command for SRem {
 /// SMEMBERS key
 ///
 /// Returns all the members of the set stored at `key`.
+#[derive(Clone)]
 pub struct SMembers {
     key: String,
 }
@@ -171,6 +174,7 @@ impl Command for SMembers {
 /// SISMEMBER key member
 ///
 /// Returns whether `member` is a member of the set stored at `key`.
+#[derive(Clone)]
 pub struct SIsMember {
     key: String,
     member: String,
@@ -219,6 +223,7 @@ impl Command for SIsMember {
 /// SCARD key
 ///
 /// Returns the number of members in the set stored at `key`.
+#[derive(Clone)]
 pub struct SCard {
     key: String,
 }
@@ -259,6 +264,7 @@ impl Command for SCard {
 ///
 /// Returns the members of the set resulting from the intersection of all
 /// the given sets.
+#[derive(Clone)]
 pub struct SInter {
     keys: Vec<String>,
 }
@@ -331,6 +337,7 @@ impl Command for SInter {
 /// Returns one or more random members from the set stored at `key`. When called
 /// without `count`, returns a single member. When `count` is provided, returns
 /// up to that many members. A negative count allows duplicates.
+#[derive(Clone)]
 pub struct SRandMember {
     key: String,
     count: Option<i64>,
@@ -397,6 +404,7 @@ impl Command for SRandMember {
 /// Removes and returns one or more random members from the set stored at `key`.
 /// Without `count`, removes and returns a single member. With `count`, removes
 /// and returns up to that many members.
+#[derive(Clone)]
 pub struct SPop {
     key: String,
     count: Option<u64>,
@@ -458,6 +466,7 @@ impl Command for SPop {
 ///
 /// Returns the members of the set resulting from the difference between the
 /// first set and all the successive sets.
+#[derive(Clone)]
 pub struct SDiff {
     keys: Vec<String>,
 }
@@ -530,6 +539,7 @@ impl Command for SDiff {
 /// Stores the members of the set resulting from the difference between the
 /// first set and all the successive sets into `destination`. Returns the number
 /// of elements in the resulting set.
+#[derive(Clone)]
 pub struct SDiffStore {
     destination: String,
     keys: Vec<String>,
@@ -577,6 +587,7 @@ impl Command for SDiffStore {
 ///
 /// Returns the members of the set resulting from the union of all the given
 /// sets.
+#[derive(Clone)]
 pub struct SUnion {
     keys: Vec<String>,
 }
@@ -648,6 +659,7 @@ impl Command for SUnion {
 ///
 /// Stores the members of the set resulting from the union of all the given
 /// sets into `destination`. Returns the number of elements in the resulting set.
+#[derive(Clone)]
 pub struct SUnionStore {
     destination: String,
     keys: Vec<String>,
@@ -696,6 +708,7 @@ impl Command for SUnionStore {
 /// Moves `member` from the set at `source` to the set at `destination`.
 /// Returns `true` if the member was moved, `false` if it was not a member of
 /// the source set.
+#[derive(Clone)]
 pub struct SMove {
     source: String,
     destination: String,
@@ -748,6 +761,7 @@ impl Command for SMove {
 ///
 /// Returns whether each member is a member of the set stored at `key`. For
 /// each member, returns `true` if the member exists, `false` otherwise.
+#[derive(Clone)]
 pub struct SMisMember {
     key: String,
     members: Vec<String>,
@@ -817,6 +831,7 @@ impl Command for SMisMember {
 /// Stores the members of the set resulting from the intersection of all the
 /// given sets into `destination`. Returns the number of elements in the
 /// resulting set.
+#[derive(Clone)]
 pub struct SInterStore {
     destination: String,
     keys: Vec<String>,
@@ -865,6 +880,7 @@ impl Command for SInterStore {
 /// Returns the cardinality of the intersection of the given sets, without
 /// actually computing the full intersection. An optional `LIMIT` caps the
 /// work done when the cardinality reaches the specified value.
+#[derive(Clone)]
 pub struct SInterCard {
     keys: Vec<String>,
     limit: Option<u64>,

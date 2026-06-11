@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Sets or clears the bit at `offset` in the string value stored at `key`.
 /// Returns the original bit value stored at `offset`.
+#[derive(Clone)]
 pub struct SetBit {
     key: String,
     offset: u64,
@@ -51,6 +52,7 @@ impl Command for SetBit {
 /// GETBIT key offset
 ///
 /// Returns the bit value at `offset` in the string value stored at `key`.
+#[derive(Clone)]
 pub struct GetBit {
     key: String,
     offset: u64,
@@ -96,6 +98,7 @@ impl Command for GetBit {
 /// Counts the number of set bits (population counting) in a string.
 /// By default counts all bytes; use `.range()` to limit and `.bit_mode()`
 /// to interpret the range as bit offsets instead of byte offsets.
+#[derive(Clone)]
 pub struct BitCount {
     key: String,
     range: Option<(i64, i64)>,
@@ -159,6 +162,7 @@ impl Command for BitCount {
 /// Returns the position of the first bit set to `bit` (0 or 1) in the string
 /// stored at `key`. Use `.range()` to limit the search and `.bit_mode()` to
 /// interpret the range as bit offsets instead of byte offsets.
+#[derive(Clone)]
 pub struct BitPos {
     key: String,
     bit: u8,
@@ -224,6 +228,7 @@ impl Command for BitPos {
 }
 
 /// Bitwise operation for BITOP.
+#[derive(Clone)]
 pub enum BitOperation {
     /// Bitwise AND.
     And,
@@ -251,6 +256,7 @@ impl BitOperation {
 /// Performs a bitwise operation between strings and stores the result in `destkey`.
 /// Returns the size of the string stored in the destination key (the longest
 /// input string length).
+#[derive(Clone)]
 pub struct BitOp {
     operation: BitOperation,
     destkey: String,

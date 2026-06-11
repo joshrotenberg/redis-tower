@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Returns the value associated with `field` in the hash stored at `key`,
 /// or `None` if the field or key does not exist.
+#[derive(Clone)]
 pub struct HGet {
     key: String,
     field: String,
@@ -55,6 +56,7 @@ impl Command for HGet {
 ///
 /// Sets one or more field-value pairs in the hash stored at `key`.
 /// Returns the number of fields that were added (not updated).
+#[derive(Clone)]
 pub struct HSet {
     key: String,
     fields: Vec<(String, String)>,
@@ -133,6 +135,7 @@ impl Command for HSet {
 ///
 /// Removes the specified fields from the hash stored at `key`.
 /// Returns the number of fields that were removed.
+#[derive(Clone)]
 pub struct HDel {
     key: String,
     fields: Vec<String>,
@@ -186,6 +189,7 @@ impl Command for HDel {
 /// HEXISTS key field
 ///
 /// Returns `true` if `field` exists in the hash stored at `key`.
+#[derive(Clone)]
 pub struct HExists {
     key: String,
     field: String,
@@ -235,6 +239,7 @@ impl Command for HExists {
 ///
 /// Returns all fields and values of the hash stored at `key` as a list
 /// of `(field, value)` pairs.
+#[derive(Clone)]
 pub struct HGetAll {
     key: String,
 }
@@ -331,6 +336,7 @@ impl Command for HGetAll {
 ///
 /// Increments the integer value of `field` in the hash stored at `key`
 /// by `increment`. Returns the new value.
+#[derive(Clone)]
 pub struct HIncrBy {
     key: String,
     field: String,
@@ -377,6 +383,7 @@ impl Command for HIncrBy {
 /// HKEYS key
 ///
 /// Returns all field names in the hash stored at `key`.
+#[derive(Clone)]
 pub struct HKeys {
     key: String,
 }
@@ -425,6 +432,7 @@ impl Command for HKeys {
 /// HVALS key
 ///
 /// Returns all values in the hash stored at `key`.
+#[derive(Clone)]
 pub struct HVals {
     key: String,
 }
@@ -473,6 +481,7 @@ impl Command for HVals {
 /// HLEN key
 ///
 /// Returns the number of fields contained in the hash stored at `key`.
+#[derive(Clone)]
 pub struct HLen {
     key: String,
 }
@@ -538,6 +547,7 @@ fn parse_per_field_response(frame: Frame) -> Result<Vec<i64>, RedisError> {
 ///
 /// Sets an expiration (in seconds) on the specified hash fields.
 /// Returns one status code per field.
+#[derive(Clone)]
 pub struct HExpire {
     key: String,
     seconds: i64,
@@ -588,6 +598,7 @@ impl Command for HExpire {
 ///
 /// Sets an expiration on hash fields using an absolute Unix timestamp (seconds).
 /// Returns one status code per field.
+#[derive(Clone)]
 pub struct HExpireAt {
     key: String,
     timestamp: i64,
@@ -638,6 +649,7 @@ impl Command for HExpireAt {
 ///
 /// Sets an expiration (in milliseconds) on the specified hash fields.
 /// Returns one status code per field.
+#[derive(Clone)]
 pub struct HPExpire {
     key: String,
     milliseconds: i64,
@@ -688,6 +700,7 @@ impl Command for HPExpire {
 ///
 /// Sets an expiration on hash fields using an absolute Unix timestamp (milliseconds).
 /// Returns one status code per field.
+#[derive(Clone)]
 pub struct HPExpireAt {
     key: String,
     timestamp: i64,
@@ -738,6 +751,7 @@ impl Command for HPExpireAt {
 ///
 /// Returns the remaining TTL (in seconds) for the specified hash fields.
 /// Returns one value per field.
+#[derive(Clone)]
 pub struct HTtl {
     key: String,
     fields: Vec<String>,
@@ -788,6 +802,7 @@ impl Command for HTtl {
 ///
 /// Returns the remaining TTL (in milliseconds) for the specified hash fields.
 /// Returns one value per field.
+#[derive(Clone)]
 pub struct HPTtl {
     key: String,
     fields: Vec<String>,
@@ -838,6 +853,7 @@ impl Command for HPTtl {
 ///
 /// Removes the expiration from the specified hash fields.
 /// Returns one status code per field.
+#[derive(Clone)]
 pub struct HPersist {
     key: String,
     fields: Vec<String>,
@@ -885,6 +901,7 @@ impl Command for HPersist {
 /// Sets `field` in the hash stored at `key` to `value`, only if `field`
 /// does not yet exist. Returns `true` if the field was set, `false` if it
 /// already existed.
+#[derive(Clone)]
 pub struct HSetNx {
     key: String,
     field: String,
@@ -933,6 +950,7 @@ impl Command for HSetNx {
 ///
 /// Increments the floating-point value of `field` in the hash stored at
 /// `key` by `increment`. Returns the new value as `f64`.
+#[derive(Clone)]
 pub struct HIncrByFloat {
     key: String,
     field: String,
@@ -989,6 +1007,7 @@ impl Command for HIncrByFloat {
 /// Returns one or more random field names from the hash stored at `key`.
 /// Without `count`, returns a single random field; with `count`, returns
 /// up to that many fields. The result is always returned as a `Vec<Bytes>`.
+#[derive(Clone)]
 pub struct HRandField {
     key: String,
     count: Option<i64>,
@@ -1056,6 +1075,7 @@ impl Command for HRandField {
 ///
 /// Returns the absolute Unix expiration timestamp (in seconds) for the
 /// specified hash fields. Returns one value per field.
+#[derive(Clone)]
 pub struct HExpireTime {
     key: String,
     fields: Vec<String>,
@@ -1107,6 +1127,7 @@ impl Command for HExpireTime {
 /// Returns the values associated with the specified fields in the hash stored
 /// at `key`. For each field, returns `Some(value)` if it exists, or `None` if
 /// the field is missing.
+#[derive(Clone)]
 pub struct HMGet {
     key: String,
     fields: Vec<String>,
@@ -1181,6 +1202,7 @@ impl Command for HMGet {
 ///
 /// Returns the string length of the value associated with `field` in the hash
 /// stored at `key`, or 0 if the field or key does not exist.
+#[derive(Clone)]
 pub struct HStrLen {
     key: String,
     field: String,
@@ -1229,6 +1251,7 @@ impl Command for HStrLen {
 ///
 /// Returns the absolute Unix expiration timestamp (in milliseconds) for the
 /// specified hash fields. Returns one value per field.
+#[derive(Clone)]
 pub struct HPExpireTime {
     key: String,
     fields: Vec<String>,

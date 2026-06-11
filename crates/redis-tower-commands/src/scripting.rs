@@ -12,6 +12,7 @@ use crate::server::FlushMode;
 ///
 /// Evaluates a Lua script server-side. Returns `Frame` directly because Lua
 /// scripts can produce any response type.
+#[derive(Clone)]
 pub struct Eval {
     script: String,
     keys: Vec<String>,
@@ -74,6 +75,7 @@ impl Command for Eval {
 /// EVALSHA sha1 numkeys [key ...] [arg ...]
 ///
 /// Evaluates a cached Lua script by its SHA1 digest. Returns `Frame` directly.
+#[derive(Clone)]
 pub struct EvalSha {
     sha1: String,
     keys: Vec<String>,
@@ -137,6 +139,7 @@ impl Command for EvalSha {
 ///
 /// Read-only variant of EVAL. Evaluates a Lua script server-side, rejecting any
 /// write commands. Returns `Frame` directly.
+#[derive(Clone)]
 pub struct EvalRo {
     script: String,
     keys: Vec<String>,
@@ -200,6 +203,7 @@ impl Command for EvalRo {
 ///
 /// Read-only variant of EVALSHA. Evaluates a cached Lua script by its SHA1
 /// digest, rejecting any write commands. Returns `Frame` directly.
+#[derive(Clone)]
 pub struct EvalShaRo {
     sha1: String,
     keys: Vec<String>,
@@ -263,6 +267,7 @@ impl Command for EvalShaRo {
 ///
 /// Loads a Lua script into the script cache without executing it. Returns the
 /// SHA1 digest of the script.
+#[derive(Clone)]
 pub struct ScriptLoad {
     script: String,
 }
@@ -309,6 +314,7 @@ impl Command for ScriptLoad {
 ///
 /// Returns a list of booleans indicating whether each script SHA1 exists in
 /// the cache.
+#[derive(Clone)]
 pub struct ScriptExists {
     sha1s: Vec<String>,
 }
@@ -370,6 +376,7 @@ impl Command for ScriptExists {
 /// SCRIPT FLUSH [ASYNC | SYNC]
 ///
 /// Flushes the Lua script cache.
+#[derive(Clone)]
 pub struct ScriptFlush {
     mode: Option<FlushMode>,
 }
@@ -427,6 +434,7 @@ impl Command for ScriptFlush {
 /// SCRIPT KILL
 ///
 /// Kills the currently executing Lua script.
+#[derive(Clone)]
 pub struct ScriptKill;
 
 impl ScriptKill {
@@ -471,6 +479,7 @@ impl Command for ScriptKill {
 ///
 /// Calls a Redis function. Returns `Frame` directly because functions can
 /// produce any response type.
+#[derive(Clone)]
 pub struct FCall {
     function: String,
     keys: Vec<String>,
@@ -534,6 +543,7 @@ impl Command for FCall {
 ///
 /// Read-only variant of FCALL. Calls a Redis function without write
 /// permissions. Returns `Frame` directly.
+#[derive(Clone)]
 pub struct FCallRo {
     function: String,
     keys: Vec<String>,
@@ -596,6 +606,7 @@ impl Command for FCallRo {
 /// FUNCTION LOAD \[REPLACE\] function-code
 ///
 /// Loads a library to Redis. Returns the library name.
+#[derive(Clone)]
 pub struct FunctionLoad {
     code: String,
     replace: bool,
@@ -650,6 +661,7 @@ impl Command for FunctionLoad {
 /// FUNCTION DELETE library-name
 ///
 /// Deletes a library and all its functions.
+#[derive(Clone)]
 pub struct FunctionDelete {
     library: String,
 }
@@ -696,6 +708,7 @@ impl Command for FunctionDelete {
 ///
 /// Returns information about the libraries. Returns the raw `Frame` array
 /// because the response is a complex nested structure.
+#[derive(Clone)]
 pub struct FunctionList {
     library_pattern: Option<String>,
     withcode: bool,
@@ -766,6 +779,7 @@ impl Command for FunctionList {
 ///
 /// Returns a serialized payload of all libraries. The payload can be restored
 /// with FUNCTION RESTORE.
+#[derive(Clone)]
 pub struct FunctionDump;
 
 impl FunctionDump {
@@ -809,12 +823,14 @@ impl Command for FunctionDump {
 /// FUNCTION RESTORE serialized-value [FLUSH | APPEND | REPLACE]
 ///
 /// Restores libraries from a serialized payload produced by FUNCTION DUMP.
+#[derive(Clone)]
 pub struct FunctionRestore {
     payload: Bytes,
     policy: Option<RestorePolicy>,
 }
 
 /// Restore policy for FUNCTION RESTORE.
+#[derive(Clone)]
 pub enum RestorePolicy {
     /// Delete all existing libraries before restoring.
     Flush,
@@ -879,6 +895,7 @@ impl Command for FunctionRestore {
 /// FUNCTION FLUSH [ASYNC | SYNC]
 ///
 /// Deletes all libraries and functions.
+#[derive(Clone)]
 pub struct FunctionFlush {
     mode: Option<FlushMode>,
 }
@@ -938,6 +955,7 @@ impl Command for FunctionFlush {
 /// Returns information about the function currently running and the available
 /// execution engines. Returns the raw `Frame` array because the response is a
 /// complex nested structure.
+#[derive(Clone)]
 pub struct FunctionStats;
 
 impl FunctionStats {

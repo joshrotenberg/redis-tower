@@ -126,3 +126,30 @@ pub use timeseries::*;
 mod vector_sets;
 #[cfg(feature = "vector-sets")]
 pub use vector_sets::*;
+
+#[cfg(test)]
+mod clone_coverage {
+    //! Every command builder derives `Clone` so typed commands can flow through
+    //! Tower `Retry`/`Hedge` layers, which require `Req: Clone`. This asserts a
+    //! representative command from each core group; a missing derive on any of
+    //! them fails to compile here.
+    use crate::{BitCount, ClusterInfo, Del, Get, HGet, LPush, Ping, SAdd, Scan, Set, XAdd, ZAdd};
+
+    fn assert_clone<T: Clone>() {}
+
+    #[test]
+    fn command_builders_are_clone() {
+        assert_clone::<Get>();
+        assert_clone::<Set>();
+        assert_clone::<Del>();
+        assert_clone::<HGet>();
+        assert_clone::<LPush>();
+        assert_clone::<SAdd>();
+        assert_clone::<ZAdd>();
+        assert_clone::<XAdd>();
+        assert_clone::<Ping>();
+        assert_clone::<Scan>();
+        assert_clone::<ClusterInfo>();
+        assert_clone::<BitCount>();
+    }
+}

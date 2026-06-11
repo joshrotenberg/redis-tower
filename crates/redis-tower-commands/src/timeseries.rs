@@ -106,6 +106,7 @@ fn push_labels(args: &mut Vec<Frame>, labels: &[(String, String)]) {
 /// \[DUPLICATE_POLICY policy\] \[LABELS label value ...\]
 ///
 /// Creates a new TimeSeries key.
+#[derive(Clone)]
 pub struct TsCreate {
     key: String,
     retention: Option<u64>,
@@ -206,6 +207,7 @@ impl Command for TsCreate {
 /// \[DUPLICATE_POLICY policy\] \[LABELS label value ...\]
 ///
 /// Alters an existing TimeSeries key configuration.
+#[derive(Clone)]
 pub struct TsAlter {
     key: String,
     retention: Option<u64>,
@@ -294,6 +296,7 @@ impl Command for TsAlter {
 ///
 /// Deletes samples between two timestamps (inclusive). Returns the number
 /// of samples deleted.
+#[derive(Clone)]
 pub struct TsDel {
     key: String,
     from: i64,
@@ -371,6 +374,7 @@ impl From<i64> for TsTimestamp {
 ///
 /// Appends a sample to a TimeSeries key. Returns the timestamp of the
 /// added sample.
+#[derive(Clone)]
 pub struct TsAdd {
     key: String,
     timestamp: TsTimestamp,
@@ -480,6 +484,7 @@ impl Command for TsAdd {
 ///
 /// Appends samples to multiple TimeSeries keys. Returns the raw array of
 /// timestamps (or errors per sample).
+#[derive(Clone)]
 pub struct TsMAdd {
     samples: Vec<(String, TsTimestamp, f64)>,
 }
@@ -545,6 +550,7 @@ impl Command for TsMAdd {
 ///
 /// Increments the value of the latest sample in a TimeSeries key.
 /// Creates the key if it does not exist. Returns the timestamp.
+#[derive(Clone)]
 pub struct TsIncrBy {
     key: String,
     value: f64,
@@ -623,6 +629,7 @@ impl Command for TsIncrBy {
 ///
 /// Decrements the value of the latest sample in a TimeSeries key.
 /// Creates the key if it does not exist. Returns the timestamp.
+#[derive(Clone)]
 pub struct TsDecrBy {
     key: String,
     value: f64,
@@ -705,6 +712,7 @@ impl Command for TsDecrBy {
 ///
 /// Returns the last sample of a TimeSeries key as a raw Frame
 /// (timestamp-value pair, or empty if the key has no samples).
+#[derive(Clone)]
 pub struct TsGet {
     key: String,
     latest: bool,
@@ -753,6 +761,7 @@ impl Command for TsGet {
 ///
 /// Returns the last sample of multiple TimeSeries keys matching the given
 /// filter expressions. Returns the raw Frame.
+#[derive(Clone)]
 pub struct TsMGet {
     latest: bool,
     withlabels: bool,
@@ -819,6 +828,7 @@ impl Command for TsMGet {
 // ---------------------------------------------------------------------------
 
 /// Common options for TS.RANGE and TS.REVRANGE.
+#[derive(Clone)]
 struct TsRangeOptions {
     key: String,
     from: String,
@@ -835,6 +845,7 @@ struct TsRangeOptions {
 ///
 /// Queries a range of samples from a TimeSeries key in chronological
 /// order. Returns the raw Frame.
+#[derive(Clone)]
 pub struct TsRange {
     opts: TsRangeOptions,
 }
@@ -940,6 +951,7 @@ impl Command for TsRange {
 ///
 /// Queries a range of samples from a TimeSeries key in reverse
 /// chronological order. Returns the raw Frame.
+#[derive(Clone)]
 pub struct TsRevRange {
     opts: TsRangeOptions,
 }
@@ -1016,6 +1028,7 @@ impl Command for TsRevRange {
 // ---------------------------------------------------------------------------
 
 /// Common options for TS.MRANGE and TS.MREVRANGE.
+#[derive(Clone)]
 struct TsMRangeOptions {
     from: String,
     to: String,
@@ -1069,6 +1082,7 @@ fn push_mrange_args(args: &mut Vec<Frame>, opts: &TsMRangeOptions) {
 ///
 /// Queries a range of samples from multiple TimeSeries keys matching
 /// the given filter expressions. Returns the raw Frame.
+#[derive(Clone)]
 pub struct TsMRange {
     opts: TsMRangeOptions,
 }
@@ -1158,6 +1172,7 @@ impl Command for TsMRange {
 ///
 /// Queries a range of samples from multiple TimeSeries keys in reverse
 /// chronological order. Returns the raw Frame.
+#[derive(Clone)]
 pub struct TsMRevRange {
     opts: TsMRangeOptions,
 }
@@ -1249,6 +1264,7 @@ impl Command for TsMRevRange {
 ///
 /// Returns information and statistics about a TimeSeries key. Returns
 /// the raw Frame (complex nested structure).
+#[derive(Clone)]
 pub struct TsInfo {
     key: String,
     debug: bool,
@@ -1296,6 +1312,7 @@ impl Command for TsInfo {
 /// TS.QUERYINDEX filter_expr \[filter_expr ...\]
 ///
 /// Returns the keys matching the given filter expressions.
+#[derive(Clone)]
 pub struct TsQueryIndex {
     filters: Vec<String>,
 }

@@ -23,6 +23,7 @@ impl<T> ScanResult<T> {
 /// SCAN cursor \[MATCH pattern\] \[COUNT count\] \[TYPE type\]
 ///
 /// Iterates over all keys in the database.
+#[derive(Clone)]
 pub struct Scan {
     cursor: String,
     pattern: Option<String>,
@@ -104,6 +105,7 @@ impl Command for Scan {
 /// SSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over members of a set.
+#[derive(Clone)]
 pub struct SScan {
     key: String,
     cursor: String,
@@ -169,6 +171,7 @@ impl Command for SScan {
 /// HSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over fields and values of a hash. Returns (field, value) pairs.
+#[derive(Clone)]
 pub struct HScan {
     key: String,
     cursor: String,
@@ -234,6 +237,7 @@ impl Command for HScan {
 /// ZSCAN key cursor \[MATCH pattern\] \[COUNT count\]
 ///
 /// Iterates over members and scores of a sorted set. Returns (member, score) pairs.
+#[derive(Clone)]
 pub struct ZScan {
     key: String,
     cursor: String,

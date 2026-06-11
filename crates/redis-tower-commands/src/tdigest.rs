@@ -62,6 +62,7 @@ fn parse_i64_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
 /// TDIGEST.CREATE key \[COMPRESSION compression\]
 ///
 /// Creates an empty T-Digest sketch at `key`.
+#[derive(Clone)]
 pub struct TdigestCreate {
     key: String,
     compression: Option<i64>,
@@ -112,6 +113,7 @@ impl Command for TdigestCreate {
 /// TDIGEST.ADD key value \[value ...\]
 ///
 /// Adds one or more values to the T-Digest sketch at `key`.
+#[derive(Clone)]
 pub struct TdigestAdd {
     key: String,
     values: Vec<f64>,
@@ -156,6 +158,7 @@ impl Command for TdigestAdd {
 /// \[COMPRESSION compression\] \[OVERRIDE\]
 ///
 /// Merges one or more T-Digest sketches into a destination key.
+#[derive(Clone)]
 pub struct TdigestMerge {
     destination: String,
     sources: Vec<String>,
@@ -229,6 +232,7 @@ impl Command for TdigestMerge {
 /// TDIGEST.CDF key value \[value ...\]
 ///
 /// Returns the cumulative distribution function value for each given value.
+#[derive(Clone)]
 pub struct TdigestCdf {
     key: String,
     values: Vec<f64>,
@@ -266,6 +270,7 @@ impl Command for TdigestCdf {
 /// TDIGEST.QUANTILE key quantile \[quantile ...\]
 ///
 /// Returns the estimated value at each given quantile.
+#[derive(Clone)]
 pub struct TdigestQuantile {
     key: String,
     quantiles: Vec<f64>,
@@ -303,6 +308,7 @@ impl Command for TdigestQuantile {
 /// TDIGEST.MIN key
 ///
 /// Returns the minimum value observed by the T-Digest.
+#[derive(Clone)]
 pub struct TdigestMin {
     key: String,
 }
@@ -332,6 +338,7 @@ impl Command for TdigestMin {
 /// TDIGEST.MAX key
 ///
 /// Returns the maximum value observed by the T-Digest.
+#[derive(Clone)]
 pub struct TdigestMax {
     key: String,
 }
@@ -361,6 +368,7 @@ impl Command for TdigestMax {
 /// TDIGEST.INFO key
 ///
 /// Returns information about the T-Digest at `key` as a raw Frame.
+#[derive(Clone)]
 pub struct TdigestInfo {
     key: String,
 }
@@ -390,6 +398,7 @@ impl Command for TdigestInfo {
 /// TDIGEST.RESET key
 ///
 /// Resets the T-Digest sketch at `key`, discarding all observed values.
+#[derive(Clone)]
 pub struct TdigestReset {
     key: String,
 }
@@ -425,6 +434,7 @@ impl Command for TdigestReset {
 /// TDIGEST.TRIMMED_MEAN key low_quantile high_quantile
 ///
 /// Returns the trimmed mean between the given quantile bounds.
+#[derive(Clone)]
 pub struct TdigestTrimmedMean {
     key: String,
     low_quantile: f64,
@@ -465,6 +475,7 @@ impl Command for TdigestTrimmedMean {
 /// TDIGEST.RANK key value \[value ...\]
 ///
 /// Returns the estimated rank of each given value.
+#[derive(Clone)]
 pub struct TdigestRank {
     key: String,
     values: Vec<f64>,
@@ -502,6 +513,7 @@ impl Command for TdigestRank {
 /// TDIGEST.REVRANK key value \[value ...\]
 ///
 /// Returns the estimated reverse rank of each given value.
+#[derive(Clone)]
 pub struct TdigestRevRank {
     key: String,
     values: Vec<f64>,
@@ -539,6 +551,7 @@ impl Command for TdigestRevRank {
 /// TDIGEST.BYRANK key rank \[rank ...\]
 ///
 /// Returns the estimated value at each given rank.
+#[derive(Clone)]
 pub struct TdigestByRank {
     key: String,
     ranks: Vec<i64>,
@@ -576,6 +589,7 @@ impl Command for TdigestByRank {
 /// TDIGEST.BYREVRANK key rank \[rank ...\]
 ///
 /// Returns the estimated value at each given reverse rank.
+#[derive(Clone)]
 pub struct TdigestByRevRank {
     key: String,
     ranks: Vec<i64>,

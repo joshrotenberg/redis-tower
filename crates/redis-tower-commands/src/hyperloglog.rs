@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Adds the specified elements to the HyperLogLog at `key`.
 /// Returns `true` if the internal representation was altered (i.e., the
 /// estimated cardinality changed), `false` otherwise.
+#[derive(Clone)]
 pub struct PfAdd {
     key: String,
     elements: Vec<String>,
@@ -62,6 +63,7 @@ impl Command for PfAdd {
 /// Returns the approximate cardinality of the set(s) observed by the
 /// HyperLogLog at the specified key(s). When called with multiple keys,
 /// returns the approximate cardinality of the union.
+#[derive(Clone)]
 pub struct PfCount {
     keys: Vec<String>,
 }
@@ -110,6 +112,7 @@ impl Command for PfCount {
 ///
 /// Merges one or more HyperLogLog values into a single key.
 /// The destination key will hold the union of the source keys.
+#[derive(Clone)]
 pub struct PfMerge {
     destkey: String,
     sourcekeys: Vec<String>,
