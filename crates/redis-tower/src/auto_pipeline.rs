@@ -62,6 +62,22 @@ pub struct AutoPipelineConfig {
     ///
     /// Default: `false`.
     pub shed_load_on_full: bool,
+    /// Maximum time to wait for a batch's responses before treating the
+    /// connection as failed.
+    ///
+    /// `None` (default) means no response deadline: a hung or black-holed node
+    /// can stall this worker's whole queue until OS TCP keepalive eventually
+    /// fires (minutes). Set a value so a stuck node is detected promptly -- the
+    /// in-flight batch fails with [`RedisError::CommandTimeout`] and the worker
+    /// discards the connection (factory-backed clients then reconnect with
+    /// backoff, so a new connection serves subsequent requests).
+    ///
+    /// The deadline covers a whole pipelined batch's round-trip, so size it
+    /// above your slowest legitimate command (a long `BLPOP`/`WAIT`/`DEBUG
+    /// SLEEP` will trip it).
+    ///
+    /// Default: `None`.
+    pub response_timeout: Option<Duration>,
 }
 
 impl Default for AutoPipelineConfig {
@@ -71,6 +87,7 @@ impl Default for AutoPipelineConfig {
             batch_window: Duration::ZERO,
             queue_capacity: 1024,
             shed_load_on_full: false,
+            response_timeout: None,
         }
     }
 }
@@ -384,7 +401,7 @@ async fn pipeline_worker(
                     }
                     Ok(None) => {
                         // Channel closed -- flush remaining and exit.
-                        let _ = flush_batch(&mut conn, batch).await;
+                        let _ = flush_batch(&mut conn, batch, config.response_timeout).await;
                         return;
                     }
                     Err(_) => break, // timeout
@@ -392,7 +409,10 @@ async fn pipeline_worker(
             }
         }
 
-        if flush_batch(&mut conn, batch).await.is_err() {
+        if flush_batch(&mut conn, batch, config.response_timeout)
+            .await
+            .is_err()
+        {
             // Pipeline execution failed. Either give up (Fixed source) or
             // reconnect via factory and keep serving.
             match &source {
@@ -439,7 +459,11 @@ async fn pipeline_worker(
 /// Returns `Ok(())` on success and `Err(())` on pipeline failure so the
 /// worker can decide whether to reconnect. All individual response channels
 /// are always notified before this returns.
-async fn flush_batch(conn: &mut RedisConnection, batch: Vec<WorkerRequest>) -> Result<(), ()> {
+async fn flush_batch(
+    conn: &mut RedisConnection,
+    batch: Vec<WorkerRequest>,
+    response_timeout: Option<Duration>,
+) -> Result<(), ()> {
     // Owned single-pass: move frames out of each request directly into the
     // pipeline vec, and collect response senders into a parallel `responders`
     // vec. This eliminates the per-Frame clone that the previous two-pass
@@ -471,7 +495,30 @@ async fn flush_batch(conn: &mut RedisConnection, batch: Vec<WorkerRequest>) -> R
         }
     }
 
-    match conn.execute_pipeline(frames).await {
+    let exec_result = match response_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, conn.execute_pipeline(frames)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // Response timeout: the connection has written commands whose
+                // replies were never read, so its state is now unknown. Fail
+                // the whole batch and signal the worker (via Err) to discard
+                // and reconnect the connection.
+                for responder in responders {
+                    match responder {
+                        Responder::Single(tx) => {
+                            let _ = tx.send(Err(RedisError::CommandTimeout));
+                        }
+                        Responder::Multi(_, tx) => {
+                            let _ = tx.send(Err(RedisError::CommandTimeout));
+                        }
+                    }
+                }
+                return Err(());
+            }
+        },
+        None => conn.execute_pipeline(frames).await,
+    };
+    match exec_result {
         Ok(responses) => {
             let mut iter = responses.into_iter();
             for responder in responders {
@@ -629,6 +676,10 @@ mod tests {
             !config.shed_load_on_full,
             "back-pressure is the default; load shedding is opt-in"
         );
+        assert!(
+            config.response_timeout.is_none(),
+            "no response deadline by default"
+        );
     }
 
     #[test]
@@ -638,11 +689,13 @@ mod tests {
             batch_window: Duration::from_micros(500),
             queue_capacity: 512,
             shed_load_on_full: true,
+            response_timeout: Some(Duration::from_millis(250)),
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
         assert_eq!(config.queue_capacity, 512);
         assert!(config.shed_load_on_full);
+        assert_eq!(config.response_timeout, Some(Duration::from_millis(250)));
     }
 
     fn make_test_svc(
