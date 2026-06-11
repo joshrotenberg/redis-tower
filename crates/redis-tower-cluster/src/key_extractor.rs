@@ -23,7 +23,15 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         _ => return None,
     };
 
-    // Commands with no key (return None to route to any node).
+    // Commands with no key (return None to route to the default node).
+    //
+    // MULTI/EXEC/DISCARD are keyless and route to the default node, but the
+    // commands queued between them route by their own keys -- so a transaction
+    // driven with raw command builders scatters across nodes and does NOT
+    // execute atomically on a cluster. Atomic cluster transactions require all
+    // keys in one slot plus a slot-pinned executor (not yet implemented). Drive
+    // a transaction against a single-node client for the owning slot, not the
+    // cluster client.
     let upper: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_uppercase()).collect();
     match upper.as_slice() {
         b"PING" | b"ECHO" | b"AUTH" | b"SELECT" | b"FLUSHDB" | b"FLUSHALL" | b"DBSIZE"

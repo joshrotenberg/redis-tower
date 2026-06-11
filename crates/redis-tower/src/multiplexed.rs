@@ -31,13 +31,17 @@
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
 //! ```
 
+use std::future::Future;
+
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_protocol::helpers::{array, bulk};
 use tower_service::Service;
 
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::command_adapter::CommandAdapter;
 use crate::reconnect::ConnectionFactory;
+use crate::transaction::TransactionExecutor;
 
 /// A multiplexed Redis client that batches concurrent requests.
 ///
@@ -76,6 +80,19 @@ use crate::reconnect::ConnectionFactory;
 ///     .service(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
 /// let client = MultiplexedClient::from_layered(inner);
 /// ```
+///
+/// # Transactions
+///
+/// Use the [`Transaction`](crate::Transaction) type for MULTI/EXEC -- it runs
+/// atomically here (the whole WATCH/MULTI/EXEC sequence is sent as one
+/// contiguous pipeline via [`AutoPipelineService::call_pipeline`], so no other
+/// task's commands interleave).
+///
+/// Do **not** drive a transaction with the raw `Multi`/`Exec` command builders
+/// over [`execute`](Self::execute): each `execute` is an independent
+/// auto-pipelined call, so commands from other tasks sharing this connection
+/// can land between your MULTI and EXEC and corrupt the transaction. The
+/// `Transaction` type exists precisely to avoid that.
 #[derive(Clone)]
 pub struct MultiplexedClient<S = AutoPipelineService> {
     inner: CommandAdapter<S>,
@@ -225,6 +242,52 @@ where
     }
 }
 
+/// Atomic MULTI/EXEC for the standard multiplexed client.
+///
+/// The WATCH/MULTI/commands/EXEC frames are sent as one contiguous batch via
+/// [`AutoPipelineService::call_pipeline`], which guarantees the worker flushes
+/// them back-to-back with no interleaving from other tasks sharing the
+/// connection. This makes [`Transaction`](crate::Transaction) safe on a
+/// `MultiplexedClient` despite the shared connection. Only the default
+/// `AutoPipelineService`-backed client supports this (a layered client built
+/// with [`from_layered`](MultiplexedClient::from_layered) has no
+/// `call_pipeline`).
+impl TransactionExecutor for MultiplexedClient<AutoPipelineService> {
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        // Assemble the full sequence: [WATCH..., MULTI, commands..., EXEC].
+        let mut frames = watch_frames;
+        frames.push(array(vec![bulk("MULTI")]));
+        frames.extend(command_frames);
+        frames.push(array(vec![bulk("EXEC")]));
+
+        // Clone the handle so the future owns its executor; the clone shares
+        // the same worker, and call_pipeline keeps the batch atomic.
+        let mut svc = self.inner.clone().into_inner();
+        async move {
+            let mut responses = svc.call_pipeline(frames).await?;
+            // The last response is EXEC's: an array of per-command results when
+            // committed, or null when a WATCHed key changed (aborted).
+            let exec = responses.pop().ok_or(RedisError::UnexpectedResponse {
+                expected: "EXEC response",
+                actual: "empty pipeline response".to_string(),
+            })?;
+            match exec {
+                Frame::Array(Some(results)) => Ok(Some(results)),
+                Frame::Array(None) | Frame::Null => Ok(None),
+                Frame::Error(e) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "array or null",
+                    actual: format!("{other:?}"),
+                }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +315,13 @@ mod tests {
         fn call(&mut self, _req: Frame) -> Self::Future {
             std::future::ready(Ok(self.reply.clone()))
         }
+    }
+
+    #[test]
+    fn multiplexed_client_is_transaction_executor() {
+        // The standard client supports atomic MULTI/EXEC via call_pipeline.
+        fn assert_txn_executor<T: TransactionExecutor>() {}
+        assert_txn_executor::<MultiplexedClient>();
     }
 
     #[tokio::test]

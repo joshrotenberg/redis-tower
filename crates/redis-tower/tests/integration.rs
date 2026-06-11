@@ -522,6 +522,66 @@ async fn transaction_watch_aborted() {
 }
 
 #[tokio::test]
+async fn transaction_multiplexed_basic() {
+    // A Transaction must commit atomically on the shared multiplexed
+    // connection (the WATCH/MULTI/EXEC sequence is sent as one contiguous
+    // pipeline, so no other task's commands interleave).
+    let client = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let k = key("txn_mux_basic", "k");
+    client.execute(Del::new(&k)).await.unwrap();
+
+    let mut txn_client = client.clone();
+    let result = Transaction::new()
+        .push(Set::new(&k, "1"))
+        .push(Incr::new(&k))
+        .push(Get::new(&k))
+        .execute(&mut txn_client)
+        .await
+        .unwrap();
+
+    match result {
+        TransactionResult::Committed(results) => {
+            assert_eq!(*results.get::<i64>(1).unwrap(), 2);
+            let get_val: &Option<Bytes> = results.get(2).unwrap();
+            assert_eq!(*get_val, Some(Bytes::from("2")));
+        }
+        TransactionResult::Aborted => panic!("transaction should not abort"),
+    }
+
+    client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+async fn transaction_multiplexed_watch_no_conflict() {
+    // WATCH frames flow through the multiplexed atomic path; with no conflict
+    // the transaction commits.
+    let client = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let k = key("txn_mux_watch", "k");
+    client.execute(Set::new(&k, "10")).await.unwrap();
+
+    let mut txn_client = client.clone();
+    let result = Transaction::new()
+        .watch([k.as_str()])
+        .push(Incr::new(&k))
+        .execute(&mut txn_client)
+        .await
+        .unwrap();
+
+    match result {
+        TransactionResult::Committed(results) => {
+            assert_eq!(*results.get::<i64>(0).unwrap(), 11);
+        }
+        TransactionResult::Aborted => panic!("transaction should not abort"),
+    }
+
+    client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
 async fn transaction_empty() {
     let mut conn = conn().await;
     let result = Transaction::new().execute(&mut conn).await.unwrap();
