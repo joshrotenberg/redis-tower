@@ -113,6 +113,20 @@ Also single-threaded. The sentinel topology is a shared `OnceCell` -- the `senti
 
 Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node).
 
+## Definition of Done
+
+An issue is **not** done when the code compiles. Every issue -- including ones
+dispatched to agents -- must ship, in the same PR:
+
+- **Tests**: unit and/or integration as appropriate to the change. New behavior
+  gets a test that would fail without it. Mechanical changes (e.g. bulk derives)
+  are covered by a clean `--all-features` build plus at least one assertion test
+  demonstrating the intent.
+- **Documentation**: doc comments on any new public surface, and updates to the
+  relevant guide/README/CLAUDE.md where behavior or usage changes.
+
+A PR with code but no tests or docs is incomplete, not a follow-up.
+
 ## Pre-commit Checklist
 
 ```bash
