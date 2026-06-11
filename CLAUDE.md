@@ -1,6 +1,6 @@
 # redis-tower
 
-A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. Private GitHub repo.
+A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. Private GitHub repo (crates were published to crates.io on 2026-06-11 then yanked; the Release workflow is gated to manual dispatch -- see Release State below).
 
 ## Architecture
 
@@ -113,6 +113,20 @@ Also single-threaded. The sentinel topology is a shared `OnceCell` -- the `senti
 
 Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node).
 
+## Definition of Done
+
+An issue is **not** done when the code compiles. Every issue -- including ones
+dispatched to agents -- must ship, in the same PR:
+
+- **Tests**: unit and/or integration as appropriate to the change. New behavior
+  gets a test that would fail without it. Mechanical changes (e.g. bulk derives)
+  are covered by a clean `--all-features` build plus at least one assertion test
+  demonstrating the intent.
+- **Documentation**: doc comments on any new public surface, and updates to the
+  relevant guide/README/CLAUDE.md where behavior or usage changes.
+
+A PR with code but no tests or docs is incomplete, not a follow-up.
+
 ## Pre-commit Checklist
 
 ```bash
@@ -153,15 +167,36 @@ All three audit passes are complete and merged: the initial audit, the second (#
 **Every per-file test suite now runs in CI.** As of #400 the standalone integration job runs `cargo test -p redis-tower --test '*' -- --test-threads=1` (all `tests/*.rs` suites, not just `integration.rs`; single-threaded for the `FunctionFlush` quirk above). The #390–#396 pass added: live-server circuit-breaker/command-timeout failure injection (`test_resilience_integration.rs`), `#[ignore]` module-client integration tests (need Redis Stack), server/CLIENT command coverage, EVAL_RO/EVALSHA_RO + XSETID, ACL DRYRUN, an `#[ignore]` ObjectFreq LFU fixture, and `command_tests!` applied to `MultiplexedSentinelClient`. Dead `todo!()` infra stubs were removed.
 
 **What's been hardened (since the second audit):**
-- Circuit breaker, command/connect timeouts, pool acquisition timeout, AutoPipeline back-pressure
+- Circuit breaker, command/connect timeouts, pool acquisition timeout
 - TCP keepalive, reconnect backoff jitter, graceful `MultiplexedClient` shutdown
 - Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
 - Dead pool connection replacement after health check failure
 - Cluster MOVED/ASK refresh, CROSSSLOT errors, eager sentinel rediscovery on failover
 
-**What Is Not Yet Done**
+## Release State
 
-- **#399** -- adopt `tower-resilience-circuitbreaker` in place of the custom `CircuitBreakerLayer`. Recommendation posted on the issue (adopt behind a thin error-mapping adapter; its `failure_classifier` fixes the current "any `Err` trips the breaker" gap). Spike not yet started.
-- `ACL SAVE`/`ACL LOAD` -- require a Redis server started with an ACL file
-- `REPLICAOF`, `FAILOVER` -- require multi-server setups
-- Module-client integration tests are `#[ignore]` (require Redis Stack) -- run with `-- --ignored`
+- **0.1.0 published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day: the GitHub repo is still private, so the crates.io repository links 404. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (re-publish or `cargo yank --undo` when ready).
+- **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger was removed so merges no longer auto-publish. Release deliberately with `gh workflow run Release --ref main`.
+- **Re-launch checklist** lives in issue #435 (reconcile publish state, decide repo visibility, refresh this file).
+
+## Go-Hard Backlog (filed 2026-06-11)
+
+The lone open item used to be #399. It is now one of 107 issues filed from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
+
+- **Kind** (the execution axis -- work in this order): `kind: architecture` (13, structural / awkward-by-design), then `kind: bug` (13), then `kind: feature` (42). Test/docs/chore/perf issues carry no kind label.
+- **Priority**: `priority: high` (P0), `priority: medium` (P1), `priority: low` (P2).
+- **Area**: `area: cluster`, `area: resilience`, `area: observability`, `area: client-caching`, `area: commands`, `area: performance`, `area: testing`, `area: tower`, `area: pubsub`, `area: transactions`, `documentation`.
+
+The agreed working sequence is **architecture first, then bugs, then features**. The `kind: architecture` queue opens with the composition foundation -- the ExecutorService bridge (#480) and middleware injection point (#482) that unblock wiring Tower layers into the real clients (#429); the rest of that queue is #417 #420 #421 #433 #442 #444 #448 #478 #505 plus the #399 circuit-breaker adapter.
+
+**P0 tracks, roughly in dependency order:**
+
+1. **`auto_pipeline.rs` chokepoint** -- response timeout (#420), real backpressure (#421, replaces the current `try_send`/`QueueFull` load-shedding), observability wiring (#429). Land as one series; the cluster work builds on it.
+2. **Cluster failover self-healing** (#417, the kill-a-master test) -- plus single-slot MOVED patching (#418), TRYAGAIN/CLUSTERDOWN/LOADING handling (#419), per-command key extraction (#422).
+3. **Sentinel auth/TLS** (#424) and demoted-master detection (#425).
+4. **CSC correctness blockers** -- cache-key collisions (#426), tracking-loss stale data (#427), TTL/bounding (#428).
+5. **Packaging / procurement** -- redis-rs migration guide (#434), publish reconciliation (#435), docs.rs metadata (#436), client-selection docs (#437), stability + SECURITY + supply-chain pack (#438).
+
+**Cross-repo dogfooding** (filed on the user's own supporting crates, worked in parallel): `docker-wrapper` #243-#250 (chaos-test backbone; being remediated now), `redis-server-wrapper` #79-#80 (byte-level fault proxy, reshard orchestration), `tower-resilience` #346-#347 (Clone bound + `failure_classifier` for the #399 adapter).
+
+**Test architecture decision**: per-PR tests stay on `redis-server-wrapper` processes (it already has chaos kill/freeze/failover, ACL files, `replicaof`, full TLS). A nightly Docker tier (`redis-chaos-tests`, #411) covers only what processes cannot: image-based version/Stack/Valkey matrices and true network partitions. `ACL SAVE`/`LOAD` (#414) and `REPLICAOF`/`FAILOVER` (#415) moved to the process tier; module-client integration tests are still `#[ignore]` (run with `-- --ignored`).
