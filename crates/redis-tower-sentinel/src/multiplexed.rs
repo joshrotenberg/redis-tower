@@ -40,7 +40,8 @@ use redis_tower::auto_pipeline::{
     AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService,
 };
 use redis_tower::command_adapter::CommandAdapter;
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use tower_service::Service;
 
 use crate::discovery;
 
@@ -52,12 +53,19 @@ use crate::discovery;
 ///
 /// Concurrent requests from multiple tasks are batched into Redis pipelines
 /// automatically. Single requests flush immediately with no batching delay.
+///
+/// # Middleware
+///
+/// The type parameter `S` is the inner Frame-level [`Service`] and defaults to
+/// [`AutoPipelineService`]. Use [`from_layered`](Self::from_layered) to wrap the
+/// sentinel-managed client in a Tower middleware stack (circuit breaker,
+/// timeout, retry).
 #[derive(Clone)]
-pub struct MultiplexedSentinelClient {
-    inner: CommandAdapter<AutoPipelineService>,
+pub struct MultiplexedSentinelClient<S = AutoPipelineService> {
+    inner: CommandAdapter<S>,
 }
 
-impl MultiplexedSentinelClient {
+impl MultiplexedSentinelClient<AutoPipelineService> {
     /// Connect to the sentinel-discovered master.
     ///
     /// Does not reconnect automatically on connection failure. For
@@ -112,21 +120,6 @@ impl MultiplexedSentinelClient {
         })
     }
 
-    /// Execute a command against the sentinel-managed master.
-    ///
-    /// If other tasks are calling execute concurrently, their commands
-    /// will be batched into a single Redis pipeline for efficiency.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let mut svc = self.inner.clone();
-        std::future::poll_fn(|cx| {
-            <CommandAdapter<AutoPipelineService> as tower_service::Service<Cmd>>::poll_ready(
-                &mut svc, cx,
-            )
-        })
-        .await?;
-        tower_service::Service::call(&mut svc, cmd).await
-    }
-
     /// Gracefully shut down the multiplexed sentinel client.
     ///
     /// Signals the background worker to stop accepting new requests, then
@@ -139,5 +132,76 @@ impl MultiplexedSentinelClient {
     /// simply dropping the client.
     pub async fn shutdown(self) {
         self.inner.into_inner().shutdown().await;
+    }
+}
+
+impl<S> MultiplexedSentinelClient<S>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone,
+    S::Future: Send + 'static,
+{
+    /// Build a sentinel client from a layered Frame-level [`Service`].
+    ///
+    /// The middleware injection point: wrap [`AutoPipelineService`] (or any
+    /// `Service<Frame, Response = Frame, Error = RedisError>`) in a Tower stack
+    /// and hand it here. Every [`execute`](Self::execute) then flows through the
+    /// middleware. The caller is responsible for sentinel discovery when
+    /// building the inner service; for the built-in discovery use
+    /// [`connect`](Self::connect) or
+    /// [`connect_with_reconnect`](Self::connect_with_reconnect).
+    pub fn from_layered(service: S) -> Self {
+        Self {
+            inner: CommandAdapter::new(service),
+        }
+    }
+
+    /// Execute a command against the sentinel-managed master.
+    ///
+    /// If other tasks are calling execute concurrently, their commands
+    /// will be batched into a single Redis pipeline for efficiency.
+    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let mut svc = self.inner.clone();
+        std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
+            .await?;
+        Service::call(&mut svc, cmd).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use redis_tower_commands::Get;
+    use std::task::{Context, Poll};
+
+    #[derive(Clone)]
+    struct MockFrameService {
+        reply: Frame,
+    }
+
+    impl Service<Frame> for MockFrameService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), RedisError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Frame) -> Self::Future {
+            std::future::ready(Ok(self.reply.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn from_layered_routes_execute_through_injected_service() {
+        let inner = MockFrameService {
+            reply: Frame::BulkString(Some(Bytes::from("layered"))),
+        };
+        let client = MultiplexedSentinelClient::from_layered(inner);
+
+        let client2 = client.clone();
+        let val: Option<Bytes> = client2.execute(Get::new("k")).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("layered")));
     }
 }

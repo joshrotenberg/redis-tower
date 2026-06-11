@@ -32,7 +32,8 @@
 //! ```
 
 use redis_tower_commands::Ping;
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use tower_service::Service;
 
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::command_adapter::CommandAdapter;
@@ -55,12 +56,32 @@ use crate::reconnect::ConnectionFactory;
 /// pipelines. For workloads requiring exclusive connection access (transactions,
 /// blocking commands), use [`RedisConnection`] directly or
 /// [`ConnectionPool`](crate::pool::ConnectionPool).
+///
+/// # Middleware
+///
+/// The type parameter `S` is the inner Frame-level [`Service`] and defaults to
+/// [`AutoPipelineService`]. To wrap the client in Tower middleware (circuit
+/// breakers, timeouts, retries), build a `Service<Frame>` stack and pass it to
+/// [`from_layered`](Self::from_layered):
+///
+/// ```ignore
+/// use std::time::Duration;
+/// use tower::ServiceBuilder;
+/// use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandTimeoutLayer,
+///     MultiplexedClient, RedisConnection};
+///
+/// let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+/// let inner = ServiceBuilder::new()
+///     .layer(CommandTimeoutLayer::new(Duration::from_secs(1)))
+///     .service(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
+/// let client = MultiplexedClient::from_layered(inner);
+/// ```
 #[derive(Clone)]
-pub struct MultiplexedClient {
-    inner: CommandAdapter<AutoPipelineService>,
+pub struct MultiplexedClient<S = AutoPipelineService> {
+    inner: CommandAdapter<S>,
 }
 
-impl MultiplexedClient {
+impl MultiplexedClient<AutoPipelineService> {
     /// Connect to a Redis server at `host:port`.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect(addr).await?;
@@ -132,30 +153,6 @@ impl MultiplexedClient {
         })
     }
 
-    /// Execute a command.
-    ///
-    /// If other tasks are calling execute concurrently, their commands
-    /// will be batched into a single Redis pipeline for efficiency.
-    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let mut svc = self.inner.clone();
-        std::future::poll_fn(|cx| {
-            <CommandAdapter<AutoPipelineService> as tower_service::Service<Cmd>>::poll_ready(
-                &mut svc, cx,
-            )
-        })
-        .await?;
-        tower_service::Service::call(&mut svc, cmd).await
-    }
-
-    /// Send a PING to verify the connection is alive.
-    ///
-    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
-    /// and `/health` endpoints.
-    pub async fn health_check(&self) -> Result<(), RedisError> {
-        self.execute(Ping::new()).await?;
-        Ok(())
-    }
-
     /// Gracefully shut down the multiplexed client.
     ///
     /// Signals the background worker to stop accepting new requests, then
@@ -168,5 +165,120 @@ impl MultiplexedClient {
     /// simply dropping the client.
     pub async fn shutdown(self) {
         self.inner.into_inner().shutdown().await;
+    }
+}
+
+impl<S> MultiplexedClient<S>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone,
+    S::Future: Send + 'static,
+{
+    /// Build a multiplexed client from a layered Frame-level [`Service`].
+    ///
+    /// This is the middleware injection point: wrap [`AutoPipelineService`] (or
+    /// any `Service<Frame, Response = Frame, Error = RedisError>`) in a Tower
+    /// stack -- circuit breaker, timeout, retry -- and hand the result here. The
+    /// client adapts typed commands onto the stack, so every [`execute`] flows
+    /// through your middleware.
+    ///
+    /// [`execute`]: Self::execute
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use std::time::Duration;
+    /// use tower::ServiceBuilder;
+    /// use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandTimeoutLayer,
+    ///     MultiplexedClient, RedisConnection};
+    ///
+    /// let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    /// let inner = ServiceBuilder::new()
+    ///     .layer(CommandTimeoutLayer::new(Duration::from_secs(1)))
+    ///     .service(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
+    /// let client = MultiplexedClient::from_layered(inner);
+    /// let pong = client.health_check().await?;
+    /// ```
+    pub fn from_layered(service: S) -> Self {
+        Self {
+            inner: CommandAdapter::new(service),
+        }
+    }
+
+    /// Execute a command.
+    ///
+    /// If other tasks are calling execute concurrently, their commands
+    /// will be batched into a single Redis pipeline for efficiency.
+    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let mut svc = self.inner.clone();
+        std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
+            .await?;
+        Service::call(&mut svc, cmd).await
+    }
+
+    /// Send a PING to verify the connection is alive.
+    ///
+    /// Returns `Ok(())` on success. Useful for Kubernetes readiness probes
+    /// and `/health` endpoints.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        self.execute(Ping::new()).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use redis_tower_commands::Get;
+    use std::task::{Context, Poll};
+    use tower_layer::Layer;
+
+    /// A minimal Frame-level service standing in for a real connection, used to
+    /// verify the injection point without a live server.
+    #[derive(Clone)]
+    struct MockFrameService {
+        reply: Frame,
+    }
+
+    impl Service<Frame> for MockFrameService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), RedisError>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: Frame) -> Self::Future {
+            std::future::ready(Ok(self.reply.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn from_layered_routes_execute_through_injected_service() {
+        let inner = MockFrameService {
+            reply: Frame::BulkString(Some(Bytes::from("layered"))),
+        };
+        let client = MultiplexedClient::from_layered(inner);
+
+        // Generic over the injected service, and still Clone-shareable.
+        let client2 = client.clone();
+        let val: Option<Bytes> = client2.execute(Get::new("k")).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("layered")));
+    }
+
+    #[tokio::test]
+    async fn from_layered_composes_a_real_tower_layer() {
+        use crate::command_timeout::CommandTimeoutLayer;
+        use std::time::Duration;
+
+        // Wrap the inner service in an actual middleware layer, then inject it.
+        let inner = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(MockFrameService {
+            reply: Frame::BulkString(Some(Bytes::from("through-timeout"))),
+        });
+        let client = MultiplexedClient::from_layered(inner);
+
+        let val: Option<Bytes> = client.execute(Get::new("k")).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("through-timeout")));
     }
 }
