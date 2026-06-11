@@ -14,6 +14,7 @@ pub struct StreamEntry {
 /// XADD key \[NOMKSTREAM\] \[MAXLEN|MINID \[=|~\] threshold\] \[*|id\] field value \[field value ...\]
 ///
 /// Appends an entry to a stream. Returns the entry ID.
+#[derive(Clone)]
 pub struct XAdd {
     key: String,
     id: String,
@@ -117,6 +118,7 @@ impl Command for XAdd {
 /// XLEN key
 ///
 /// Returns the number of entries in a stream.
+#[derive(Clone)]
 pub struct XLen {
     key: String,
 }
@@ -152,6 +154,7 @@ impl Command for XLen {
 /// XRANGE key start end \[COUNT count\]
 ///
 /// Returns entries in a stream within a range of IDs.
+#[derive(Clone)]
 pub struct XRange {
     key: String,
     start: String,
@@ -216,6 +219,7 @@ impl Command for XRange {
 /// XREVRANGE key end start \[COUNT count\]
 ///
 /// Like XRANGE but in reverse order.
+#[derive(Clone)]
 pub struct XRevRange {
     key: String,
     end: String,
@@ -277,6 +281,7 @@ impl Command for XRevRange {
 /// XDEL key id \[id ...\]
 ///
 /// Removes entries from a stream. Returns the number deleted.
+#[derive(Clone)]
 pub struct XDel {
     key: String,
     ids: Vec<String>,
@@ -327,6 +332,7 @@ impl Command for XDel {
 /// XTRIM key MAXLEN|MINID \[=|~\] threshold
 ///
 /// Trims a stream. Returns the number of entries deleted.
+#[derive(Clone)]
 pub struct XTrim {
     key: String,
     maxlen: Option<(bool, u64)>,
@@ -399,6 +405,7 @@ impl Command for XTrim {
 /// XACK key group id \[id ...\]
 ///
 /// Acknowledges stream entries in a consumer group. Returns count acknowledged.
+#[derive(Clone)]
 pub struct XAck {
     key: String,
     group: String,
@@ -460,6 +467,7 @@ impl Command for XAck {
 /// XGROUP CREATE key group id \[MKSTREAM\]
 ///
 /// Creates a consumer group.
+#[derive(Clone)]
 pub struct XGroupCreate {
     key: String,
     group: String,
@@ -521,6 +529,7 @@ impl Command for XGroupCreate {
 /// XGROUP DESTROY key group
 ///
 /// Destroys a consumer group.
+#[derive(Clone)]
 pub struct XGroupDestroy {
     key: String,
     group: String,
@@ -565,6 +574,7 @@ impl Command for XGroupDestroy {
 /// XREADGROUP GROUP group consumer \[COUNT count\] \[BLOCK ms\] STREAMS key \[key ...\] id \[id ...\]
 ///
 /// Read from streams as a consumer group member.
+#[derive(Clone)]
 pub struct XReadGroup {
     group: String,
     consumer: String,
@@ -663,6 +673,7 @@ impl Command for XReadGroup {
 /// XREAD \[COUNT count\] \[BLOCK ms\] STREAMS key \[key ...\] id \[id ...\]
 ///
 /// Read from one or more streams.
+#[derive(Clone)]
 pub struct XRead {
     streams: Vec<(String, String)>,
     count: Option<u64>,
@@ -734,6 +745,7 @@ impl Command for XRead {
 /// XGROUP SETID key group id
 ///
 /// Sets the last-delivered ID for a consumer group.
+#[derive(Clone)]
 pub struct XGroupSetId {
     key: String,
     group: String,
@@ -781,6 +793,7 @@ impl Command for XGroupSetId {
 /// XGROUP CREATECONSUMER key group consumer
 ///
 /// Creates a consumer in a consumer group. Returns 1 if created, 0 if already existed.
+#[derive(Clone)]
 pub struct XGroupCreateConsumer {
     key: String,
     group: String,
@@ -832,6 +845,7 @@ impl Command for XGroupCreateConsumer {
 /// XGROUP DELCONSUMER key group consumer
 ///
 /// Deletes a consumer from a consumer group. Returns the number of pending entries the consumer had.
+#[derive(Clone)]
 pub struct XGroupDelConsumer {
     key: String,
     group: String,
@@ -883,6 +897,7 @@ impl Command for XGroupDelConsumer {
 /// XCLAIM key group consumer min-idle-time id \[id ...\] \[IDLE ms\] \[TIME ms\] \[RETRYCOUNT count\] \[FORCE\] \[JUSTID\]
 ///
 /// Claims ownership of pending stream entries.
+#[derive(Clone)]
 pub struct XClaim {
     key: String,
     group: String,
@@ -1004,6 +1019,7 @@ pub struct AutoClaimResult {
 /// XAUTOCLAIM key group consumer min-idle-time start \[COUNT count\] \[JUSTID\]
 ///
 /// Automatically claims pending entries that have been idle for at least min-idle-time.
+#[derive(Clone)]
 pub struct XAutoClaim {
     key: String,
     group: String,
@@ -1078,6 +1094,7 @@ pub struct PendingSummary {
 /// XPENDING key group (summary form)
 ///
 /// Returns a summary of pending entries for a consumer group.
+#[derive(Clone)]
 pub struct XPendingSummary {
     key: String,
     group: String,
@@ -1124,6 +1141,7 @@ pub struct PendingEntry {
 /// XPENDING key group \[IDLE min-idle\] start end count \[consumer\]
 ///
 /// Returns detailed pending entries for a consumer group.
+#[derive(Clone)]
 pub struct XPendingRange {
     key: String,
     group: String,
@@ -1212,6 +1230,7 @@ pub struct StreamInfo {
 /// XINFO STREAM key
 ///
 /// Returns information about a stream.
+#[derive(Clone)]
 pub struct XInfoStream {
     key: String,
 }
@@ -1250,6 +1269,7 @@ pub struct GroupInfo {
 /// XINFO GROUPS key
 ///
 /// Returns information about the consumer groups of a stream.
+#[derive(Clone)]
 pub struct XInfoGroups {
     key: String,
 }
@@ -1287,6 +1307,7 @@ pub struct ConsumerInfo {
 /// XINFO CONSUMERS key group
 ///
 /// Returns information about the consumers of a consumer group.
+#[derive(Clone)]
 pub struct XInfoConsumers {
     key: String,
     group: String,
@@ -1902,6 +1923,7 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
 ///
 /// The optional `ENTRIESADDED` flag (Redis 7.0+) sets the total number of
 /// entries ever added to the stream.
+#[derive(Clone)]
 pub struct XSetId {
     key: String,
     last_id: String,

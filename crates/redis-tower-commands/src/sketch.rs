@@ -72,6 +72,7 @@ fn parse_optional_bytes_array(frame: Frame) -> Result<Vec<Option<Bytes>>, RedisE
 /// CMS.INITBYDIM key width depth
 ///
 /// Initializes a Count-Min Sketch with the given width and depth.
+#[derive(Clone)]
 pub struct CmsInitByDim {
     key: String,
     width: i64,
@@ -118,6 +119,7 @@ impl Command for CmsInitByDim {
 /// CMS.INITBYPROB key error probability
 ///
 /// Initializes a Count-Min Sketch with the given error rate and probability.
+#[derive(Clone)]
 pub struct CmsInitByProb {
     key: String,
     error: f64,
@@ -165,6 +167,7 @@ impl Command for CmsInitByProb {
 ///
 /// Increments one or more items in the Count-Min Sketch. Returns the
 /// estimated count for each item after incrementing.
+#[derive(Clone)]
 pub struct CmsIncrBy {
     key: String,
     items: Vec<(String, i64)>,
@@ -206,6 +209,7 @@ impl Command for CmsIncrBy {
 /// CMS.QUERY key item \[item ...\]
 ///
 /// Returns the estimated count for one or more items in the Count-Min Sketch.
+#[derive(Clone)]
 pub struct CmsQuery {
     key: String,
     items: Vec<String>,
@@ -243,6 +247,7 @@ impl Command for CmsQuery {
 /// CMS.MERGE destination numkeys source \[source ...\] \[WEIGHTS weight ...\]
 ///
 /// Merges several Count-Min Sketches into a destination sketch.
+#[derive(Clone)]
 pub struct CmsMerge {
     destination: String,
     sources: Vec<String>,
@@ -307,6 +312,7 @@ impl Command for CmsMerge {
 /// CMS.INFO key
 ///
 /// Returns information about the Count-Min Sketch at `key` as a raw Frame.
+#[derive(Clone)]
 pub struct CmsInfo {
     key: String,
 }
@@ -340,6 +346,7 @@ impl Command for CmsInfo {
 /// TOPK.RESERVE key topk \[width depth decay\]
 ///
 /// Initializes a Top-K data structure with the given parameters.
+#[derive(Clone)]
 pub struct TopkReserve {
     key: String,
     topk: i64,
@@ -404,6 +411,7 @@ impl Command for TopkReserve {
 ///
 /// Adds one or more items to the Top-K. Returns a vector of evicted items
 /// (or None for items that did not cause an eviction).
+#[derive(Clone)]
 pub struct TopkAdd {
     key: String,
     items: Vec<String>,
@@ -442,6 +450,7 @@ impl Command for TopkAdd {
 ///
 /// Increments the score of one or more items in the Top-K. Returns a vector
 /// of evicted items (or None for items that did not cause an eviction).
+#[derive(Clone)]
 pub struct TopkIncrBy {
     key: String,
     items: Vec<(String, i64)>,
@@ -483,6 +492,7 @@ impl Command for TopkIncrBy {
 /// TOPK.QUERY key item \[item ...\]
 ///
 /// Checks whether one or more items are in the Top-K.
+#[derive(Clone)]
 pub struct TopkQuery {
     key: String,
     items: Vec<String>,
@@ -520,6 +530,7 @@ impl Command for TopkQuery {
 /// TOPK.COUNT key item \[item ...\]
 ///
 /// Returns the approximate count for one or more items in the Top-K.
+#[derive(Clone)]
 pub struct TopkCount {
     key: String,
     items: Vec<String>,
@@ -558,6 +569,7 @@ impl Command for TopkCount {
 ///
 /// Returns the list of top-k items. When called with WITHCOUNT, the response
 /// includes counts interleaved with items, returned as a raw Frame.
+#[derive(Clone)]
 pub struct TopkList {
     key: String,
     withcount: bool,
@@ -601,6 +613,7 @@ impl Command for TopkList {
 /// TOPK.INFO key
 ///
 /// Returns information about the Top-K at `key` as a raw Frame.
+#[derive(Clone)]
 pub struct TopkInfo {
     key: String,
 }

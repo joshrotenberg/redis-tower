@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// GET key
 ///
 /// Returns the value of `key`, or `None` if the key does not exist.
+#[derive(Clone)]
 pub struct Get {
     key: String,
 }
@@ -46,6 +47,7 @@ impl Command for Get {
 ///
 /// Sets `key` to hold `value`. Returns `Ok` on success, or the old value
 /// if `GET` is specified.
+#[derive(Clone)]
 pub struct Set {
     key: String,
     value: String,
@@ -56,6 +58,7 @@ pub struct Set {
 }
 
 /// Condition for SET (NX or XX).
+#[derive(Clone)]
 pub enum SetCondition {
     /// Only set if the key does not exist.
     Nx,
@@ -158,6 +161,7 @@ impl Command for Set {
 /// INCR key
 ///
 /// Increments the integer value of `key` by one.
+#[derive(Clone)]
 pub struct Incr {
     key: String,
 }
@@ -193,6 +197,7 @@ impl Command for Incr {
 /// MGET key [key ...]
 ///
 /// Returns the values of all specified keys.
+#[derive(Clone)]
 pub struct MGet {
     keys: Vec<String>,
 }
@@ -249,6 +254,7 @@ impl Command for MGet {
 ///
 /// Appends `value` to the end of the string at `key`. Returns the length
 /// of the string after the append.
+#[derive(Clone)]
 pub struct Append {
     key: String,
     value: String,
@@ -292,6 +298,7 @@ impl Command for Append {
 /// MSET key value \[key value ...\]
 ///
 /// Sets multiple keys to their respective values atomically.
+#[derive(Clone)]
 pub struct MSet {
     pairs: Vec<(String, String)>,
 }
@@ -338,6 +345,7 @@ impl Command for MSet {
 ///
 /// Gets the value of `key` and optionally sets its expiration.
 /// Returns `None` if the key does not exist.
+#[derive(Clone)]
 pub struct GetEx {
     key: String,
     ex: Option<u64>,
@@ -459,6 +467,7 @@ impl Command for GetEx {
 ///
 /// Gets the value of `key` and deletes it. Returns `None` if the key does
 /// not exist.
+#[derive(Clone)]
 pub struct GetDel {
     key: String,
 }
@@ -495,6 +504,7 @@ impl Command for GetDel {
 /// SETEX key seconds value
 ///
 /// Sets `key` to hold `value` with an expiration of `seconds`.
+#[derive(Clone)]
 pub struct SetEx {
     key: String,
     seconds: u64,
@@ -541,6 +551,7 @@ impl Command for SetEx {
 /// PSETEX key milliseconds value
 ///
 /// Sets `key` to hold `value` with an expiration of `milliseconds`.
+#[derive(Clone)]
 pub struct PSetEx {
     key: String,
     milliseconds: u64,
@@ -588,6 +599,7 @@ impl Command for PSetEx {
 ///
 /// Sets `key` to hold `value` if `key` does not exist. Returns `true` if
 /// the key was set, `false` if the key already existed.
+#[derive(Clone)]
 pub struct SetNx {
     key: String,
     value: String,
@@ -633,6 +645,7 @@ impl Command for SetNx {
 ///
 /// Increments the floating-point value of `key` by `increment`. Returns the
 /// new value.
+#[derive(Clone)]
 pub struct IncrByFloat {
     key: String,
     increment: f64,
@@ -686,6 +699,7 @@ impl Command for IncrByFloat {
 /// DECR key
 ///
 /// Decrements the integer value of `key` by one.
+#[derive(Clone)]
 pub struct Decr {
     key: String,
 }
@@ -721,6 +735,7 @@ impl Command for Decr {
 /// DECRBY key decrement
 ///
 /// Decrements the integer value of `key` by `decrement`.
+#[derive(Clone)]
 pub struct DecrBy {
     key: String,
     decrement: i64,
@@ -765,6 +780,7 @@ impl Command for DecrBy {
 ///
 /// Returns the substring of the string value stored at `key`, determined
 /// by the offsets `start` and `end` (both inclusive).
+#[derive(Clone)]
 pub struct GetRange {
     key: String,
     start: i64,
@@ -817,6 +833,7 @@ impl Command for GetRange {
 /// Overwrites part of the string stored at `key`, starting at the
 /// specified byte `offset`. Returns the length of the string after the
 /// modification.
+#[derive(Clone)]
 pub struct SetRange {
     key: String,
     offset: i64,
@@ -864,6 +881,7 @@ impl Command for SetRange {
 ///
 /// Returns the length of the string value stored at `key`, or 0 if the
 /// key does not exist.
+#[derive(Clone)]
 pub struct StrLen {
     key: String,
 }
@@ -904,6 +922,7 @@ impl Command for StrLen {
 ///
 /// Increments the integer value of `key` by `increment`. Returns the new
 /// value after the increment.
+#[derive(Clone)]
 pub struct IncrBy {
     key: String,
     increment: i64,
@@ -949,6 +968,7 @@ impl Command for IncrBy {
 /// Sets the given keys to their respective values, but only if none of the
 /// keys already exist. Returns `true` if all keys were set, `false` if no
 /// key was set (at least one already existed).
+#[derive(Clone)]
 pub struct MSetNx {
     pairs: Vec<(String, String)>,
 }
@@ -993,6 +1013,7 @@ impl Command for MSetNx {
 }
 
 /// Mode selector for the LCS command.
+#[derive(Clone)]
 pub enum LcsMode {
     /// Return the longest common substring as bytes.
     String,
@@ -1012,6 +1033,7 @@ pub enum LcsMode {
 /// keys. The response type depends on the selected mode: a bulk string for
 /// the default mode, an integer for LEN mode, or a raw Frame for IDX mode
 /// (which returns a complex nested structure).
+#[derive(Clone)]
 pub struct Lcs {
     key1: String,
     key2: String,
@@ -1128,6 +1150,7 @@ impl Command for Lcs {
 ///
 /// Note: GETSET is deprecated in favor of `SET key value GET`, but remains
 /// widely used.
+#[derive(Clone)]
 pub struct GetSet {
     key: String,
     value: String,

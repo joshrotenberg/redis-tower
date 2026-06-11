@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 use crate::SortOrder;
 
 /// Field type for RediSearch schema definitions.
+#[derive(Clone)]
 pub enum FieldType {
     /// Full-text searchable field.
     Text,
@@ -31,6 +32,7 @@ impl FieldType {
 }
 
 /// A field definition for a RediSearch schema.
+#[derive(Clone)]
 pub struct SchemaField {
     /// Field name.
     pub name: String,
@@ -43,6 +45,7 @@ pub struct SchemaField {
 }
 
 /// Data structure type for FT.CREATE.
+#[derive(Clone)]
 pub enum OnType {
     /// Index HASH keys.
     Hash,
@@ -54,6 +57,7 @@ pub enum OnType {
 ///
 /// Creates a new search index with the given schema. Uses a builder pattern
 /// for constructing the index definition.
+#[derive(Clone)]
 pub struct FtCreate {
     index: String,
     on_type: Option<OnType>,
@@ -173,6 +177,7 @@ impl Command for FtCreate {
 /// FT.DROPINDEX index \[DD\]
 ///
 /// Deletes a search index. With `DD`, also deletes the indexed documents.
+#[derive(Clone)]
 pub struct FtDropIndex {
     index: String,
     dd: bool,
@@ -222,6 +227,7 @@ impl Command for FtDropIndex {
 /// FT.ALTER index SCHEMA ADD field type ...
 ///
 /// Adds new fields to an existing index schema.
+#[derive(Clone)]
 pub struct FtAlter {
     index: String,
     fields: Vec<SchemaField>,
@@ -295,6 +301,7 @@ impl Command for FtAlter {
 ///
 /// Returns information and statistics about a search index. The response is
 /// a complex nested structure returned as a raw `Frame`.
+#[derive(Clone)]
 pub struct FtInfo {
     index: String,
 }
@@ -326,6 +333,7 @@ impl Command for FtInfo {
 /// FT._LIST
 ///
 /// Returns a list of all existing search index names.
+#[derive(Clone)]
 pub struct FtList;
 
 impl FtList {
@@ -377,6 +385,7 @@ impl Command for FtList {
 /// Searches the index with the given query. Uses a builder pattern for
 /// optional parameters. Returns a raw `Frame` containing the result count
 /// and document array.
+#[derive(Clone)]
 pub struct FtSearch {
     index: String,
     query: String,
@@ -504,6 +513,7 @@ impl Command for FtSearch {
 /// \[LIMIT offset num\] \[APPLY expr AS alias\]
 ///
 /// Runs an aggregation query against the index. Returns a raw `Frame`.
+#[derive(Clone)]
 pub struct FtAggregate {
     index: String,
     query: String,
@@ -644,6 +654,7 @@ impl Command for FtAggregate {
 /// FT.ALIASADD alias index
 ///
 /// Adds an alias to a search index.
+#[derive(Clone)]
 pub struct FtAliasAdd {
     alias: String,
     index: String,
@@ -687,6 +698,7 @@ impl Command for FtAliasAdd {
 /// FT.ALIASDEL alias
 ///
 /// Removes an alias from a search index.
+#[derive(Clone)]
 pub struct FtAliasDel {
     alias: String,
 }
@@ -724,6 +736,7 @@ impl Command for FtAliasDel {
 /// FT.ALIASUPDATE alias index
 ///
 /// Updates an alias to point to a different search index.
+#[derive(Clone)]
 pub struct FtAliasUpdate {
     alias: String,
     index: String,

@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// ACL LIST
 ///
 /// Returns a list of ACL rules for all users.
+#[derive(Clone)]
 pub struct AclList;
 
 impl AclList {
@@ -53,6 +54,7 @@ impl Command for AclList {
 /// ACL GETUSER username
 ///
 /// Returns the ACL rules for a specific user as a complex nested response.
+#[derive(Clone)]
 pub struct AclGetUser {
     username: String,
 }
@@ -88,6 +90,7 @@ impl Command for AclGetUser {
 /// ACL SETUSER username [rule ...]
 ///
 /// Create or modify an ACL user with the specified rules.
+#[derive(Clone)]
 pub struct AclSetUser {
     username: String,
     rules: Vec<String>,
@@ -143,6 +146,7 @@ impl Command for AclSetUser {
 /// ACL DELUSER username [username ...]
 ///
 /// Deletes one or more ACL users. Returns the number of users deleted.
+#[derive(Clone)]
 pub struct AclDelUser {
     usernames: Vec<String>,
 }
@@ -190,6 +194,7 @@ impl Command for AclDelUser {
 /// ACL CAT \[category\]
 ///
 /// Lists ACL categories, or the commands within a given category.
+#[derive(Clone)]
 pub struct AclCat {
     category: Option<String>,
 }
@@ -252,6 +257,7 @@ impl Command for AclCat {
 /// ACL LOG [count|RESET]
 ///
 /// Returns recent ACL security events. Use `AclLogReset` to clear the log.
+#[derive(Clone)]
 pub struct AclLog {
     count: Option<u64>,
 }
@@ -297,6 +303,7 @@ impl Command for AclLog {
 /// ACL LOG RESET
 ///
 /// Clears the ACL security event log.
+#[derive(Clone)]
 pub struct AclLogReset;
 
 impl AclLogReset {
@@ -336,6 +343,7 @@ impl Command for AclLogReset {
 /// ACL SAVE
 ///
 /// Saves the current ACL rules to the configured ACL file.
+#[derive(Clone)]
 pub struct AclSave;
 
 impl AclSave {
@@ -375,6 +383,7 @@ impl Command for AclSave {
 /// ACL LOAD
 ///
 /// Reloads ACL rules from the configured ACL file.
+#[derive(Clone)]
 pub struct AclLoad;
 
 impl AclLoad {
@@ -414,6 +423,7 @@ impl Command for AclLoad {
 /// ACL WHOAMI
 ///
 /// Returns the username of the current connection.
+#[derive(Clone)]
 pub struct AclWhoAmI;
 
 impl AclWhoAmI {
@@ -454,6 +464,7 @@ impl Command for AclWhoAmI {
 ///
 /// Generates a random password. Optionally specify the number of bits
 /// of pseudo-random data (default 256).
+#[derive(Clone)]
 pub struct AclGenPass {
     bits: Option<u32>,
 }
@@ -507,6 +518,7 @@ impl Command for AclGenPass {
 /// Simulates the execution of a command by the specified user and reports
 /// whether the user has permission. Returns "OK" on success or an error
 /// message describing the permission failure.
+#[derive(Clone)]
 pub struct AclDryRun {
     username: String,
     command: String,

@@ -3,6 +3,7 @@ use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
 /// Quantization type for VADD.
+#[derive(Clone)]
 pub enum VQuantization {
     /// 8-bit quantization.
     Q8,
@@ -17,6 +18,7 @@ pub enum VQuantization {
 ///
 /// Adds an element with its vector to the vector set at `key`. Returns `true`
 /// if the element was added, `false` if it already existed (and was updated).
+#[derive(Clone)]
 pub struct VAdd {
     key: String,
     vector: Vec<f32>,
@@ -150,6 +152,7 @@ impl Command for VAdd {
 ///
 /// Removes an element from the vector set at `key`. Returns `true` if the
 /// element was removed, `false` if it did not exist.
+#[derive(Clone)]
 pub struct VRem {
     key: String,
     element: String,
@@ -195,6 +198,7 @@ impl Command for VRem {
 /// VCARD key
 ///
 /// Returns the number of elements in the vector set at `key`.
+#[derive(Clone)]
 pub struct VCard {
     key: String,
 }
@@ -230,6 +234,7 @@ impl Command for VCard {
 /// VDIM key
 ///
 /// Returns the dimensionality of the vectors in the vector set at `key`.
+#[derive(Clone)]
 pub struct VDim {
     key: String,
 }
@@ -267,6 +272,7 @@ impl Command for VDim {
 /// Returns the vector embedding for `element` in the vector set at `key`.
 /// Without RAW, returns an array of doubles. With RAW, returns the raw FP32
 /// binary blob.
+#[derive(Clone)]
 pub struct VEmb {
     key: String,
     element: String,
@@ -342,6 +348,7 @@ impl Command for VEmb {
 /// Finds the most similar elements to the given vector or element in the
 /// vector set. Returns element names, or (element, score) pairs when
 /// WITHSCORES is specified.
+#[derive(Clone)]
 pub struct VSim {
     key: String,
     target: VSimTarget,
@@ -355,6 +362,7 @@ pub struct VSim {
 }
 
 /// Target for VSIM: search by existing element name or by vector values.
+#[derive(Clone)]
 pub enum VSimTarget {
     /// Search by existing element name.
     Element(String),
@@ -557,6 +565,7 @@ impl Command for VSim {
 /// VRANDMEMBER key \[COUNT n\]
 ///
 /// Returns one or more random elements from the vector set at `key`.
+#[derive(Clone)]
 pub struct VRandMember {
     key: String,
     count: Option<i64>,
@@ -619,6 +628,7 @@ impl Command for VRandMember {
 ///
 /// Returns the JSON attribute string for `element` in the vector set at `key`,
 /// or `None` if no attribute is set.
+#[derive(Clone)]
 pub struct VGetAttr {
     key: String,
     element: String,
@@ -672,6 +682,7 @@ impl Command for VGetAttr {
 ///
 /// Sets a JSON attribute on `element` in the vector set at `key`. Returns
 /// `true` on success.
+#[derive(Clone)]
 pub struct VSetAttr {
     key: String,
     element: String,
@@ -726,6 +737,7 @@ impl Command for VSetAttr {
 ///
 /// Deletes the JSON attribute from `element` in the vector set at `key`.
 /// Returns `true` if the attribute was removed, `false` if no attribute existed.
+#[derive(Clone)]
 pub struct VDelAttr {
     key: String,
     element: String,
@@ -772,6 +784,7 @@ impl Command for VDelAttr {
 ///
 /// Returns information about the vector set at `key` as a flat array of
 /// alternating field names and values.
+#[derive(Clone)]
 pub struct VInfo {
     key: String,
 }
@@ -817,6 +830,7 @@ impl Command for VInfo {
 ///
 /// Returns the neighbor links of `element` in the vector set at `key`.
 /// With WITHSCORES, returns (element, score) pairs.
+#[derive(Clone)]
 pub struct VLinks {
     key: String,
     element: String,

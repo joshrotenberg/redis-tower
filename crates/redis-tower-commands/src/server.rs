@@ -5,6 +5,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// PING \[message\]
 ///
 /// Returns PONG, or echoes the message if provided.
+#[derive(Clone)]
 pub struct Ping {
     message: Option<String>,
 }
@@ -57,10 +58,12 @@ impl Command for Ping {
 /// FLUSHDB [ASYNC|SYNC]
 ///
 /// Delete all keys in the current database.
+#[derive(Clone)]
 pub struct FlushDb {
     mode: Option<FlushMode>,
 }
 
+#[derive(Clone)]
 pub enum FlushMode {
     Async,
     Sync,
@@ -119,6 +122,7 @@ impl Command for FlushDb {
 /// DBSIZE
 ///
 /// Returns the number of keys in the current database.
+#[derive(Clone)]
 pub struct DbSize;
 
 impl DbSize {
@@ -158,6 +162,7 @@ impl Command for DbSize {
 /// SELECT index
 ///
 /// Select the Redis database for the current connection.
+#[derive(Clone)]
 pub struct Select {
     db: u16,
 }
@@ -194,6 +199,7 @@ impl Command for Select {
 ///
 /// Authenticate to the server. With Redis 6+ ACLs, pass both username
 /// and password. For older versions, only pass the password.
+#[derive(Clone)]
 pub struct Auth {
     username: Option<String>,
     password: String,
@@ -247,6 +253,7 @@ impl Command for Auth {
 /// CLIENT TRACKING ON|OFF \[REDIRECT client-id\] \[PREFIX prefix\] \[BCAST\] \[OPTIN\] \[OPTOUT\]
 ///
 /// Enable or disable server-assisted client-side caching.
+#[derive(Clone)]
 pub struct ClientTracking {
     enabled: bool,
     bcast: bool,
@@ -349,6 +356,7 @@ impl Command for ClientTracking {
 /// filter can be provided to limit the output (e.g. "server", "memory",
 /// "replication"). Returns the raw bulk string; callers can parse the
 /// key-value pairs from the line-oriented format.
+#[derive(Clone)]
 pub struct Info {
     sections: Vec<String>,
 }
@@ -404,6 +412,7 @@ impl Command for Info {
 ///
 /// Returns the current server time as a two-element array:
 /// unix timestamp in seconds and microseconds.
+#[derive(Clone)]
 pub struct Time;
 
 impl Time {
@@ -474,6 +483,7 @@ impl Command for Time {
 /// COMMAND COUNT
 ///
 /// Returns the total number of commands supported by the server.
+#[derive(Clone)]
 pub struct CommandCount;
 
 impl CommandCount {
@@ -515,6 +525,7 @@ impl Command for CommandCount {
 /// Returns documentary information about one or more commands.
 /// Each command's documentation is returned as a nested array of
 /// key-value pairs.
+#[derive(Clone)]
 pub struct CommandDocs {
     commands: Vec<String>,
 }
@@ -571,11 +582,13 @@ impl Command for CommandDocs {
 /// COMMAND LIST \[FILTERBY MODULE module | ACLCAT category | PATTERN pattern\]
 ///
 /// Returns a list of all command names supported by the server.
+#[derive(Clone)]
 pub struct CommandList {
     filter: Option<CommandListFilter>,
 }
 
 /// Filter for the COMMAND LIST command.
+#[derive(Clone)]
 pub enum CommandListFilter {
     /// Filter by module name.
     Module(String),
@@ -675,6 +688,7 @@ impl Command for CommandList {
 ///
 /// Trigger a background save of the dataset. With `schedule`, the save
 /// is queued if one is already in progress (instead of returning an error).
+#[derive(Clone)]
 pub struct BgSave {
     schedule: bool,
 }
@@ -726,6 +740,7 @@ impl Command for BgSave {
 /// BGREWRITEAOF
 ///
 /// Trigger an Append Only File rewrite. The rewrite runs in the background.
+#[derive(Clone)]
 pub struct BgRewriteAof;
 
 impl BgRewriteAof {
@@ -765,6 +780,7 @@ impl Command for BgRewriteAof {
 /// LASTSAVE
 ///
 /// Returns the Unix timestamp of the last successful save to disk.
+#[derive(Clone)]
 pub struct LastSave;
 
 impl LastSave {
@@ -805,6 +821,7 @@ impl Command for LastSave {
 ///
 /// Configure the server as a replica of another Redis instance,
 /// or promote it to a primary with `ReplicaOf::no_one()`.
+#[derive(Clone)]
 pub struct ReplicaOf {
     host: String,
     port: String,
@@ -857,6 +874,7 @@ impl Command for ReplicaOf {
 /// SWAPDB index1 index2
 ///
 /// Swap two Redis databases atomically.
+#[derive(Clone)]
 pub struct SwapDb {
     db1: u16,
     db2: u16,
@@ -898,6 +916,7 @@ impl Command for SwapDb {
 ///
 /// Trigger a replica failover (Redis 6.2+). When run on a primary, it
 /// coordinates with a replica to perform a graceful failover.
+#[derive(Clone)]
 pub struct Failover {
     to: Option<(String, u16)>,
     force: bool,
@@ -995,6 +1014,7 @@ impl Command for Failover {
 /// Blocks the current client until all previous write commands are acknowledged
 /// by at least `numreplicas` replicas, or until the timeout (in milliseconds)
 /// expires. Returns the number of replicas that acknowledged.
+#[derive(Clone)]
 pub struct Wait {
     numreplicas: i64,
     timeout: i64,
@@ -1040,6 +1060,7 @@ impl Command for Wait {
 /// Blocks the current client until all previous write commands are fsynced
 /// to the AOF of the local host and/or at least `numreplicas` replicas.
 /// Returns a tuple of (local, replicas) counts parsed from a two-element array.
+#[derive(Clone)]
 pub struct WaitAof {
     numlocal: i64,
     numreplicas: i64,
@@ -1110,6 +1131,7 @@ impl Command for WaitAof {
 /// CLIENT ID
 ///
 /// Returns the ID of the current connection.
+#[derive(Clone)]
 pub struct ClientId;
 
 impl ClientId {
@@ -1150,6 +1172,7 @@ impl Command for ClientId {
 ///
 /// Returns the name of the current connection as set by CLIENT SETNAME,
 /// or None if no name is set.
+#[derive(Clone)]
 pub struct ClientGetName;
 
 impl ClientGetName {
@@ -1190,6 +1213,7 @@ impl Command for ClientGetName {
 /// CLIENT SETNAME connection-name
 ///
 /// Set the name of the current connection.
+#[derive(Clone)]
 pub struct ClientSetName {
     name: String,
 }
@@ -1227,6 +1251,7 @@ impl Command for ClientSetName {
 }
 
 /// Filter type for CLIENT LIST.
+#[derive(Clone)]
 pub enum ClientListType {
     Normal,
     Master,
@@ -1249,6 +1274,7 @@ impl ClientListType {
 ///
 /// Returns information and statistics about client connections.
 /// The response is raw text with one client per line.
+#[derive(Clone)]
 pub struct ClientList {
     client_type: Option<ClientListType>,
 }
@@ -1302,6 +1328,7 @@ impl Command for ClientList {
 ///
 /// Kill client connections matching the given filters.
 /// Returns the number of clients killed.
+#[derive(Clone)]
 pub struct ClientKill {
     id: Option<i64>,
     addr: Option<String>,
@@ -1404,6 +1431,7 @@ impl Command for ClientKill {
 /// CLIENT INFO
 ///
 /// Returns information about the current client connection.
+#[derive(Clone)]
 pub struct ClientInfo;
 
 impl ClientInfo {
@@ -1445,6 +1473,7 @@ impl Command for ClientInfo {
 /// Set the client eviction mode for the current connection. When enabled,
 /// the current client will not be evicted even when the maxmemory-clients
 /// threshold is reached.
+#[derive(Clone)]
 pub struct ClientNoEvict {
     enabled: bool,
 }
@@ -1486,6 +1515,7 @@ impl Command for ClientNoEvict {
 /// Control whether commands sent by the client affect LRU/LFU of accessed
 /// keys. When enabled, accessed keys will not have their idle time or
 /// frequency updated.
+#[derive(Clone)]
 pub struct ClientNoTouch {
     enabled: bool,
 }
@@ -1523,6 +1553,7 @@ impl Command for ClientNoTouch {
 }
 
 /// Pause mode for CLIENT PAUSE.
+#[derive(Clone)]
 pub enum ClientPauseMode {
     /// Pause all client commands.
     All,
@@ -1542,6 +1573,7 @@ impl ClientPauseMode {
 /// CLIENT PAUSE timeout \[WRITE|ALL\]
 ///
 /// Suspend all clients for the specified amount of time (in milliseconds).
+#[derive(Clone)]
 pub struct ClientPause {
     timeout: u64,
     mode: Option<ClientPauseMode>,
@@ -1595,6 +1627,7 @@ impl Command for ClientPause {
 /// CLIENT UNPAUSE
 ///
 /// Resume clients that were paused by CLIENT PAUSE.
+#[derive(Clone)]
 pub struct ClientUnpause;
 
 impl ClientUnpause {
@@ -1639,6 +1672,7 @@ impl Command for ClientUnpause {
 ///
 /// Returns configuration parameters matching the glob-style pattern.
 /// The response is a list of key-value pairs.
+#[derive(Clone)]
 pub struct ConfigGet {
     pattern: String,
 }
@@ -1737,6 +1771,7 @@ impl Command for ConfigGet {
 /// CONFIG SET param value \[param value ...\]
 ///
 /// Set one or more configuration parameters to the given values.
+#[derive(Clone)]
 pub struct ConfigSet {
     pairs: Vec<(String, String)>,
 }
@@ -1786,6 +1821,7 @@ impl Command for ConfigSet {
 /// CONFIG RESETSTAT
 ///
 /// Reset the statistics reported by the INFO command.
+#[derive(Clone)]
 pub struct ConfigResetStat;
 
 impl ConfigResetStat {
@@ -1825,6 +1861,7 @@ impl Command for ConfigResetStat {
 /// CONFIG REWRITE
 ///
 /// Rewrite the configuration file with the in-memory configuration.
+#[derive(Clone)]
 pub struct ConfigRewrite;
 
 impl ConfigRewrite {
@@ -1865,6 +1902,7 @@ impl Command for ConfigRewrite {
 ///
 /// Set the client library name. Sent automatically on connection to
 /// identify the client library to the Redis server.
+#[derive(Clone)]
 pub struct ClientSetInfoLibName {
     name: String,
 }
@@ -1906,6 +1944,7 @@ impl Command for ClientSetInfoLibName {
 ///
 /// Set the client library version. Sent automatically on connection to
 /// identify the client library version to the Redis server.
+#[derive(Clone)]
 pub struct ClientSetInfoLibVer {
     version: String,
 }
@@ -1948,6 +1987,7 @@ impl Command for ClientSetInfoLibVer {
 /// ECHO message
 ///
 /// Returns `message` back to the client. Useful for testing connectivity.
+#[derive(Clone)]
 pub struct Echo {
     message: String,
 }
@@ -1985,6 +2025,7 @@ impl Command for Echo {
 /// FLUSHALL [ASYNC|SYNC]
 ///
 /// Delete all keys in all databases.
+#[derive(Clone)]
 pub struct FlushAll {
     mode: Option<FlushMode>,
 }
@@ -2042,6 +2083,7 @@ impl Command for FlushAll {
 /// SAVE
 ///
 /// Synchronously save the dataset to disk.
+#[derive(Clone)]
 pub struct Save;
 
 impl Save {
@@ -2079,6 +2121,7 @@ impl Command for Save {
 }
 
 /// Save behavior for SHUTDOWN.
+#[derive(Clone)]
 pub enum ShutdownMode {
     /// Do not save the dataset before shutting down.
     NoSave,
@@ -2091,6 +2134,7 @@ pub enum ShutdownMode {
 /// Shuts down the server. On a successful shutdown the connection is closed and
 /// no reply is received; this command therefore treats both an absent reply and
 /// an `OK` reply as success.
+#[derive(Clone)]
 pub struct Shutdown {
     mode: Option<ShutdownMode>,
     now: bool,
@@ -2182,6 +2226,7 @@ impl Command for Shutdown {
 ///
 /// Returns the role of the instance in the context of replication. The response
 /// structure varies by role, so the raw `Frame` is returned.
+#[derive(Clone)]
 pub struct Role;
 
 impl Role {
@@ -2217,6 +2262,7 @@ impl Command for Role {
 /// Switches the connection's protocol and returns a map of server properties.
 /// The response is returned as a raw `Frame` (map or array depending on the
 /// negotiated protocol version).
+#[derive(Clone)]
 pub struct Hello {
     protover: Option<u8>,
     auth: Option<(String, String)>,
@@ -2290,6 +2336,7 @@ impl Command for Hello {
 ///
 /// Resets the connection to its initial state. Returns the simple string
 /// `"RESET"`.
+#[derive(Clone)]
 pub struct Reset;
 
 impl Reset {
@@ -2330,6 +2377,7 @@ impl Command for Reset {
 ///
 /// Returns details about the specified commands. The response is a nested,
 /// command-specific structure returned as a raw `Frame`.
+#[derive(Clone)]
 pub struct CommandInfo {
     commands: Vec<String>,
 }
@@ -2371,6 +2419,7 @@ impl Command for CommandInfo {
 /// COMMAND GETKEYS command \[arg ...\]
 ///
 /// Returns the keys that would be accessed by the given command invocation.
+#[derive(Clone)]
 pub struct CommandGetKeys {
     command: String,
     args: Vec<String>,
@@ -2431,6 +2480,7 @@ impl Command for CommandGetKeys {
 }
 
 /// Reply mode for CLIENT REPLY.
+#[derive(Clone)]
 pub enum ClientReplyMode {
     On,
     Off,
@@ -2451,6 +2501,7 @@ impl ClientReplyMode {
 ///
 /// Controls whether the server replies to commands from the current
 /// connection.
+#[derive(Clone)]
 pub struct ClientReply {
     mode: ClientReplyMode,
 }
@@ -2491,6 +2542,7 @@ impl Command for ClientReply {
 ///
 /// Returns information about the current connection's server-assisted
 /// client-side caching state. Returned as a raw `Frame` map.
+#[derive(Clone)]
 pub struct ClientTrackingInfo;
 
 impl ClientTrackingInfo {
@@ -2522,6 +2574,7 @@ impl Command for ClientTrackingInfo {
 }
 
 /// Mode for CLIENT UNBLOCK.
+#[derive(Clone)]
 pub enum UnblockMode {
     Timeout,
     Error,
@@ -2540,6 +2593,7 @@ impl UnblockMode {
 ///
 /// Unblocks a different connection that is blocked in a blocking command.
 /// Returns `1` if the client was unblocked, `0` otherwise.
+#[derive(Clone)]
 pub struct ClientUnblock {
     client_id: i64,
     mode: Option<UnblockMode>,
@@ -2594,6 +2648,7 @@ impl Command for ClientUnblock {
 ///
 /// Controls tracking of keys in the next command when client tracking is in
 /// OPTIN or OPTOUT mode.
+#[derive(Clone)]
 pub struct ClientCaching {
     yes: bool,
 }

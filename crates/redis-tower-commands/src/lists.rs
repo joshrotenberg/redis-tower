@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Prepends one or more elements to the head of the list stored at `key`.
 /// Returns the length of the list after the push operation.
+#[derive(Clone)]
 pub struct LPush {
     key: String,
     elements: Vec<String>,
@@ -66,6 +67,7 @@ impl Command for LPush {
 ///
 /// Appends one or more elements to the tail of the list stored at `key`.
 /// Returns the length of the list after the push operation.
+#[derive(Clone)]
 pub struct RPush {
     key: String,
     elements: Vec<String>,
@@ -126,6 +128,7 @@ impl Command for RPush {
 ///
 /// Removes and returns the first element of the list stored at `key`.
 /// Returns `None` if the key does not exist.
+#[derive(Clone)]
 pub struct LPop {
     key: String,
 }
@@ -163,6 +166,7 @@ impl Command for LPop {
 ///
 /// Removes and returns the last element of the list stored at `key`.
 /// Returns `None` if the key does not exist.
+#[derive(Clone)]
 pub struct RPop {
     key: String,
 }
@@ -201,6 +205,7 @@ impl Command for RPop {
 /// Returns the specified elements of the list stored at `key`. The offsets
 /// `start` and `stop` are zero-based indices, with negative values counting
 /// from the end of the list.
+#[derive(Clone)]
 pub struct LRange {
     key: String,
     start: i64,
@@ -262,6 +267,7 @@ impl Command for LRange {
 ///
 /// Returns the length of the list stored at `key`. If the key does not
 /// exist, it is interpreted as an empty list and 0 is returned.
+#[derive(Clone)]
 pub struct LLen {
     key: String,
 }
@@ -303,6 +309,7 @@ impl Command for LLen {
 /// Returns the element at `index` in the list stored at `key`. The index
 /// is zero-based, with negative values counting from the end of the list.
 /// Returns `None` if the index is out of range.
+#[derive(Clone)]
 pub struct LIndex {
     key: String,
     index: i64,
@@ -352,6 +359,7 @@ impl Command for LIndex {
 ///
 /// Sets the list element at `index` to `element`. An error is returned for
 /// out-of-range indices.
+#[derive(Clone)]
 pub struct LSet {
     key: String,
     index: i64,
@@ -396,6 +404,7 @@ impl Command for LSet {
 }
 
 /// Direction for LMOVE source/destination.
+#[derive(Clone)]
 pub enum ListDirection {
     Left,
     Right,
@@ -414,6 +423,7 @@ impl ListDirection {
 ///
 /// Atomically pops an element from `source` and pushes it to `destination`.
 /// Returns the element moved.
+#[derive(Clone)]
 pub struct LMove {
     source: String,
     destination: String,
@@ -471,6 +481,7 @@ impl Command for LMove {
 /// Prepends an element to the head of the list stored at `key`, only if `key`
 /// already exists and holds a list. Returns the length of the list after the
 /// push operation, or 0 if the key does not exist.
+#[derive(Clone)]
 pub struct LPushX {
     key: String,
     element: String,
@@ -516,6 +527,7 @@ impl Command for LPushX {
 /// Appends an element to the tail of the list stored at `key`, only if `key`
 /// already exists and holds a list. Returns the length of the list after the
 /// push operation, or 0 if the key does not exist.
+#[derive(Clone)]
 pub struct RPushX {
     key: String,
     element: String,
@@ -557,6 +569,7 @@ impl Command for RPushX {
 }
 
 /// Position relative to a pivot element for `LINSERT`.
+#[derive(Clone)]
 pub enum ListPosition {
     Before,
     After,
@@ -576,6 +589,7 @@ impl ListPosition {
 /// Inserts `element` in the list stored at `key` either before or after the
 /// reference value `pivot`. Returns the length of the list after the insert
 /// operation, or -1 when the pivot value was not found.
+#[derive(Clone)]
 pub struct LInsert {
     key: String,
     position: ListPosition,
@@ -633,6 +647,7 @@ impl Command for LInsert {
 /// at `key`. If `count` is positive, elements are removed from head to tail;
 /// if negative, from tail to head; if zero, all occurrences are removed.
 /// Returns the number of removed elements.
+#[derive(Clone)]
 pub struct LRem {
     key: String,
     count: i64,
@@ -681,6 +696,7 @@ impl Command for LRem {
 /// Trims an existing list so that it will contain only the specified range of
 /// elements. Both `start` and `stop` are zero-based indices, with negative
 /// values counting from the end of the list.
+#[derive(Clone)]
 pub struct LTrim {
     key: String,
     start: i64,
@@ -729,6 +745,7 @@ impl Command for LTrim {
 /// Returns the index of matching elements inside a list. By default returns
 /// the position of the first match. Use the builder methods to set optional
 /// `RANK`, `COUNT`, and `MAXLEN` sub-commands.
+#[derive(Clone)]
 pub struct LPos {
     key: String,
     element: String,
@@ -818,6 +835,7 @@ impl Command for LPos {
 /// Pops one or more elements from the first non-empty list among the
 /// specified keys. Returns the key name and the popped elements as
 /// `Some((key, elements))`, or `None` if all lists are empty.
+#[derive(Clone)]
 pub struct LMPop {
     keys: Vec<String>,
     direction: ListDirection,
@@ -910,6 +928,7 @@ impl Command for LMPop {
 ///
 /// Removes and returns up to `count` elements from the head of the list stored
 /// at `key`. Returns an empty vector if the key does not exist.
+#[derive(Clone)]
 pub struct LPopCount {
     key: String,
     count: u64,
@@ -964,6 +983,7 @@ impl Command for LPopCount {
 ///
 /// Removes and returns up to `count` elements from the tail of the list stored
 /// at `key`. Returns an empty vector if the key does not exist.
+#[derive(Clone)]
 pub struct RPopCount {
     key: String,
     count: u64,
@@ -1020,6 +1040,7 @@ impl Command for RPopCount {
 /// non-empty list among the specified keys, blocking up to `timeout` seconds
 /// (0 to block indefinitely). Returns the key name and the popped elements as
 /// `Some((key, elements))`, or `None` on timeout.
+#[derive(Clone)]
 pub struct BlMPop {
     timeout: f64,
     keys: Vec<String>,

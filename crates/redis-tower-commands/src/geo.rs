@@ -31,6 +31,7 @@ impl GeoUnit {
 /// Adds the specified geospatial items (longitude, latitude, name) to the
 /// specified key. Returns the number of elements added to the sorted set
 /// (excluding score updates when `CH` is not set).
+#[derive(Clone)]
 pub struct GeoAdd {
     key: String,
     members: Vec<(f64, f64, String)>,
@@ -119,6 +120,7 @@ impl Command for GeoAdd {
 /// Returns the distance between two members of a geospatial index. The
 /// distance is returned as a floating-point number in the specified unit,
 /// or `None` if one or both members are missing.
+#[derive(Clone)]
 pub struct GeoDist {
     key: String,
     member1: String,
@@ -194,6 +196,7 @@ impl Command for GeoDist {
 /// Returns the Geohash strings representing the position of each member.
 /// Each element is `Some(hash)` if the member exists, or `None` if it
 /// does not.
+#[derive(Clone)]
 pub struct GeoHash {
     key: String,
     members: Vec<String>,
@@ -262,6 +265,7 @@ impl Command for GeoHash {
 /// Returns the longitude and latitude of each specified member. Each
 /// element is `Some((longitude, latitude))` if the member exists, or
 /// `None` if it does not.
+#[derive(Clone)]
 pub struct GeoPos {
     key: String,
     members: Vec<String>,
@@ -358,12 +362,14 @@ impl Command for GeoPos {
 }
 
 /// Origin for a GEOSEARCH or GEOSEARCHSTORE command.
+#[derive(Clone)]
 enum GeoSearchOrigin {
     Member(String),
     LonLat(f64, f64),
 }
 
 /// Shape predicate for a GEOSEARCH or GEOSEARCHSTORE command.
+#[derive(Clone)]
 enum GeoSearchShape {
     Radius(f64, GeoUnit),
     Box(f64, f64, GeoUnit),
@@ -380,6 +386,7 @@ enum GeoSearchOrder {
 ///
 /// Returns the members of a sorted set populated with geospatial data
 /// that are within the borders of the area specified by a given shape.
+#[derive(Clone)]
 pub struct GeoSearch {
     key: String,
     origin: GeoSearchOrigin,
@@ -534,6 +541,7 @@ impl Command for GeoSearch {
 /// Like \[`GeoSearch`\], but stores the result in `destination`. Returns the
 /// number of elements stored. When `store_dist` is set, the sorted set
 /// stores distances instead of geospatial data.
+#[derive(Clone)]
 pub struct GeoSearchStore {
     destination: String,
     source: String,

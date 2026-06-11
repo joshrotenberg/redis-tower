@@ -7,6 +7,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Adds the specified members with scores to the sorted set stored at `key`.
 /// Returns the number of members added (excluding members already present
 /// whose score was updated).
+#[derive(Clone)]
 pub struct ZAdd {
     key: String,
     members: Vec<(f64, String)>,
@@ -152,6 +153,7 @@ impl Command for ZAdd {
 ///
 /// Removes the specified members from the sorted set stored at `key`. Returns
 /// the number of members that were removed.
+#[derive(Clone)]
 pub struct ZRem {
     key: String,
     members: Vec<String>,
@@ -207,6 +209,7 @@ impl Command for ZRem {
 /// Returns the specified range of members in the sorted set stored at `key`,
 /// ordered from lowest to highest score. `start` and `stop` are zero-based
 /// indices, where -1 is the last element.
+#[derive(Clone)]
 pub struct ZRange {
     key: String,
     start: i64,
@@ -267,6 +270,7 @@ impl Command for ZRange {
 ///
 /// Returns the score of `member` in the sorted set at `key`, or `None` if
 /// the \[member\] or key does not exist.
+#[derive(Clone)]
 pub struct ZScore {
     key: String,
     member: String,
@@ -325,6 +329,7 @@ impl Command for ZScore {
 /// ZCARD key
 ///
 /// Returns the number of members in the sorted set stored at `key`.
+#[derive(Clone)]
 pub struct ZCard {
     key: String,
 }
@@ -365,6 +370,7 @@ impl Command for ZCard {
 ///
 /// Increments the score of `member` in the sorted set at `key` by
 /// `increment`. Returns the new score of the \[member\].
+#[derive(Clone)]
 pub struct ZIncrBy {
     key: String,
     increment: f64,
@@ -420,6 +426,7 @@ impl Command for ZIncrBy {
 ///
 /// Returns the rank of `member` in the sorted set at `key` (zero-based,
 /// lowest score = rank 0), or `None` if the \[member\] or key does not exist.
+#[derive(Clone)]
 pub struct ZRank {
     key: String,
     member: String,
@@ -470,6 +477,7 @@ impl Command for ZRank {
 /// Returns all members in the sorted set at `key` with a score between
 /// `min` and `max` (inclusive). The `min` and `max` arguments can be
 /// `"-inf"`, `"+inf"`, or numeric strings.
+#[derive(Clone)]
 pub struct ZRangeByScore {
     key: String,
     min: String,
@@ -530,6 +538,7 @@ impl Command for ZRangeByScore {
 ///
 /// Removes and returns the members with the lowest scores in the sorted set
 /// stored at `key`. Returns a list of `(member, score)` pairs.
+#[derive(Clone)]
 pub struct ZPopMin {
     key: String,
     count: Option<i64>,
@@ -620,6 +629,7 @@ impl Command for ZPopMin {
 ///
 /// Removes and returns the members with the highest scores in the sorted set
 /// stored at `key`. Returns a list of `(member, score)` pairs.
+#[derive(Clone)]
 pub struct ZPopMax {
     key: String,
     count: Option<i64>,
@@ -712,6 +722,7 @@ impl Command for ZPopMax {
 /// between `min` and `max` (inclusive by default). The `min` and `max`
 /// arguments can be `"-inf"`, `"+inf"`, or numeric strings (prefix with
 /// `"("` for exclusive bounds).
+#[derive(Clone)]
 pub struct ZCount {
     key: String,
     min: String,
@@ -765,6 +776,7 @@ impl Command for ZCount {
 /// lexicographical range specified by `min` and `max`. Valid values for
 /// `min` and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
 /// (exclusive).
+#[derive(Clone)]
 pub struct ZLexCount {
     key: String,
     min: String,
@@ -817,6 +829,7 @@ impl Command for ZLexCount {
 /// Returns one or more random members from the sorted set at `key`.
 /// When called without `count`, returns a single random member.
 /// When called with `count`, returns up to that many distinct members.
+#[derive(Clone)]
 pub struct ZRandMember {
     key: String,
     count: Option<i64>,
@@ -883,6 +896,7 @@ impl Command for ZRandMember {
 /// Returns the scores associated with the specified members in the sorted
 /// set at `key`. For each member, returns `Some(score)` if the member
 /// exists, or `None` if it does not.
+#[derive(Clone)]
 pub struct ZMScore {
     key: String,
     members: Vec<String>,
@@ -980,6 +994,7 @@ impl Aggregate {
 /// Computes the intersection of the sorted sets given by the specified keys,
 /// and stores the result in `destination`. Returns the number of elements in
 /// the resulting sorted set.
+#[derive(Clone)]
 pub struct ZInterStore {
     destination: String,
     keys: Vec<String>,
@@ -1058,6 +1073,7 @@ impl Command for ZInterStore {
 /// Computes the union of the sorted sets given by the specified keys, and
 /// stores the result in `destination`. Returns the number of elements in
 /// the resulting sorted set.
+#[derive(Clone)]
 pub struct ZUnionStore {
     destination: String,
     keys: Vec<String>,
@@ -1136,6 +1152,7 @@ impl Command for ZUnionStore {
 /// Computes the difference between the first sorted set and all successive
 /// sorted sets given by the specified keys, and stores the result in
 /// `destination`. Returns the number of elements in the resulting sorted set.
+#[derive(Clone)]
 pub struct ZDiffStore {
     destination: String,
     keys: Vec<String>,
@@ -1188,6 +1205,7 @@ impl Command for ZDiffStore {
 /// Returns the cardinality of the intersection of the sorted sets given by
 /// the specified keys. The optional `LIMIT` argument caps the work done
 /// when the intersection cardinality reaches the limit.
+#[derive(Clone)]
 pub struct ZInterCard {
     keys: Vec<String>,
     limit: Option<i64>,
@@ -1246,6 +1264,7 @@ impl Command for ZInterCard {
 ///
 /// Stores the specified range of members from the sorted set at `src` into
 /// `dst`. Returns the number of elements in the resulting sorted set.
+#[derive(Clone)]
 pub struct ZRangeStore {
     dst: String,
     src: String,
@@ -1368,6 +1387,7 @@ impl ZMPopDirection {
 /// elements could be popped from any of the sorted sets, or
 /// `Some((key, members))` where `key` is the name of the sorted set and
 /// `members` is a list of `(member, score)` pairs.
+#[derive(Clone)]
 pub struct ZMPop {
     keys: Vec<String>,
     direction: ZMPopDirection,
@@ -1488,6 +1508,7 @@ impl Command for ZMPop {
 /// Removes all members in the sorted set stored at `key` with rank between
 /// `start` and `stop` (inclusive, zero-based). Returns the number of members
 /// removed.
+#[derive(Clone)]
 pub struct ZRemRangeByRank {
     key: String,
     start: i64,
@@ -1537,6 +1558,7 @@ impl Command for ZRemRangeByRank {
 /// `min` and `max` (inclusive). The `min` and `max` arguments can be `"-inf"`,
 /// `"+inf"`, or numeric strings (prefix with `"("` for exclusive bounds).
 /// Returns the number of members removed.
+#[derive(Clone)]
 pub struct ZRemRangeByScore {
     key: String,
     min: String,
@@ -1586,6 +1608,7 @@ impl Command for ZRemRangeByScore {
 /// lexicographical range specified by `min` and `max`. Valid values for
 /// `min` and `max` are `"-"`, `"+"`, `"[value"` (inclusive), or `"(value"`
 /// (exclusive). Returns the number of members removed.
+#[derive(Clone)]
 pub struct ZRemRangeByLex {
     key: String,
     min: String,
@@ -1634,6 +1657,7 @@ impl Command for ZRemRangeByLex {
 /// Returns the rank of `member` in the sorted set at `key` with scores
 /// ordered from high to low (zero-based, highest score = rank 0), or `None`
 /// if the member or key does not exist.
+#[derive(Clone)]
 pub struct ZRevRank {
     key: String,
     member: String,
@@ -1774,6 +1798,7 @@ fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisErro
 /// Increments the score of `member` by `score` (ZADD with the INCR flag). When
 /// used together with NX/XX the operation may be skipped, in which case `None`
 /// is returned; otherwise returns the new score of the member.
+#[derive(Clone)]
 pub struct ZAddIncr {
     key: String,
     score: f64,
@@ -1833,6 +1858,7 @@ impl Command for ZAddIncr {
 ///
 /// Returns the difference between the first sorted set and all successive
 /// sorted sets. Returns only the members (without scores).
+#[derive(Clone)]
 pub struct ZDiff {
     keys: Vec<String>,
 }
@@ -1873,6 +1899,7 @@ impl Command for ZDiff {
 ///
 /// Returns the difference between the first sorted set and all successive
 /// sorted sets, including each member's score.
+#[derive(Clone)]
 pub struct ZDiffWithScores {
     keys: Vec<String>,
 }
@@ -1914,6 +1941,7 @@ impl Command for ZDiffWithScores {
 ///
 /// Returns the union of the sorted sets given by the specified keys. Returns
 /// only the members (without scores).
+#[derive(Clone)]
 pub struct ZUnion {
     keys: Vec<String>,
     weights: Option<Vec<f64>>,
@@ -1980,6 +2008,7 @@ impl Command for ZUnion {
 ///
 /// Returns the union of the sorted sets given by the specified keys, including
 /// each member's score.
+#[derive(Clone)]
 pub struct ZUnionWithScores {
     keys: Vec<String>,
     weights: Option<Vec<f64>>,
@@ -2047,6 +2076,7 @@ impl Command for ZUnionWithScores {
 ///
 /// Returns the intersection of the sorted sets given by the specified keys.
 /// Returns only the members (without scores).
+#[derive(Clone)]
 pub struct ZInter {
     keys: Vec<String>,
     weights: Option<Vec<f64>>,
@@ -2113,6 +2143,7 @@ impl Command for ZInter {
 ///
 /// Returns the intersection of the sorted sets given by the specified keys,
 /// including each member's score.
+#[derive(Clone)]
 pub struct ZInterWithScores {
     keys: Vec<String>,
     weights: Option<Vec<f64>>,
@@ -2183,6 +2214,7 @@ impl Command for ZInterWithScores {
 /// keys, blocking up to `timeout` seconds (0 to block indefinitely). Returns
 /// `None` on timeout, or `Some((key, members))` where `members` is a list of
 /// `(member, score)` pairs.
+#[derive(Clone)]
 pub struct BZMPop {
     timeout: f64,
     keys: Vec<String>,
@@ -2313,6 +2345,7 @@ impl Command for BZMPop {
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... REV`, but still widely
 /// used. Use [`ZRevRangeWithScores`] to also return each member's score.
+#[derive(Clone)]
 pub struct ZRevRange {
     key: String,
     start: i64,
@@ -2360,6 +2393,7 @@ impl Command for ZRevRange {
 /// ordered from highest to lowest score, including each member's score.
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... REV WITHSCORES`.
+#[derive(Clone)]
 pub struct ZRevRangeWithScores {
     key: String,
     start: i64,
@@ -2410,6 +2444,7 @@ impl Command for ZRevRangeWithScores {
 /// all members share the same score.
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX`.
+#[derive(Clone)]
 pub struct ZRangeByLex {
     key: String,
     min: String,
@@ -2474,6 +2509,7 @@ impl Command for ZRangeByLex {
 /// (exclusive). Assumes all members share the same score.
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX REV`.
+#[derive(Clone)]
 pub struct ZRevRangeByLex {
     key: String,
     max: String,
@@ -2539,6 +2575,7 @@ impl Command for ZRevRangeByLex {
 /// score.
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV`.
+#[derive(Clone)]
 pub struct ZRevRangeByScore {
     key: String,
     max: String,
@@ -2601,6 +2638,7 @@ impl Command for ZRevRangeByScore {
 /// score. Note the reversed argument order: `max` comes before `min`.
 ///
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV WITHSCORES`.
+#[derive(Clone)]
 pub struct ZRevRangeByScoreWithScores {
     key: String,
     max: String,

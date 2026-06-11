@@ -6,6 +6,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Adds a suggestion string to an auto-complete dictionary. Returns the
 /// current size of the dictionary.
+#[derive(Clone)]
 pub struct FtSugAdd {
     key: String,
     string: String,
@@ -77,6 +78,7 @@ impl Command for FtSugAdd {
 ///
 /// Gets completion suggestions for a prefix from an auto-complete dictionary.
 /// The response structure varies based on options, so it returns a raw `Frame`.
+#[derive(Clone)]
 pub struct FtSugGet {
     key: String,
     prefix: String,
@@ -161,6 +163,7 @@ impl Command for FtSugGet {
 ///
 /// Deletes a string from an auto-complete dictionary. Returns `true` if the
 /// string was found and deleted.
+#[derive(Clone)]
 pub struct FtSugDel {
     key: String,
     string: String,
@@ -205,6 +208,7 @@ impl Command for FtSugDel {
 /// FT.SUGLEN key
 ///
 /// Returns the number of entries in an auto-complete dictionary.
+#[derive(Clone)]
 pub struct FtSugLen {
     key: String,
 }
@@ -240,6 +244,7 @@ impl Command for FtSugLen {
 /// FT.SYNUPDATE index group_id term \[term ...\]
 ///
 /// Updates a synonym group with additional terms.
+#[derive(Clone)]
 pub struct FtSynUpdate {
     index: String,
     group_id: String,
@@ -294,6 +299,7 @@ impl Command for FtSynUpdate {
 ///
 /// Dumps the contents of a synonym group. Returns a raw `Frame` containing
 /// alternating term and group ID pairs.
+#[derive(Clone)]
 pub struct FtSynDump {
     index: String,
 }
@@ -325,6 +331,7 @@ impl Command for FtSynDump {
 /// FT.DICTADD dict term \[term ...\]
 ///
 /// Adds terms to a dictionary. Returns the number of new terms added.
+#[derive(Clone)]
 pub struct FtDictAdd {
     dict: String,
     terms: Vec<String>,
@@ -371,6 +378,7 @@ impl Command for FtDictAdd {
 /// FT.DICTDEL dict term \[term ...\]
 ///
 /// Deletes terms from a dictionary. Returns the number of terms deleted.
+#[derive(Clone)]
 pub struct FtDictDel {
     dict: String,
     terms: Vec<String>,
@@ -417,6 +425,7 @@ impl Command for FtDictDel {
 /// FT.DICTDUMP dict
 ///
 /// Returns all terms in a dictionary.
+#[derive(Clone)]
 pub struct FtDictDump {
     dict: String,
 }
@@ -459,6 +468,7 @@ impl Command for FtDictDump {
 }
 
 /// Term inclusion mode for FT.SPELLCHECK.
+#[derive(Clone)]
 pub enum SpellCheckTerms {
     /// Include terms from the specified dictionary.
     Include(String),
@@ -470,6 +480,7 @@ pub enum SpellCheckTerms {
 ///
 /// Performs spelling correction on a query. Returns suggestions for
 /// misspelled terms as a raw `Frame`.
+#[derive(Clone)]
 pub struct FtSpellCheck {
     index: String,
     query: String,
@@ -547,6 +558,7 @@ impl Command for FtSpellCheck {
 /// FT.CONFIG SET option value
 ///
 /// Sets a RediSearch configuration option.
+#[derive(Clone)]
 pub struct FtConfigSet {
     option: String,
     value: String,
@@ -591,6 +603,7 @@ impl Command for FtConfigSet {
 /// FT.CONFIG GET option
 ///
 /// Gets the value of a RediSearch configuration option. Returns a raw `Frame`.
+#[derive(Clone)]
 pub struct FtConfigGet {
     option: String,
 }

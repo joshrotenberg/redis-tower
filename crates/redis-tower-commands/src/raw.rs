@@ -11,6 +11,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// ```ignore
 /// let result = conn.execute(RawCommand::new("CUSTOM.CMD").arg("key").arg("val")).await?;
 /// ```
+#[derive(Clone)]
 pub struct RawCommand {
     name_str: String,
     args: Vec<Vec<u8>>,
