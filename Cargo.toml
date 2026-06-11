@@ -26,13 +26,13 @@ rust-version = "1.88"
 
 [workspace.dependencies]
 # Internal crates
-redis-tower = { path = "crates/redis-tower" }
-redis-tower-protocol = { path = "crates/redis-tower-protocol" }
-redis-tower-core = { path = "crates/redis-tower-core" }
-redis-tower-commands = { path = "crates/redis-tower-commands" }
-redis-tower-cluster = { path = "crates/redis-tower-cluster" }
-redis-tower-sentinel = { path = "crates/redis-tower-sentinel" }
-redis-tower-modules = { path = "crates/redis-tower-modules" }
+redis-tower = { version = "0.1.0", path = "crates/redis-tower" }
+redis-tower-protocol = { version = "0.1.1", path = "crates/redis-tower-protocol" }
+redis-tower-core = { version = "0.1.0", path = "crates/redis-tower-core" }
+redis-tower-commands = { version = "0.1.0", path = "crates/redis-tower-commands" }
+redis-tower-cluster = { version = "0.1.0", path = "crates/redis-tower-cluster" }
+redis-tower-sentinel = { version = "0.1.0", path = "crates/redis-tower-sentinel" }
+redis-tower-modules = { version = "0.1.0", path = "crates/redis-tower-modules" }
 
 # Async runtime
 async-stream = "0.3"
