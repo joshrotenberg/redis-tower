@@ -306,7 +306,7 @@ pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
     AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
 };
-pub use executor::RedisExecutor;
+pub use executor::{ExecutorService, RedisExecutor};
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
