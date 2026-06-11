@@ -1,0 +1,25 @@
+[package]
+name = "redis-tower-client"
+version = "0.1.0"
+description = "Unified Redis client (standalone, cluster, sentinel) for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "../../README.md"
+keywords = ["redis", "cluster", "sentinel", "tower"]
+categories = ["database", "asynchronous", "network-programming"]
+
+[dependencies]
+redis-tower = { workspace = true }
+redis-tower-core = { workspace = true }
+redis-tower-cluster = { workspace = true }
+redis-tower-sentinel = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+redis-tower-commands = { workspace = true }
+redis-server-wrapper = { workspace = true }
+bytes = { workspace = true }

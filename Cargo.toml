@@ -9,6 +9,7 @@ members = [
     "crates/redis-tower-sentinel",
     "crates/redis-tower-sync",
     "crates/redis-tower-modules",
+    "crates/redis-tower-client",
     "crates/redis-test-harness",
     "crates/cluster-bench",
     "crates/standalone-bench",
@@ -33,6 +34,7 @@ redis-tower-commands = { version = "0.1.0", path = "crates/redis-tower-commands"
 redis-tower-cluster = { version = "0.1.0", path = "crates/redis-tower-cluster" }
 redis-tower-sentinel = { version = "0.1.0", path = "crates/redis-tower-sentinel" }
 redis-tower-modules = { version = "0.1.0", path = "crates/redis-tower-modules" }
+redis-tower-client = { version = "0.1.0", path = "crates/redis-tower-client" }
 
 # Async runtime
 async-stream = "0.3"

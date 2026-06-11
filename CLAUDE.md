@@ -4,7 +4,7 @@ A Tower-based Redis client with strong typing, composable middleware, and resili
 
 ## Architecture
 
-Workspace of 11 crates with a clear dependency direction:
+Workspace of 12 crates with a clear dependency direction:
 
 ```
 redis-tower-protocol   (RESP2/3 codec, frame types)
@@ -15,6 +15,7 @@ redis-tower            (clients, middleware layers, pool, pipeline, pub/sub)
   redis-tower-sentinel (sentinel discovery, failover)
   redis-tower-sync     (blocking wrapper around MultiplexedClient)
   redis-tower-modules  (high-level module clients: JSON, Search, TimeSeries, Probabilistic, Vector)
+  redis-tower-client   (UniversalClient: one type over standalone/cluster/sentinel)
 redis-test-harness     (test utilities: MockConnection, command_tests! macro)
 cluster-bench          (criterion benchmarks for cluster clients)
 standalone-bench       (redis-rs comparison benchmarks)
@@ -22,6 +23,9 @@ standalone-bench       (redis-rs comparison benchmarks)
 
 `redis-tower-cluster` and `redis-tower-sentinel` both depend on `redis-tower`.
 `redis-tower-modules` depends on `redis-tower` and `redis-tower-commands`.
+`redis-tower-client` is the top of the graph -- it depends on `redis-tower`,
+`redis-tower-cluster`, and `redis-tower-sentinel` so it can unify all three
+multiplexed clients (the only crate that sees all of them).
 
 ## Key Client Types
 
@@ -37,8 +41,9 @@ standalone-bench       (redis-rs comparison benchmarks)
 | `SentinelClient` | `redis-tower-sentinel/client.rs` | Arc<Mutex<SentinelConnection>>, cloneable |
 | `MultiplexedSentinelClient` | `redis-tower-sentinel/multiplexed.rs` | Auto-pipeline + sentinel discovery, both static and factory-reconnect ctors |
 | `SyncClient` | `redis-tower-sync/lib.rs` | Blocking wrapper, uses tokio Runtime internally |
+| `UniversalClient` | `redis-tower-client/lib.rs` | Enum over Standalone/Cluster/Sentinel multiplexed clients; `connect_url` picks the variant by scheme (`redis://`, `redis+cluster://`, `redis+sentinel://h1,h2/master`) |
 
-`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `ClusterConnection`, `SentinelConnection`.
+`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClient`, `MultiplexedClusterClient`, and `UniversalClient`.
 
 ## Middleware Layers (Tower)
 
