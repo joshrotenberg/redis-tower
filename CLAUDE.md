@@ -44,7 +44,7 @@ standalone-bench       (redis-rs comparison benchmarks)
 
 All live in `redis-tower/src/`:
 - `reconnect_layer.rs` / `reconnect.rs` -- `ConnectionFactory`-based reconnect with exponential backoff + jitter
-- `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls; bounded queue with `QueueFull` back-pressure
+- `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls; bounded queue with real back-pressure (`poll_ready` awaits capacity via `PollSender`), opt-in `QueueFull` load-shedding (`AutoPipelineConfig::shed_load_on_full`)
 - `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`)
 - `metrics_layer.rs` -- `MetricsRecorder` hook with `ErrorKind` enum (7 variants, not just `bool`)
 - `cache_layer.rs` / `caching.rs` -- client-side caching
