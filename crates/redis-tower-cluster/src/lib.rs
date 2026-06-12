@@ -9,20 +9,26 @@
 //! | You need... | Use |
 //! |---|---|
 //! | Simple one-task-at-a-time usage, lowest moving parts | [`ClusterClient`] |
-//! | Correct-by-construction MULTI/EXEC on one connection | [`ClusterClient`] or raw [`ClusterConnection`] |
 //! | High-concurrency sharing across many tokio tasks | [`MultiplexedClusterClient`] |
 //! | Automatic per-node reconnect on failover | [`MultiplexedClusterClient`] |
 //! | Credential rotation across reconnects | [`MultiplexedClusterClient`] |
 //! | Per-node background auto-pipelining of concurrent requests | [`MultiplexedClusterClient`] |
+//!
+//! # Transactions
+//!
+//! MULTI/EXEC is **not** supported on the cluster clients: commands route to
+//! their key's node while MULTI/EXEC route to the default node, so a
+//! transaction scatters and is not atomic. Atomic cluster transactions need
+//! all keys in one hash slot plus a slot-pinned executor (not yet implemented).
+//! For a transaction, target a single-node client for the owning slot.
 //!
 //! ## [`ClusterClient`]
 //!
 //! A thin `Arc<Mutex<ClusterConnection>>`. Commands serialize through a
 //! single cluster-wide lock, so throughput does not scale with
 //! concurrency beyond the latency of one in-flight request. Use when you
-//! want the simplest possible surface, when ordering across commands
-//! must be total, or when you need direct access to connection-level
-//! features like transactions.
+//! want the simplest possible surface or when ordering across commands
+//! must be total.
 //!
 //! ## [`MultiplexedClusterClient`]
 //!
