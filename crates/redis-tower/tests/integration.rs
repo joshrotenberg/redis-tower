@@ -2991,3 +2991,52 @@ async fn multiplexed_response_timeout_trips_on_slow_command() {
         "expected CommandTimeout, got {err:?}"
     );
 }
+
+#[tokio::test]
+async fn multiplexed_pipeline_flushed_metric_fires() {
+    use redis_tower::metrics_layer::{ErrorKind, MetricsRecorder};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingRecorder {
+        flushes: AtomicUsize,
+        frames: AtomicUsize,
+    }
+    impl MetricsRecorder for CountingRecorder {
+        fn command_completed(
+            &self,
+            _command: &str,
+            _duration: std::time::Duration,
+            _error: Option<ErrorKind>,
+        ) {
+        }
+        fn pipeline_flushed(&self, batch_size: usize) {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            self.frames.fetch_add(batch_size, Ordering::SeqCst);
+        }
+    }
+
+    let recorder = Arc::new(CountingRecorder {
+        flushes: AtomicUsize::new(0),
+        frames: AtomicUsize::new(0),
+    });
+    let conn = RedisConnection::connect(redis_addr().await).await.unwrap();
+    let config = AutoPipelineConfig {
+        metrics_recorder: Some(Arc::clone(&recorder) as Arc<dyn MetricsRecorder>),
+        ..Default::default()
+    };
+    let client = MultiplexedClient::from_connection_with_config(conn, config);
+
+    let k = key("metrics_flush", "k");
+    client.execute(Set::new(&k, "v")).await.unwrap();
+    client.execute(Del::new(&k)).await.unwrap();
+
+    assert!(
+        recorder.flushes.load(Ordering::SeqCst) >= 1,
+        "pipeline_flushed should fire on a worker flush"
+    );
+    assert!(
+        recorder.frames.load(Ordering::SeqCst) >= 2,
+        "the SET and DEL frames were flushed and counted"
+    );
+}
