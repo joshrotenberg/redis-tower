@@ -10,29 +10,45 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use redis_tower_core::{Frame, RedisError};
 use tokio::sync::RwLock;
 use tower_service::Service;
 
-use crate::cache_state::{CacheState, extract_cache_entry, parse_invalidation};
+use crate::cache_state::{
+    CacheState, DEFAULT_MAX_ENTRIES, DEFAULT_TTL, extract_cache_entry, parse_invalidation,
+};
 
 /// Configuration for the [`CacheService`] layer.
 ///
 /// # Defaults
 ///
-/// - `max_size`: 0 (unlimited)
-#[derive(Default)]
+/// - `max_size`: 10000 entries
+/// - `ttl`: 30s per-entry freshness deadline
 pub struct CacheConfig {
-    /// Maximum number of cached entries. 0 means unlimited.
+    /// Maximum number of cached entries. 0 means unbounded.
     pub max_size: usize,
+    /// Per-entry client-side freshness deadline. `None` disables the deadline.
+    /// A cached entry older than this is treated as a miss, bounding staleness
+    /// even if an invalidation is missed.
+    pub ttl: Option<Duration>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            max_size: DEFAULT_MAX_ENTRIES,
+            ttl: Some(DEFAULT_TTL),
+        }
+    }
 }
 
 /// Tower `Service` that caches Frame responses for cacheable read commands.
 ///
-/// Caches responses for GET, HGET, HGETALL, LRANGE, SMEMBERS, ZRANGE,
-/// TYPE, and TTL. Write commands bypass the cache entirely. Entries are keyed
-/// by the full command argument vector, so distinct arguments never collide.
+/// Caches responses for GET, HGET, HGETALL, LRANGE, SMEMBERS, ZRANGE, and
+/// TYPE. Write commands bypass the cache entirely. Entries are keyed by the
+/// full command argument vector, so distinct arguments never collide.
 ///
 /// Sits between [`CommandAdapter`](crate::CommandAdapter) and
 /// [`FrameService`](crate::FrameService) in the service stack:
@@ -47,26 +63,22 @@ pub struct CacheConfig {
 pub struct CacheService<S> {
     inner: S,
     cache: Arc<RwLock<CacheState>>,
-    config: CacheConfig,
 }
 
 impl<S> CacheService<S> {
-    /// Create a new cache service wrapping an inner Frame service.
+    /// Create a new cache service wrapping an inner Frame service. The size and
+    /// TTL bounds from `config` are baked into the cache.
     pub fn new(inner: S, config: CacheConfig) -> Self {
         Self {
             inner,
-            cache: Arc::new(RwLock::new(CacheState::default())),
-            config,
+            cache: Arc::new(RwLock::new(CacheState::new(config.max_size, config.ttl))),
         }
     }
 
-    /// Create with an existing shared cache (for invalidation integration).
-    pub fn with_cache(inner: S, cache: Arc<RwLock<CacheState>>, config: CacheConfig) -> Self {
-        Self {
-            inner,
-            cache,
-            config,
-        }
+    /// Create with an existing shared cache (for invalidation integration). The
+    /// cache already carries its own size/TTL bounds.
+    pub fn with_cache(inner: S, cache: Arc<RwLock<CacheState>>) -> Self {
+        Self { inner, cache }
     }
 
     /// Get a reference to the shared cache for invalidation wiring.
@@ -109,7 +121,6 @@ where
         // Cache miss or non-cacheable -- call inner service.
         let future = self.inner.call(request);
         let cache = Arc::clone(&self.cache);
-        let max_size = self.config.max_size;
 
         Box::pin(async move {
             let response = future.await?;
@@ -118,7 +129,7 @@ where
                 && !matches!(response, Frame::Error(_))
             {
                 let mut guard = cache.write().await;
-                guard.insert(cache_key, redis_key, response.clone(), max_size);
+                guard.insert(cache_key, redis_key, response.clone());
             }
 
             Ok(response)
@@ -269,7 +280,13 @@ mod tests {
             call_count: Arc::clone(&call_count),
             response: Frame::BulkString(Some(Bytes::from("v"))),
         };
-        let mut cache_svc = CacheService::new(svc, CacheConfig { max_size: 1 });
+        let mut cache_svc = CacheService::new(
+            svc,
+            CacheConfig {
+                max_size: 1,
+                ttl: None,
+            },
+        );
 
         // Fill the cache with key "a".
         cache_svc.call(make_get_frame("a")).await.unwrap();

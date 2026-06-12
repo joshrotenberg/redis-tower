@@ -149,10 +149,10 @@ impl CachedClient {
                 return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
             }
 
-            // Store in cache (unbounded; the layer-based cache bounds size).
+            // Store in cache (bounded with a per-entry client TTL by default).
             {
                 let mut cache = self.cache.lock().await;
-                cache.insert(cache_key, redis_key, response.clone(), 0);
+                cache.insert(cache_key, redis_key, response.clone());
             }
 
             cmd.parse_response(response)
