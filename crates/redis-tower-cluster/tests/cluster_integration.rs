@@ -143,6 +143,80 @@ async fn mux_cluster_refresh_topology() {
     assert_eq!(topo.master_addrs().len(), 3);
 }
 
+/// The kill-a-master test a customer evaluation runs first: a master dies and
+/// the client must keep serving the rest of the cluster instead of wedging.
+///
+/// Before this change a per-node worker reconnected to the dead address
+/// forever -- nothing triggered a topology refresh -- so the whole client could
+/// stall. Now the failure triggers a background self-healing refresh that
+/// reconciles the per-node services (replacing dead workers, pruning departed
+/// nodes), and commands to the surviving masters keep succeeding.
+///
+/// Uses a dedicated cluster with `cluster-require-full-coverage no`, so the
+/// surviving masters keep serving their own slots after one master dies. That
+/// makes the assertion deterministic: we verify the live part of the cluster
+/// stays usable through the client, without depending on a replica election
+/// (the prune/replace/promote reconciliation itself is unit-tested in
+/// `multiplexed::diff_tests`).
+#[tokio::test]
+#[ignore = "destructive: starts a dedicated cluster and kills a master"]
+async fn mux_cluster_survives_master_kill_without_wedging() {
+    use redis_server_wrapper::chaos;
+    use std::time::Duration;
+
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(1)
+        .base_port(17500)
+        .cluster_node_timeout(2000)
+        .cluster_require_full_coverage(false)
+        .start()
+        .await
+        .expect("failed to start cluster");
+
+    let client = MultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect");
+
+    // Seed keys spread across all three masters; confirm they read back first.
+    let keys: Vec<String> = (0..24).map(|i| format!("heal:{i}")).collect();
+    for k in &keys {
+        client.execute(Set::new(k, "v")).await.expect("initial set");
+    }
+
+    // Kill one master. Its ~1/3 of slots become unservable (no election here),
+    // but the other two masters keep serving theirs.
+    chaos::kill_master_by_key(&cluster, &keys[0])
+        .await
+        .expect("failed to kill master");
+
+    // A self-healing client keeps the surviving masters usable: after a brief
+    // settle, a healthy majority of keys keep reading back, poll after poll. A
+    // client that loops on the dead address would serve nothing.
+    let mut best = 0usize;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let mut ok = 0usize;
+        for k in &keys {
+            if let Ok(Ok(_)) =
+                tokio::time::timeout(Duration::from_secs(2), client.execute(Get::new(k))).await
+            {
+                ok += 1;
+            }
+        }
+        best = best.max(ok);
+        // Two of three masters' worth of keys is the success bar.
+        if ok >= 14 {
+            break;
+        }
+    }
+
+    assert!(
+        best >= 14,
+        "client served only {best}/24 keys after a master was killed; it wedged the live cluster"
+    );
+}
+
 #[tokio::test]
 #[ignore]
 async fn mux_cluster_credentials_authenticate_on_connect() {

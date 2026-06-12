@@ -49,16 +49,19 @@
 //! [`RedisConnection`](redis_tower_core::RedisConnection)) for the node that
 //! owns the slot.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use redis_tower::AutoPipelineService;
 use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::credentials::CredentialProvider;
-use redis_tower::reconnect::ConnectionFactory;
+use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
 use redis_tower_commands::Auth;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
@@ -82,14 +85,83 @@ use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
 /// an overview.
 pub struct MultiplexedClusterClient {
     inner: Arc<RwLock<Inner>>,
+    /// Rate-limits and single-flights background self-healing refreshes shared
+    /// across clones, so a node failure seen by many concurrent commands
+    /// triggers one refresh, not a storm.
+    refresh_gate: Arc<RefreshGate>,
 }
 
 impl Clone for MultiplexedClusterClient {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            refresh_gate: Arc::clone(&self.refresh_gate),
         }
     }
+}
+
+/// Coordinates background topology refreshes: single-flight (only one at a
+/// time) and rate-limited (at most one per `min_interval`).
+struct RefreshGate {
+    in_flight: AtomicBool,
+    last_start: Mutex<Option<Instant>>,
+    min_interval: Duration,
+}
+
+impl RefreshGate {
+    fn new(min_interval: Duration) -> Self {
+        Self {
+            in_flight: AtomicBool::new(false),
+            last_start: Mutex::new(None),
+            min_interval,
+        }
+    }
+
+    /// Try to claim the right to start a refresh. Returns `true` if the caller
+    /// should proceed (and must call [`finish`](Self::finish) when done), or
+    /// `false` if a refresh is already in flight or one ran too recently.
+    fn try_begin(&self) -> bool {
+        // Single-flight: bail if another refresh is already running.
+        if self.in_flight.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        // Rate-limit: bail if we refreshed within the last `min_interval`.
+        let mut last = self.last_start.lock().unwrap();
+        if let Some(t) = *last
+            && t.elapsed() < self.min_interval
+        {
+            self.in_flight.store(false, Ordering::Release);
+            return false;
+        }
+        *last = Some(Instant::now());
+        true
+    }
+
+    fn finish(&self) {
+        self.in_flight.store(false, Ordering::Release);
+    }
+}
+
+/// Minimum interval between background self-healing refreshes.
+const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1000);
+
+/// Per-node reconnect attempts before the worker gives up and surfaces
+/// `ConnectionClosed`.
+///
+/// Bounded -- unlike the standalone default of unbounded retries -- so a dead
+/// node lets the cluster client self-heal: the worker stops looping on the dead
+/// address, the resulting `ConnectionClosed` triggers a topology refresh, and
+/// the refresh routes to the promoted replica's (different) address. With
+/// unbounded retries the worker would loop on the dead address forever and no
+/// refresh would ever fire.
+const NODE_RECONNECT_MAX_RETRIES: usize = 3;
+
+/// Default per-node reconnect policy: bounded retries over the standard backoff.
+fn default_node_reconnect() -> AutoPipelineReconnectConfig {
+    AutoPipelineReconnectConfig::new(ReconnectConfig {
+        max_retries: Some(NODE_RECONNECT_MAX_RETRIES),
+        ..ReconnectConfig::default()
+    })
 }
 
 struct Inner {
@@ -245,7 +317,7 @@ impl MultiplexedClusterClient {
             None,
             MAX_REDIRECTS,
             AutoPipelineConfig::default(),
-            AutoPipelineReconnectConfig::default(),
+            default_node_reconnect(),
             None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
@@ -266,7 +338,7 @@ impl MultiplexedClusterClient {
             None,
             MAX_REDIRECTS,
             AutoPipelineConfig::default(),
-            AutoPipelineReconnectConfig::default(),
+            default_node_reconnect(),
             None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
@@ -284,7 +356,7 @@ impl MultiplexedClusterClient {
             read_routing: None,
             max_redirects: MAX_REDIRECTS,
             pipeline_config: AutoPipelineConfig::default(),
-            reconnect_config: AutoPipelineReconnectConfig::default(),
+            reconnect_config: default_node_reconnect(),
             credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
@@ -409,6 +481,7 @@ impl MultiplexedClusterClient {
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             })),
+            refresh_gate: Arc::new(RefreshGate::new(REFRESH_MIN_INTERVAL)),
         })
     }
 
@@ -426,13 +499,30 @@ impl MultiplexedClusterClient {
         let max_redirects = self.inner.read().await.max_redirects;
 
         for _ in 0..max_redirects {
-            let response = call_service(&mut target.svc, cmd_frame.clone()).await?;
+            let response = match call_service(&mut target.svc, cmd_frame.clone()).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // A node-level connection failure (e.g. its worker gave up
+                    // reconnecting to a dead address). Heal the topology in the
+                    // background so subsequent commands avoid the dead node;
+                    // this command still returns its error for the caller to
+                    // retry.
+                    if e.is_connection_error() {
+                        self.trigger_refresh();
+                    }
+                    return Err(e);
+                }
+            };
 
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
                     let addr = self.remap_addr(&addr).await;
                     self.ensure_master(&addr).await?;
                     self.update_slot_owner(slot, &addr).await;
+                    // Patch the single moved slot immediately, and schedule a
+                    // rate-limited full refresh: during a live resharding many
+                    // slots migrate, and one refresh reconciles them all.
+                    self.trigger_refresh();
                     target = self.master_service(&addr).await?;
                     continue;
                 }
@@ -472,9 +562,12 @@ impl MultiplexedClusterClient {
                     // budget rather than surfacing on first occurrence.
                     if let Some(transient) = TransientError::from_frame(&response) {
                         if transient == TransientError::ClusterDown {
-                            // The cluster view may be stale; refresh
-                            // best-effort and re-route to the key's owner.
-                            let _ = self.refresh_topology().await;
+                            // The cluster view may be stale (failover in
+                            // progress). Schedule a gated background refresh --
+                            // not an inline one per retry, which would storm the
+                            // cluster with reconnects and stall its election --
+                            // then re-route and retry after a backoff.
+                            self.trigger_refresh();
                             target = self.route_command(&cmd_frame).await?;
                         }
                         tracing::debug!(?transient, "transient cluster error; retrying");
@@ -496,8 +589,12 @@ impl MultiplexedClusterClient {
 
     /// Refresh the cluster topology from a connected master.
     ///
-    /// Discovers any new masters/replicas and spins up per-node services
-    /// for them. Existing services for still-present nodes are preserved.
+    /// Self-healing: re-runs `CLUSTER SLOTS` (against the first node that
+    /// answers, so a dead seed is skipped) and reconciles the per-node
+    /// services against the result. New nodes get a service; a node whose
+    /// worker has exited -- it gave up reconnecting to a dead address -- is
+    /// rebuilt at the same address; a node absent from the new topology is
+    /// pruned and drained. Live, still-present nodes are left untouched.
     pub async fn refresh_topology(&self) -> Result<(), RedisError> {
         // Snapshot what we need from the inner state, then release the lock
         // before doing network I/O.
@@ -522,28 +619,40 @@ impl MultiplexedClusterClient {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         let tls: Option<Arc<TlsConfig>> = self.inner.read().await.tls.clone();
 
-        // Use a short-lived raw connection to an existing master to run
-        // CLUSTER SLOTS. We pick any master addr we know about.
-        let seed_addr = {
+        // Run CLUSTER SLOTS against the first node that answers. The previous
+        // seed (`masters.keys().next()`) could be the node that just died, so
+        // try every node we know about -- masters first, then replicas.
+        let seeds: Vec<String> = {
             let inner = self.inner.read().await;
             inner
                 .masters
                 .keys()
-                .next()
+                .chain(inner.replicas.keys())
                 .cloned()
-                .ok_or(RedisError::ConnectionClosed)?
+                .collect()
         };
-        let mut seed_conn = connect_node(
-            &seed_addr,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            tls.as_deref(),
-        )
-        .await?;
-        if let Some(ref provider) = credentials {
-            authenticate(&mut seed_conn, provider.as_ref()).await?;
+        let mut discovered = None;
+        let mut last_err = RedisError::ConnectionClosed;
+        for seed in &seeds {
+            match discover_from_seed(
+                seed,
+                credentials.as_ref(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.as_deref(),
+            )
+            .await
+            {
+                Ok(t) => {
+                    discovered = Some(t);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(seed, error = %e, "cluster: seed unreachable during topology refresh");
+                    last_err = e;
+                }
+            }
         }
-        let mut topology = discover_topology(&mut seed_conn).await?;
-        drop(seed_conn);
+        let mut topology = discovered.ok_or(last_err)?;
 
         if let Some(ref map) = address_map {
             remap_topology_with_map(&mut topology, map);
@@ -552,60 +661,141 @@ impl MultiplexedClusterClient {
             remap_topology(&mut topology, host);
         }
 
-        // Build services for any new nodes without holding the write lock
-        // across connect.
-        let mut new_masters: Vec<(String, AutoPipelineService)> = Vec::new();
+        // Desired per-node addresses from the fresh topology.
+        let master_desired: Vec<String> = topology
+            .master_addrs()
+            .iter()
+            .map(|a| a.addr_string())
+            .collect();
+        let replica_desired: Vec<String> = if read_preference != ReadPreference::Master {
+            topology
+                .replica_addrs()
+                .iter()
+                .map(|a| a.addr_string())
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        // Diff against current services and their liveness (read lock, no I/O).
+        let (master_diff, replica_diff) = {
+            let inner = self.inner.read().await;
+            let master_live: HashMap<String, bool> = inner
+                .masters
+                .iter()
+                .map(|(addr, svc)| (addr.clone(), svc.is_alive()))
+                .collect();
+            let replica_live: HashMap<String, bool> = inner
+                .replicas
+                .iter()
+                .map(|(addr, svc)| (addr.clone(), svc.is_alive()))
+                .collect();
+            (
+                diff_node_services(&master_desired, &master_live),
+                diff_node_services(&replica_desired, &replica_live),
+            )
+        };
+
+        // Build (re)placement services without holding the write lock. A node
+        // that is unreachable right now (e.g. a master still listed by CLUSTER
+        // SLOTS mid-failover) is skipped, not fatal: committing the reachable
+        // nodes and pruning departed ones still makes progress, and the next
+        // refresh picks up the rest once it settles.
+        let mut built_masters: Vec<(String, AutoPipelineService)> = Vec::new();
+        for addr in &master_diff.to_build {
+            match build_node_service(
+                addr,
+                false,
+                pipeline_config.clone(),
+                reconnect_config.clone(),
+                credentials.clone(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.clone(),
+            )
+            .await
+            {
+                Ok(svc) => built_masters.push((addr.clone(), svc)),
+                Err(e) => {
+                    tracing::debug!(addr, error = %e, "cluster: master unreachable during refresh; skipping")
+                }
+            }
+        }
+        let mut built_replicas: Vec<(String, AutoPipelineService)> = Vec::new();
+        for addr in &replica_diff.to_build {
+            match build_node_service(
+                addr,
+                true,
+                pipeline_config.clone(),
+                reconnect_config.clone(),
+                credentials.clone(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls.clone(),
+            )
+            .await
+            {
+                Ok(svc) => built_replicas.push((addr.clone(), svc)),
+                Err(e) => {
+                    tracing::debug!(addr, error = %e, "cluster: replica unreachable during refresh; skipping")
+                }
+            }
+        }
+
+        // Commit under the write lock; collect replaced/pruned services to drain
+        // after the lock is released.
+        let mut to_drain: Vec<AutoPipelineService> = Vec::new();
         {
-            let inner = self.inner.read().await;
-            for addr in topology.master_addrs() {
-                let addr_str = addr.addr_string();
-                if !inner.masters.contains_key(&addr_str) {
-                    let svc = build_node_service(
-                        &addr_str,
-                        false,
-                        pipeline_config.clone(),
-                        reconnect_config.clone(),
-                        credentials.clone(),
-                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                        tls.clone(),
-                    )
-                    .await?;
-                    new_masters.push((addr_str, svc));
+            let mut inner = self.inner.write().await;
+            inner.topology = topology;
+            for (addr, svc) in built_masters {
+                if let Some(old) = inner.masters.insert(addr, svc) {
+                    to_drain.push(old);
+                }
+            }
+            for (addr, svc) in built_replicas {
+                if let Some(old) = inner.replicas.insert(addr, svc) {
+                    to_drain.push(old);
+                }
+            }
+            for addr in &master_diff.to_prune {
+                if let Some(svc) = inner.masters.remove(addr) {
+                    to_drain.push(svc);
+                }
+            }
+            for addr in &replica_diff.to_prune {
+                if let Some(svc) = inner.replicas.remove(addr) {
+                    to_drain.push(svc);
                 }
             }
         }
 
-        let mut new_replicas: Vec<(String, AutoPipelineService)> = Vec::new();
-        if read_preference != ReadPreference::Master {
-            let inner = self.inner.read().await;
-            for addr in topology.replica_addrs() {
-                let addr_str = addr.addr_string();
-                if !inner.replicas.contains_key(&addr_str) {
-                    let svc = build_node_service(
-                        &addr_str,
-                        true,
-                        pipeline_config.clone(),
-                        reconnect_config.clone(),
-                        credentials.clone(),
-                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                        tls.clone(),
-                    )
-                    .await?;
-                    new_replicas.push((addr_str, svc));
-                }
-            }
-        }
-
-        // Commit the new topology and new services under the write lock.
-        let mut inner = self.inner.write().await;
-        inner.topology = topology;
-        for (addr, svc) in new_masters {
-            inner.masters.insert(addr, svc);
-        }
-        for (addr, svc) in new_replicas {
-            inner.replicas.insert(addr, svc);
+        // Drain replaced/pruned services outside the lock: an alive service
+        // flushes its in-flight batch; a dead one returns immediately.
+        for svc in to_drain {
+            svc.shutdown().await;
         }
         Ok(())
+    }
+
+    /// Spawn a rate-limited, single-flight background topology refresh.
+    ///
+    /// Called when a node failure is observed (a connection error, or a MOVED
+    /// during resharding). Returns immediately: the failing command still
+    /// surfaces its error to the caller, while the refresh heals the topology
+    /// -- replacing the dead node's service and pruning departed nodes -- so
+    /// subsequent commands route to the live cluster instead of looping on the
+    /// dead address forever. The [`RefreshGate`] collapses concurrent triggers
+    /// into a single refresh.
+    fn trigger_refresh(&self) {
+        if !self.refresh_gate.try_begin() {
+            return;
+        }
+        let client = self.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.refresh_topology().await {
+                tracing::warn!(error = %e, "cluster: background topology refresh failed");
+            }
+            client.refresh_gate.finish();
+        });
     }
 
     /// Get a snapshot of the current cluster topology.
@@ -758,6 +948,67 @@ fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
 }
 
 /// Build a per-node [`AutoPipelineService`] backed by a reconnecting factory.
+/// How a per-node service map should change to match a freshly discovered
+/// topology.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ServiceDiff {
+    /// Addresses needing a freshly built service: a new node, or one whose
+    /// worker has exited (gave up reconnecting to a dead address).
+    to_build: Vec<String>,
+    /// Addresses present now but absent from the new topology -- drain and drop.
+    to_prune: Vec<String>,
+}
+
+/// Compute the [`ServiceDiff`] for a set of desired node addresses against the
+/// current services, keyed by address with their liveness (`is_alive`).
+///
+/// A desired address is (re)built when it is absent or its current worker is
+/// dead; an alive desired address is kept. A current address absent from the
+/// desired set is pruned. Pure so the self-heal policy is unit-testable without
+/// a live cluster.
+fn diff_node_services(desired: &[String], current: &HashMap<String, bool>) -> ServiceDiff {
+    let desired_set: HashSet<&str> = desired.iter().map(String::as_str).collect();
+
+    let mut to_build = Vec::new();
+    for addr in desired {
+        // Build when absent or dead; an alive entry (`Some(true)`) is kept.
+        if current.get(addr).copied() != Some(true) {
+            to_build.push(addr.clone());
+        }
+    }
+
+    let mut to_prune = Vec::new();
+    for addr in current.keys() {
+        if !desired_set.contains(addr.as_str()) {
+            to_prune.push(addr.clone());
+        }
+    }
+
+    ServiceDiff { to_build, to_prune }
+}
+
+/// Connect to a seed node, authenticate if needed, and run `CLUSTER SLOTS`.
+///
+/// Used by [`MultiplexedClusterClient::refresh_topology`] to try each known
+/// node in turn until one answers, so a refresh survives the seed itself
+/// having died.
+async fn discover_from_seed(
+    seed_addr: &str,
+    credentials: Option<&Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<&TlsConfig>,
+) -> Result<ClusterTopology, RedisError> {
+    let mut conn = connect_node(
+        seed_addr,
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        tls,
+    )
+    .await?;
+    if let Some(provider) = credentials {
+        authenticate(&mut conn, provider.as_ref()).await?;
+    }
+    discover_topology(&mut conn).await
+}
+
 async fn build_node_service(
     addr: &str,
     readonly: bool,
@@ -929,5 +1180,82 @@ mod redis_executor_tests {
     #[test]
     fn cluster_client_implements_redis_executor() {
         assert_redis_executor::<MultiplexedClusterClient>();
+    }
+}
+
+#[cfg(test)]
+mod diff_tests {
+    use super::*;
+
+    fn current(entries: &[(&str, bool)]) -> HashMap<String, bool> {
+        entries
+            .iter()
+            .map(|(a, alive)| (a.to_string(), *alive))
+            .collect()
+    }
+
+    fn desired(addrs: &[&str]) -> Vec<String> {
+        addrs.iter().map(|a| a.to_string()).collect()
+    }
+
+    #[test]
+    fn builds_new_nodes_and_keeps_alive_ones() {
+        let diff = diff_node_services(&desired(&["a", "b"]), &current(&[("a", true)]));
+        assert_eq!(diff.to_build, vec!["b".to_string()]); // a alive -> kept
+        assert!(diff.to_prune.is_empty());
+    }
+
+    #[test]
+    fn rebuilds_dead_service_at_unchanged_address() {
+        // The kill-a-master case: address unchanged, but its worker exited.
+        let diff = diff_node_services(&desired(&["a"]), &current(&[("a", false)]));
+        assert_eq!(diff.to_build, vec!["a".to_string()]);
+        assert!(diff.to_prune.is_empty());
+    }
+
+    #[test]
+    fn prunes_departed_nodes() {
+        let mut diff = diff_node_services(
+            &desired(&["a"]),
+            &current(&[("a", true), ("gone", true), ("gone2", false)]),
+        );
+        assert!(diff.to_build.is_empty());
+        diff.to_prune.sort();
+        assert_eq!(diff.to_prune, vec!["gone".to_string(), "gone2".to_string()]);
+    }
+
+    #[test]
+    fn empty_desired_prunes_everything() {
+        let diff = diff_node_services(&[], &current(&[("a", true), ("b", false)]));
+        assert!(diff.to_build.is_empty());
+        assert_eq!(diff.to_prune.len(), 2);
+    }
+
+    #[test]
+    fn fresh_topology_builds_all() {
+        let diff = diff_node_services(&desired(&["a", "b", "c"]), &HashMap::new());
+        assert_eq!(diff.to_build.len(), 3);
+        assert!(diff.to_prune.is_empty());
+    }
+
+    #[test]
+    fn refresh_gate_single_flights() {
+        let gate = RefreshGate::new(Duration::from_millis(0));
+        assert!(gate.try_begin(), "first caller claims the refresh");
+        assert!(!gate.try_begin(), "second is denied while one is in flight");
+        gate.finish();
+        assert!(
+            gate.try_begin(),
+            "after finish (no rate limit) a new one starts"
+        );
+    }
+
+    #[test]
+    fn refresh_gate_rate_limits() {
+        let gate = RefreshGate::new(Duration::from_secs(60));
+        assert!(gate.try_begin());
+        gate.finish();
+        // Not in flight, but within the min interval -> denied.
+        assert!(!gate.try_begin());
     }
 }
