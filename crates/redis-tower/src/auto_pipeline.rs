@@ -399,6 +399,17 @@ impl AutoPipelineService {
             let _ = handle.await;
         }
     }
+
+    /// Returns `true` while the background worker task is still running.
+    ///
+    /// A factory-backed worker exits only after exhausting its reconnect budget
+    /// (or on a clean [`shutdown`](Self::shutdown)); once it has, this service
+    /// can no longer serve requests. A cluster client uses this to detect a
+    /// per-node worker that gave up on a dead address so it can replace the
+    /// service during a topology refresh.
+    pub fn is_alive(&self) -> bool {
+        !self.worker.is_finished()
+    }
 }
 
 /// Background task that collects requests and executes them as pipelines.
@@ -885,6 +896,26 @@ mod tests {
 
         // _clone still holds the Arc; worker is still running.
         // Drop the clone to let the worker task get cleaned up.
+    }
+
+    #[tokio::test]
+    async fn is_alive_tracks_worker_exit() {
+        // A running worker reports alive.
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
+        let alive = make_test_svc(tx, tokio::spawn(futures::future::pending::<()>()), false);
+        assert!(alive.is_alive());
+
+        // A worker that has returned reports not-alive once the task finishes.
+        let (tx2, _rx2) = mpsc::channel::<WorkerRequest>(1);
+        let dead = make_test_svc(tx2, tokio::spawn(async {}), false);
+        // Let the empty worker task complete before checking.
+        for _ in 0..10 {
+            if !dead.is_alive() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!dead.is_alive());
     }
 
     #[tokio::test]
