@@ -362,7 +362,9 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
             .await
     }
 
-    /// Delete the attribute from an element. Returns `true` if one was removed.
+    /// Clear the attribute on an element. Redis has no `VDELATTR`, so this sets
+    /// the attribute to the empty string via `VSETATTR`. Returns `true` if the
+    /// element exists, `false` if it is not in the set.
     pub async fn del_attr(&mut self, element: &str) -> Result<bool, RedisError> {
         self.conn
             .execute(VDelAttr::new(self.key.clone(), element))
@@ -646,5 +648,13 @@ mod tests {
             vset.get_attr("a").await.unwrap(),
             Some("{\"x\":1}".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn del_attr_returns_true_on_success() {
+        // del_attr sends VSETATTR "" (no VDELATTR exists) and parses 1 as true.
+        let mut mock = MockRedis::new(vec![Frame::Integer(1)]);
+        let mut vset = VectorSetClient::new(&mut mock, "k");
+        assert!(vset.del_attr("a").await.unwrap());
     }
 }

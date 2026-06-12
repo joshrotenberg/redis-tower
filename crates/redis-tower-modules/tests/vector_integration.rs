@@ -72,3 +72,34 @@ async fn vector_set_basic_lifecycle() {
     use redis_tower::commands::Del;
     conn.execute(Del::new(key)).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a live Redis 8.0+ server with Vector Sets"]
+async fn vector_set_attr_then_del_attr() {
+    let mut conn = connect().await;
+    let key = format!("test:vset:attr:{}", unique_suffix());
+
+    {
+        let mut vset = VectorSetClient::new(&mut conn, key.clone());
+        assert!(vset.add(vec![1.0, 0.0, 0.0], "a").await.unwrap());
+
+        // Set, then clear, the attribute. del_attr must send `VSETATTR "" `
+        // (there is no VDELATTR) and round-trip cleanly against a real server.
+        assert!(vset.set_attr("a", "{\"color\":\"red\"}").await.unwrap());
+        assert_eq!(
+            vset.get_attr("a").await.unwrap().as_deref(),
+            Some("{\"color\":\"red\"}")
+        );
+
+        assert!(vset.del_attr("a").await.unwrap());
+        // The attribute is now the empty string (cleared), not the old value.
+        let cleared = vset.get_attr("a").await.unwrap();
+        assert!(
+            cleared.is_none() || cleared.as_deref() == Some(""),
+            "attribute should be cleared, got {cleared:?}"
+        );
+    }
+
+    use redis_tower::commands::Del;
+    conn.execute(Del::new(key)).await.unwrap();
+}
