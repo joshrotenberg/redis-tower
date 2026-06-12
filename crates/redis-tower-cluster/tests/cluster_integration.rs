@@ -256,6 +256,64 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
     }
 }
 
+/// The plain `ClusterConnection` had no auth path at all, so every
+/// password-protected cluster was unreachable. Verify `.credentials()` on the
+/// builder and `connect_url` (password-only `redis://:pass@`) both authenticate.
+#[tokio::test]
+#[ignore]
+async fn cluster_connection_credentials_and_connect_url() {
+    use redis_tower::credentials::StaticCredentials;
+
+    let cluster = RedisCluster::builder()
+        .masters(3)
+        .replicas_per_master(0)
+        .base_port(17600)
+        .password("cluster-secret")
+        .start()
+        .await
+        .expect("failed to start auth cluster");
+    let seed = cluster.addr();
+
+    // A bare connect (no credentials) must fail on an auth cluster.
+    assert!(
+        ClusterConnection::connect(&seed).await.is_err(),
+        "bare connect should fail on an auth cluster"
+    );
+
+    // Builder .credentials() authenticates every node connection.
+    let mut conn = ClusterConnection::builder(&seed)
+        .credentials(StaticCredentials::password("cluster-secret"))
+        .connect()
+        .await
+        .expect("connect with credentials should succeed");
+    conn.execute(Set::new("cc_auth:k", "v")).await.unwrap();
+    assert_eq!(
+        conn.execute(Get::new("cc_auth:k")).await.unwrap(),
+        Some(Bytes::from("v"))
+    );
+
+    // connect_url wires the same auth from a redis:// URL.
+    let url = format!("redis://:cluster-secret@{seed}");
+    let mut via_url = ClusterConnection::connect_url(&url)
+        .await
+        .expect("ClusterConnection::connect_url should authenticate");
+    assert_eq!(
+        via_url.execute(Get::new("cc_auth:k")).await.unwrap(),
+        Some(Bytes::from("v"))
+    );
+
+    // The multiplexed client's connect_url authenticates too.
+    let mux = MultiplexedClusterClient::connect_url(&url)
+        .await
+        .expect("MultiplexedClusterClient::connect_url should authenticate");
+    assert_eq!(
+        mux.execute(Get::new("cc_auth:k")).await.unwrap(),
+        Some(Bytes::from("v"))
+    );
+
+    conn.execute(Del::new("cc_auth:k")).await.unwrap();
+}
+
 // -- TLS cluster tests --
 //
 // These spin up a TLS-enabled cluster automatically using self-signed

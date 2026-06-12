@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower::credentials::{CredentialProvider, StaticCredentials};
+use redis_tower_commands::Auth;
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError, parse_redis_url};
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor;
@@ -182,6 +184,8 @@ pub struct ClusterConnection {
     read_routing: Arc<dyn ReadRoutingStrategy>,
     /// Maximum MOVED/ASK redirects to follow for a single command.
     max_redirects: usize,
+    /// Credential provider for authenticating each node connection.
+    credentials: Option<Arc<dyn CredentialProvider>>,
     /// TLS configuration for node connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -195,6 +199,7 @@ pub struct ClusterConnectionBuilder {
     read_preference: ReadPreference,
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     max_redirects: usize,
+    credentials: Option<Arc<dyn CredentialProvider>>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
@@ -246,6 +251,19 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Authenticate every node connection (seed, masters, replicas, and
+    /// reconnects) using the given credential provider.
+    ///
+    /// Required for ACL-protected or password-protected clusters (most Cloud
+    /// and Enterprise deployments). The provider is consulted on every
+    /// connection, so credential rotation flows through automatically. Use
+    /// [`StaticCredentials`](redis_tower::credentials::StaticCredentials) for a
+    /// fixed username/password.
+    pub fn credentials(mut self, provider: impl CredentialProvider) -> Self {
+        self.credentials = Some(Arc::new(provider));
+        self
+    }
+
     /// Set the TLS configuration for cluster connections.
     ///
     /// When set, all connections to cluster nodes (seed, masters, and
@@ -268,6 +286,7 @@ impl ClusterConnectionBuilder {
             self.read_preference,
             self.read_routing,
             self.max_redirects,
+            self.credentials,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -292,6 +311,7 @@ impl ClusterConnection {
             ReadPreference::Master,
             None,
             MAX_REDIRECTS,
+            None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -310,10 +330,46 @@ impl ClusterConnection {
             ReadPreference::Master,
             None,
             MAX_REDIRECTS,
+            None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
         .await
+    }
+
+    /// Connect to a cluster from a Redis URL.
+    ///
+    /// `redis://[user:pass@]host:port` connects in the clear; `rediss://...`
+    /// enables TLS (rustls -- system roots with a webpki-roots fallback, so it
+    /// validates against managed Redis out of the box). A username/password in
+    /// the URL authenticates every node connection (ACL user, or legacy
+    /// password-only for `redis://:pass@`). For a custom TLS config or host
+    /// override, use [`builder`](Self::builder).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let cluster =
+    ///     ClusterConnection::connect_url("rediss://default:secret@cluster.example.com:6379")
+    ///         .await?;
+    /// ```
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let (seed, credentials, tls) = parse_cluster_url(url)?;
+        let mut builder = Self::builder(seed);
+        if let Some(creds) = credentials {
+            builder = builder.credentials(creds);
+        }
+        if tls {
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            {
+                builder = builder.tls(default_url_tls());
+            }
+            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+            {
+                return Err(tls_feature_required());
+            }
+        }
+        builder.connect().await
     }
 
     /// Create a builder for configuring the connection.
@@ -325,6 +381,7 @@ impl ClusterConnection {
             read_preference: ReadPreference::Master,
             read_routing: None,
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -338,12 +395,14 @@ impl ClusterConnection {
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
         max_redirects: usize,
+        credentials: Option<Arc<dyn CredentialProvider>>,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
             Arc<redis_tower_core::tls::TlsConfig>,
         >,
     ) -> Result<Self, RedisError> {
         let mut seed_conn = connect_node(
             seed_addr,
+            credentials.as_ref(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.as_deref(),
         )
@@ -366,6 +425,7 @@ impl ClusterConnection {
             if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone()) {
                 let conn = connect_node(
                     &addr_str,
+                    credentials.as_ref(),
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     tls.as_deref(),
                 )
@@ -385,6 +445,7 @@ impl ClusterConnection {
                 {
                     let mut conn = connect_node(
                         &addr_str,
+                        credentials.as_ref(),
                         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                         tls.as_deref(),
                     )
@@ -413,6 +474,7 @@ impl ClusterConnection {
             read_preference,
             read_routing,
             max_redirects,
+            credentials,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
@@ -567,6 +629,7 @@ impl ClusterConnection {
         if !self.nodes.contains_key(addr) {
             let conn = connect_node(
                 addr,
+                self.credentials.as_ref(),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 self.tls.as_deref(),
             )
@@ -628,6 +691,7 @@ impl ClusterConnection {
             {
                 let conn = connect_node(
                     &addr_str,
+                    self.credentials.as_ref(),
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     self.tls.as_deref(),
                 )
@@ -644,6 +708,7 @@ impl ClusterConnection {
                 {
                     let mut conn = connect_node(
                         &addr_str,
+                        self.credentials.as_ref(),
                         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                         self.tls.as_deref(),
                     )
@@ -758,20 +823,105 @@ impl TransientError {
 /// Connect to a single cluster node, using TLS if configured.
 async fn connect_node(
     addr: &str,
+    credentials: Option<&Arc<dyn CredentialProvider>>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
         &redis_tower_core::tls::TlsConfig,
     >,
 ) -> Result<RedisConnection, RedisError> {
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-    if let Some(tls) = tls {
-        let hostname = addr
-            .rsplit_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(addr)
-            .to_string();
-        return RedisConnection::connect_tls(addr, &hostname, tls).await;
+    let mut conn = match tls {
+        Some(tls) => {
+            let hostname = addr
+                .rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or(addr)
+                .to_string();
+            RedisConnection::connect_tls(addr, &hostname, tls).await?
+        }
+        None => RedisConnection::connect(addr).await?,
+    };
+    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+    let mut conn = RedisConnection::connect(addr).await?;
+
+    if let Some(provider) = credentials {
+        authenticate(&mut conn, provider.as_ref()).await?;
     }
-    RedisConnection::connect(addr).await
+    Ok(conn)
+}
+
+/// Authenticate a freshly opened node connection using the credential provider.
+///
+/// Shared by every cluster node connection (seed, masters, replicas, and
+/// reconnects), so an ACL-protected Cloud/Enterprise cluster is reachable.
+pub(crate) async fn authenticate(
+    conn: &mut RedisConnection,
+    provider: &dyn CredentialProvider,
+) -> Result<(), RedisError> {
+    let creds = provider.get_credentials().await?;
+    let auth_cmd = match creds.username.as_deref() {
+        Some(user) => Auth::credentials(user, &creds.password),
+        None => Auth::password(&creds.password),
+    };
+    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
+    match responses.into_iter().next() {
+        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
+        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
+        Some(other) => Err(RedisError::UnexpectedResponse {
+            expected: "OK",
+            actual: format!("{other:?}"),
+        }),
+        None => Err(RedisError::ConnectionClosed),
+    }
+}
+
+/// Parse a Redis URL into a cluster seed address and an optional credential
+/// provider, shared by both clients' `connect_url`. Returns the TLS flag so the
+/// caller can wire it through its own (cfg-gated) builder.
+///
+/// `redis://[user:pass@]host:port` -> AUTH credentials from the URL;
+/// `rediss://` sets `tls = true`. Unix-socket URLs are rejected (a cluster
+/// needs reachable TCP seed nodes).
+pub(crate) fn parse_cluster_url(
+    url: &str,
+) -> Result<(String, Option<StaticCredentials>, bool), RedisError> {
+    let parsed = parse_redis_url(url)?;
+    if parsed.unix {
+        return Err(RedisError::InvalidUrl(
+            "unix socket URLs are not supported for cluster connections".to_string(),
+        ));
+    }
+    let seed = format!("{}:{}", parsed.host, parsed.port);
+    let credentials = parsed.password.map(|password| match parsed.username {
+        // ACL user (`redis://user:pass@`) vs legacy password-only
+        // (`redis://:pass@`, the `requirepass` case).
+        Some(user) if !user.is_empty() => StaticCredentials::new(user, password),
+        _ => StaticCredentials::password(password),
+    });
+    Ok((seed, credentials, parsed.tls))
+}
+
+/// Build the default TLS config for a `rediss://` URL: rustls when available
+/// (validating against the system roots with a webpki-roots fallback -- the
+/// modern, Cloud-friendly default), otherwise native-tls. For a custom config,
+/// use the builder's `.tls()`.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+pub(crate) fn default_url_tls() -> redis_tower_core::tls::TlsConfig {
+    #[cfg(feature = "tls-rustls")]
+    {
+        redis_tower_core::tls::TlsConfig::default_rustls()
+    }
+    #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native-tls"))]
+    {
+        redis_tower_core::tls::TlsConfig::default_native_tls()
+    }
+}
+
+/// Error for a `rediss://` URL when no TLS feature is enabled.
+#[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+pub(crate) fn tls_feature_required() -> RedisError {
+    RedisError::InvalidUrl(
+        "rediss:// requires the `tls-rustls` or `tls-native-tls` feature".to_string(),
+    )
 }
 
 /// Remap all node addresses in a topology to use a specific host.
@@ -988,6 +1138,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1005,6 +1156,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1032,6 +1184,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1060,6 +1213,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1150,6 +1304,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1174,6 +1329,7 @@ mod tests {
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
+            credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1198,6 +1354,43 @@ mod tests {
     fn builder_sets_max_redirects() {
         let builder = ClusterConnection::builder("127.0.0.1:7000").max_redirects(10);
         assert_eq!(builder.max_redirects, 10);
+    }
+
+    // -- connect_url parsing --
+
+    #[tokio::test]
+    async fn parse_cluster_url_acl_user_and_tls() {
+        let (seed, creds, tls) =
+            parse_cluster_url("rediss://alice:s3cret@cluster.example.com:7000").unwrap();
+        assert_eq!(seed, "cluster.example.com:7000");
+        assert!(tls);
+        let creds = creds.unwrap().get_credentials().await.unwrap();
+        assert_eq!(creds.username.as_deref(), Some("alice"));
+        assert_eq!(creds.password, "s3cret");
+    }
+
+    #[tokio::test]
+    async fn parse_cluster_url_password_only_is_legacy_auth() {
+        // redis://:pass@ -- the `requirepass` case: AUTH with no username.
+        let (seed, creds, tls) = parse_cluster_url("redis://:hunter2@127.0.0.1:6379").unwrap();
+        assert_eq!(seed, "127.0.0.1:6379");
+        assert!(!tls);
+        let creds = creds.unwrap().get_credentials().await.unwrap();
+        assert_eq!(creds.username, None);
+        assert_eq!(creds.password, "hunter2");
+    }
+
+    #[test]
+    fn parse_cluster_url_no_auth() {
+        let (seed, creds, tls) = parse_cluster_url("redis://127.0.0.1:6379").unwrap();
+        assert_eq!(seed, "127.0.0.1:6379");
+        assert!(creds.is_none());
+        assert!(!tls);
+    }
+
+    #[test]
+    fn parse_cluster_url_rejects_unix_socket() {
+        assert!(parse_cluster_url("unix:///tmp/redis.sock").is_err());
     }
 
     // -- redirect edge cases --
