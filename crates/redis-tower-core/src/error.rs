@@ -161,6 +161,33 @@ impl RedisError {
         matches!(self, RedisError::Redis(msg) if msg.starts_with("ASK"))
     }
 
+    /// Returns true if this is a TRYAGAIN error (cluster).
+    ///
+    /// Redis returns TRYAGAIN for a multi-key command whose keys span a slot
+    /// that is partway through migration. It is transient: retrying shortly
+    /// usually succeeds once the slot settles.
+    pub fn is_tryagain(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("TRYAGAIN"))
+    }
+
+    /// Returns true if this is a CLUSTERDOWN error (cluster).
+    ///
+    /// The cluster cannot currently serve the request -- typically a master
+    /// election window, or a hash slot that no node is serving. It is
+    /// transient: a topology refresh plus a bounded retry usually recovers.
+    pub fn is_clusterdown(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("CLUSTERDOWN"))
+    }
+
+    /// Returns true if this is a LOADING error.
+    ///
+    /// The node is still loading its dataset into memory (for example just
+    /// after a restart or a full resync). It is transient: retrying shortly,
+    /// or against another node, usually succeeds.
+    pub fn is_loading(&self) -> bool {
+        matches!(self, RedisError::Redis(msg) if msg.starts_with("LOADING"))
+    }
+
     /// Returns true if this is a BUSY error (script in progress).
     pub fn is_busy(&self) -> bool {
         matches!(self, RedisError::Redis(msg) if msg.starts_with("BUSY"))
@@ -380,6 +407,27 @@ mod tests {
     }
 
     #[test]
+    fn is_tryagain_matches() {
+        let err =
+            RedisError::Redis("TRYAGAIN Multiple keys request during rehashing of slot".into());
+        assert!(err.is_tryagain());
+        assert!(!err.is_clusterdown());
+    }
+
+    #[test]
+    fn is_clusterdown_matches() {
+        let err = RedisError::Redis("CLUSTERDOWN The cluster is down".into());
+        assert!(err.is_clusterdown());
+        assert!(!err.is_tryagain());
+    }
+
+    #[test]
+    fn is_loading_matches() {
+        let err = RedisError::Redis("LOADING Redis is loading the dataset in memory".into());
+        assert!(err.is_loading());
+    }
+
+    #[test]
     fn is_busy_matches() {
         let err =
             RedisError::Redis("BUSY Redis is busy running a script. You can only call SCRIPT KILL or SHUTDOWN NOSAVE.".into());
@@ -424,6 +472,9 @@ mod tests {
         assert!(!err.is_noscript());
         assert!(!err.is_moved());
         assert!(!err.is_ask());
+        assert!(!err.is_tryagain());
+        assert!(!err.is_clusterdown());
+        assert!(!err.is_loading());
         assert!(!err.is_busy());
         assert!(!err.is_oom());
         assert!(!err.is_readonly());

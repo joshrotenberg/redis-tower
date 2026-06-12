@@ -69,7 +69,8 @@ use tower_service::Service;
 
 use crate::connection::{
     MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect, RoundRobinRouting,
-    parse_redirect, remap_topology, remap_topology_with_map,
+    TRANSIENT_RETRY_BACKOFF, TransientError, parse_redirect, remap_topology,
+    remap_topology_with_map,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
@@ -467,6 +468,19 @@ impl MultiplexedClusterClient {
                     return cmd.parse_response(cmd_response);
                 }
                 None => {
+                    // Transient cluster errors: retry within the redirect
+                    // budget rather than surfacing on first occurrence.
+                    if let Some(transient) = TransientError::from_frame(&response) {
+                        if transient == TransientError::ClusterDown {
+                            // The cluster view may be stale; refresh
+                            // best-effort and re-route to the key's owner.
+                            let _ = self.refresh_topology().await;
+                            target = self.route_command(&cmd_frame).await?;
+                        }
+                        tracing::debug!(?transient, "transient cluster error; retrying");
+                        tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        continue;
+                    }
                     if let Frame::Error(ref e) = response {
                         return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
                     }
