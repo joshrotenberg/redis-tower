@@ -62,7 +62,6 @@ use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::credentials::CredentialProvider;
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
-use redis_tower_commands::Auth;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
@@ -72,8 +71,8 @@ use tower_service::Service;
 
 use crate::connection::{
     MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect, RoundRobinRouting,
-    TRANSIENT_RETRY_BACKOFF, TransientError, parse_redirect, remap_topology,
-    remap_topology_with_map,
+    TRANSIENT_RETRY_BACKOFF, TransientError, authenticate, parse_cluster_url, parse_redirect,
+    remap_topology, remap_topology_with_map,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
@@ -344,6 +343,33 @@ impl MultiplexedClusterClient {
             None,
         )
         .await
+    }
+
+    /// Connect to a cluster from a Redis URL.
+    ///
+    /// Parses `redis://[user:pass@]host:port` / `rediss://...`, wiring AUTH
+    /// credentials and TLS (rustls -- system roots with a webpki-roots fallback)
+    /// from the URL. See
+    /// [`ClusterConnection::connect_url`](crate::ClusterConnection::connect_url)
+    /// for the URL semantics; use [`builder`](Self::builder) for a custom TLS
+    /// config or host override.
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let (seed, credentials, tls) = parse_cluster_url(url)?;
+        let mut builder = Self::builder(seed);
+        if let Some(creds) = credentials {
+            builder = builder.credentials(creds);
+        }
+        if tls {
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            {
+                builder = builder.tls(crate::connection::default_url_tls());
+            }
+            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+            {
+                return Err(crate::connection::tls_feature_required());
+            }
+        }
+        builder.connect().await
     }
 
     /// Create a builder for configuring the client.
@@ -1098,27 +1124,6 @@ impl ConnectionFactory for NodeConnectionFactory {
 }
 
 /// Fetch credentials from the provider and send AUTH on the given connection.
-async fn authenticate(
-    conn: &mut RedisConnection,
-    provider: &dyn CredentialProvider,
-) -> Result<(), RedisError> {
-    let creds = provider.get_credentials().await?;
-    let auth_cmd = match creds.username.as_deref() {
-        Some(user) => Auth::credentials(user, &creds.password),
-        None => Auth::password(&creds.password),
-    };
-    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
-    match responses.into_iter().next() {
-        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
-        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
-        Some(other) => Err(RedisError::UnexpectedResponse {
-            expected: "OK",
-            actual: format!("{other:?}"),
-        }),
-        None => Err(RedisError::ConnectionClosed),
-    }
-}
-
 /// Send a single frame through an [`AutoPipelineService`] and await the
 /// response. Mirrors what `MultiplexedClient::execute` does internally, but
 /// stays at the frame level so the cluster routing code can reuse the same
