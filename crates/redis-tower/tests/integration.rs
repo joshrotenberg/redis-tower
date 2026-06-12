@@ -629,6 +629,49 @@ async fn pubsub_basic() {
 }
 
 #[tokio::test]
+async fn pubsub_resubscribes_after_reconnect() {
+    let channel = key("pubsub_resubscribe", "ch");
+    let pattern = format!("{channel}.*");
+
+    let sub_conn = conn().await;
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&channel]).await.unwrap();
+    pubsub.psubscribe(&[&pattern]).await.unwrap();
+    assert_eq!(pubsub.subscriptions().channels.len(), 1);
+    assert_eq!(pubsub.subscriptions().patterns.len(), 1);
+
+    // Rebuild the connection from a factory. Redis drops the subscriptions on
+    // the old (now-closed) connection; reconnect_with replays them on the new
+    // one, so delivery resumes instead of silently stopping.
+    let factory = AddrConnectionFactory::new(redis_addr().await);
+    pubsub.reconnect_with(&factory).await.unwrap();
+
+    // Publish AFTER the reconnect -- without resubscription this is lost.
+    let mut pub_conn = conn().await;
+    use redis_tower_protocol::helpers::{array, bulk};
+    pub_conn
+        .execute_pipeline(vec![array(vec![
+            bulk("PUBLISH"),
+            bulk(channel.as_str()),
+            bulk("after reconnect"),
+        ])])
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout waiting for message after reconnect")
+        .expect("stream ended")
+        .expect("parse error");
+    assert_eq!(msg.channel, channel);
+    assert_eq!(msg.payload, Bytes::from("after reconnect"));
+
+    // The subscriptions remain tracked across the reconnect.
+    assert_eq!(pubsub.subscriptions().channels.len(), 1);
+    assert_eq!(pubsub.subscriptions().patterns.len(), 1);
+}
+
+#[tokio::test]
 async fn pubsub_pattern() {
     let prefix = key("pubsub_pat", "");
     let pattern = format!("{prefix}*");
