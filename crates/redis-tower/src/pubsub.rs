@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -34,6 +34,8 @@ use tokio_util::codec::Framed;
 
 use redis_tower_core::RedisStream;
 use redis_tower_protocol::RespCodec;
+
+use crate::reconnect::ConnectionFactory;
 
 /// A message received on a pub/sub channel.
 #[derive(Debug, Clone)]
@@ -59,11 +61,77 @@ pub enum MessageKind {
     SMessage,
 }
 
+/// The subscriptions a [`PubSubConnection`] is tracking, so they can be
+/// replayed after a reconnect.
+///
+/// Redis drops every subscription when the connection is lost, so a pub/sub
+/// consumer that reconnects must re-issue them or it silently stops receiving
+/// messages. [`PubSubConnection`] records each confirmed subscription here and
+/// replays them via [`PubSubConnection::resubscribe`] and
+/// [`PubSubConnection::reconnect_with`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subscriptions {
+    /// Channels from `SUBSCRIBE`.
+    pub channels: BTreeSet<String>,
+    /// Patterns from `PSUBSCRIBE`.
+    pub patterns: BTreeSet<String>,
+    /// Shard channels from `SSUBSCRIBE`.
+    pub shard_channels: BTreeSet<String>,
+}
+
+impl Subscriptions {
+    /// True when nothing is subscribed.
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty() && self.patterns.is_empty() && self.shard_channels.is_empty()
+    }
+
+    /// The command frames that re-establish every tracked subscription: one
+    /// each of `SUBSCRIBE` / `PSUBSCRIBE` / `SSUBSCRIBE` for the non-empty
+    /// sets, in that order.
+    pub fn replay_frames(&self) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        for (cmd, set) in [
+            ("SUBSCRIBE", &self.channels),
+            ("PSUBSCRIBE", &self.patterns),
+            ("SSUBSCRIBE", &self.shard_channels),
+        ] {
+            if !set.is_empty() {
+                let mut args = vec![bulk(cmd)];
+                args.extend(set.iter().map(|s| bulk(s.as_str())));
+                frames.push(array(args));
+            }
+        }
+        frames
+    }
+
+    /// Add subscription names (channels/patterns/shard channels) to `set`.
+    fn add(set: &mut BTreeSet<String>, names: &[&str]) {
+        set.extend(names.iter().map(|n| n.to_string()));
+    }
+
+    /// Remove subscription names from `set`. An empty `names` clears the whole
+    /// set, mirroring Redis `UNSUBSCRIBE`/`PUNSUBSCRIBE`/`SUNSUBSCRIBE` with no
+    /// arguments (unsubscribe from everything of that kind).
+    fn remove(set: &mut BTreeSet<String>, names: &[&str]) {
+        if names.is_empty() {
+            set.clear();
+        } else {
+            for n in names {
+                set.remove(*n);
+            }
+        }
+    }
+}
+
 /// A Redis connection in pub/sub mode.
 ///
 /// Consumes a [`RedisConnection`] and provides an async [`Stream`] of
 /// [`PubSubMessage`] values. Once in pub/sub mode, the connection can
 /// only subscribe/unsubscribe and receive messages.
+///
+/// Active subscriptions are tracked and can be replayed after a connection
+/// drop via [`reconnect_with`](Self::reconnect_with), so a blip does not
+/// silently end message delivery.
 ///
 /// # Example
 ///
@@ -86,6 +154,8 @@ pub struct PubSubConnection {
     /// This prevents confirmations from one subscribe call being silently
     /// consumed by another's confirmation loop.
     buffered_frames: VecDeque<Frame>,
+    /// Active subscriptions, tracked so they can be replayed after a reconnect.
+    subs: Subscriptions,
 }
 
 impl PubSubConnection {
@@ -98,35 +168,43 @@ impl PubSubConnection {
         Ok(Self {
             framed,
             buffered_frames: VecDeque::new(),
+            subs: Subscriptions::default(),
         })
+    }
+
+    /// Send a subscribe-family command and await its confirmations, without
+    /// touching the tracked set.
+    async fn send_subscribe(
+        &mut self,
+        cmd: &str,
+        names: &[&str],
+        kind: &str,
+    ) -> Result<(), RedisError> {
+        let mut args = vec![bulk(cmd)];
+        for n in names {
+            args.push(bulk(*n));
+        }
+        self.framed
+            .send(array(args))
+            .await
+            .map_err(RedisError::from)?;
+        self.await_confirmations(names, kind).await
     }
 
     /// Subscribe to one or more channels.
     pub async fn subscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("SUBSCRIBE")];
-        for ch in channels {
-            args.push(bulk(*ch));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        self.await_confirmations(channels, "subscribe").await
+        self.send_subscribe("SUBSCRIBE", channels, "subscribe")
+            .await?;
+        Subscriptions::add(&mut self.subs.channels, channels);
+        Ok(())
     }
 
     /// Subscribe to one or more patterns.
     pub async fn psubscribe(&mut self, patterns: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("PSUBSCRIBE")];
-        for pat in patterns {
-            args.push(bulk(*pat));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        self.await_confirmations(patterns, "psubscribe").await
+        self.send_subscribe("PSUBSCRIBE", patterns, "psubscribe")
+            .await?;
+        Subscriptions::add(&mut self.subs.patterns, patterns);
+        Ok(())
     }
 
     /// Unsubscribe from one or more channels.
@@ -168,21 +246,16 @@ impl PubSubConnection {
             }
         }
 
+        Subscriptions::remove(&mut self.subs.channels, channels);
         Ok(())
     }
 
     /// Subscribe to one or more shard channels.
     pub async fn ssubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("SSUBSCRIBE")];
-        for ch in channels {
-            args.push(bulk(*ch));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        self.await_confirmations(channels, "ssubscribe").await
+        self.send_subscribe("SSUBSCRIBE", channels, "ssubscribe")
+            .await?;
+        Subscriptions::add(&mut self.subs.shard_channels, channels);
+        Ok(())
     }
 
     /// Unsubscribe from one or more shard channels.
@@ -221,6 +294,7 @@ impl PubSubConnection {
             }
         }
 
+        Subscriptions::remove(&mut self.subs.shard_channels, channels);
         Ok(())
     }
 
@@ -258,7 +332,60 @@ impl PubSubConnection {
             }
         }
 
+        Subscriptions::remove(&mut self.subs.patterns, patterns);
         Ok(())
+    }
+
+    /// The subscriptions currently tracked on this connection.
+    ///
+    /// These are replayed by [`resubscribe`](Self::resubscribe) and
+    /// [`reconnect_with`](Self::reconnect_with).
+    pub fn subscriptions(&self) -> &Subscriptions {
+        &self.subs
+    }
+
+    /// Re-issue every tracked subscription over the current connection.
+    ///
+    /// Redis drops all subscriptions on disconnect, so call this after
+    /// replacing the underlying connection to restore message delivery. It is
+    /// a no-op when nothing is subscribed. The tracked set is unchanged.
+    pub async fn resubscribe(&mut self) -> Result<(), RedisError> {
+        // Snapshot to release the borrow on `self.subs` before sending.
+        let channels: Vec<String> = self.subs.channels.iter().cloned().collect();
+        let patterns: Vec<String> = self.subs.patterns.iter().cloned().collect();
+        let shard: Vec<String> = self.subs.shard_channels.iter().cloned().collect();
+
+        if !channels.is_empty() {
+            let refs: Vec<&str> = channels.iter().map(String::as_str).collect();
+            self.send_subscribe("SUBSCRIBE", &refs, "subscribe").await?;
+        }
+        if !patterns.is_empty() {
+            let refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+            self.send_subscribe("PSUBSCRIBE", &refs, "psubscribe")
+                .await?;
+        }
+        if !shard.is_empty() {
+            let refs: Vec<&str> = shard.iter().map(String::as_str).collect();
+            self.send_subscribe("SSUBSCRIBE", &refs, "ssubscribe")
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Rebuild the underlying connection from `factory` and replay all tracked
+    /// subscriptions.
+    ///
+    /// Use this when the pub/sub stream reports a connection error: instead of
+    /// silently going quiet, the connection is re-established and every
+    /// subscription is restored, so message delivery resumes.
+    pub async fn reconnect_with(
+        &mut self,
+        factory: &dyn ConnectionFactory,
+    ) -> Result<(), RedisError> {
+        let conn = factory.connect().await?;
+        self.framed = conn.into_framed()?;
+        self.buffered_frames.clear();
+        self.resubscribe().await
     }
 
     /// Read the next frame, draining the buffer first.
@@ -563,5 +690,68 @@ mod tests {
     fn is_unsub_complete_returns_false_for_nonzero_count() {
         let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(2)]);
         assert!(!PubSubConnection::is_unsub_complete(&frame));
+    }
+
+    // -- subscription tracking (replayed on reconnect) --
+
+    #[test]
+    fn subscriptions_add_accumulates_each_kind() {
+        let mut subs = Subscriptions::default();
+        assert!(subs.is_empty());
+        Subscriptions::add(&mut subs.channels, &["a", "b"]);
+        Subscriptions::add(&mut subs.patterns, &["p.*"]);
+        Subscriptions::add(&mut subs.shard_channels, &["s"]);
+        Subscriptions::add(&mut subs.channels, &["b", "c"]); // dedups b
+        assert!(!subs.is_empty());
+        assert_eq!(
+            subs.channels.iter().cloned().collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(subs.patterns.len(), 1);
+        assert_eq!(subs.shard_channels.len(), 1);
+    }
+
+    #[test]
+    fn subscriptions_remove_named_leaves_the_rest() {
+        let mut subs = Subscriptions::default();
+        Subscriptions::add(&mut subs.channels, &["a", "b", "c"]);
+        Subscriptions::remove(&mut subs.channels, &["b"]);
+        assert_eq!(
+            subs.channels.iter().cloned().collect::<Vec<_>>(),
+            vec!["a", "c"]
+        );
+    }
+
+    #[test]
+    fn subscriptions_remove_empty_clears_that_kind_only() {
+        // UNSUBSCRIBE with no args clears all channels but not patterns/shards.
+        let mut subs = Subscriptions::default();
+        Subscriptions::add(&mut subs.channels, &["a", "b"]);
+        Subscriptions::add(&mut subs.patterns, &["p.*"]);
+        Subscriptions::remove(&mut subs.channels, &[]);
+        assert!(subs.channels.is_empty());
+        assert_eq!(subs.patterns.len(), 1);
+        assert!(!subs.is_empty());
+    }
+
+    #[test]
+    fn replay_frames_emits_one_command_per_nonempty_kind() {
+        let mut subs = Subscriptions::default();
+        Subscriptions::add(&mut subs.channels, &["c1", "c2"]);
+        Subscriptions::add(&mut subs.shard_channels, &["s1"]);
+        // No patterns -> no PSUBSCRIBE frame.
+        let frames = subs.replay_frames();
+        assert_eq!(
+            frames,
+            vec![
+                array(vec![bulk("SUBSCRIBE"), bulk("c1"), bulk("c2")]),
+                array(vec![bulk("SSUBSCRIBE"), bulk("s1")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_frames_is_empty_when_nothing_subscribed() {
+        assert!(Subscriptions::default().replay_frames().is_empty());
     }
 }
