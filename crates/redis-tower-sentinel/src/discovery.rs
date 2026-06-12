@@ -203,10 +203,121 @@ fn extract_bulk_string(frame: &Frame) -> Result<String, RedisError> {
     }
 }
 
+/// True if a `ROLE` reply indicates the connected node is a master.
+///
+/// `ROLE` returns an array whose first element is the role name -- `master`,
+/// `slave`, or `sentinel`. Sentinel's view of which node is the master can lag
+/// a real failover, so after (re)connecting to the address it reports, callers
+/// confirm the node actually reports `master` before trusting it for writes --
+/// otherwise they rebind to the demoted replica and keep getting READONLY.
+pub(crate) fn role_reports_master(frame: &Frame) -> bool {
+    let Frame::Array(Some(items)) = frame else {
+        return false;
+    };
+    match items.first() {
+        Some(Frame::BulkString(Some(b))) => b.eq_ignore_ascii_case(b"master"),
+        Some(Frame::SimpleString(b)) => b.eq_ignore_ascii_case(b"master"),
+        _ => false,
+    }
+}
+
+/// Issue `ROLE` on `conn` and report whether the node is currently a master.
+pub(crate) async fn connection_is_master(conn: &mut RedisConnection) -> Result<bool, RedisError> {
+    let responses = conn
+        .execute_pipeline(vec![array(vec![bulk("ROLE")])])
+        .await?;
+    let frame = responses
+        .into_iter()
+        .next()
+        .ok_or(RedisError::ConnectionClosed)?;
+    Ok(role_reports_master(&frame))
+}
+
+/// Discover the master via sentinel, connect to it, and verify it actually
+/// reports the master role -- retrying with exponential backoff while
+/// sentinel's view lags a failover (or returns the just-demoted old master).
+///
+/// Returns the verified connection and the master's `"host:port"` address.
+pub(crate) async fn connect_verified_master(
+    sentinel_addrs: &[String],
+    master_name: &str,
+) -> Result<(RedisConnection, String), RedisError> {
+    const MAX_ATTEMPTS: u32 = 5;
+    const BASE_BACKOFF: Duration = Duration::from_millis(100);
+
+    let mut last_err: Option<RedisError> = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(BASE_BACKOFF * 2u32.pow(attempt - 1)).await;
+        }
+
+        let master_addr = match discover_master(sentinel_addrs, master_name).await {
+            Ok(addr) => addr,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        let mut conn = match RedisConnection::connect(&master_addr).await {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match connection_is_master(&mut conn).await {
+            Ok(true) => return Ok((conn, master_addr)),
+            Ok(false) => {
+                tracing::warn!(
+                    addr = %master_addr,
+                    master_name,
+                    attempt,
+                    "sentinel: discovered node is not yet a master, retrying"
+                );
+                last_err = Some(RedisError::Redis(format!(
+                    "sentinel returned {master_addr} but it does not report the master role"
+                )));
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+
+    Err(last_err
+        .unwrap_or_else(|| RedisError::Redis("sentinel master discovery exhausted".to_string())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[test]
+    fn role_reports_master_detects_master() {
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("master"))),
+            Frame::Integer(12345),
+        ]));
+        assert!(role_reports_master(&frame));
+    }
+
+    #[test]
+    fn role_reports_master_rejects_replica() {
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("slave"))),
+            Frame::BulkString(Some(Bytes::from("127.0.0.1"))),
+        ]));
+        assert!(!role_reports_master(&frame));
+    }
+
+    #[test]
+    fn role_reports_master_is_case_insensitive_and_handles_garbage() {
+        assert!(role_reports_master(&Frame::Array(Some(vec![
+            Frame::SimpleString(Bytes::from("MASTER"))
+        ]))));
+        assert!(!role_reports_master(&Frame::Null));
+        assert!(!role_reports_master(&Frame::Array(Some(vec![]))));
+        assert!(!role_reports_master(&Frame::Array(None)));
+    }
 
     #[test]
     fn parse_master_addr() {
