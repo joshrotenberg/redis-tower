@@ -2,8 +2,10 @@
 //!
 //! Wraps a `Service<Frame, Response=Frame>` and caches responses for
 //! cacheable read commands. Receives invalidation messages via a channel.
+//!
+//! Cache keying and invalidation are shared with
+//! [`CachedClient`](crate::caching::CachedClient) so the two never diverge.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,6 +14,8 @@ use std::task::{Context, Poll};
 use redis_tower_core::{Frame, RedisError};
 use tokio::sync::RwLock;
 use tower_service::Service;
+
+use crate::cache_state::{CacheState, extract_cache_entry, parse_invalidation};
 
 /// Configuration for the [`CacheService`] layer.
 ///
@@ -27,7 +31,8 @@ pub struct CacheConfig {
 /// Tower `Service` that caches Frame responses for cacheable read commands.
 ///
 /// Caches responses for GET, HGET, HGETALL, LRANGE, SMEMBERS, ZRANGE,
-/// TYPE, and TTL. Write commands bypass the cache entirely.
+/// TYPE, and TTL. Write commands bypass the cache entirely. Entries are keyed
+/// by the full command argument vector, so distinct arguments never collide.
 ///
 /// Sits between [`CommandAdapter`](crate::CommandAdapter) and
 /// [`FrameService`](crate::FrameService) in the service stack:
@@ -41,7 +46,7 @@ pub struct CacheConfig {
 /// use [`spawn_invalidation_task`] with a push message stream.
 pub struct CacheService<S> {
     inner: S,
-    cache: Arc<RwLock<HashMap<String, Frame>>>,
+    cache: Arc<RwLock<CacheState>>,
     config: CacheConfig,
 }
 
@@ -50,17 +55,13 @@ impl<S> CacheService<S> {
     pub fn new(inner: S, config: CacheConfig) -> Self {
         Self {
             inner,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(CacheState::default())),
             config,
         }
     }
 
     /// Create with an existing shared cache (for invalidation integration).
-    pub fn with_cache(
-        inner: S,
-        cache: Arc<RwLock<HashMap<String, Frame>>>,
-        config: CacheConfig,
-    ) -> Self {
+    pub fn with_cache(inner: S, cache: Arc<RwLock<CacheState>>, config: CacheConfig) -> Self {
         Self {
             inner,
             cache,
@@ -69,7 +70,7 @@ impl<S> CacheService<S> {
     }
 
     /// Get a reference to the shared cache for invalidation wiring.
-    pub fn cache(&self) -> &Arc<RwLock<HashMap<String, Frame>>> {
+    pub fn cache(&self) -> &Arc<RwLock<CacheState>> {
         &self.cache
     }
 
@@ -93,17 +94,12 @@ where
     }
 
     fn call(&mut self, request: Frame) -> Self::Future {
-        let cache_key = extract_cache_key(&request);
+        let entry = extract_cache_entry(&request);
 
-        if let Some(ref key) = cache_key {
-            let cache = Arc::clone(&self.cache);
-            let key_clone = key.clone();
-
-            // Try cache lookup.
-            // We can't await inside call(), so we need to check synchronously
-            // or defer to the future. Use try_lock for non-blocking check.
-            if let Ok(guard) = cache.try_read()
-                && let Some(cached) = guard.get(&key_clone)
+        if let Some((ref cache_key, _)) = entry {
+            // Non-blocking cache check; we can't await inside call().
+            if let Ok(guard) = self.cache.try_read()
+                && let Some(cached) = guard.get(cache_key)
             {
                 let result = cached.clone();
                 return Box::pin(async move { Ok(result) });
@@ -118,19 +114,11 @@ where
         Box::pin(async move {
             let response = future.await?;
 
-            // Cache the response if this was a cacheable command.
-            if let Some(key) = cache_key
+            if let Some((cache_key, redis_key)) = entry
                 && !matches!(response, Frame::Error(_))
             {
                 let mut guard = cache.write().await;
-                // Evict oldest if at capacity (simple eviction -- not LRU).
-                if max_size > 0
-                    && guard.len() >= max_size
-                    && let Some(first_key) = guard.keys().next().cloned()
-                {
-                    guard.remove(&first_key);
-                }
-                guard.insert(key, response.clone());
+                guard.insert(cache_key, redis_key, response.clone(), max_size);
             }
 
             Ok(response)
@@ -144,7 +132,7 @@ where
 /// Returns the `JoinHandle` for the task. The task runs until the
 /// receiver is closed (tracking connection dropped).
 pub fn spawn_invalidation_task(
-    cache: Arc<RwLock<HashMap<String, Frame>>>,
+    cache: Arc<RwLock<CacheState>>,
     mut push_rx: impl futures::Stream<Item = Result<Frame, redis_tower_protocol::ProtocolError>>
     + Unpin
     + Send
@@ -159,7 +147,7 @@ pub fn spawn_invalidation_task(
                     c.clear();
                 } else {
                     for key in &keys {
-                        c.retain(|cache_key, _| !cache_key.ends_with(&format!(":{key}")));
+                        c.invalidate(key);
                     }
                 }
             }
@@ -167,109 +155,10 @@ pub fn spawn_invalidation_task(
     })
 }
 
-/// Extract a cache key from a command frame.
-fn extract_cache_key(frame: &Frame) -> Option<String> {
-    let items = match frame {
-        Frame::Array(Some(items)) if items.len() >= 2 => items,
-        _ => return None,
-    };
-
-    let cmd_name = match &items[0] {
-        Frame::BulkString(Some(b)) => b.as_ref(),
-        _ => return None,
-    };
-
-    let upper: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_uppercase()).collect();
-
-    let cacheable = matches!(
-        upper.as_slice(),
-        b"GET" | b"HGET" | b"HGETALL" | b"LRANGE" | b"SMEMBERS" | b"ZRANGE" | b"TYPE" | b"TTL"
-    );
-
-    if !cacheable {
-        return None;
-    }
-
-    let key = match &items[1] {
-        Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => return None,
-    };
-
-    Some(format!("{}:{}", String::from_utf8_lossy(&upper), key))
-}
-
-/// Parse an invalidation push message.
-fn parse_invalidation(frame: &Frame) -> Option<Vec<String>> {
-    let items = match frame {
-        Frame::Push(items) if items.len() >= 2 => items,
-        Frame::Array(Some(items)) if items.len() >= 2 => items,
-        _ => return None,
-    };
-
-    match &items[0] {
-        Frame::BulkString(Some(b)) if b.as_ref() == b"invalidate" => {}
-        _ => return None,
-    }
-
-    match &items[1] {
-        Frame::Array(Some(keys)) => {
-            let mut result = Vec::new();
-            for key in keys {
-                if let Frame::BulkString(Some(b)) = key {
-                    result.push(String::from_utf8_lossy(b).into_owned());
-                }
-            }
-            Some(result)
-        }
-        Frame::Null | Frame::Array(None) => Some(Vec::new()),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
-
-    #[test]
-    fn cache_key_get() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("GET"))),
-            Frame::BulkString(Some(Bytes::from("mykey"))),
-        ]));
-        assert_eq!(extract_cache_key(&frame), Some("GET:mykey".to_string()));
-    }
-
-    #[test]
-    fn cache_key_set_not_cached() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("SET"))),
-            Frame::BulkString(Some(Bytes::from("mykey"))),
-            Frame::BulkString(Some(Bytes::from("val"))),
-        ]));
-        assert_eq!(extract_cache_key(&frame), None);
-    }
-
-    #[test]
-    fn invalidation_single() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from("k")))])),
-        ]);
-        assert_eq!(parse_invalidation(&frame), Some(vec!["k".to_string()]));
-    }
-
-    #[test]
-    fn invalidation_flush() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Null,
-        ]);
-        assert_eq!(parse_invalidation(&frame), Some(vec![]));
-    }
-
-    // -- behavioral tests with a mock inner Frame service --
-
     use std::sync::Mutex;
 
     /// A `Service<Frame>` that counts how many times `call` is invoked and

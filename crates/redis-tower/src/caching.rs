@@ -4,6 +4,9 @@
 //! push messages via CLIENT TRACKING BCAST. The tracking connection runs
 //! a background reader that processes invalidation pushes as they arrive.
 //!
+//! Cache keying and invalidation are shared with the Tower
+//! [`CacheService`](crate::cache_layer::CacheService) so the two never diverge.
+//!
 //! # Example
 //!
 //! ```ignore
@@ -19,13 +22,14 @@
 //! let val = client.execute(Get::new("key")).await?;
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use redis_tower_commands::ClientTracking;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use tokio::sync::Mutex;
+
+use crate::cache_state::{CacheState, extract_cache_entry, parse_invalidation};
 
 /// A Redis client with local caching and automatic invalidation.
 ///
@@ -34,6 +38,10 @@ use tokio::sync::Mutex;
 /// Cacheable read commands (GET, HGET, HGETALL, etc.) are served from
 /// the local cache when available, and invalidated automatically when
 /// the server notifies that keys have changed.
+///
+/// Cache keys are the full command argument vector, so `HGET h f1` and
+/// `HGET h f2` are distinct entries; invalidation of a Redis key evicts every
+/// cached variant that reads it.
 ///
 /// # Example
 ///
@@ -51,7 +59,7 @@ use tokio::sync::Mutex;
 /// ```
 pub struct CachedClient {
     conn: RedisConnection,
-    cache: Arc<Mutex<HashMap<String, Frame>>>,
+    cache: Arc<Mutex<CacheState>>,
     _reader_task: tokio::task::JoinHandle<()>,
 }
 
@@ -72,7 +80,7 @@ impl CachedClient {
         // Take ownership of the tracking connection's framed stream.
         let tracking_framed = tracking_conn.into_framed()?;
 
-        let cache: Arc<Mutex<HashMap<String, Frame>>> = Arc::new(Mutex::new(HashMap::new()));
+        let cache: Arc<Mutex<CacheState>> = Arc::new(Mutex::new(CacheState::default()));
         let cache_for_task = Arc::clone(&cache);
 
         // Background reader: reads from the tracking connection and
@@ -86,7 +94,7 @@ impl CachedClient {
                         c.clear();
                     } else {
                         for key in &keys {
-                            c.retain(|cache_key, _| !cache_key.ends_with(&format!(":{key}")));
+                            c.invalidate(key);
                         }
                     }
                 }
@@ -104,7 +112,7 @@ impl CachedClient {
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let frame = cmd.to_frame();
 
-        if let Some(cache_key) = extract_cache_key(&frame) {
+        if let Some((cache_key, redis_key)) = extract_cache_entry(&frame) {
             // Check cache.
             {
                 let cache = self.cache.lock().await;
@@ -124,10 +132,10 @@ impl CachedClient {
                 return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
             }
 
-            // Store in cache.
+            // Store in cache (unbounded; the layer-based cache bounds size).
             {
                 let mut cache = self.cache.lock().await;
-                cache.insert(cache_key, response.clone());
+                cache.insert(cache_key, redis_key, response.clone(), 0);
             }
 
             cmd.parse_response(response)
@@ -145,153 +153,5 @@ impl CachedClient {
     /// Clear the local cache.
     pub async fn clear_cache(&self) {
         self.cache.lock().await.clear();
-    }
-}
-
-/// Parse an invalidation push message.
-///
-/// Handles both `Push` (RESP3) and `Array` (REDIRECT) frames.
-fn parse_invalidation(frame: &Frame) -> Option<Vec<String>> {
-    let items = match frame {
-        Frame::Push(items) if items.len() >= 2 => items,
-        Frame::Array(Some(items)) if items.len() >= 2 => items,
-        _ => return None,
-    };
-
-    match &items[0] {
-        Frame::BulkString(Some(b)) if b.as_ref() == b"invalidate" => {}
-        _ => return None,
-    }
-
-    match &items[1] {
-        Frame::Array(Some(keys)) => {
-            let mut result = Vec::new();
-            for key in keys {
-                if let Frame::BulkString(Some(b)) = key {
-                    result.push(String::from_utf8_lossy(b).into_owned());
-                }
-            }
-            Some(result)
-        }
-        Frame::Null | Frame::Array(None) => Some(Vec::new()),
-        _ => None,
-    }
-}
-
-/// Extract a cache key from a command frame for cacheable reads.
-fn extract_cache_key(frame: &Frame) -> Option<String> {
-    let items = match frame {
-        Frame::Array(Some(items)) if items.len() >= 2 => items,
-        _ => return None,
-    };
-
-    let cmd_name = match &items[0] {
-        Frame::BulkString(Some(b)) => b.as_ref(),
-        _ => return None,
-    };
-
-    let upper: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_uppercase()).collect();
-
-    let cacheable = matches!(
-        upper.as_slice(),
-        b"GET" | b"HGET" | b"HGETALL" | b"LRANGE" | b"SMEMBERS" | b"ZRANGE" | b"TYPE" | b"TTL"
-    );
-
-    if !cacheable {
-        return None;
-    }
-
-    let key = match &items[1] {
-        Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
-        _ => return None,
-    };
-
-    Some(format!("{}:{}", String::from_utf8_lossy(&upper), key))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use bytes::Bytes;
-
-    #[test]
-    fn parse_invalidation_single_key() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from("mykey")))])),
-        ]);
-        let keys = parse_invalidation(&frame).unwrap();
-        assert_eq!(keys, vec!["mykey"]);
-    }
-
-    #[test]
-    fn parse_invalidation_multiple_keys() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Array(Some(vec![
-                Frame::BulkString(Some(Bytes::from("key1"))),
-                Frame::BulkString(Some(Bytes::from("key2"))),
-            ])),
-        ]);
-        let keys = parse_invalidation(&frame).unwrap();
-        assert_eq!(keys, vec!["key1", "key2"]);
-    }
-
-    #[test]
-    fn parse_invalidation_as_array() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from("mykey")))])),
-        ]));
-        let keys = parse_invalidation(&frame).unwrap();
-        assert_eq!(keys, vec!["mykey"]);
-    }
-
-    #[test]
-    fn parse_invalidation_flush_all() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("invalidate"))),
-            Frame::Null,
-        ]);
-        let keys = parse_invalidation(&frame).unwrap();
-        assert!(keys.is_empty());
-    }
-
-    #[test]
-    fn parse_invalidation_not_invalidate() {
-        let frame = Frame::Push(vec![
-            Frame::BulkString(Some(Bytes::from("other"))),
-            Frame::Null,
-        ]);
-        assert!(parse_invalidation(&frame).is_none());
-    }
-
-    #[test]
-    fn cache_key_for_get() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("GET"))),
-            Frame::BulkString(Some(Bytes::from("mykey"))),
-        ]));
-        assert_eq!(extract_cache_key(&frame), Some("GET:mykey".to_string()));
-    }
-
-    #[test]
-    fn cache_key_for_set_is_none() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("SET"))),
-            Frame::BulkString(Some(Bytes::from("mykey"))),
-            Frame::BulkString(Some(Bytes::from("value"))),
-        ]));
-        assert_eq!(extract_cache_key(&frame), None);
-    }
-
-    #[test]
-    fn cache_key_for_hget() {
-        let frame = Frame::Array(Some(vec![
-            Frame::BulkString(Some(Bytes::from("HGET"))),
-            Frame::BulkString(Some(Bytes::from("hash"))),
-            Frame::BulkString(Some(Bytes::from("field"))),
-        ]));
-        assert_eq!(extract_cache_key(&frame), Some("HGET:hash".to_string()));
     }
 }
