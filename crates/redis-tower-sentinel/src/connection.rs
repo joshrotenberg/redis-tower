@@ -90,38 +90,54 @@ impl SentinelConnection {
 
         let result = self.conn.execute(cmd).await;
         if let Err(ref e) = result
-            && e.is_connection_error()
+            && (e.is_connection_error() || e.is_readonly())
         {
+            // Two failover modes trigger rediscovery:
+            //   - connection error: the master became unreachable.
+            //   - READONLY: the master was demoted to a replica (REPLICAOF)
+            //     with TCP intact, so writes now fail with READONLY. Without
+            //     this the client wedges on the demoted node forever.
             tracing::warn!(
                 error = %e,
                 master_name = %self.master_name,
-                "sentinel: connection error, rediscovering master"
+                "sentinel: master unreachable or demoted, rediscovering"
             );
-            // Failover may have occurred. Eagerly rediscover the new master
-            // so the next execute() call connects immediately without an
-            // additional rediscovery round-trip. The current command cannot
-            // be retried here because it has been consumed; the caller should
-            // retry if appropriate. If rediscovery fails, fall back to the
-            // deferred path so the next call tries again.
+            // Eagerly rediscover the new master so the next execute() call
+            // connects immediately. The current command cannot be retried here
+            // because it has been consumed; the caller should retry if
+            // appropriate. If rediscovery fails, fall back to the deferred path
+            // so the next call tries again.
             self.needs_rediscovery = self.rediscover().await.is_err();
         }
         result
     }
 
     /// Force rediscovery of the master and reconnect.
+    ///
+    /// Sentinel's view of the master can lag a failover, so each candidate is
+    /// verified with `ROLE` before it is trusted: if the node still reports
+    /// `slave` (the failover has not fully propagated, or we got the demoted
+    /// old master back), the attempt is retried with exponential backoff until
+    /// a real master is found or the attempt budget is exhausted.
     pub async fn rediscover(&mut self) -> Result<(), RedisError> {
-        let master_addr =
-            discovery::discover_master(&self.sentinel_addrs, &self.master_name).await?;
-        tracing::info!(
-            old_addr = %self.current_addr,
-            new_addr = %master_addr,
-            master_name = %self.master_name,
-            "sentinel: master rediscovered"
-        );
-        self.conn = RedisConnection::connect(&master_addr).await?;
-        self.current_addr = master_addr;
-        self.needs_rediscovery = false;
-        Ok(())
+        match discovery::connect_verified_master(&self.sentinel_addrs, &self.master_name).await {
+            Ok((conn, master_addr)) => {
+                tracing::info!(
+                    old_addr = %self.current_addr,
+                    new_addr = %master_addr,
+                    master_name = %self.master_name,
+                    "sentinel: master rediscovered"
+                );
+                self.conn = conn;
+                self.current_addr = master_addr;
+                self.needs_rediscovery = false;
+                Ok(())
+            }
+            Err(e) => {
+                self.needs_rediscovery = true;
+                Err(e)
+            }
+        }
     }
 
     /// Get the sentinel addresses.

@@ -105,13 +105,23 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
             let addrs = addrs.clone();
             let name = name.clone();
             async move {
-                let master_addr = discovery::discover_master(&addrs, &name).await?;
-                RedisConnection::connect(&master_addr).await
+                // Verify ROLE so a reconnect lands on a real master, not a
+                // demoted replica that sentinel still reports during a failover.
+                let (conn, _addr) = discovery::connect_verified_master(&addrs, &name).await?;
+                Ok(conn)
             }
+        };
+        // Enable READONLY-triggered reconnect: if the master is demoted to a
+        // replica with TCP intact, writes return READONLY (not a connection
+        // error), and the worker must rebuild via the factory to find the new
+        // master instead of wedging on the demoted node.
+        let config = AutoPipelineConfig {
+            reconnect_on_readonly: true,
+            ..AutoPipelineConfig::default()
         };
         let svc = AutoPipelineService::with_factory(
             factory,
-            AutoPipelineConfig::default(),
+            config,
             AutoPipelineReconnectConfig::default(),
         )
         .await?;

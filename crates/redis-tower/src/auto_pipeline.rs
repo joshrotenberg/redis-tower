@@ -96,6 +96,19 @@ pub struct AutoPipelineConfig {
     ///
     /// Default: `None`.
     pub metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    /// Treat a `READONLY` reply as a signal that the connection points at a
+    /// replica and the worker should reconnect via its factory.
+    ///
+    /// Off by default. A factory-backed Sentinel client enables this: when a
+    /// master is demoted to a replica (`REPLICAOF`) with TCP intact, writes
+    /// come back `READONLY` rather than as a connection error, so without this
+    /// the worker would keep serving the demoted node forever. With it on, the
+    /// caller still receives the `READONLY` error for the current command and
+    /// the worker reconnects (re-querying Sentinel) so the next batch lands on
+    /// the new master. Standalone and cluster clients leave this off.
+    ///
+    /// Default: `false`.
+    pub reconnect_on_readonly: bool,
 }
 
 impl std::fmt::Debug for AutoPipelineConfig {
@@ -110,6 +123,7 @@ impl std::fmt::Debug for AutoPipelineConfig {
                 "metrics_recorder",
                 &self.metrics_recorder.as_ref().map(|_| "<recorder>"),
             )
+            .field("reconnect_on_readonly", &self.reconnect_on_readonly)
             .finish()
     }
 }
@@ -123,6 +137,7 @@ impl Default for AutoPipelineConfig {
             shed_load_on_full: false,
             response_timeout: None,
             metrics_recorder: None,
+            reconnect_on_readonly: false,
         }
     }
 }
@@ -441,6 +456,7 @@ async fn pipeline_worker(
                             batch,
                             config.response_timeout,
                             config.metrics_recorder.as_ref(),
+                            config.reconnect_on_readonly,
                         )
                         .await;
                         return;
@@ -455,6 +471,7 @@ async fn pipeline_worker(
             batch,
             config.response_timeout,
             config.metrics_recorder.as_ref(),
+            config.reconnect_on_readonly,
         )
         .await
         .is_err()
@@ -489,6 +506,12 @@ async fn pipeline_worker(
     }
 }
 
+/// True if `frame` is a `READONLY` error reply (write attempted against a
+/// replica). Used to detect a demoted Sentinel master.
+fn is_readonly_frame(frame: &Frame) -> bool {
+    matches!(frame, Frame::Error(e) if e.len() >= 8 && e[..8].eq_ignore_ascii_case(b"READONLY"))
+}
+
 /// Send a batch of requests as a pipeline and route responses back.
 ///
 /// Frames from all requests are flattened into a single `execute_pipeline`
@@ -510,6 +533,7 @@ async fn flush_batch(
     batch: Vec<WorkerRequest>,
     response_timeout: Option<Duration>,
     recorder: Option<&Arc<dyn MetricsRecorder>>,
+    reconnect_on_readonly: bool,
 ) -> Result<(), ()> {
     // Owned single-pass: move frames out of each request directly into the
     // pipeline vec, and collect response senders into a parallel `responders`
@@ -574,6 +598,12 @@ async fn flush_batch(
     };
     match exec_result {
         Ok(responses) => {
+            // A READONLY reply means the connection points at a replica (e.g. a
+            // Sentinel master demoted via REPLICAOF). Detect it before routing
+            // so the caller still gets the error, then signal the worker to
+            // reconnect via the factory onto a real master.
+            let saw_readonly = reconnect_on_readonly && responses.iter().any(is_readonly_frame);
+
             let mut iter = responses.into_iter();
             for responder in responders {
                 match responder {
@@ -590,7 +620,7 @@ async fn flush_batch(
                     }
                 }
             }
-            Ok(())
+            if saw_readonly { Err(()) } else { Ok(()) }
         }
         Err(_) => {
             for responder in responders {
@@ -749,12 +779,32 @@ mod tests {
             shed_load_on_full: true,
             response_timeout: Some(Duration::from_millis(250)),
             metrics_recorder: None,
+            reconnect_on_readonly: false,
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
         assert_eq!(config.queue_capacity, 512);
         assert!(config.shed_load_on_full);
         assert_eq!(config.response_timeout, Some(Duration::from_millis(250)));
+        assert!(!config.reconnect_on_readonly);
+    }
+
+    #[test]
+    fn is_readonly_frame_detects_readonly_errors_only() {
+        use bytes::Bytes;
+        assert!(is_readonly_frame(&Frame::Error(Bytes::from(
+            "READONLY You can't write against a read only replica."
+        ))));
+        // Case-insensitive on the prefix.
+        assert!(is_readonly_frame(&Frame::Error(Bytes::from(
+            "readonly nope"
+        ))));
+        // Other errors and non-error frames are not READONLY.
+        assert!(!is_readonly_frame(&Frame::Error(Bytes::from(
+            "WRONGTYPE Operation against a key"
+        ))));
+        assert!(!is_readonly_frame(&Frame::Error(Bytes::from("READ"))));
+        assert!(!is_readonly_frame(&Frame::SimpleString(Bytes::from("OK"))));
     }
 
     fn make_test_svc(
