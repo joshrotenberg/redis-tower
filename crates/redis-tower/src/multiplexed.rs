@@ -111,6 +111,19 @@ impl MultiplexedClient<AutoPipelineService> {
         Ok(Self::from_connection(conn))
     }
 
+    /// Connect from a Redis URL with an explicit TLS config (custom root CA or
+    /// mTLS client certificate).
+    ///
+    /// See [`RedisConnection::connect_url_with_tls`].
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub async fn connect_url_with_tls(
+        url: &str,
+        tls_config: &redis_tower_core::tls::TlsConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = RedisConnection::connect_url_with_tls(url, tls_config).await?;
+        Ok(Self::from_connection(conn))
+    }
+
     /// Connect and negotiate RESP3 protocol.
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_resp3(addr).await?;

@@ -261,7 +261,27 @@ Call `reauthenticate()` on token rotation.
 let conn = RedisConnection::connect_url("rediss://my-redis:6380").await?;
 ```
 
-Supports `native-tls` and `rustls` backends via feature flags.
+A `rediss://` URL uses rustls by default (system roots with a webpki-roots
+fallback). For a private CA or mutual TLS (mTLS) -- the standard enterprise
+posture -- build a `TlsConfig` from PEM and pass it explicitly:
+
+```rust,ignore
+use redis_tower_core::tls::TlsConfig;
+
+let tls = TlsConfig::default_rustls()
+    .with_root_ca_pem(std::fs::read("ca.pem")?)                                  // trust a private CA
+    .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?); // present a client cert (mTLS)
+
+// URL provides host/port/AUTH; the TlsConfig drives the handshake:
+let conn = RedisConnection::connect_url_with_tls("rediss://default:secret@redis.internal:6379", &tls).await?;
+
+// To keep custom TLS across reconnects, wire it into the factory:
+use redis_tower::reconnect::UrlConnectionFactory;
+let factory = UrlConnectionFactory::new("rediss://default:secret@redis.internal:6379").with_tls(tls);
+```
+
+`with_root_ca_pem` / `with_client_auth_pem` work with both the `native-tls`
+and `rustls` backends (selected via feature flags).
 
 ## Sync client
 

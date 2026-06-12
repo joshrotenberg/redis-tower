@@ -364,6 +364,46 @@ impl RedisConnection {
         Ok(conn)
     }
 
+    /// Connect from a Redis URL, performing the TLS handshake with an explicit
+    /// [`TlsConfig`](crate::tls::TlsConfig).
+    ///
+    /// Like [`connect_url`](Self::connect_url) but the caller supplies the TLS
+    /// configuration -- a custom root CA, a client certificate for mTLS, or a
+    /// pre-built backend -- instead of the URL's hardcoded default. The host,
+    /// port, and any AUTH/SELECT parameters still come from the URL, and the
+    /// connection always uses TLS (for either a `redis://` or `rediss://` URL).
+    /// Unix-socket URLs are rejected.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redis_tower_core::tls::TlsConfig;
+    /// let tls = TlsConfig::default_rustls()
+    ///     .with_root_ca_pem(std::fs::read("ca.pem")?)
+    ///     .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
+    /// let conn = RedisConnection::connect_url_with_tls(
+    ///     "rediss://default:secret@redis.internal:6379",
+    ///     &tls,
+    /// )
+    /// .await?;
+    /// ```
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    pub async fn connect_url_with_tls(
+        url: &str,
+        tls_config: &crate::tls::TlsConfig,
+    ) -> Result<Self, RedisError> {
+        let parsed = parse_redis_url(url)?;
+        if parsed.unix {
+            return Err(RedisError::InvalidUrl(
+                "unix socket URLs cannot use TLS".into(),
+            ));
+        }
+        let addr = format!("{}:{}", parsed.host, parsed.port);
+        let mut conn = Self::connect_tls(&addr, &parsed.host, tls_config).await?;
+        conn.post_connect_setup(&parsed).await?;
+        Ok(conn)
+    }
+
     /// Connect to a Redis server and negotiate RESP3 protocol.
     ///
     /// Sends `HELLO 3` after connecting. The server will respond with

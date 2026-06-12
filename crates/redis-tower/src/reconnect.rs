@@ -78,18 +78,45 @@ where
 /// requires authentication or a non-default database.
 pub struct UrlConnectionFactory {
     url: String,
+    /// Explicit TLS config applied on every (re)connect, so reconnect-with-auth
+    /// works with a custom CA / mTLS instead of the URL's default TLS.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<std::sync::Arc<redis_tower_core::tls::TlsConfig>>,
 }
 
 impl UrlConnectionFactory {
     /// Create a new factory from the given Redis URL.
     pub fn new(url: impl Into<String>) -> Self {
-        Self { url: url.into() }
+        Self {
+            url: url.into(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        }
+    }
+
+    /// Use an explicit TLS config (custom root CA or mTLS client certificate)
+    /// for every connection this factory makes.
+    ///
+    /// Without this, a `rediss://` URL uses the default rustls config -- so URL
+    /// connect and custom TLS were previously mutually exclusive, which made
+    /// reconnect-with-auth plus a private CA impossible. With it, the factory
+    /// connects via [`RedisConnection::connect_url_with_tls`] on every attempt.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn with_tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
+        self.tls = Some(std::sync::Arc::new(tls));
+        self
     }
 }
 
 impl ConnectionFactory for UrlConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let url = self.url.clone();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        if let Some(tls) = self.tls.clone() {
+            return Box::pin(
+                async move { RedisConnection::connect_url_with_tls(&url, &tls).await },
+            );
+        }
         Box::pin(async move { RedisConnection::connect_url(&url).await })
     }
 }
