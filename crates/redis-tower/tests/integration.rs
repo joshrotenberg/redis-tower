@@ -2610,6 +2610,35 @@ async fn csc_hgetall_cached() {
     client.clear_cache().await;
 }
 
+#[tokio::test]
+async fn csc_hget_fields_do_not_collide() {
+    // Regression for the cache-key collision: HGET h f1 and HGET h f2 share a
+    // Redis key but must return their own values, not each other's.
+    let addr = redis_addr().await;
+    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
+
+    let k = "csc_hget_collision:h";
+    let mut writer = conn().await;
+    writer.execute(HSet::new(k, "f1", "v1")).await.unwrap();
+    writer.execute(HSet::new(k, "f2", "v2")).await.unwrap();
+
+    // Populate the cache with both fields.
+    let a: Option<Bytes> = client.execute(HGet::new(k, "f1")).await.unwrap();
+    let b: Option<Bytes> = client.execute(HGet::new(k, "f2")).await.unwrap();
+    assert_eq!(a, Some(Bytes::from("v1")));
+    assert_eq!(b, Some(Bytes::from("v2")));
+    assert!(client.cache_size().await >= 2, "fields cached separately");
+
+    // Cached reads must still return the correct, distinct values.
+    let a2: Option<Bytes> = client.execute(HGet::new(k, "f1")).await.unwrap();
+    let b2: Option<Bytes> = client.execute(HGet::new(k, "f2")).await.unwrap();
+    assert_eq!(a2, Some(Bytes::from("v1")), "f1 must not return f2's value");
+    assert_eq!(b2, Some(Bytes::from("v2")), "f2 must not return f1's value");
+
+    writer.execute(Del::new(k)).await.unwrap();
+    client.clear_cache().await;
+}
+
 // -- Additional PubSub edge-case tests (#156) --
 
 #[tokio::test]
