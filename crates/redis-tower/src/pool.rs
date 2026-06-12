@@ -106,11 +106,13 @@ pub struct PoolConfig {
     /// Maximum time to wait for a connection slot to become available.
     ///
     /// When all connections in the pool are busy, new callers block waiting
-    /// for a slot to free up. If this is set and the wait exceeds the
-    /// duration, `RedisError::PoolAcquisitionTimeout` is returned.
+    /// for a slot to free up. If the wait exceeds this duration,
+    /// [`RedisError::PoolAcquisitionTimeout`] is returned, so pool exhaustion
+    /// fails fast as a timeout instead of stalling the caller indefinitely.
     ///
-    /// `None` (the default) means unlimited: the caller blocks until a slot
-    /// is available, which is the pre-existing behavior.
+    /// Defaults to [`PoolConfig::DEFAULT_ACQUISITION_TIMEOUT`] (5 seconds).
+    /// Set it to `None` -- via [`PoolConfig::disable_acquisition_timeout`] --
+    /// to wait forever, restoring the previous unbounded behavior.
     pub acquisition_timeout: Option<Duration>,
 }
 
@@ -120,12 +122,20 @@ impl Default for PoolConfig {
             size: 4,
             dispatch: DispatchStrategy::RoundRobin,
             health_check_interval: None,
-            acquisition_timeout: None,
+            acquisition_timeout: Some(Self::DEFAULT_ACQUISITION_TIMEOUT),
         }
     }
 }
 
 impl PoolConfig {
+    /// Default upper bound on how long a caller waits for a connection slot.
+    ///
+    /// Used by [`PoolConfig::default`]. Five seconds is long enough to ride
+    /// out brief contention but short enough that genuine pool exhaustion
+    /// surfaces as a [`RedisError::PoolAcquisitionTimeout`] rather than an
+    /// unbounded stall that masquerades as a hang.
+    pub const DEFAULT_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(5);
+
     /// Set the pool size.
     pub fn size(mut self, size: usize) -> Self {
         self.size = size;
@@ -151,9 +161,22 @@ impl PoolConfig {
     ///
     /// If all connections are busy when a command is submitted and a slot
     /// does not free up within `timeout`, the call returns
-    /// [`RedisError::PoolAcquisitionTimeout`].
+    /// [`RedisError::PoolAcquisitionTimeout`]. Overrides the bounded
+    /// [`PoolConfig::DEFAULT_ACQUISITION_TIMEOUT`].
     pub fn acquisition_timeout(mut self, timeout: Duration) -> Self {
         self.acquisition_timeout = Some(timeout);
+        self
+    }
+
+    /// Wait forever for a connection slot, disabling the acquisition timeout.
+    ///
+    /// This restores the previous behavior where a saturated pool blocks the
+    /// caller indefinitely. Prefer the bounded
+    /// [`default`](PoolConfig::default) unless an unbounded wait is genuinely
+    /// what you want -- an unbounded wait turns pool exhaustion into a silent
+    /// hang rather than a surfaced [`RedisError::PoolAcquisitionTimeout`].
+    pub fn disable_acquisition_timeout(mut self) -> Self {
+        self.acquisition_timeout = None;
         self
     }
 }
@@ -1194,8 +1217,30 @@ mod tests {
         assert!(elapsed < Duration::from_secs(1));
     }
 
-    /// With acquisition_timeout: None (the default), execute() still blocks
-    /// until the lock is available — existing behavior is unchanged.
+    /// The default config now bounds the acquisition wait, so callers fail
+    /// fast on a saturated pool instead of stalling forever.
+    #[test]
+    fn pool_default_config_bounds_acquisition_timeout() {
+        let config = PoolConfig::default();
+        assert_eq!(
+            config.acquisition_timeout,
+            Some(PoolConfig::DEFAULT_ACQUISITION_TIMEOUT),
+        );
+        assert_eq!(
+            PoolConfig::DEFAULT_ACQUISITION_TIMEOUT,
+            Duration::from_secs(5),
+        );
+        // disable_acquisition_timeout opts back into the unbounded wait.
+        assert_eq!(
+            PoolConfig::default()
+                .disable_acquisition_timeout()
+                .acquisition_timeout,
+            None,
+        );
+    }
+
+    /// With the acquisition timeout disabled, execute() blocks until the lock
+    /// is available rather than timing out — the opt-in unbounded behavior.
     #[tokio::test]
     async fn pool_no_acquisition_timeout_blocks_until_available() {
         use redis_tower_commands::Ping;
@@ -1207,7 +1252,7 @@ mod tests {
 
         let pool = ConnectionPool::from_connections(
             conns,
-            PoolConfig::default(), // no acquisition_timeout
+            PoolConfig::default().disable_acquisition_timeout(),
         )
         .unwrap();
 
