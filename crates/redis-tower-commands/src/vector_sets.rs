@@ -733,10 +733,12 @@ impl Command for VSetAttr {
     }
 }
 
-/// VDELATTR key element
+/// Delete the attribute from `element` in the vector set at `key`.
 ///
-/// Deletes the JSON attribute from `element` in the vector set at `key`.
-/// Returns `true` if the attribute was removed, `false` if no attribute existed.
+/// Redis has no `VDELATTR` command; an attribute is cleared by setting it to
+/// the empty string, so this builder sends `VSETATTR key element ""`. The
+/// ergonomic `VDelAttr` name is kept. Returns `true` if the element exists
+/// (its attribute is cleared), `false` if the element is not in the set.
 #[derive(Clone)]
 pub struct VDelAttr {
     key: String,
@@ -756,10 +758,13 @@ impl Command for VDelAttr {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
+        // No VDELATTR command exists in Redis; clear the attribute by setting
+        // it to the empty string via VSETATTR.
         array(vec![
-            bulk("VDELATTR"),
+            bulk("VSETATTR"),
             bulk(self.key.as_str()),
             bulk(self.element.as_str()),
+            bulk(""),
         ])
     }
 
@@ -768,15 +773,17 @@ impl Command for VDelAttr {
             Frame::Integer(1) => Ok(true),
             Frame::Integer(0) => Ok(false),
             Frame::Boolean(b) => Ok(b),
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(true),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "integer 0 or 1",
+                expected: "integer 0 or 1, or OK",
                 actual: format!("{other:?}"),
             }),
         }
     }
 
     fn name(&self) -> &str {
-        "VDELATTR"
+        // VSETATTR is what actually goes on the wire.
+        "VSETATTR"
     }
 }
 

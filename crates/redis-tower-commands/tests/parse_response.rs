@@ -610,9 +610,34 @@ fn vsetattr_wrong_type() {
 #[test]
 fn vdelattr_wrong_type() {
     let mut mock = MockConnection::new();
-    mock.enqueue(Frame::SimpleString(Bytes::from("OK")));
+    mock.enqueue(Frame::Array(Some(vec![]))); // VSETATTR expects integer 0/1 or OK
     let result = mock.execute(VDelAttr::new("key", "elem"));
     assert!(result.is_err());
+}
+
+#[test]
+fn vdelattr_sends_vsetattr_empty() {
+    use redis_tower_core::Command;
+    // No VDELATTR command exists; VDelAttr must clear the attribute via
+    // `VSETATTR key element ""`. Guards against the invented-command regression.
+    let frame = VDelAttr::new("myset", "elem").to_frame();
+    let Frame::Array(Some(items)) = frame else {
+        panic!("expected array frame, got {frame:?}");
+    };
+    assert_eq!(items.len(), 4, "VSETATTR key element \"\" has four parts");
+    let cmd = match &items[0] {
+        Frame::BulkString(Some(b)) => b.as_ref(),
+        other => panic!("expected bulk command, got {other:?}"),
+    };
+    assert_eq!(cmd, b"VSETATTR", "must send VSETATTR, never VDELATTR");
+    let attr = match &items[3] {
+        Frame::BulkString(Some(b)) => b.as_ref(),
+        other => panic!("expected bulk attribute value, got {other:?}"),
+    };
+    assert!(
+        attr.is_empty(),
+        "the attribute value must be the empty string"
+    );
 }
 
 #[test]
