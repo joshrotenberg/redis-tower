@@ -133,7 +133,19 @@ fn key_after_token<'a>(items: &'a [Frame], token: &[u8]) -> Option<&'a [u8]> {
     as_key(items.get(pos + 1)?)
 }
 
-/// Returns true if the command is read-only (safe to route to a replica).
+/// Returns true if the command is read-only, and so safe to route to a replica
+/// under [`ReadPreference::Replica`](crate::ReadPreference).
+///
+/// Routing happens on the serialized frame -- the auto-pipeline batches frames,
+/// not typed commands -- so this matches the command name rather than a
+/// `Command` trait flag. The name is uppercased into a stack buffer to avoid a
+/// heap allocation on every replica-routed command.
+///
+/// Coverage follows the Redis command `readonly` flag across the core types and
+/// the common Redis Stack reads. Commands that can mutate -- even conditionally,
+/// like `GETEX` (may change a TTL), `GEORADIUS`/`SORT` (have a `STORE` option),
+/// or `XREADGROUP` (advances a consumer group) -- are treated as writes and
+/// routed to the master; their dedicated `_RO` variants are read-only.
 pub fn is_readonly_command(frame: &Frame) -> bool {
     let items = match frame {
         Frame::Array(Some(items)) if !items.is_empty() => items,
@@ -145,48 +157,68 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
         _ => return false,
     };
 
-    let upper: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_uppercase()).collect();
+    // Uppercase into a stack buffer. No read-only command name is longer than
+    // this, so anything that overflows it cannot be read-only.
+    let mut buf = [0u8; 24];
+    if cmd_name.len() > buf.len() {
+        return false;
+    }
+    for (i, b) in cmd_name.iter().enumerate() {
+        buf[i] = b.to_ascii_uppercase();
+    }
+
     matches!(
-        upper.as_slice(),
-        b"GET"
-            | b"MGET"
-            | b"STRLEN"
-            | b"EXISTS"
-            | b"GETRANGE"
-            | b"HGET"
-            | b"HGETALL"
-            | b"HKEYS"
-            | b"HVALS"
-            | b"HLEN"
-            | b"HEXISTS"
-            | b"HMGET"
-            | b"LRANGE"
-            | b"LLEN"
-            | b"LINDEX"
-            | b"SMEMBERS"
-            | b"SISMEMBER"
-            | b"SCARD"
-            | b"SINTER"
-            | b"SUNION"
-            | b"SDIFF"
-            | b"SRANDMEMBER"
-            | b"ZRANGE"
-            | b"ZRANGEBYSCORE"
-            | b"ZRANGEBYLEX"
-            | b"ZREVRANGE"
-            | b"ZREVRANGEBYSCORE"
-            | b"ZSCORE"
-            | b"ZCARD"
-            | b"ZRANK"
-            | b"ZREVRANK"
-            | b"ZCOUNT"
-            | b"TTL"
-            | b"PTTL"
-            | b"TYPE"
-            | b"DBSIZE"
-            | b"PING"
-            | b"ECHO"
-            | b"INFO"
+        &buf[..cmd_name.len()],
+        // strings / bitmaps
+        b"GET" | b"GETRANGE" | b"SUBSTR" | b"MGET" | b"STRLEN" | b"LCS"
+        | b"GETBIT" | b"BITCOUNT" | b"BITPOS" | b"BITFIELD_RO"
+        // generic keyspace
+        | b"EXISTS" | b"TYPE" | b"TTL" | b"PTTL" | b"EXPIRETIME" | b"PEXPIRETIME"
+        | b"DUMP" | b"OBJECT" | b"MEMORY" | b"SORT_RO"
+        // hashes
+        | b"HGET" | b"HGETALL" | b"HKEYS" | b"HVALS" | b"HLEN" | b"HEXISTS"
+        | b"HMGET" | b"HSTRLEN" | b"HRANDFIELD" | b"HSCAN"
+        // lists
+        | b"LRANGE" | b"LLEN" | b"LINDEX" | b"LPOS"
+        // sets
+        | b"SMEMBERS" | b"SISMEMBER" | b"SMISMEMBER" | b"SCARD" | b"SINTER"
+        | b"SINTERCARD" | b"SUNION" | b"SDIFF" | b"SRANDMEMBER" | b"SSCAN"
+        // sorted sets
+        | b"ZRANGE" | b"ZRANGEBYSCORE" | b"ZRANGEBYLEX" | b"ZREVRANGE"
+        | b"ZREVRANGEBYSCORE" | b"ZREVRANGEBYLEX" | b"ZSCORE" | b"ZMSCORE"
+        | b"ZCARD" | b"ZRANK" | b"ZREVRANK" | b"ZCOUNT" | b"ZLEXCOUNT"
+        | b"ZRANDMEMBER" | b"ZSCAN" | b"ZDIFF" | b"ZINTER" | b"ZUNION"
+        | b"ZINTERCARD"
+        // streams (XREADGROUP mutates a consumer group -- excluded)
+        | b"XLEN" | b"XRANGE" | b"XREVRANGE" | b"XREAD" | b"XINFO" | b"XPENDING"
+        // geo (read-only; STORE-capable GEORADIUS routes to master)
+        | b"GEOPOS" | b"GEODIST" | b"GEOHASH" | b"GEOSEARCH"
+        | b"GEORADIUS_RO" | b"GEORADIUSBYMEMBER_RO"
+        // hyperloglog (PFADD/PFMERGE mutate -- excluded)
+        | b"PFCOUNT"
+        // scripting (read-only variants only)
+        | b"EVAL_RO" | b"EVALSHA_RO" | b"FCALL_RO"
+        // server
+        | b"DBSIZE" | b"PING" | b"ECHO" | b"INFO"
+        // Redis Stack: JSON
+        | b"JSON.GET" | b"JSON.MGET" | b"JSON.TYPE" | b"JSON.STRLEN"
+        | b"JSON.ARRLEN" | b"JSON.ARRINDEX" | b"JSON.OBJLEN" | b"JSON.OBJKEYS"
+        | b"JSON.RESP"
+        // Redis Stack: Search
+        | b"FT.SEARCH" | b"FT.AGGREGATE" | b"FT.INFO" | b"FT.EXPLAIN"
+        // Redis Stack: TimeSeries
+        | b"TS.GET" | b"TS.MGET" | b"TS.RANGE" | b"TS.REVRANGE" | b"TS.MRANGE"
+        | b"TS.MREVRANGE" | b"TS.INFO" | b"TS.QUERYINDEX"
+        // Redis Stack: probabilistic
+        | b"BF.EXISTS" | b"BF.MEXISTS" | b"BF.INFO" | b"BF.CARD"
+        | b"CF.EXISTS" | b"CF.COUNT" | b"CF.INFO"
+        | b"CMS.QUERY" | b"CMS.INFO"
+        | b"TOPK.QUERY" | b"TOPK.COUNT" | b"TOPK.LIST" | b"TOPK.INFO"
+        | b"TDIGEST.MIN" | b"TDIGEST.MAX" | b"TDIGEST.QUANTILE"
+        | b"TDIGEST.CDF" | b"TDIGEST.RANK" | b"TDIGEST.INFO"
+        // Redis Stack: vector sets
+        | b"VSIM" | b"VCARD" | b"VDIM" | b"VEMB" | b"VGETATTR" | b"VLINKS"
+        | b"VINFO"
     )
 }
 
@@ -272,6 +304,114 @@ mod tests {
     fn empty_frame_not_readonly() {
         assert!(!is_readonly_command(&Frame::Array(Some(vec![]))));
         assert!(!is_readonly_command(&Frame::Null));
+    }
+
+    #[test]
+    fn expanded_readonly_coverage_engages_replicas() {
+        // The reads that were previously missing -- replicas sat idle for these.
+        for cmd in [
+            "GETBIT",
+            "BITCOUNT",
+            "BITPOS",
+            "SMISMEMBER",
+            "SINTERCARD",
+            "ZMSCORE",
+            "ZRANDMEMBER",
+            "ZDIFF",
+            "ZUNION",
+            "XLEN",
+            "XRANGE",
+            "XREAD",
+            "XINFO",
+            "GEOPOS",
+            "GEODIST",
+            "GEOSEARCH",
+            "PFCOUNT",
+            "OBJECT",
+            "HRANDFIELD",
+            "LPOS",
+            "DUMP",
+            "EXPIRETIME",
+        ] {
+            assert!(
+                is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),
+                "{cmd} should be read-only"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_ro_variants_engage_replicas_but_base_does_not() {
+        // The base commands can mutate (STORE / TTL / consumer-group), so they
+        // route to the master; the dedicated _RO variants are read-only.
+        for ro in [
+            "EVAL_RO",
+            "EVALSHA_RO",
+            "FCALL_RO",
+            "GEORADIUS_RO",
+            "GEORADIUSBYMEMBER_RO",
+            "BITFIELD_RO",
+            "SORT_RO",
+        ] {
+            assert!(
+                is_readonly_command(&array(vec![bulk(ro), bulk("k")])),
+                "{ro} should be read-only"
+            );
+        }
+        for write in [
+            "GEORADIUS",
+            "BITFIELD",
+            "SORT",
+            "XREADGROUP",
+            "GETEX",
+            "PFADD",
+        ] {
+            assert!(
+                !is_readonly_command(&array(vec![bulk(write), bulk("k")])),
+                "{write} can mutate and must route to the master"
+            );
+        }
+    }
+
+    #[test]
+    fn readonly_covers_redis_stack_reads() {
+        for cmd in [
+            "JSON.GET",
+            "JSON.TYPE",
+            "FT.SEARCH",
+            "FT.AGGREGATE",
+            "TS.RANGE",
+            "TS.GET",
+            "BF.EXISTS",
+            "CF.COUNT",
+            "CMS.QUERY",
+            "TOPK.LIST",
+            "VSIM",
+        ] {
+            assert!(
+                is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),
+                "{cmd} should be read-only"
+            );
+        }
+        // Stack writes still route to the master.
+        for cmd in ["JSON.SET", "TS.ADD", "BF.ADD", "FT.CREATE"] {
+            assert!(
+                !is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),
+                "{cmd} should route to the master"
+            );
+        }
+    }
+
+    #[test]
+    fn overlong_command_name_is_not_readonly() {
+        // Longer than the stack buffer -- must return false, not panic.
+        let long = "X".repeat(64);
+        assert!(!is_readonly_command(&array(vec![bulk(long), bulk("k")])));
+        // The longest real read-only name still fits and matches.
+        assert!(is_readonly_command(&array(vec![
+            bulk("GEORADIUSBYMEMBER_RO"),
+            bulk("k")
+        ])));
     }
 
     #[test]
