@@ -32,35 +32,51 @@ use tracing::Instrument;
 
 /// Tower `Layer` that adds tracing spans for Redis commands.
 ///
-/// Each call creates an `info`-level span named `redis.command` with OTel
-/// DB semantic convention attributes (`db.system`, `db.statement`,
-/// `server.address`). Error details are recorded as `otel.status_code` and
-/// `otel.status_message`.
+/// Each call creates an `info`-level span carrying the **stable OpenTelemetry
+/// database semantic conventions** so it lights up Redis dashboards in Grafana,
+/// Datadog, and Dynatrace out of the box:
 ///
-/// Use [`TracingLayer::with_peer`] to set `server.address` for per-node
-/// flame graphs in cluster or sentinel topologies.
+/// - `otel.name` set to the command (the exported span name is dynamic, e.g.
+///   `GET`, not a static `redis.command`),
+/// - `db.system.name = "redis"` and `db.operation.name` = the command,
+/// - `server.address` / `server.port` (split from the peer address),
+/// - `otel.status_code` / `otel.status_message`, and `error.type` on failure.
+///
+/// The deprecated `db.system` / `db.statement` attributes are emitted only when
+/// [`with_legacy_attributes`](Self::with_legacy_attributes) is set, for callers
+/// mid-migration.
+///
+/// Use [`TracingLayer::with_peer`] to set the peer address for per-node flame
+/// graphs in cluster or sentinel topologies.
 #[derive(Clone, Debug, Default)]
 pub struct TracingLayer {
     server_address: Option<String>,
+    legacy_attributes: bool,
 }
 
 impl TracingLayer {
     /// Create a new tracing layer without a peer address.
     pub fn new() -> Self {
-        Self {
-            server_address: None,
-        }
+        Self::default()
     }
 
-    /// Create a new tracing layer with a `server.address` field.
+    /// Create a new tracing layer with a peer address.
     ///
-    /// The address is recorded on every span as the `server.address` OTel
-    /// attribute, enabling per-node flame graphs in backends like Grafana
-    /// Tempo.
+    /// The address is split into the `server.address` and `server.port` OTel
+    /// attributes on every span, enabling per-node flame graphs in backends
+    /// like Grafana Tempo.
     pub fn with_peer(addr: impl Into<String>) -> Self {
         Self {
             server_address: Some(addr.into()),
+            legacy_attributes: false,
         }
+    }
+
+    /// Also emit the deprecated `db.system` / `db.statement` attributes
+    /// alongside the stable conventions, for dashboards not yet migrated.
+    pub fn with_legacy_attributes(mut self) -> Self {
+        self.legacy_attributes = true;
+        self
     }
 }
 
@@ -71,6 +87,7 @@ impl<S> Layer<S> for TracingLayer {
         TracingService {
             inner,
             server_address: self.server_address.clone(),
+            legacy_attributes: self.legacy_attributes,
         }
     }
 }
@@ -84,6 +101,7 @@ impl<S> Layer<S> for TracingLayer {
 pub struct TracingService<S> {
     inner: S,
     server_address: Option<String>,
+    legacy_attributes: bool,
 }
 
 impl<S> TracingService<S> {
@@ -92,15 +110,23 @@ impl<S> TracingService<S> {
         Self {
             inner,
             server_address: None,
+            legacy_attributes: false,
         }
     }
 
-    /// Create a new tracing service with an explicit server address.
+    /// Create a new tracing service with an explicit peer address.
     pub fn with_peer(inner: S, addr: impl Into<String>) -> Self {
         Self {
             inner,
             server_address: Some(addr.into()),
+            legacy_attributes: false,
         }
+    }
+
+    /// Also emit the deprecated `db.system` / `db.statement` attributes.
+    pub fn with_legacy_attributes(mut self) -> Self {
+        self.legacy_attributes = true;
+        self
     }
 }
 
@@ -133,19 +159,37 @@ where
 
     fn call(&mut self, request: Frame) -> Self::Future {
         let cmd_name = extract_command_name(&request);
+        // `otel.name` drives the exported OTel span name (dynamic, per command);
+        // the static macro name is what non-OTel tracing subscribers see.
         let span = tracing::info_span!(
             "redis.command",
-            redis.command = %cmd_name,
+            otel.name = %cmd_name,
             otel.kind = "client",
-            db.system = "redis",
-            db.statement = %cmd_name,
+            db.system.name = "redis",
+            db.operation.name = %cmd_name,
+            server.address = tracing::field::Empty,
+            server.port = tracing::field::Empty,
             otel.status_code = tracing::field::Empty,
             otel.status_message = tracing::field::Empty,
-            server.address = tracing::field::Empty,
+            error.type = tracing::field::Empty,
+            // Convenience field kept for existing filters.
+            redis.command = %cmd_name,
+            // Deprecated; recorded only with legacy compat enabled.
+            db.system = tracing::field::Empty,
+            db.statement = tracing::field::Empty,
         );
 
         if let Some(ref addr) = self.server_address {
-            span.record("server.address", addr.as_str());
+            let (host, port) = split_server_addr(addr);
+            span.record("server.address", host);
+            if let Some(port) = port {
+                span.record("server.port", i64::from(port));
+            }
+        }
+
+        if self.legacy_attributes {
+            span.record("db.system", "redis");
+            span.record("db.statement", cmd_name.as_str());
         }
 
         let future = self.inner.call(request);
@@ -156,11 +200,11 @@ where
                 let span = tracing::Span::current();
                 match &result {
                     Ok(Frame::Error(bytes)) => {
+                        let msg = String::from_utf8_lossy(bytes);
                         span.record("otel.status_code", "ERROR");
-                        span.record(
-                            "otel.status_message",
-                            String::from_utf8_lossy(bytes).as_ref(),
-                        );
+                        span.record("otel.status_message", msg.as_ref());
+                        // The Redis error prefix (WRONGTYPE, MOVED, ...).
+                        span.record("error.type", msg.split_whitespace().next().unwrap_or("ERR"));
                     }
                     Ok(_) => {
                         span.record("otel.status_code", "OK");
@@ -168,12 +212,39 @@ where
                     Err(e) => {
                         span.record("otel.status_code", "ERROR");
                         span.record("otel.status_message", e.to_string().as_str());
+                        span.record("error.type", error_type(e));
                     }
                 }
                 result
             }
             .instrument(span),
         )
+    }
+}
+
+/// Split a `host:port` peer address into `(host, port)` for the OTel
+/// `server.address` / `server.port` attributes. IPv6 addresses (which contain
+/// colons) split on the last colon; an address with no port yields `None`.
+fn split_server_addr(addr: &str) -> (&str, Option<u16>) {
+    match addr.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()),
+        None => (addr, None),
+    }
+}
+
+/// The OTel `error.type` for a [`RedisError`]: the server error prefix for a
+/// Redis error (`WRONGTYPE`, `MOVED`, ...), otherwise a stable category.
+fn error_type(err: &RedisError) -> &str {
+    match err {
+        RedisError::Redis(msg) => msg.split_whitespace().next().unwrap_or("ERR"),
+        RedisError::Connection(_) | RedisError::ConnectionClosed => "CONNECTION",
+        RedisError::Protocol(_) => "PROTOCOL",
+        RedisError::CommandTimeout => "COMMAND_TIMEOUT",
+        RedisError::ConnectTimeout => "CONNECT_TIMEOUT",
+        RedisError::CircuitOpen => "CIRCUIT_OPEN",
+        RedisError::PoolAcquisitionTimeout { .. } => "POOL_TIMEOUT",
+        RedisError::QueueFull => "QUEUE_FULL",
+        _ => "CLIENT_ERROR",
     }
 }
 
@@ -217,6 +288,45 @@ mod tests {
     fn unknown_for_null_array() {
         let frame = Frame::Array(None);
         assert_eq!(extract_command_name(&frame), "UNKNOWN");
+    }
+
+    #[test]
+    fn split_server_addr_ipv4() {
+        assert_eq!(
+            split_server_addr("127.0.0.1:6379"),
+            ("127.0.0.1", Some(6379))
+        );
+    }
+
+    #[test]
+    fn split_server_addr_ipv6_splits_on_last_colon() {
+        assert_eq!(split_server_addr("::1:6380"), ("::1", Some(6380)));
+    }
+
+    #[test]
+    fn split_server_addr_no_port() {
+        assert_eq!(split_server_addr("localhost"), ("localhost", None));
+    }
+
+    #[test]
+    fn split_server_addr_bad_port() {
+        // Host kept, port dropped when it doesn't parse.
+        assert_eq!(split_server_addr("host:notaport"), ("host", None));
+    }
+
+    #[test]
+    fn error_type_uses_redis_prefix() {
+        let err = RedisError::Redis("WRONGTYPE Operation against a key".into());
+        assert_eq!(error_type(&err), "WRONGTYPE");
+        let moved = RedisError::Redis("MOVED 3999 127.0.0.1:6381".into());
+        assert_eq!(error_type(&moved), "MOVED");
+    }
+
+    #[test]
+    fn error_type_categorizes_client_errors() {
+        assert_eq!(error_type(&RedisError::ConnectionClosed), "CONNECTION");
+        assert_eq!(error_type(&RedisError::CommandTimeout), "COMMAND_TIMEOUT");
+        assert_eq!(error_type(&RedisError::CircuitOpen), "CIRCUIT_OPEN");
     }
 
     #[test]
