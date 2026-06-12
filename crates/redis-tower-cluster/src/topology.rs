@@ -50,11 +50,19 @@ impl ClusterTopology {
             .map(|r| &r.master)
     }
 
-    /// Get all unique master addresses.
+    /// Get all unique master addresses, in first-seen order.
+    ///
+    /// Deduplicates globally (not just adjacent entries) so a master that owns
+    /// several non-contiguous ranges -- which happens after
+    /// [`reassign_slot`](Self::reassign_slot) splits a range on a single-slot
+    /// MOVED -- is still reported once.
     pub fn master_addrs(&self) -> Vec<&NodeAddr> {
-        let mut addrs: Vec<&NodeAddr> = self.slot_ranges.iter().map(|r| &r.master).collect();
-        addrs.dedup_by(|a, b| a == b);
-        addrs
+        let mut seen = std::collections::HashSet::new();
+        self.slot_ranges
+            .iter()
+            .map(|r| &r.master)
+            .filter(|a| seen.insert(*a))
+            .collect()
     }
 
     /// Find replica nodes for a given slot.
@@ -75,6 +83,73 @@ impl ClusterTopology {
         addrs.sort_by_key(|a| a.addr_string());
         addrs.dedup_by(|a, b| a == b);
         addrs
+    }
+
+    /// Reassign a single slot to a new master after a MOVED redirect,
+    /// splitting its containing range if necessary.
+    ///
+    /// A MOVED names exactly one slot. Reassigning the whole containing range
+    /// (as a naive patch does) steals every other slot in that range and
+    /// causes redirect ping-pong for the duration of a live resharding -- the
+    /// client bounces the entire range between the old and new owner one
+    /// command at a time. Instead, split the containing range into up to three
+    /// pieces so only `slot` changes owner; the rest of the range keeps its
+    /// current master and replicas.
+    ///
+    /// The moved slot starts with no known replicas -- a MOVED tells us the
+    /// new master but not its replica set -- until the next full
+    /// [`discover_topology`] refresh repopulates them. Reassigning a slot to
+    /// the master that already owns it, or that is not currently mapped, is
+    /// handled without splitting.
+    pub fn reassign_slot(&mut self, slot: u16, master: NodeAddr) {
+        let Some(idx) = self
+            .slot_ranges
+            .iter()
+            .position(|r| slot >= r.start && slot <= r.end)
+        else {
+            // Slot isn't currently mapped: record it as a standalone range.
+            self.slot_ranges.push(SlotRange {
+                start: slot,
+                end: slot,
+                master,
+                replicas: Vec::new(),
+            });
+            return;
+        };
+
+        if self.slot_ranges[idx].master == master {
+            // Already owned by this master; nothing to split.
+            return;
+        }
+
+        let range = self.slot_ranges[idx].clone();
+        let mut replacement = Vec::with_capacity(3);
+        // Slots before the moved one keep the old owner.
+        if slot > range.start {
+            replacement.push(SlotRange {
+                start: range.start,
+                end: slot - 1,
+                master: range.master.clone(),
+                replicas: range.replicas.clone(),
+            });
+        }
+        // The moved slot, now owned by the new master.
+        replacement.push(SlotRange {
+            start: slot,
+            end: slot,
+            master,
+            replicas: Vec::new(),
+        });
+        // Slots after the moved one keep the old owner.
+        if slot < range.end {
+            replacement.push(SlotRange {
+                start: slot + 1,
+                end: range.end,
+                master: range.master,
+                replicas: range.replicas,
+            });
+        }
+        self.slot_ranges.splice(idx..=idx, replacement);
     }
 }
 
@@ -329,5 +404,111 @@ mod tests {
         let topo = parse_cluster_slots(&frame).unwrap();
         let replicas = topo.replicas_for_slot(0).unwrap();
         assert_eq!(replicas.len(), 2);
+    }
+
+    // -- reassign_slot (single-slot MOVED patching) --
+
+    fn node(port: u16) -> NodeAddr {
+        NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port,
+        }
+    }
+
+    fn topo_with(ranges: &[(u16, u16, u16)]) -> ClusterTopology {
+        ClusterTopology {
+            slot_ranges: ranges
+                .iter()
+                .map(|&(start, end, port)| SlotRange {
+                    start,
+                    end,
+                    master: node(port),
+                    replicas: vec![],
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn reassign_slot_splits_containing_range_in_three() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(50, node(7009));
+        // Only slot 50 moved; every other slot keeps the old owner.
+        assert_eq!(topo.master_for_slot(50).unwrap().port, 7009);
+        assert_eq!(topo.master_for_slot(49).unwrap().port, 7000);
+        assert_eq!(topo.master_for_slot(51).unwrap().port, 7000);
+        assert_eq!(topo.master_for_slot(0).unwrap().port, 7000);
+        assert_eq!(topo.master_for_slot(100).unwrap().port, 7000);
+        // Split into 0-49, 50-50, 51-100.
+        assert_eq!(topo.slot_ranges.len(), 3);
+    }
+
+    #[test]
+    fn reassign_slot_at_range_start_splits_in_two() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(0, node(7009));
+        assert_eq!(topo.master_for_slot(0).unwrap().port, 7009);
+        assert_eq!(topo.master_for_slot(1).unwrap().port, 7000);
+        assert_eq!(topo.slot_ranges.len(), 2);
+    }
+
+    #[test]
+    fn reassign_slot_at_range_end_splits_in_two() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(100, node(7009));
+        assert_eq!(topo.master_for_slot(100).unwrap().port, 7009);
+        assert_eq!(topo.master_for_slot(99).unwrap().port, 7000);
+        assert_eq!(topo.slot_ranges.len(), 2);
+    }
+
+    #[test]
+    fn reassign_single_slot_range_replaces_in_place() {
+        let mut topo = topo_with(&[(50, 50, 7000)]);
+        topo.reassign_slot(50, node(7009));
+        assert_eq!(topo.master_for_slot(50).unwrap().port, 7009);
+        assert_eq!(topo.slot_ranges.len(), 1);
+    }
+
+    #[test]
+    fn reassign_unmapped_slot_adds_standalone_range() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(5000, node(7009));
+        assert_eq!(topo.master_for_slot(5000).unwrap().port, 7009);
+        assert_eq!(topo.master_for_slot(50).unwrap().port, 7000);
+        assert_eq!(topo.slot_ranges.len(), 2);
+    }
+
+    #[test]
+    fn reassign_slot_to_current_owner_is_noop() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(50, node(7000));
+        assert_eq!(topo.slot_ranges.len(), 1);
+        assert_eq!(topo.master_for_slot(50).unwrap().port, 7000);
+    }
+
+    #[test]
+    fn reassign_slot_clears_moved_replicas_but_keeps_flank_replicas() {
+        let mut topo = ClusterTopology {
+            slot_ranges: vec![SlotRange {
+                start: 0,
+                end: 100,
+                master: node(7000),
+                replicas: vec![node(7100)],
+            }],
+        };
+        topo.reassign_slot(50, node(7009));
+        // A MOVED gives the new master but not its replicas.
+        assert_eq!(topo.replicas_for_slot(50).unwrap().len(), 0);
+        // The flanks retain the original replica.
+        assert_eq!(topo.replicas_for_slot(49).unwrap(), &[node(7100)][..]);
+        assert_eq!(topo.replicas_for_slot(51).unwrap(), &[node(7100)][..]);
+    }
+
+    #[test]
+    fn master_addrs_dedups_a_master_fragmented_by_a_split() {
+        let mut topo = topo_with(&[(0, 100, 7000)]);
+        topo.reassign_slot(50, node(7009));
+        // slot_ranges now owns [7000, 7009, 7000]; 7000 must be reported once.
+        assert_eq!(topo.master_addrs().len(), 2);
     }
 }

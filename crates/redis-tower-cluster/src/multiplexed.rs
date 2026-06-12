@@ -100,6 +100,7 @@ struct Inner {
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
     read_routing: Arc<dyn ReadRoutingStrategy>,
+    max_redirects: usize,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
@@ -114,6 +115,7 @@ pub struct MultiplexedClusterClientBuilder {
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+    max_redirects: usize,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
@@ -145,6 +147,16 @@ impl MultiplexedClusterClientBuilder {
     /// Set a custom read routing strategy for replica selection.
     pub fn read_routing(mut self, strategy: impl ReadRoutingStrategy) -> Self {
         self.read_routing = Some(Arc::new(strategy));
+        self
+    }
+
+    /// Set the maximum number of MOVED/ASK redirects to follow for a single
+    /// command before giving up with an error.
+    ///
+    /// Each redirect is a round-trip to another node, so this bounds the worst
+    /// case latency of one command during a resharding. Defaults to 5.
+    pub fn max_redirects(mut self, max: usize) -> Self {
+        self.max_redirects = max;
         self
     }
 
@@ -210,6 +222,7 @@ impl MultiplexedClusterClientBuilder {
             self.address_map,
             self.read_preference,
             self.read_routing,
+            self.max_redirects,
             self.pipeline_config,
             self.reconnect_config,
             self.credentials,
@@ -229,6 +242,7 @@ impl MultiplexedClusterClient {
             None,
             ReadPreference::Master,
             None,
+            MAX_REDIRECTS,
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
             None,
@@ -249,6 +263,7 @@ impl MultiplexedClusterClient {
             None,
             ReadPreference::Master,
             None,
+            MAX_REDIRECTS,
             AutoPipelineConfig::default(),
             AutoPipelineReconnectConfig::default(),
             None,
@@ -266,6 +281,7 @@ impl MultiplexedClusterClient {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: None,
+            max_redirects: MAX_REDIRECTS,
             pipeline_config: AutoPipelineConfig::default(),
             reconnect_config: AutoPipelineReconnectConfig::default(),
             credentials: None,
@@ -281,6 +297,7 @@ impl MultiplexedClusterClient {
         address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+        max_redirects: usize,
         pipeline_config: AutoPipelineConfig,
         reconnect_config: AutoPipelineReconnectConfig,
         credentials: Option<Arc<dyn CredentialProvider>>,
@@ -384,6 +401,7 @@ impl MultiplexedClusterClient {
                 address_map,
                 read_preference,
                 read_routing,
+                max_redirects,
                 pipeline_config,
                 reconnect_config,
                 credentials,
@@ -404,8 +422,9 @@ impl MultiplexedClusterClient {
 
         // Initial routing.
         let mut target = self.route_command(&cmd_frame).await?;
+        let max_redirects = self.inner.read().await.max_redirects;
 
-        for _ in 0..MAX_REDIRECTS {
+        for _ in 0..max_redirects {
             let response = call_service(&mut target.svc, cmd_frame.clone()).await?;
 
             match parse_redirect(&response) {
@@ -457,7 +476,7 @@ impl MultiplexedClusterClient {
         }
 
         Err(RedisError::Redis(format!(
-            "too many redirects ({MAX_REDIRECTS})"
+            "too many redirects ({max_redirects})"
         )))
     }
 
@@ -676,20 +695,21 @@ impl MultiplexedClusterClient {
         Ok(())
     }
 
+    /// Patch a single slot's owner after a MOVED, splitting its containing
+    /// range so the rest of the range keeps its owner. See
+    /// [`ClusterTopology::reassign_slot`].
     async fn update_slot_owner(&self, slot: u16, addr: &str) {
-        let mut inner = self.inner.write().await;
         if let Some((host, port_str)) = addr.rsplit_once(':')
             && let Ok(port) = port_str.parse::<u16>()
         {
-            for range in &mut inner.topology.slot_ranges {
-                if slot >= range.start && slot <= range.end {
-                    range.master = NodeAddr {
-                        host: host.to_string(),
-                        port,
-                    };
-                    return;
-                }
-            }
+            let mut inner = self.inner.write().await;
+            inner.topology.reassign_slot(
+                slot,
+                NodeAddr {
+                    host: host.to_string(),
+                    port,
+                },
+            );
         }
     }
 
