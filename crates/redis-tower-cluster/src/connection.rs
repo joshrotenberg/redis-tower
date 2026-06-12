@@ -115,6 +115,12 @@ impl ReadRoutingStrategy for FirstReplicaRouting {
 /// Maximum number of redirects before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
 
+/// Backoff applied before retrying a transient cluster error (TRYAGAIN,
+/// CLUSTERDOWN, LOADING). Retries share the redirect budget, so the total
+/// transient wait is bounded by `max_redirects * TRANSIENT_RETRY_BACKOFF`.
+pub(crate) const TRANSIENT_RETRY_BACKOFF: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
 /// Read routing preference for cluster commands.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReadPreference {
@@ -465,6 +471,19 @@ impl ClusterConnection {
                     return cmd.parse_response(response);
                 }
                 None => {
+                    // Transient cluster errors: retry within the redirect
+                    // budget rather than surfacing on first occurrence.
+                    if let Some(transient) = TransientError::from_frame(&response) {
+                        if transient == TransientError::ClusterDown {
+                            // The cluster view may be stale (election / moved
+                            // slots); refresh best-effort and re-route the key.
+                            let _ = self.refresh_topology().await;
+                            target_node = self.route_command(&cmd_frame).to_string();
+                        }
+                        tracing::debug!(?transient, node = %target_node, "transient cluster error; retrying");
+                        tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        continue;
+                    }
                     if let Frame::Error(ref e) = response {
                         return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
                     }
@@ -704,6 +723,38 @@ pub(crate) fn parse_redirect(frame: &Frame) -> Option<Redirect> {
     }
 }
 
+/// A transient cluster error worth retrying within the redirect budget.
+///
+/// Unlike a hard command error (WRONGTYPE, etc.), these reflect a momentary
+/// cluster state -- a slot mid-migration, an election window, or a node still
+/// loading -- that typically clears on a short retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransientError {
+    /// `TRYAGAIN`: a multi-key command spans a slot that is mid-migration.
+    TryAgain,
+    /// `CLUSTERDOWN`: the cluster cannot currently serve the request (election
+    /// window, or a slot no node is serving). Worth a topology refresh.
+    ClusterDown,
+    /// `LOADING`: the target node is still loading its dataset into memory.
+    Loading,
+}
+
+impl TransientError {
+    /// Classify an error frame as a transient cluster error, if it is one.
+    pub(crate) fn from_frame(frame: &Frame) -> Option<Self> {
+        let Frame::Error(e) = frame else {
+            return None;
+        };
+        let msg = String::from_utf8_lossy(e);
+        match msg.split(' ').next() {
+            Some("TRYAGAIN") => Some(Self::TryAgain),
+            Some("CLUSTERDOWN") => Some(Self::ClusterDown),
+            Some("LOADING") => Some(Self::Loading),
+            _ => None,
+        }
+    }
+}
+
 /// Connect to a single cluster node, using TLS if configured.
 async fn connect_node(
     addr: &str,
@@ -800,6 +851,58 @@ mod tests {
     fn parse_non_error_frame() {
         let frame = Frame::SimpleString(Bytes::from("OK"));
         assert!(parse_redirect(&frame).is_none());
+    }
+
+    // -- transient cluster error classification --
+
+    #[test]
+    fn transient_error_classifies_tryagain() {
+        let frame = Frame::Error(Bytes::from(
+            "TRYAGAIN Multiple keys request during rehashing",
+        ));
+        assert_eq!(
+            TransientError::from_frame(&frame),
+            Some(TransientError::TryAgain)
+        );
+    }
+
+    #[test]
+    fn transient_error_classifies_clusterdown() {
+        let frame = Frame::Error(Bytes::from("CLUSTERDOWN The cluster is down"));
+        assert_eq!(
+            TransientError::from_frame(&frame),
+            Some(TransientError::ClusterDown)
+        );
+    }
+
+    #[test]
+    fn transient_error_classifies_loading() {
+        let frame = Frame::Error(Bytes::from(
+            "LOADING Redis is loading the dataset in memory",
+        ));
+        assert_eq!(
+            TransientError::from_frame(&frame),
+            Some(TransientError::Loading)
+        );
+    }
+
+    #[test]
+    fn transient_error_ignores_hard_errors_and_redirects() {
+        // Hard command errors are not transient.
+        assert_eq!(
+            TransientError::from_frame(&Frame::Error(Bytes::from("WRONGTYPE bad op"))),
+            None
+        );
+        // MOVED/ASK are redirects, handled separately -- not transient retries.
+        assert_eq!(
+            TransientError::from_frame(&Frame::Error(Bytes::from("MOVED 3999 127.0.0.1:7001"))),
+            None
+        );
+        // Non-error frames are never transient.
+        assert_eq!(
+            TransientError::from_frame(&Frame::SimpleString(Bytes::from("OK"))),
+            None
+        );
     }
 
     #[test]
