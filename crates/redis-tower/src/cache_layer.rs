@@ -129,8 +129,12 @@ where
 /// Spawn a background task that processes invalidation push messages
 /// and removes entries from the cache.
 ///
-/// Returns the `JoinHandle` for the task. The task runs until the
-/// receiver is closed (tracking connection dropped).
+/// Returns the `JoinHandle` for the task. The task runs until the receiver is
+/// closed (tracking connection dropped). When that happens it **disables the
+/// cache** (clearing entries and forcing reads to pass through) so stale data
+/// is never served once invalidations stop arriving. Re-establishing tracking
+/// and re-enabling the cache is the caller's responsibility, since this
+/// function is given a stream rather than a connection factory.
 pub fn spawn_invalidation_task(
     cache: Arc<RwLock<CacheState>>,
     mut push_rx: impl futures::Stream<Item = Result<Frame, redis_tower_protocol::ProtocolError>>
@@ -152,6 +156,8 @@ pub fn spawn_invalidation_task(
                 }
             }
         }
+        // Tracking stream ended -- disable caching so no stale entry is served.
+        cache.write().await.disable();
     })
 }
 
@@ -275,5 +281,21 @@ mod tests {
 
         // One miss per distinct key.
         assert_eq!(*call_count.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn invalidation_task_disables_cache_when_stream_ends() {
+        let cache = Arc::new(RwLock::new(CacheState::default()));
+        assert!(cache.read().await.is_enabled());
+
+        // A tracking stream that ends immediately (connection dropped).
+        let stream =
+            futures::stream::iter(Vec::<Result<Frame, redis_tower_protocol::ProtocolError>>::new());
+        spawn_invalidation_task(Arc::clone(&cache), stream)
+            .await
+            .unwrap();
+
+        // The cache must now pass through rather than silently serve stale data.
+        assert!(!cache.read().await.is_enabled());
     }
 }

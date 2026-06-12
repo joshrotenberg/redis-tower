@@ -23,6 +23,7 @@
 //! ```
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt;
 use redis_tower_commands::ClientTracking;
@@ -73,31 +74,47 @@ impl CachedClient {
         // Data connection.
         let conn = RedisConnection::connect_resp3(addr).await?;
 
-        // Tracking connection -- BCAST mode pushes all key invalidations.
-        let mut tracking_conn = RedisConnection::connect_resp3(addr).await?;
-        tracking_conn.execute(ClientTracking::on().bcast()).await?;
-
-        // Take ownership of the tracking connection's framed stream.
-        let tracking_framed = tracking_conn.into_framed()?;
+        // Initial tracking connection -- fail fast if the server can't track.
+        let initial_stream = connect_tracking_stream(addr).await?;
 
         let cache: Arc<Mutex<CacheState>> = Arc::new(Mutex::new(CacheState::default()));
         let cache_for_task = Arc::clone(&cache);
+        let addr = addr.to_string();
 
-        // Background reader: reads from the tracking connection and
-        // processes invalidation messages.
+        // Background reader: processes invalidations, and -- crucially -- when
+        // the tracking connection dies it disables caching (so stale data is
+        // never served) and reconnects with backoff before re-enabling.
         let reader_task = tokio::spawn(async move {
-            let (_sink, mut stream) = tracking_framed.split();
-            while let Some(Ok(frame)) = stream.next().await {
-                if let Some(keys) = parse_invalidation(&frame) {
-                    let mut c = cache_for_task.lock().await;
-                    if keys.is_empty() {
-                        c.clear();
-                    } else {
-                        for key in &keys {
-                            c.invalidate(key);
+            let mut stream = initial_stream;
+            loop {
+                while let Some(Ok(frame)) = stream.next().await {
+                    if let Some(keys) = parse_invalidation(&frame) {
+                        let mut c = cache_for_task.lock().await;
+                        if keys.is_empty() {
+                            c.clear();
+                        } else {
+                            for key in &keys {
+                                c.invalidate(key);
+                            }
                         }
                     }
                 }
+
+                // Tracking connection lost: disable caching (clears entries and
+                // forces every read to pass through to the server).
+                cache_for_task.lock().await.disable();
+
+                // Reconnect with capped exponential backoff, replaying CLIENT
+                // TRACKING, then re-enable caching once healthy again.
+                let mut backoff = Duration::from_millis(100);
+                stream = loop {
+                    tokio::time::sleep(backoff).await;
+                    match connect_tracking_stream(&addr).await {
+                        Ok(s) => break s,
+                        Err(_) => backoff = (backoff * 2).min(Duration::from_secs(5)),
+                    }
+                };
+                cache_for_task.lock().await.enable();
             }
         });
 
@@ -154,4 +171,36 @@ impl CachedClient {
     pub async fn clear_cache(&self) {
         self.cache.lock().await.clear();
     }
+
+    /// Whether client-side caching is currently active.
+    ///
+    /// Returns `false` while the tracking connection is down and being
+    /// re-established; during that window reads pass through to the server
+    /// (fresh, uncached) so stale data is never served. Use this as a health
+    /// signal.
+    pub async fn is_caching_healthy(&self) -> bool {
+        self.cache.lock().await.is_enabled()
+    }
+}
+
+/// Open a tracking connection (RESP3 + `CLIENT TRACKING ON BCAST`) and return
+/// its invalidation-push stream. Both the initial connect and every reconnect
+/// go through here, so they share one stream type.
+async fn connect_tracking_stream(
+    addr: &str,
+) -> Result<
+    // `use<>`: the returned stream owns its connection and does not borrow
+    // `addr`, so it captures no lifetimes (Rust 2024 would otherwise assume it
+    // borrows `addr`, which breaks moving it into the 'static reader task).
+    impl futures::Stream<Item = Result<Frame, redis_tower_protocol::ProtocolError>>
+    + Unpin
+    + Send
+    + use<>,
+    RedisError,
+> {
+    let mut tracking_conn = RedisConnection::connect_resp3(addr).await?;
+    tracking_conn.execute(ClientTracking::on().bcast()).await?;
+    let tracking_framed = tracking_conn.into_framed()?;
+    let (_sink, stream) = tracking_framed.split();
+    Ok(stream)
 }
