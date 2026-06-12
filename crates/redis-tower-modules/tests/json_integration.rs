@@ -1,8 +1,9 @@
 //! Live-server integration tests for [`JsonClient`].
 //!
 //! These exercise RedisJSON (`JSON.*`) commands against a real server, so they
-//! require a Redis Stack build (CI runs Redis 8.0.6 with Stack). They are
-//! `#[ignore]`d by default and only run when explicitly requested:
+//! require a Redis Stack build. CI does not run them -- its Redis is built
+//! without modules -- so they are `#[ignore]`d by default and only run when
+//! explicitly requested:
 //!
 //! ```sh
 //! cargo test -p redis-tower-modules --test json_integration --features json -- --ignored

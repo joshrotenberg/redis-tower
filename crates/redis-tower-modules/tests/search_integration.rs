@@ -1,8 +1,9 @@
 //! Live-server integration tests for [`SearchClient`].
 //!
 //! These exercise RediSearch (`FT.*`) commands against a real server, so they
-//! require a Redis Stack build (CI runs Redis 8.0.6 with Stack). They are
-//! `#[ignore]`d by default and only run when explicitly requested:
+//! require a Redis Stack build. CI does not run them -- its Redis is built
+//! without modules -- so they are `#[ignore]`d by default and only run when
+//! explicitly requested:
 //!
 //! ```sh
 //! cargo test -p redis-tower-modules --test search_integration --features search -- --ignored
