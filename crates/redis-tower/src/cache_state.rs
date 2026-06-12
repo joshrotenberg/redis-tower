@@ -11,10 +11,21 @@
 //! O(1) lookups instead of an O(n) suffix scan that over-evicts.
 
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use redis_tower_core::Frame;
 
+/// Default maximum number of cached entries (memory bound).
+pub(crate) const DEFAULT_MAX_ENTRIES: usize = 10_000;
+/// Default per-entry client-side freshness deadline. A cached entry older than
+/// this is treated as a miss even if no invalidation arrived -- a safety
+/// backstop against missed invalidations (Redis CSC guidance).
+pub(crate) const DEFAULT_TTL: Duration = Duration::from_secs(30);
+
 /// The cacheable read commands. The key these read is always argument 1.
+///
+/// `TTL` is intentionally excluded: its reply is a countdown that is wrong the
+/// instant it is cached.
 const CACHEABLE: &[&[u8]] = &[
     b"GET",
     b"HGET",
@@ -23,7 +34,6 @@ const CACHEABLE: &[&[u8]] = &[
     b"SMEMBERS",
     b"ZRANGE",
     b"TYPE",
-    b"TTL",
 ];
 
 /// Append `arg` to `buf` with a 4-byte length prefix, so a concatenation of
@@ -106,6 +116,15 @@ pub(crate) fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
     }
 }
 
+/// A cached response plus the metadata needed to bound and expire it.
+struct Entry {
+    /// The Redis key this entry depends on (for reverse-index cleanup).
+    redis_key: Vec<u8>,
+    frame: Frame,
+    /// When the entry was stored, for the per-entry client TTL.
+    stored_at: Instant,
+}
+
 /// The client-side cache: response entries keyed by the full command, plus a
 /// reverse index from Redis key to the cache entries that depend on it.
 ///
@@ -113,53 +132,68 @@ pub(crate) fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
 /// share a cache between a [`CacheService`](crate::cache_layer::CacheService)
 /// and its invalidation task; the cache is managed internally by those types.
 pub struct CacheState {
-    /// `cache_key -> (redis_key, cached response)`. The redis_key is stored so
-    /// eviction can clean up the reverse index without a scan.
-    entries: HashMap<Vec<u8>, (Vec<u8>, Frame)>,
+    /// `cache_key -> Entry`.
+    entries: HashMap<Vec<u8>, Entry>,
     /// `redis_key -> {cache_key}`.
     index: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
     /// When `false`, the tracking connection is unhealthy: reads pass through to
     /// the server and nothing is cached, so stale data can never be served.
     enabled: bool,
+    /// Maximum number of cached entries (`0` = unbounded).
+    max_size: usize,
+    /// Per-entry freshness deadline (`None` = no client TTL).
+    ttl: Option<Duration>,
 }
 
 impl Default for CacheState {
     fn default() -> Self {
-        Self {
-            entries: HashMap::new(),
-            index: HashMap::new(),
-            enabled: true,
-        }
+        Self::new(DEFAULT_MAX_ENTRIES, Some(DEFAULT_TTL))
     }
 }
 
 impl CacheState {
+    /// Create a cache bounded to `max_size` entries (`0` = unbounded) with an
+    /// optional per-entry client TTL.
+    pub(crate) fn new(max_size: usize, ttl: Option<Duration>) -> Self {
+        Self {
+            entries: HashMap::new(),
+            index: HashMap::new(),
+            enabled: true,
+            max_size,
+            ttl,
+        }
+    }
+
     /// Look up a cached response by its full-command cache key. Returns `None`
-    /// while caching is disabled, so the caller fetches fresh from the server.
+    /// when caching is disabled (passthrough) or when the entry is older than
+    /// the client TTL, so the caller fetches fresh from the server.
     pub(crate) fn get(&self, cache_key: &[u8]) -> Option<&Frame> {
         if !self.enabled {
             return None;
         }
-        self.entries.get(cache_key).map(|(_, frame)| frame)
+        let entry = self.entries.get(cache_key)?;
+        if let Some(ttl) = self.ttl
+            && entry.stored_at.elapsed() > ttl
+        {
+            // Expired: don't serve it. The entry is left in place and will be
+            // overwritten by the re-fetch's insert (removing it would need
+            // &mut, and the Tower read path only holds a read lock).
+            return None;
+        }
+        Some(&entry.frame)
     }
 
     /// Store `frame` under `cache_key`, recording the reverse-index link to
-    /// `redis_key`. If `max_size > 0` and the cache is full of *new* keys, one
+    /// `redis_key`. If the cache is bounded and full of *new* keys, one
     /// arbitrary existing entry is evicted first.
-    pub(crate) fn insert(
-        &mut self,
-        cache_key: Vec<u8>,
-        redis_key: Vec<u8>,
-        frame: Frame,
-        max_size: usize,
-    ) {
+    pub(crate) fn insert(&mut self, cache_key: Vec<u8>, redis_key: Vec<u8>, frame: Frame) {
         // Don't populate the cache while tracking is unhealthy.
         if !self.enabled {
             return;
         }
-        if max_size > 0
+        if self.max_size > 0
             && !self.entries.contains_key(&cache_key)
-            && self.entries.len() >= max_size
+            && self.entries.len() >= self.max_size
             && let Some(victim) = self.entries.keys().next().cloned()
         {
             self.remove(&victim);
@@ -168,7 +202,14 @@ impl CacheState {
             .entry(redis_key.clone())
             .or_default()
             .insert(cache_key.clone());
-        self.entries.insert(cache_key, (redis_key, frame));
+        self.entries.insert(
+            cache_key,
+            Entry {
+                redis_key,
+                frame,
+                stored_at: Instant::now(),
+            },
+        );
     }
 
     /// Evict every cache entry that depends on `redis_key`.
@@ -218,12 +259,12 @@ impl CacheState {
 
     /// Remove a single entry and its reverse-index link.
     fn remove(&mut self, cache_key: &[u8]) {
-        if let Some((redis_key, _)) = self.entries.remove(cache_key)
-            && let Some(set) = self.index.get_mut(&redis_key)
+        if let Some(entry) = self.entries.remove(cache_key)
+            && let Some(set) = self.index.get_mut(&entry.redis_key)
         {
             set.remove(cache_key);
             if set.is_empty() {
-                self.index.remove(&redis_key);
+                self.index.remove(&entry.redis_key);
             }
         }
     }
@@ -269,8 +310,8 @@ mod tests {
         let mut state = CacheState::default();
         let (k1, rk1) = extract_cache_entry(&frame(&["HGET", "h", "f1"])).unwrap();
         let (k2, rk2) = extract_cache_entry(&frame(&["HGET", "h", "f2"])).unwrap();
-        state.insert(k1.clone(), rk1, bulk("v1"), 0);
-        state.insert(k2.clone(), rk2, bulk("v2"), 0);
+        state.insert(k1.clone(), rk1, bulk("v1"));
+        state.insert(k2.clone(), rk2, bulk("v2"));
         assert_eq!(state.len(), 2);
 
         // Invalidating `h` must drop both variants.
@@ -284,7 +325,7 @@ mod tests {
     fn invalidate_other_key_leaves_entry() {
         let mut state = CacheState::default();
         let (k, rk) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
-        state.insert(k.clone(), rk, bulk("v"), 0);
+        state.insert(k.clone(), rk, bulk("v"));
         state.invalidate(b"b"); // unrelated key
         assert_eq!(state.len(), 1);
         assert!(state.get(&k).is_some());
@@ -292,11 +333,11 @@ mod tests {
 
     #[test]
     fn eviction_cleans_reverse_index() {
-        let mut state = CacheState::default();
+        let mut state = CacheState::new(1, None);
         let (k1, rk1) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
         let (k2, rk2) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
-        state.insert(k1, rk1, bulk("va"), 1);
-        state.insert(k2.clone(), rk2, bulk("vb"), 1); // evicts the "a" entry
+        state.insert(k1, rk1, bulk("va"));
+        state.insert(k2.clone(), rk2, bulk("vb")); // evicts the "a" entry
         assert_eq!(state.len(), 1);
         // The evicted key's index link is gone, so invalidating it is a no-op
         // and does not disturb the surviving entry.
@@ -333,7 +374,7 @@ mod tests {
     fn disabled_cache_passes_through_and_drops_writes() {
         let mut state = CacheState::default();
         let (k, rk) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
-        state.insert(k.clone(), rk.clone(), bulk("v"), 0);
+        state.insert(k.clone(), rk.clone(), bulk("v"));
         assert!(state.get(&k).is_some());
 
         // Losing the tracking connection: disable clears entries and forces
@@ -344,13 +385,45 @@ mod tests {
         assert!(state.get(&k).is_none());
 
         // Writes while disabled are dropped, so nothing accumulates uninvalidated.
-        state.insert(k.clone(), rk, bulk("v2"), 0);
+        state.insert(k.clone(), rk, bulk("v2"));
         assert_eq!(state.len(), 0);
 
         // Re-enabling (tracking restored) resumes normal caching.
         state.enable();
         let (k2, rk2) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
-        state.insert(k2.clone(), rk2, bulk("vb"), 0);
+        state.insert(k2.clone(), rk2, bulk("vb"));
         assert!(state.get(&k2).is_some());
+    }
+
+    #[test]
+    fn ttl_command_is_not_cacheable() {
+        // A cached TTL countdown would be wrong the instant it is stored.
+        assert!(extract_cache_entry(&frame(&["TTL", "k"])).is_none());
+    }
+
+    #[test]
+    fn entry_expires_after_client_ttl() {
+        let mut state = CacheState::new(0, Some(Duration::from_millis(10)));
+        let (k, rk) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(k.clone(), rk, bulk("v"));
+        assert!(state.get(&k).is_some(), "fresh entry is a hit");
+
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(
+            state.get(&k).is_none(),
+            "an entry past the client TTL must not be served"
+        );
+    }
+
+    #[test]
+    fn no_ttl_means_no_expiry() {
+        let mut state = CacheState::new(0, None);
+        let (k, rk) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(k.clone(), rk, bulk("v"));
+        std::thread::sleep(Duration::from_millis(15));
+        assert!(
+            state.get(&k).is_some(),
+            "no TTL configured -> never expires"
+        );
     }
 }
