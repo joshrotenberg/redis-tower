@@ -174,6 +174,8 @@ pub struct ClusterConnection {
     read_preference: ReadPreference,
     /// Strategy for selecting which replica to read from.
     read_routing: Arc<dyn ReadRoutingStrategy>,
+    /// Maximum MOVED/ASK redirects to follow for a single command.
+    max_redirects: usize,
     /// TLS configuration for node connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -186,6 +188,7 @@ pub struct ClusterConnectionBuilder {
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+    max_redirects: usize,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
@@ -227,6 +230,16 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Set the maximum number of MOVED/ASK redirects to follow for a single
+    /// command before giving up with an error.
+    ///
+    /// Each redirect is a round-trip to another node, so this bounds the worst
+    /// case latency of one command during a resharding. Defaults to 5.
+    pub fn max_redirects(mut self, max: usize) -> Self {
+        self.max_redirects = max;
+        self
+    }
+
     /// Set the TLS configuration for cluster connections.
     ///
     /// When set, all connections to cluster nodes (seed, masters, and
@@ -248,6 +261,7 @@ impl ClusterConnectionBuilder {
             self.address_map,
             self.read_preference,
             self.read_routing,
+            self.max_redirects,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -271,6 +285,7 @@ impl ClusterConnection {
             None,
             ReadPreference::Master,
             None,
+            MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -288,6 +303,7 @@ impl ClusterConnection {
             None,
             ReadPreference::Master,
             None,
+            MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -302,17 +318,20 @@ impl ClusterConnection {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: None,
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn connect_inner(
         seed_addr: &str,
         host_override: Option<String>,
         address_map: Option<HashMap<String, String>>,
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
+        max_redirects: usize,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
             Arc<redis_tower_core::tls::TlsConfig>,
         >,
@@ -387,6 +406,7 @@ impl ClusterConnection {
             address_map,
             read_preference,
             read_routing,
+            max_redirects,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
@@ -401,7 +421,7 @@ impl ClusterConnection {
 
         let mut target_node = initial_node;
 
-        for _ in 0..MAX_REDIRECTS {
+        for _ in 0..self.max_redirects {
             let conn = self.nodes.get_mut(&target_node).ok_or_else(|| {
                 RedisError::Redis(format!("no connection for node {target_node}"))
             })?;
@@ -454,7 +474,8 @@ impl ClusterConnection {
         }
 
         Err(RedisError::Redis(format!(
-            "too many redirects ({MAX_REDIRECTS})"
+            "too many redirects ({})",
+            self.max_redirects
         )))
     }
 
@@ -536,20 +557,22 @@ impl ClusterConnection {
         Ok(())
     }
 
-    /// Update the topology to assign a slot to a new node (after MOVED).
+    /// Update the topology to assign a single slot to a new node (after MOVED).
+    ///
+    /// Patches only the named slot, splitting its containing range if needed,
+    /// so a single-slot MOVED during resharding does not steal the whole range.
+    /// See [`ClusterTopology::reassign_slot`].
     fn update_slot_owner(&mut self, slot: u16, addr: &str) {
         if let Some((host, port_str)) = addr.rsplit_once(':')
             && let Ok(port) = port_str.parse::<u16>()
         {
-            for range in &mut self.topology.slot_ranges {
-                if slot >= range.start && slot <= range.end {
-                    range.master = NodeAddr {
-                        host: host.to_string(),
-                        port,
-                    };
-                    return;
-                }
-            }
+            self.topology.reassign_slot(
+                slot,
+                NodeAddr {
+                    host: host.to_string(),
+                    port,
+                },
+            );
         }
     }
 
@@ -861,6 +884,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -877,6 +901,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -903,6 +928,7 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -930,6 +956,7 @@ mod tests {
             address_map: Some(map),
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1019,6 +1046,7 @@ mod tests {
             address_map: None,
             read_preference: ReadPreference::Master,
             read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1030,6 +1058,43 @@ mod tests {
         conn.update_slot_owner(100, "10.0.0.9:9000");
         assert_eq!(conn.topology.master_for_slot(100).unwrap().host, "10.0.0.9");
         assert_eq!(conn.topology.master_for_slot(100).unwrap().port, 9000);
+    }
+
+    #[test]
+    fn update_slot_owner_moves_only_the_named_slot() {
+        let mut conn = ClusterConnection {
+            nodes: HashMap::new(),
+            topology: make_topology(),
+            default_node: "10.0.0.1:7000".to_string(),
+            host_override: None,
+            address_map: None,
+            read_preference: ReadPreference::Master,
+            read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        };
+
+        // A single-slot MOVED must not steal the rest of the 0-5460 range --
+        // that was the redirect ping-pong bug during live resharding.
+        conn.update_slot_owner(100, "10.0.0.9:9000");
+        assert_eq!(conn.topology.master_for_slot(100).unwrap().port, 9000);
+        assert_eq!(conn.topology.master_for_slot(99).unwrap().port, 7000);
+        assert_eq!(conn.topology.master_for_slot(101).unwrap().port, 7000);
+        assert_eq!(conn.topology.master_for_slot(0).unwrap().port, 7000);
+        assert_eq!(conn.topology.master_for_slot(5460).unwrap().port, 7000);
+    }
+
+    #[test]
+    fn builder_defaults_max_redirects() {
+        let builder = ClusterConnection::builder("127.0.0.1:7000");
+        assert_eq!(builder.max_redirects, MAX_REDIRECTS);
+    }
+
+    #[test]
+    fn builder_sets_max_redirects() {
+        let builder = ClusterConnection::builder("127.0.0.1:7000").max_redirects(10);
+        assert_eq!(builder.max_redirects, 10);
     }
 
     // -- redirect edge cases --
