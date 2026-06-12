@@ -2967,3 +2967,27 @@ async fn multiplexed_client_reconnects_after_server_restart() {
 
     client.execute(Del::new("mux:reconnect:k")).await.unwrap();
 }
+
+#[tokio::test]
+async fn multiplexed_response_timeout_trips_on_slow_command() {
+    let conn = RedisConnection::connect(redis_addr().await).await.unwrap();
+    let config = AutoPipelineConfig {
+        response_timeout: Some(std::time::Duration::from_millis(150)),
+        ..Default::default()
+    };
+    let client = MultiplexedClient::from_connection_with_config(conn, config);
+
+    // BLPOP on an empty key blocks this connection for up to 5s (it does not
+    // block the whole server). The 150ms response deadline must trip first and
+    // surface CommandTimeout rather than stalling the worker.
+    let k = key("mux_timeout", "blpop");
+    client.execute(Del::new(&k)).await.unwrap();
+    let err = client
+        .execute(RawCommand::new("BLPOP").arg(&k).arg("5"))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, redis_tower::RedisError::CommandTimeout),
+        "expected CommandTimeout, got {err:?}"
+    );
+}
