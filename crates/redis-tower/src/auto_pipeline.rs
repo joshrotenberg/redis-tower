@@ -29,10 +29,11 @@ use tokio_util::sync::PollSender;
 use tower_service::Service;
 use tracing::warn;
 
+use crate::metrics_layer::MetricsRecorder;
 use crate::reconnect::{ConnectionFactory, ReconnectConfig};
 
 /// Configuration for the auto-pipelining service.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AutoPipelineConfig {
     /// Maximum commands to batch before sending. Default: 100.
     pub max_batch_size: usize,
@@ -78,6 +79,39 @@ pub struct AutoPipelineConfig {
     ///
     /// Default: `None`.
     pub response_timeout: Option<Duration>,
+    /// Optional metrics recorder for worker-level observability.
+    ///
+    /// When set, the background worker calls
+    /// [`MetricsRecorder::pipeline_flushed`] after each batch flush, reporting
+    /// how many frames went out together. This is the one signal only the
+    /// worker can see -- a histogram of it shows whether auto-pipelining is
+    /// actually batching (`> 1`) or every caller flushes alone (`== 1`).
+    ///
+    /// For per-command latency/error metrics and tracing spans, wrap the
+    /// client in [`MetricsLayer`](crate::MetricsLayer) /
+    /// [`TracingLayer`](crate::TracingLayer) via
+    /// [`MultiplexedClient::from_layered`](crate::MultiplexedClient::from_layered) --
+    /// those compose at the `Service<Frame>` layer where per-command timing is
+    /// available.
+    ///
+    /// Default: `None`.
+    pub metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+}
+
+impl std::fmt::Debug for AutoPipelineConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AutoPipelineConfig")
+            .field("max_batch_size", &self.max_batch_size)
+            .field("batch_window", &self.batch_window)
+            .field("queue_capacity", &self.queue_capacity)
+            .field("shed_load_on_full", &self.shed_load_on_full)
+            .field("response_timeout", &self.response_timeout)
+            .field(
+                "metrics_recorder",
+                &self.metrics_recorder.as_ref().map(|_| "<recorder>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for AutoPipelineConfig {
@@ -88,6 +122,7 @@ impl Default for AutoPipelineConfig {
             queue_capacity: 1024,
             shed_load_on_full: false,
             response_timeout: None,
+            metrics_recorder: None,
         }
     }
 }
@@ -401,7 +436,13 @@ async fn pipeline_worker(
                     }
                     Ok(None) => {
                         // Channel closed -- flush remaining and exit.
-                        let _ = flush_batch(&mut conn, batch, config.response_timeout).await;
+                        let _ = flush_batch(
+                            &mut conn,
+                            batch,
+                            config.response_timeout,
+                            config.metrics_recorder.as_ref(),
+                        )
+                        .await;
                         return;
                     }
                     Err(_) => break, // timeout
@@ -409,9 +450,14 @@ async fn pipeline_worker(
             }
         }
 
-        if flush_batch(&mut conn, batch, config.response_timeout)
-            .await
-            .is_err()
+        if flush_batch(
+            &mut conn,
+            batch,
+            config.response_timeout,
+            config.metrics_recorder.as_ref(),
+        )
+        .await
+        .is_err()
         {
             // Pipeline execution failed. Either give up (Fixed source) or
             // reconnect via factory and keep serving.
@@ -463,6 +509,7 @@ async fn flush_batch(
     conn: &mut RedisConnection,
     batch: Vec<WorkerRequest>,
     response_timeout: Option<Duration>,
+    recorder: Option<&Arc<dyn MetricsRecorder>>,
 ) -> Result<(), ()> {
     // Owned single-pass: move frames out of each request directly into the
     // pipeline vec, and collect response senders into a parallel `responders`
@@ -470,6 +517,13 @@ async fn flush_batch(
     // implementation (borrow to build frames, then own to route responses)
     // required.
     let total_frames: usize = batch.iter().map(|r| r.frame_count()).sum();
+
+    // Report the batch size -- the one observability signal only the worker can
+    // see (per-command metrics belong to the composed MetricsLayer instead).
+    if let Some(recorder) = recorder {
+        recorder.pipeline_flushed(total_frames);
+    }
+
     let mut frames: Vec<Frame> = Vec::with_capacity(total_frames);
 
     enum Responder {
@@ -680,6 +734,10 @@ mod tests {
             config.response_timeout.is_none(),
             "no response deadline by default"
         );
+        assert!(
+            config.metrics_recorder.is_none(),
+            "no metrics recorder by default"
+        );
     }
 
     #[test]
@@ -690,6 +748,7 @@ mod tests {
             queue_capacity: 512,
             shed_load_on_full: true,
             response_timeout: Some(Duration::from_millis(250)),
+            metrics_recorder: None,
         };
         assert_eq!(config.max_batch_size, 50);
         assert_eq!(config.batch_window, Duration::from_micros(500));
