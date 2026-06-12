@@ -2639,6 +2639,17 @@ async fn csc_hget_fields_do_not_collide() {
     client.clear_cache().await;
 }
 
+#[tokio::test]
+async fn csc_reports_healthy_caching() {
+    // A fresh CachedClient has a live tracking connection, so caching is active.
+    let addr = redis_addr().await;
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
+    assert!(
+        client.is_caching_healthy().await,
+        "caching should be healthy on a fresh connection"
+    );
+}
+
 // -- Additional PubSub edge-case tests (#156) --
 
 #[tokio::test]

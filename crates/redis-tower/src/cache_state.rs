@@ -112,18 +112,34 @@ pub(crate) fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
 /// This is an opaque handle. Construct one with [`CacheState::default`] to
 /// share a cache between a [`CacheService`](crate::cache_layer::CacheService)
 /// and its invalidation task; the cache is managed internally by those types.
-#[derive(Default)]
 pub struct CacheState {
     /// `cache_key -> (redis_key, cached response)`. The redis_key is stored so
     /// eviction can clean up the reverse index without a scan.
     entries: HashMap<Vec<u8>, (Vec<u8>, Frame)>,
     /// `redis_key -> {cache_key}`.
     index: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
+    /// When `false`, the tracking connection is unhealthy: reads pass through to
+    /// the server and nothing is cached, so stale data can never be served.
+    enabled: bool,
+}
+
+impl Default for CacheState {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            index: HashMap::new(),
+            enabled: true,
+        }
+    }
 }
 
 impl CacheState {
-    /// Look up a cached response by its full-command cache key.
+    /// Look up a cached response by its full-command cache key. Returns `None`
+    /// while caching is disabled, so the caller fetches fresh from the server.
     pub(crate) fn get(&self, cache_key: &[u8]) -> Option<&Frame> {
+        if !self.enabled {
+            return None;
+        }
         self.entries.get(cache_key).map(|(_, frame)| frame)
     }
 
@@ -137,6 +153,10 @@ impl CacheState {
         frame: Frame,
         max_size: usize,
     ) {
+        // Don't populate the cache while tracking is unhealthy.
+        if !self.enabled {
+            return;
+        }
         if max_size > 0
             && !self.entries.contains_key(&cache_key)
             && self.entries.len() >= max_size
@@ -164,6 +184,26 @@ impl CacheState {
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
         self.index.clear();
+    }
+
+    /// Disable caching because the tracking connection was lost: clears all
+    /// entries and makes every read pass through to the server until
+    /// [`enable`](Self::enable) is called. This is what prevents serving stale
+    /// data after invalidations stop arriving.
+    pub(crate) fn disable(&mut self) {
+        self.enabled = false;
+        self.clear();
+    }
+
+    /// Re-enable caching after the tracking connection is restored.
+    pub(crate) fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Whether caching is currently active (the tracking connection is healthy).
+    /// A `false` here means reads are passing through to the server.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Number of cached response entries.
@@ -287,5 +327,30 @@ mod tests {
     fn parse_invalidation_non_invalidate_is_none() {
         let f = Frame::Push(vec![bulk("other"), Frame::Null]);
         assert!(parse_invalidation(&f).is_none());
+    }
+
+    #[test]
+    fn disabled_cache_passes_through_and_drops_writes() {
+        let mut state = CacheState::default();
+        let (k, rk) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(k.clone(), rk.clone(), bulk("v"), 0);
+        assert!(state.get(&k).is_some());
+
+        // Losing the tracking connection: disable clears entries and forces
+        // every read to pass through (never serve stale data).
+        state.disable();
+        assert!(!state.is_enabled());
+        assert_eq!(state.len(), 0);
+        assert!(state.get(&k).is_none());
+
+        // Writes while disabled are dropped, so nothing accumulates uninvalidated.
+        state.insert(k.clone(), rk, bulk("v2"), 0);
+        assert_eq!(state.len(), 0);
+
+        // Re-enabling (tracking restored) resumes normal caching.
+        state.enable();
+        let (k2, rk2) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
+        state.insert(k2.clone(), rk2, bulk("vb"), 0);
+        assert!(state.get(&k2).is_some());
     }
 }
