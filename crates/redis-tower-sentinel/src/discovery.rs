@@ -94,13 +94,6 @@ pub(crate) async fn connect_hop(
     if let Some(provider) = credentials {
         authenticate(&mut conn, provider.as_ref()).await?;
     }
-    // `connect`/`connect_tls` now negotiate RESP3 by default, but the SENTINEL
-    // command parsers (and the master data path discovered through here) still
-    // expect RESP2 frame shapes. Pin sentinel hops to RESP2 -- after AUTH, so
-    // HELLO 2 cannot hit NOAUTH. Proper RESP3 sentinel support is a follow-up.
-    if conn.is_resp3() {
-        let _ = conn.hello(2).await;
-    }
     Ok(conn)
 }
 
@@ -347,25 +340,32 @@ fn parse_replicas_response(frame: &Frame) -> Result<Vec<String>, RedisError> {
     Ok(addrs)
 }
 
-/// Parse a flat key-value array into a map.
+/// Parse a key-value reply into a map, accepting both the RESP2 flat
+/// key-value array and the RESP3 map shape.
 fn parse_flat_map(frame: &Frame) -> Result<std::collections::HashMap<String, String>, RedisError> {
-    let items = match frame {
-        Frame::Array(Some(items)) => items,
+    let mut map = std::collections::HashMap::new();
+    match frame {
+        Frame::Array(Some(items)) => {
+            let mut i = 0;
+            while i + 1 < items.len() {
+                let key = extract_bulk_string(&items[i])?;
+                let value = extract_bulk_string(&items[i + 1])?;
+                map.insert(key, value);
+                i += 2;
+            }
+        }
+        // RESP3 returns the per-replica info as a map rather than a flat array.
+        Frame::Map(pairs) => {
+            for (k, v) in pairs {
+                map.insert(extract_bulk_string(k)?, extract_bulk_string(v)?);
+            }
+        }
         other => {
             return Err(RedisError::UnexpectedResponse {
-                expected: "flat key-value array",
+                expected: "flat key-value array or map",
                 actual: format!("{other:?}"),
             });
         }
-    };
-
-    let mut map = std::collections::HashMap::new();
-    let mut i = 0;
-    while i + 1 < items.len() {
-        let key = extract_bulk_string(&items[i])?;
-        let value = extract_bulk_string(&items[i + 1])?;
-        map.insert(key, value);
-        i += 2;
     }
     Ok(map)
 }
@@ -552,6 +552,28 @@ mod tests {
             Frame::BulkString(Some(Bytes::from("flags"))),
             Frame::BulkString(Some(Bytes::from("slave"))),
         ]));
+        let frame = Frame::Array(Some(vec![replica]));
+        let addrs = parse_replicas_response(&frame).unwrap();
+        assert_eq!(addrs, vec!["127.0.0.1:6381"]);
+    }
+
+    #[test]
+    fn parse_replicas_with_resp3_map_entries() {
+        // RESP3 returns each replica's info as a map rather than a flat array.
+        let replica = Frame::Map(vec![
+            (
+                Frame::BulkString(Some(Bytes::from("ip"))),
+                Frame::BulkString(Some(Bytes::from("127.0.0.1"))),
+            ),
+            (
+                Frame::BulkString(Some(Bytes::from("port"))),
+                Frame::BulkString(Some(Bytes::from("6381"))),
+            ),
+            (
+                Frame::BulkString(Some(Bytes::from("flags"))),
+                Frame::BulkString(Some(Bytes::from("slave"))),
+            ),
+        ]);
         let frame = Frame::Array(Some(vec![replica]));
         let addrs = parse_replicas_response(&frame).unwrap();
         assert_eq!(addrs, vec!["127.0.0.1:6381"]);
