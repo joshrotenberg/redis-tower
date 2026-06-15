@@ -51,6 +51,7 @@ pub(crate) enum TlsBackend {
 impl TlsConfig {
     /// Create a TLS config using the native-tls backend with platform defaults.
     #[cfg(feature = "tls-native-tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls-native-tls")))]
     pub fn default_native_tls() -> Self {
         Self {
             backend: TlsBackend::NativeTls,
@@ -63,6 +64,7 @@ impl TlsConfig {
 
     /// Create a TLS config using the rustls backend with system root certs.
     #[cfg(feature = "tls-rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls-rustls")))]
     pub fn default_rustls() -> Self {
         Self {
             backend: TlsBackend::Rustls,
@@ -81,6 +83,7 @@ impl TlsConfig {
     /// settings are ignored when using a custom config since the caller
     /// controls verification through the provided `ClientConfig`.
     #[cfg(feature = "tls-rustls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls-rustls")))]
     pub fn from_rustls_config(config: std::sync::Arc<rustls::ClientConfig>) -> Self {
         Self {
             backend: TlsBackend::RustlsCustom(config),
@@ -99,6 +102,7 @@ impl TlsConfig {
     /// settings are ignored when using a custom connector since the caller
     /// controls verification through the provided `TlsConnector`.
     #[cfg(feature = "tls-native-tls")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "tls-native-tls")))]
     pub fn from_native_tls_connector(connector: native_tls::TlsConnector) -> Self {
         Self {
             backend: TlsBackend::NativeTlsCustom(connector),

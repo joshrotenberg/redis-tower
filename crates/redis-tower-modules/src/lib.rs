@@ -52,17 +52,24 @@
 //! # }
 //! ```
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 #[cfg(feature = "json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "json")))]
 pub mod json;
 
 #[cfg(feature = "search")]
+#[cfg_attr(docsrs, doc(cfg(feature = "search")))]
 pub mod search;
 
 #[cfg(feature = "timeseries")]
+#[cfg_attr(docsrs, doc(cfg(feature = "timeseries")))]
 pub mod timeseries;
 
 #[cfg(feature = "probabilistic")]
+#[cfg_attr(docsrs, doc(cfg(feature = "probabilistic")))]
 pub mod probabilistic;
 
 #[cfg(feature = "vector")]
+#[cfg_attr(docsrs, doc(cfg(feature = "vector")))]
 pub mod vector;
