@@ -4,7 +4,7 @@ use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig
 use redis_tower::commands::*;
 use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
-    MultiplexedClient, Pipeline, PubSubConnection, RedisClient, RedisConnection,
+    MultiplexedClient, Pipeline, ProtocolVersion, PubSubConnection, RedisClient, RedisConnection,
     ResilientConnection, ResilientRedisClient, Transaction, TransactionResult,
 };
 use tokio::sync::OnceCell;
@@ -70,6 +70,43 @@ async fn resp3_conn() -> RedisConnection {
 mod resp3 {
     use super::*;
     redis_test_harness::command_tests!(resp3_conn, "resp3_cmd");
+}
+
+/// Explicit protocol negotiation via `connect_with_protocol` (#478).
+///
+/// PR 1 of the RESP3 work: the negotiation primitive + RESP2 fallback exist and
+/// are introspectable; flipping the `connect()` default to RESP3 is a follow-up.
+#[tokio::test]
+async fn protocol_negotiation() {
+    let addr = redis_addr().await;
+
+    // Forced RESP2: no HELLO is sent, the connection stays RESP2.
+    let c2 = RedisConnection::connect_with_protocol(addr, ProtocolVersion::Resp2)
+        .await
+        .unwrap();
+    assert!(!c2.is_resp3(), "Resp2 must not negotiate RESP3");
+
+    // Forced RESP3: HELLO 3 succeeds on a modern server.
+    let c3 = RedisConnection::connect_with_protocol(addr, ProtocolVersion::Resp3)
+        .await
+        .unwrap();
+    assert!(c3.is_resp3(), "Resp3 must negotiate RESP3");
+
+    // Auto: negotiates RESP3 on a modern server; would fall back on Redis < 6.0.
+    let ca = RedisConnection::connect_with_protocol(addr, ProtocolVersion::Auto)
+        .await
+        .unwrap();
+    assert!(
+        ca.is_resp3(),
+        "Auto must negotiate RESP3 on a modern server"
+    );
+
+    // The plain connect() default is still RESP2 in this PR (flip is a follow-up).
+    let cd = conn().await;
+    assert!(
+        !cd.is_resp3(),
+        "connect() default is RESP2 until the flip lands"
+    );
 }
 
 async fn client() -> RedisClient {
@@ -626,6 +663,41 @@ async fn pubsub_basic() {
     assert_eq!(msg.payload, Bytes::from("hello pubsub"));
     assert_eq!(msg.kind, redis_tower::MessageKind::Message);
     assert!(msg.pattern.is_none());
+}
+
+/// A subscriber on a RESP3 connection receives messages as RESP3 Push frames
+/// (#478). This is the push path that client-side caching invalidations will
+/// ride on, so it must work end-to-end under RESP3.
+#[tokio::test]
+async fn pubsub_resp3_push() {
+    let channel = key("pubsub_resp3", "ch");
+
+    let sub_conn = resp3_conn().await;
+    assert!(sub_conn.is_resp3(), "subscriber connection should be RESP3");
+    let mut pubsub = PubSubConnection::from_connection(sub_conn).unwrap();
+    pubsub.subscribe(&[&channel]).await.unwrap();
+
+    let mut pub_conn = conn().await;
+    use redis_tower_protocol::helpers::{array, bulk};
+    let publish_frame = array(vec![
+        bulk("PUBLISH"),
+        bulk(channel.as_str()),
+        bulk("hi resp3"),
+    ]);
+    pub_conn
+        .execute_pipeline(vec![publish_frame])
+        .await
+        .unwrap();
+
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(2), pubsub.next())
+        .await
+        .expect("timeout waiting for RESP3 push message")
+        .expect("stream ended")
+        .expect("parse error");
+
+    assert_eq!(msg.channel, channel);
+    assert_eq!(msg.payload, Bytes::from("hi resp3"));
+    assert_eq!(msg.kind, redis_tower::MessageKind::Message);
 }
 
 #[tokio::test]

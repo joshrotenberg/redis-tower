@@ -338,8 +338,8 @@ pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 
 // Re-export core types.
 pub use redis_tower_core::{
-    Command, Frame, FrameService, FromRedisBytes, RedisConnection, RedisConvert, RedisError,
-    RedisStream, RedisValueExt, RespCodec,
+    Command, Frame, FrameService, FromRedisBytes, ProtocolVersion, RedisConnection, RedisConvert,
+    RedisError, RedisStream, RedisValueExt, RespCodec,
 };
 
 // Re-export TLS config when a TLS backend is enabled.
