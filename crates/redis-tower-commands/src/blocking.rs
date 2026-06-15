@@ -2,6 +2,16 @@
 //!
 //! These commands hold the connection until data arrives or the timeout
 //! expires. They should NOT go through caching layers.
+//!
+//! # Multiplexed clients
+//!
+//! **Do not run blocking commands on a multiplexed client.** A multiplexed
+//! client funnels every caller through one shared connection and one pipeline
+//! worker; a blocking command (`BLPOP`, `BRPOP`, `BLMOVE`,
+//! `BZPOPMIN`/`BZPOPMAX`, or `XREAD`/`XREADGROUP` with `BLOCK`) holds that
+//! worker for its entire wait, stalling every other concurrent caller. Run
+//! blocking commands on a dedicated `RedisConnection` or a pooled connection
+//! instead. Each such command reports `is_blocking() == true`.
 
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
@@ -54,6 +64,10 @@ impl Command for BLPop {
     fn name(&self) -> &str {
         "BLPOP"
     }
+
+    fn is_blocking(&self) -> bool {
+        true
+    }
 }
 
 /// BRPOP key \[key ...\] timeout
@@ -99,6 +113,10 @@ impl Command for BRPop {
 
     fn name(&self) -> &str {
         "BRPOP"
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
     }
 }
 
@@ -176,6 +194,10 @@ impl Command for BLMove {
     fn name(&self) -> &str {
         "BLMOVE"
     }
+
+    fn is_blocking(&self) -> bool {
+        true
+    }
 }
 
 /// BZPOPMIN key \[key ...\] timeout
@@ -222,6 +244,10 @@ impl Command for BZPopMin {
     fn name(&self) -> &str {
         "BZPOPMIN"
     }
+
+    fn is_blocking(&self) -> bool {
+        true
+    }
 }
 
 /// BZPOPMAX key \[key ...\] timeout
@@ -267,6 +293,10 @@ impl Command for BZPopMax {
 
     fn name(&self) -> &str {
         "BZPOPMAX"
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
     }
 }
 
@@ -340,6 +370,14 @@ mod tests {
     use redis_tower_core::Command;
     use redis_tower_protocol::Frame;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn blocking_commands_report_is_blocking() {
+        assert!(BLPop::new("k", 0.0).is_blocking());
+        assert!(BRPop::new("k", 0.0).is_blocking());
+        assert!(BZPopMin::new("k", 0.0).is_blocking());
+        assert!(BZPopMax::new("k", 0.0).is_blocking());
+    }
 
     // -- BLPop --
 
