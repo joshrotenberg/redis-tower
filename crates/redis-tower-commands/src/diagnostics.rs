@@ -86,9 +86,12 @@ impl Command for MemoryDoctor {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::BulkString(Some(s)) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            // RESP3 returns MEMORY DOCTOR as a verbatim string.
+            Frame::BulkString(Some(s)) | Frame::VerbatimString(_, s) => {
+                Ok(String::from_utf8_lossy(&s).into_owned())
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk or verbatim string",
                 actual: format!("{other:?}"),
             }),
         }
@@ -398,5 +401,31 @@ impl Command for LatencyReset {
 
     fn name(&self) -> &str {
         "LATENCY RESET"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn memory_doctor_parse_bulk_string() {
+        let cmd = MemoryDoctor::new();
+        let frame = Frame::BulkString(Some(Bytes::from("Sam, I detected a few issues")));
+        let out = cmd.parse_response(frame).unwrap();
+        assert!(out.contains("issues"));
+    }
+
+    #[test]
+    fn memory_doctor_parse_verbatim_string_resp3() {
+        // Under RESP3 MEMORY DOCTOR comes back as a verbatim string.
+        let cmd = MemoryDoctor::new();
+        let frame = Frame::VerbatimString(
+            Bytes::from("txt"),
+            Bytes::from("Sam, I detected a few issues"),
+        );
+        let out = cmd.parse_response(frame).unwrap();
+        assert!(out.contains("issues"));
     }
 }

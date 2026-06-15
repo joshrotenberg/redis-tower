@@ -1934,13 +1934,34 @@ fn extract_integer(frame: &Frame) -> Result<i64, RedisError> {
 }
 
 /// Parse XINFO STREAM response (flat key-value array).
+/// Normalize an XINFO key/value container to a flat `[k, v, k, v, ...]` slice.
+///
+/// RESP2 returns these as a flat array; RESP3 returns the same data as a
+/// `Frame::Map` of `(key, value)` pairs. Flattening the map to the array shape
+/// lets the field-matching loops stay protocol-agnostic. Returns `None` for any
+/// other frame so callers can emit a precise `UnexpectedResponse` error.
+fn xinfo_kv_pairs(frame: &Frame) -> Option<Vec<Frame>> {
+    match frame {
+        Frame::Array(Some(items)) => Some(items.clone()),
+        Frame::Map(pairs) => {
+            let mut out = Vec::with_capacity(pairs.len() * 2);
+            for (k, v) in pairs {
+                out.push(k.clone());
+                out.push(v.clone());
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
+
 fn parse_xinfo_stream(frame: &Frame) -> Result<StreamInfo, RedisError> {
-    let items = match frame {
-        Frame::Array(Some(items)) => items,
-        other => {
+    let items = match xinfo_kv_pairs(frame) {
+        Some(items) => items,
+        None => {
             return Err(RedisError::UnexpectedResponse {
-                expected: "array of key-value pairs (XINFO STREAM)",
-                actual: format!("{other:?}"),
+                expected: "array or map of key-value pairs (XINFO STREAM)",
+                actual: format!("{frame:?}"),
             });
         }
     };
@@ -2009,12 +2030,12 @@ fn parse_xinfo_groups(frame: &Frame) -> Result<Vec<GroupInfo>, RedisError> {
 
     let mut result = Vec::new();
     for group_frame in items {
-        let fields = match group_frame {
-            Frame::Array(Some(f)) => f,
-            other => {
+        let fields = match xinfo_kv_pairs(group_frame) {
+            Some(f) => f,
+            None => {
                 return Err(RedisError::UnexpectedResponse {
-                    expected: "array of key-value pairs (group info)",
-                    actual: format!("{other:?}"),
+                    expected: "array or map of key-value pairs (group info)",
+                    actual: format!("{group_frame:?}"),
                 });
             }
         };
@@ -2067,12 +2088,12 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
 
     let mut result = Vec::new();
     for consumer_frame in items {
-        let fields = match consumer_frame {
-            Frame::Array(Some(f)) => f,
-            other => {
+        let fields = match xinfo_kv_pairs(consumer_frame) {
+            Some(f) => f,
+            None => {
                 return Err(RedisError::UnexpectedResponse {
-                    expected: "array of key-value pairs (consumer info)",
-                    actual: format!("{other:?}"),
+                    expected: "array or map of key-value pairs (consumer info)",
+                    actual: format!("{consumer_frame:?}"),
                 });
             }
         };
@@ -2184,6 +2205,58 @@ mod tests {
         // XREAD is blocking only when BLOCK is set.
         assert!(!XRead::new("s", "$").is_blocking());
         assert!(XRead::new("s", "$").block(1000).is_blocking());
+    }
+
+    // -- XINFO RESP3 map parsing (#478) --
+
+    #[test]
+    fn xinfo_stream_parses_resp3_map() {
+        // Under RESP3 XINFO STREAM returns a Map rather than a flat array.
+        let frame = Frame::Map(vec![
+            (bulk("length"), Frame::Integer(2)),
+            (bulk("radix-tree-keys"), Frame::Integer(1)),
+            (bulk("radix-tree-nodes"), Frame::Integer(2)),
+            (bulk("last-generated-id"), bulk("1-1")),
+            (bulk("groups"), Frame::Integer(0)),
+            (bulk("first-entry"), Frame::Null),
+            (bulk("last-entry"), Frame::Null),
+        ]);
+        let info = parse_xinfo_stream(&frame).unwrap();
+        assert_eq!(info.length, 2);
+        assert_eq!(info.last_generated_id, "1-1");
+        assert!(info.first_entry.is_none());
+        assert!(info.last_entry.is_none());
+    }
+
+    #[test]
+    fn xinfo_groups_parses_resp3_map_entries() {
+        // RESP3 returns each group as a Map inside the outer array.
+        let frame = Frame::Array(Some(vec![Frame::Map(vec![
+            (bulk("name"), bulk("g1")),
+            (bulk("consumers"), Frame::Integer(1)),
+            (bulk("pending"), Frame::Integer(3)),
+            (bulk("last-delivered-id"), bulk("5-0")),
+        ])]));
+        let groups = parse_xinfo_groups(&frame).unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "g1");
+        assert_eq!(groups[0].consumers, 1);
+        assert_eq!(groups[0].pending, 3);
+    }
+
+    #[test]
+    fn xinfo_consumers_parses_resp3_map_entries() {
+        // RESP3 returns each consumer as a Map inside the outer array.
+        let frame = Frame::Array(Some(vec![Frame::Map(vec![
+            (bulk("name"), bulk("c1")),
+            (bulk("pending"), Frame::Integer(1)),
+            (bulk("idle"), Frame::Integer(42)),
+        ])]));
+        let consumers = parse_xinfo_consumers(&frame).unwrap();
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].name, "c1");
+        assert_eq!(consumers[0].pending, 1);
+        assert_eq!(consumers[0].idle, 42);
     }
 
     // -- XAdd --
