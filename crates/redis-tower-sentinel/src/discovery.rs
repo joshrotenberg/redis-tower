@@ -1,9 +1,101 @@
 //! Sentinel discovery: find the current master and replicas.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use redis_tower_core::{Frame, RedisConnection, RedisError};
+use redis_tower::credentials::{CredentialProvider, Credentials};
+use redis_tower_commands::Auth;
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
+
+/// Configuration for sentinel and node connections.
+///
+/// Holds independent credentials and (when a TLS feature is enabled) TLS
+/// configs for the two hops a sentinel client makes:
+///
+/// - **Sentinel hop** -- connects to the sentinel nodes for discovery.
+/// - **Node hop** -- connects to the discovered master.
+///
+/// Sentinels and the master commonly use different passwords in production, so
+/// both hops are configured independently. Use [`SentinelConnectionBuilder`],
+/// [`SentinelClientBuilder`], or [`MultiplexedSentinelClientBuilder`] instead
+/// of constructing this directly.
+///
+/// [`SentinelConnectionBuilder`]: crate::connection::SentinelConnectionBuilder
+/// [`SentinelClientBuilder`]: crate::client::SentinelClientBuilder
+/// [`MultiplexedSentinelClientBuilder`]: crate::multiplexed::MultiplexedSentinelClientBuilder
+#[derive(Clone, Default)]
+pub struct SentinelConfig {
+    /// Credentials for authenticating to sentinel nodes.
+    pub(crate) sentinel_credentials: Option<Arc<dyn CredentialProvider>>,
+    /// Credentials for authenticating to the Redis data node (master).
+    pub(crate) node_credentials: Option<Arc<dyn CredentialProvider>>,
+    /// TLS configuration for sentinel connections.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub(crate) sentinel_tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
+    /// TLS configuration for node (master) connections.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub(crate) node_tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
+}
+
+/// Authenticate a freshly opened connection using the given credential provider.
+///
+/// Sends `AUTH [user] password` and checks for `+OK`. Returns `Ok(())` on
+/// success, or a `RedisError` on auth failure or unexpected response.
+pub(crate) async fn authenticate(
+    conn: &mut RedisConnection,
+    provider: &dyn CredentialProvider,
+) -> Result<(), RedisError> {
+    let creds: Credentials = provider.get_credentials().await?;
+    let auth_cmd = match creds.username.as_deref() {
+        Some(user) => Auth::credentials(user, &creds.password),
+        None => Auth::password(&creds.password),
+    };
+    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
+    match responses.into_iter().next() {
+        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
+        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
+        Some(other) => Err(RedisError::UnexpectedResponse {
+            expected: "OK",
+            actual: format!("{other:?}"),
+        }),
+        None => Err(RedisError::ConnectionClosed),
+    }
+}
+
+/// Open a connection to `addr`, optionally using TLS and/or authenticating.
+///
+/// When a TLS feature is enabled and `tls` is `Some`, the connection is
+/// upgraded via `RedisConnection::connect_tls`. Otherwise a plain TCP
+/// connection is made. If `credentials` is `Some`, `AUTH` is sent
+/// immediately after the connection is established.
+pub(crate) async fn connect_hop(
+    addr: &str,
+    credentials: Option<&Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
+        &Arc<redis_tower_core::tls::TlsConfig>,
+    >,
+) -> Result<RedisConnection, RedisError> {
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    let mut conn = match tls {
+        Some(tls_cfg) => {
+            let hostname = addr
+                .rsplit_once(':')
+                .map(|(h, _)| h)
+                .unwrap_or(addr)
+                .to_string();
+            RedisConnection::connect_tls(addr, &hostname, tls_cfg).await?
+        }
+        None => RedisConnection::connect(addr).await?,
+    };
+    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+    let mut conn = RedisConnection::connect(addr).await?;
+
+    if let Some(provider) = credentials {
+        authenticate(&mut conn, provider.as_ref()).await?;
+    }
+    Ok(conn)
+}
 
 /// Discover the current master address by querying sentinel nodes.
 ///
@@ -13,11 +105,14 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Uses a default per-sentinel timeout of 1 second so that an
 /// unreachable sentinel fails fast rather than blocking on the OS TCP
 /// connect timeout. See [`discover_master_with_timeout`] to customize.
+///
+/// Sentinel connections are made without credentials or TLS. For auth/TLS,
+/// use [`SentinelConnection::builder`](crate::connection::SentinelConnection::builder).
 pub async fn discover_master(
     sentinel_addrs: &[String],
     master_name: &str,
 ) -> Result<String, RedisError> {
-    discover_master_with_timeout(sentinel_addrs, master_name, Duration::from_millis(1000)).await
+    discover_master_with_config(sentinel_addrs, master_name, &SentinelConfig::default()).await
 }
 
 /// Discover the current master address, with a per-sentinel timeout.
@@ -26,13 +121,50 @@ pub async fn discover_master(
 /// `timeout`. A sentinel that does not respond within the timeout is
 /// skipped and the next sentinel is tried. This prevents an unreachable
 /// sentinel from blocking discovery on the OS TCP connect timeout.
+///
+/// Sentinel connections are made without credentials or TLS. For auth/TLS,
+/// use [`SentinelConnection::builder`](crate::connection::SentinelConnection::builder).
 pub async fn discover_master_with_timeout(
     sentinel_addrs: &[String],
     master_name: &str,
     timeout: Duration,
 ) -> Result<String, RedisError> {
+    discover_master_with_config_timeout(
+        sentinel_addrs,
+        master_name,
+        &SentinelConfig::default(),
+        timeout,
+    )
+    .await
+}
+
+/// Discover the current master address using the given sentinel config.
+///
+/// Uses the config's sentinel credentials and TLS for sentinel connections.
+/// Uses a default per-sentinel timeout of 1 second.
+pub(crate) async fn discover_master_with_config(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+) -> Result<String, RedisError> {
+    discover_master_with_config_timeout(
+        sentinel_addrs,
+        master_name,
+        config,
+        Duration::from_millis(1000),
+    )
+    .await
+}
+
+/// Discover the current master address using the given sentinel config and timeout.
+pub(crate) async fn discover_master_with_config_timeout(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+    timeout: Duration,
+) -> Result<String, RedisError> {
     for addr in sentinel_addrs {
-        match tokio::time::timeout(timeout, query_master_addr(addr, master_name)).await {
+        match tokio::time::timeout(timeout, query_master_addr(addr, master_name, config)).await {
             Ok(Ok(master_addr)) => return Ok(master_addr),
             Ok(Err(e)) => {
                 tracing::warn!(
@@ -59,12 +191,24 @@ pub async fn discover_master_with_timeout(
 }
 
 /// Discover replica addresses from a sentinel.
+///
+/// Sentinel connections are made without credentials or TLS. For auth/TLS,
+/// use [`SentinelConnection::builder`](crate::connection::SentinelConnection::builder).
 pub async fn discover_replicas(
     sentinel_addrs: &[String],
     master_name: &str,
 ) -> Result<Vec<String>, RedisError> {
+    discover_replicas_with_config(sentinel_addrs, master_name, &SentinelConfig::default()).await
+}
+
+/// Discover replica addresses using the given sentinel config.
+pub(crate) async fn discover_replicas_with_config(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+) -> Result<Vec<String>, RedisError> {
     for addr in sentinel_addrs {
-        match query_replicas(addr, master_name).await {
+        match query_replicas(addr, master_name, config).await {
             Ok(replicas) => return Ok(replicas),
             Err(_) => continue,
         }
@@ -78,8 +222,18 @@ pub async fn discover_replicas(
 ///
 /// Sends `SENTINEL GET-MASTER-ADDR-BY-NAME <name>` and parses the
 /// response (a two-element array: \[host, port\]).
-async fn query_master_addr(sentinel_addr: &str, master_name: &str) -> Result<String, RedisError> {
-    let mut conn = RedisConnection::connect(sentinel_addr).await?;
+async fn query_master_addr(
+    sentinel_addr: &str,
+    master_name: &str,
+    config: &SentinelConfig,
+) -> Result<String, RedisError> {
+    let mut conn = connect_hop(
+        sentinel_addr,
+        config.sentinel_credentials.as_ref(),
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        config.sentinel_tls.as_ref(),
+    )
+    .await?;
     let frame = array(vec![
         bulk("SENTINEL"),
         bulk("GET-MASTER-ADDR-BY-NAME"),
@@ -97,8 +251,18 @@ async fn query_master_addr(sentinel_addr: &str, master_name: &str) -> Result<Str
 /// Query a sentinel for replica addresses.
 ///
 /// Sends `SENTINEL REPLICAS <name>` (Redis 7+) and parses the response.
-async fn query_replicas(sentinel_addr: &str, master_name: &str) -> Result<Vec<String>, RedisError> {
-    let mut conn = RedisConnection::connect(sentinel_addr).await?;
+async fn query_replicas(
+    sentinel_addr: &str,
+    master_name: &str,
+    config: &SentinelConfig,
+) -> Result<Vec<String>, RedisError> {
+    let mut conn = connect_hop(
+        sentinel_addr,
+        config.sentinel_credentials.as_ref(),
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        config.sentinel_tls.as_ref(),
+    )
+    .await?;
 
     // Try SENTINEL REPLICAS first (Redis 7+), fall back to SENTINEL SLAVES.
     let frame = array(vec![bulk("SENTINEL"), bulk("REPLICAS"), bulk(master_name)]);
@@ -110,9 +274,15 @@ async fn query_replicas(sentinel_addr: &str, master_name: &str) -> Result<Vec<St
 
     // If REPLICAS fails (older Redis), try SLAVES.
     if let Frame::Error(_) = &response {
-        let mut conn = RedisConnection::connect(sentinel_addr).await?;
+        let mut conn2 = connect_hop(
+            sentinel_addr,
+            config.sentinel_credentials.as_ref(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            config.sentinel_tls.as_ref(),
+        )
+        .await?;
         let frame = array(vec![bulk("SENTINEL"), bulk("SLAVES"), bulk(master_name)]);
-        let responses = conn.execute_pipeline(vec![frame]).await?;
+        let responses = conn2.execute_pipeline(vec![frame]).await?;
         let response = responses
             .into_iter()
             .next()
@@ -238,9 +408,25 @@ pub(crate) async fn connection_is_master(conn: &mut RedisConnection) -> Result<b
 /// sentinel's view lags a failover (or returns the just-demoted old master).
 ///
 /// Returns the verified connection and the master's `"host:port"` address.
+/// Sentinel connections use default config (no auth, no TLS). For auth/TLS,
+/// use [`connect_verified_master_with_config`].
 pub(crate) async fn connect_verified_master(
     sentinel_addrs: &[String],
     master_name: &str,
+) -> Result<(RedisConnection, String), RedisError> {
+    connect_verified_master_with_config(sentinel_addrs, master_name, &SentinelConfig::default())
+        .await
+}
+
+/// Discover the master via sentinel and verify its role, using the given config.
+///
+/// The sentinel hop uses `config.sentinel_credentials` and `config.sentinel_tls`.
+/// The node (master) hop uses `config.node_credentials` and `config.node_tls`.
+/// Returns the verified connection and the master's `"host:port"` address.
+pub(crate) async fn connect_verified_master_with_config(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
 ) -> Result<(RedisConnection, String), RedisError> {
     const MAX_ATTEMPTS: u32 = 5;
     const BASE_BACKOFF: Duration = Duration::from_millis(100);
@@ -251,14 +437,22 @@ pub(crate) async fn connect_verified_master(
             tokio::time::sleep(BASE_BACKOFF * 2u32.pow(attempt - 1)).await;
         }
 
-        let master_addr = match discover_master(sentinel_addrs, master_name).await {
-            Ok(addr) => addr,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
-        };
-        let mut conn = match RedisConnection::connect(&master_addr).await {
+        let master_addr =
+            match discover_master_with_config(sentinel_addrs, master_name, config).await {
+                Ok(addr) => addr,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+        let mut conn = match connect_hop(
+            &master_addr,
+            config.node_credentials.as_ref(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            config.node_tls.as_ref(),
+        )
+        .await
+        {
             Ok(c) => c,
             Err(e) => {
                 last_err = Some(e);
@@ -354,5 +548,30 @@ mod tests {
         let frame = Frame::Array(Some(vec![replica]));
         let addrs = parse_replicas_response(&frame).unwrap();
         assert_eq!(addrs, vec!["127.0.0.1:6381"]);
+    }
+
+    // -- SentinelConfig unit tests --
+
+    #[test]
+    fn sentinel_config_default_has_no_credentials_or_tls() {
+        let config = SentinelConfig::default();
+        assert!(config.sentinel_credentials.is_none());
+        assert!(config.node_credentials.is_none());
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        {
+            assert!(config.sentinel_tls.is_none());
+            assert!(config.node_tls.is_none());
+        }
+    }
+
+    #[test]
+    fn sentinel_config_clone_is_independent() {
+        use redis_tower::credentials::StaticCredentials;
+        let config = SentinelConfig {
+            sentinel_credentials: Some(Arc::new(StaticCredentials::password("s"))),
+            ..SentinelConfig::default()
+        };
+        let cloned = config.clone();
+        assert!(cloned.sentinel_credentials.is_some());
     }
 }
