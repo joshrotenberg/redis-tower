@@ -395,9 +395,12 @@ impl Command for Info {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::BulkString(Some(s)) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            // RESP3 returns INFO as a verbatim string; RESP2 as a bulk string.
+            Frame::BulkString(Some(s)) | Frame::VerbatimString(_, s) => {
+                Ok(String::from_utf8_lossy(&s).into_owned())
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk or verbatim string",
                 actual: format!("{other:?}"),
             }),
         }
@@ -567,8 +570,18 @@ impl Command for CommandDocs {
         match frame {
             Frame::Array(Some(frames)) => Ok(frames),
             Frame::Array(None) => Ok(Vec::new()),
+            // RESP3 returns the docs as a map; flatten it to the RESP2
+            // key/value array shape so callers see one stable layout.
+            Frame::Map(pairs) => {
+                let mut out = Vec::with_capacity(pairs.len() * 2);
+                for (k, v) in pairs {
+                    out.push(k);
+                    out.push(v);
+                }
+                Ok(out)
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or map",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1311,9 +1324,10 @@ impl Command for ClientList {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::BulkString(Some(data)) => Ok(data),
+            // RESP3 returns CLIENT LIST as a verbatim string.
+            Frame::BulkString(Some(data)) | Frame::VerbatimString(_, data) => Ok(data),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk or verbatim string",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1455,9 +1469,10 @@ impl Command for ClientInfo {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::BulkString(Some(data)) => Ok(data),
+            // RESP3 returns CLIENT INFO as a verbatim string.
+            Frame::BulkString(Some(data)) | Frame::VerbatimString(_, data) => Ok(data),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk or verbatim string",
                 actual: format!("{other:?}"),
             }),
         }
@@ -2824,6 +2839,45 @@ mod tests {
     fn info_parse_error_on_integer() {
         let cmd = Info::new();
         assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn info_parse_verbatim_string_resp3() {
+        // Under RESP3 INFO comes back as a verbatim string (=...txt:...).
+        let cmd = Info::new();
+        let frame = Frame::VerbatimString(
+            Bytes::from("txt"),
+            Bytes::from("# Server\nredis_version:7.4\n"),
+        );
+        let result = cmd.parse_response(frame).unwrap();
+        assert!(result.contains("redis_version"));
+    }
+
+    #[test]
+    fn command_docs_parse_map_resp3() {
+        // Under RESP3 COMMAND DOCS comes back as a map; it flattens to the
+        // RESP2 key/value array shape.
+        let cmd = CommandDocs::new().command("get");
+        let frame = Frame::Map(vec![(bulk("get"), Frame::Array(Some(vec![])))]);
+        let out = cmd.parse_response(frame).unwrap();
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], bulk("get"));
+    }
+
+    #[test]
+    fn client_info_parse_verbatim_string_resp3() {
+        let cmd = ClientInfo;
+        let frame = Frame::VerbatimString(Bytes::from("txt"), Bytes::from("id=3 addr=127.0.0.1"));
+        let out = cmd.parse_response(frame).unwrap();
+        assert_eq!(&out[..], b"id=3 addr=127.0.0.1");
+    }
+
+    #[test]
+    fn client_list_parse_verbatim_string_resp3() {
+        let cmd = ClientList::new();
+        let frame = Frame::VerbatimString(Bytes::from("txt"), Bytes::from("id=3 addr=127.0.0.1\n"));
+        let out = cmd.parse_response(frame).unwrap();
+        assert_eq!(&out[..], b"id=3 addr=127.0.0.1\n");
     }
 
     // -- ClientId --

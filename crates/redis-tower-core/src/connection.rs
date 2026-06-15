@@ -214,6 +214,15 @@ impl RedisConnection {
         addr: &str,
         keepalive: &KeepaliveConfig,
     ) -> Result<Self, RedisError> {
+        let mut conn = Self::connect_raw(addr, keepalive).await?;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
+        Ok(conn)
+    }
+
+    /// TCP connect + CLIENT SETINFO, WITHOUT protocol negotiation. The building
+    /// block for the public connectors (which add RESP3 negotiation) and for
+    /// `connect_with_protocol` (which negotiates explicitly).
+    async fn connect_raw(addr: &str, keepalive: &KeepaliveConfig) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr).await?;
         let stream = apply_keepalive(stream, keepalive)?;
         stream.set_nodelay(true)?;
@@ -253,6 +262,7 @@ impl RedisConnection {
         stream.set_nodelay(true)?;
         let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
         conn.identify_client().await;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
     }
 
@@ -302,6 +312,7 @@ impl RedisConnection {
         let stream = tls_config.connect(tcp, hostname).await?;
         let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
         conn.identify_client().await;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
     }
 
@@ -340,6 +351,7 @@ impl RedisConnection {
         let stream = tls_config.connect(tcp, hostname).await?;
         let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
         conn.identify_client().await;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
     }
 
@@ -392,6 +404,7 @@ impl RedisConnection {
         };
 
         conn.post_connect_setup(&parsed).await?;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
     }
 
@@ -436,6 +449,7 @@ impl RedisConnection {
         let addr = format!("{}:{}", parsed.host, parsed.port);
         let mut conn = Self::connect_tls(&addr, &parsed.host, tls_config).await?;
         conn.post_connect_setup(&parsed).await?;
+        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
     }
 
@@ -444,10 +458,7 @@ impl RedisConnection {
     /// Sends `HELLO 3` after connecting. The server will respond with
     /// RESP3 frames for all subsequent commands.
     pub async fn connect_resp3(addr: &str) -> Result<Self, RedisError> {
-        // connect() already sends CLIENT SETINFO, then we upgrade to RESP3.
-        let mut conn = Self::connect(addr).await?;
-        conn.hello(3).await?;
-        Ok(conn)
+        Self::connect_with_protocol(addr, ProtocolVersion::Resp3).await
     }
 
     /// Whether this connection has negotiated RESP3 (via `HELLO 3`).
@@ -483,7 +494,7 @@ impl RedisConnection {
         addr: &str,
         version: ProtocolVersion,
     ) -> Result<Self, RedisError> {
-        let mut conn = Self::connect(addr).await?;
+        let mut conn = Self::connect_raw(addr, &KeepaliveConfig::default()).await?;
         conn.negotiate_protocol(version).await?;
         Ok(conn)
     }

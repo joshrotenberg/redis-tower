@@ -980,8 +980,18 @@ impl Command for FunctionStats {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Array(Some(frames)) => Ok(frames),
+            // RESP3 returns the stats as a map; flatten it to the RESP2
+            // key/value array shape so callers see one stable layout.
+            Frame::Map(pairs) => {
+                let mut out = Vec::with_capacity(pairs.len() * 2);
+                for (k, v) in pairs {
+                    out.push(k);
+                    out.push(v);
+                }
+                Ok(out)
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or map",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1250,5 +1260,24 @@ mod tests {
         let cmd = FunctionDelete::new("mylib");
         let frame = Frame::SimpleString(Bytes::from("OK"));
         cmd.parse_response(frame).unwrap();
+    }
+
+    // -- FunctionStats --
+
+    #[test]
+    fn function_stats_parses_resp3_map() {
+        // Under RESP3 the server returns FUNCTION STATS as a map; we flatten it
+        // to the RESP2 key/value array shape so callers see one stable layout.
+        let cmd = FunctionStats::new();
+        let frame = Frame::Map(vec![
+            (bulk("running_script"), Frame::Null),
+            (bulk("engines"), Frame::Array(Some(vec![]))),
+        ]);
+        let out = cmd.parse_response(frame).unwrap();
+        assert_eq!(out.len(), 4, "two map pairs flatten to four frames");
+        assert_eq!(out[0], bulk("running_script"));
+        assert_eq!(out[1], Frame::Null);
+        assert_eq!(out[2], bulk("engines"));
+        assert_eq!(out[3], Frame::Array(Some(vec![])));
     }
 }

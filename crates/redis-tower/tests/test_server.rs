@@ -271,9 +271,9 @@ fn hello_field(frame: &Frame, key: &str) -> Option<Frame> {
 
 /// `HELLO` with no arguments returns the current connection's properties.
 ///
-/// The harness uses `RedisConnection::connect`, which does not upgrade the
-/// protocol (only `connect_resp3` sends `HELLO 3`), so the connection defaults
-/// to RESP2 and a bare HELLO reports `proto` 2 alongside the `server` identity.
+/// The harness uses `RedisConnection::connect`, which now negotiates RESP3 by
+/// default (Auto + HELLO 3), so the connection is on RESP3 and a bare HELLO
+/// reports `proto` 3 alongside the `server` identity.
 #[tokio::test]
 async fn cover_hello_default() {
     let mut c = conn().await;
@@ -290,8 +290,8 @@ async fn cover_hello_default() {
     let proto = hello_field(&reply, "proto").expect("HELLO reply should contain a 'proto' field");
     assert_eq!(
         proto.as_integer(),
-        Some(2),
-        "default RedisConnection::connect stays on RESP2, so HELLO reports proto 2"
+        Some(3),
+        "default RedisConnection::connect now negotiates RESP3, so HELLO reports proto 3"
     );
 }
 

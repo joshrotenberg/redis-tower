@@ -50,9 +50,14 @@ async fn conn() -> RedisConnection {
         .expect("failed to connect to Redis")
 }
 
-// Connection factory for the shared command test macro.
+// Connection factory for the shared command test macro. Forced RESP2 so the
+// suite keeps exercising the RESP2 wire format even though `conn()` (and thus
+// every other standalone test) now negotiates RESP3 by default.
 async fn standalone_conn() -> RedisConnection {
-    conn().await
+    let addr = redis_addr().await;
+    RedisConnection::connect_with_protocol(addr, ProtocolVersion::Resp2)
+        .await
+        .expect("failed to connect with RESP2")
 }
 
 // Generate shared command tests for standalone (RESP2).
@@ -74,8 +79,8 @@ mod resp3 {
 
 /// Explicit protocol negotiation via `connect_with_protocol` (#478).
 ///
-/// PR 1 of the RESP3 work: the negotiation primitive + RESP2 fallback exist and
-/// are introspectable; flipping the `connect()` default to RESP3 is a follow-up.
+/// Covers the forced RESP2/RESP3/Auto paths plus the flipped default: `connect()`
+/// now negotiates RESP3 (Auto) with automatic RESP2 fallback.
 #[tokio::test]
 async fn protocol_negotiation() {
     let addr = redis_addr().await;
@@ -101,12 +106,9 @@ async fn protocol_negotiation() {
         "Auto must negotiate RESP3 on a modern server"
     );
 
-    // The plain connect() default is still RESP2 in this PR (flip is a follow-up).
+    // The plain connect() default now negotiates RESP3 (Auto) with RESP2 fallback.
     let cd = conn().await;
-    assert!(
-        !cd.is_resp3(),
-        "connect() default is RESP2 until the flip lands"
-    );
+    assert!(cd.is_resp3(), "connect() now negotiates RESP3 by default");
 }
 
 async fn client() -> RedisClient {
