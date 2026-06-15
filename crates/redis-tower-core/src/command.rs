@@ -63,4 +63,17 @@ pub trait Command: Send + 'static {
     fn idempotent(&self) -> bool {
         false
     }
+
+    /// Whether this command blocks the connection until data is available or a
+    /// timeout elapses -- `BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`, and
+    /// `XREAD`/`XREADGROUP` with `BLOCK`.
+    ///
+    /// Returns `false` by default. This matters for multiplexed clients: a
+    /// blocking command holds the single shared pipeline worker for its entire
+    /// duration, stalling every other concurrent caller on that connection. Run
+    /// blocking commands on a dedicated `RedisConnection` or a pooled connection
+    /// instead. The flag lets callers and middleware detect such commands.
+    fn is_blocking(&self) -> bool {
+        false
+    }
 }

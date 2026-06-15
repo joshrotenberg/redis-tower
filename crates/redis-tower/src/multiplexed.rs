@@ -61,6 +61,16 @@ use crate::transaction::TransactionExecutor;
 /// blocking commands), use [`RedisConnection`] directly or
 /// [`ConnectionPool`](crate::pool::ConnectionPool).
 ///
+/// # Blocking commands
+///
+/// **Never run a blocking command on a `MultiplexedClient`.** Because every
+/// clone shares one connection and one pipeline worker, a blocking command
+/// (`BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`, or `XREAD`/`XREADGROUP`
+/// with `BLOCK`) holds that worker for its entire wait, stalling every other
+/// concurrent caller until it returns. Use a dedicated [`RedisConnection`] or a
+/// [`ConnectionPool`](crate::pool::ConnectionPool) connection for blocking
+/// work; such commands report `is_blocking() == true`.
+///
 /// # Middleware
 ///
 /// The type parameter `S` is the inner Frame-level [`Service`] and defaults to

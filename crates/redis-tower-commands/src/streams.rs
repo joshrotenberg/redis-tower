@@ -851,6 +851,10 @@ impl Command for XReadGroup {
     fn name(&self) -> &str {
         "XREADGROUP"
     }
+
+    fn is_blocking(&self) -> bool {
+        self.block.is_some()
+    }
 }
 
 /// XREAD \[COUNT count\] \[BLOCK ms\] STREAMS key \[key ...\] id \[id ...\]
@@ -922,6 +926,10 @@ impl Command for XRead {
 
     fn name(&self) -> &str {
         "XREAD"
+    }
+
+    fn is_blocking(&self) -> bool {
+        self.block.is_some()
     }
 }
 
@@ -2170,6 +2178,13 @@ mod tests {
     use redis_tower_core::Command;
     use redis_tower_protocol::Frame;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn xread_is_blocking_only_with_block() {
+        // XREAD is blocking only when BLOCK is set.
+        assert!(!XRead::new("s", "$").is_blocking());
+        assert!(XRead::new("s", "$").block(1000).is_blocking());
+    }
 
     // -- XAdd --
 
