@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -903,5 +904,372 @@ impl Command for CfInsertNx {
 
     fn name(&self) -> &str {
         "CF.INSERTNX"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cardinality and chunked dump/restore (filter migration)
+// ---------------------------------------------------------------------------
+
+/// Parse a `BF.SCANDUMP` / `CF.SCANDUMP` reply: a two-element array of the next
+/// iterator (`0` when the dump is complete) and the binary chunk for this step.
+fn parse_scandump(frame: Frame) -> Result<(u64, Bytes), RedisError> {
+    match frame {
+        Frame::Array(Some(items)) if items.len() == 2 => {
+            let mut it = items.into_iter();
+            let iterator = match it.next() {
+                Some(Frame::Integer(n)) => n as u64,
+                other => {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "integer iterator",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            };
+            let chunk = match it.next() {
+                Some(Frame::BulkString(Some(data))) => data,
+                Some(Frame::BulkString(None)) | Some(Frame::Null) => Bytes::new(),
+                other => {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "bulk chunk",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            };
+            Ok((iterator, chunk))
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "two-element array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// BF.CARD key
+///
+/// Returns the cardinality of the Bloom filter at `key` -- the number of items
+/// that have been added. Returns `0` if the key does not exist.
+#[derive(Clone)]
+pub struct BfCard {
+    key: String,
+}
+
+impl BfCard {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for BfCard {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("BF.CARD"), bulk(self.key.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "BF.CARD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// BF.SCANDUMP key iterator
+///
+/// Begins or continues an incremental save of the Bloom filter at `key`. Start
+/// with iterator `0`; each call returns `(next_iterator, chunk)`. A returned
+/// iterator of `0` signals the dump is complete. Replay the chunks into another
+/// server with [`BfLoadChunk`] to migrate a filter.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::{BfScanDump, BfLoadChunk};
+///
+/// let mut iter = 0;
+/// loop {
+///     let (next, chunk) = client.execute(BfScanDump::new("src", iter)).await?;
+///     if next == 0 {
+///         break;
+///     }
+///     client.execute(BfLoadChunk::new("dst", next, chunk)).await?;
+///     iter = next;
+/// }
+/// ```
+#[derive(Clone)]
+pub struct BfScanDump {
+    key: String,
+    iterator: u64,
+}
+
+impl BfScanDump {
+    pub fn new(key: impl Into<String>, iterator: u64) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+        }
+    }
+}
+
+impl Command for BfScanDump {
+    type Response = (u64, Bytes);
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("BF.SCANDUMP"),
+            bulk(self.key.as_str()),
+            bulk(self.iterator.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_scandump(frame)
+    }
+
+    fn name(&self) -> &str {
+        "BF.SCANDUMP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// BF.LOADCHUNK key iterator data
+///
+/// Restores a chunk previously produced by [`BfScanDump`]. Call once per chunk,
+/// in iteration order, to rebuild a Bloom filter on another server.
+#[derive(Clone)]
+pub struct BfLoadChunk {
+    key: String,
+    iterator: u64,
+    data: Bytes,
+}
+
+impl BfLoadChunk {
+    pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+            data: data.into(),
+        }
+    }
+}
+
+impl Command for BfLoadChunk {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("BF.LOADCHUNK"),
+            bulk(self.key.as_str()),
+            bulk(self.iterator.to_string()),
+            bulk(self.data.as_ref()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "BF.LOADCHUNK"
+    }
+}
+
+/// CF.SCANDUMP key iterator
+///
+/// The Cuckoo-filter counterpart of [`BfScanDump`]. Start with iterator `0`;
+/// each call returns `(next_iterator, chunk)`, with a returned iterator of `0`
+/// marking the end. Restore with [`CfLoadChunk`].
+#[derive(Clone)]
+pub struct CfScanDump {
+    key: String,
+    iterator: u64,
+}
+
+impl CfScanDump {
+    pub fn new(key: impl Into<String>, iterator: u64) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+        }
+    }
+}
+
+impl Command for CfScanDump {
+    type Response = (u64, Bytes);
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CF.SCANDUMP"),
+            bulk(self.key.as_str()),
+            bulk(self.iterator.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_scandump(frame)
+    }
+
+    fn name(&self) -> &str {
+        "CF.SCANDUMP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// CF.LOADCHUNK key iterator data
+///
+/// Restores a chunk previously produced by [`CfScanDump`]. Call once per chunk,
+/// in iteration order, to rebuild a Cuckoo filter on another server.
+#[derive(Clone)]
+pub struct CfLoadChunk {
+    key: String,
+    iterator: u64,
+    data: Bytes,
+}
+
+impl CfLoadChunk {
+    pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
+        Self {
+            key: key.into(),
+            iterator,
+            data: data.into(),
+        }
+    }
+}
+
+impl Command for CfLoadChunk {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("CF.LOADCHUNK"),
+            bulk(self.key.as_str()),
+            bulk(self.iterator.to_string()),
+            bulk(self.data.as_ref()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CF.LOADCHUNK"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn bf_card_to_frame() {
+        assert_eq!(
+            BfCard::new("k").to_frame(),
+            array(vec![bulk("BF.CARD"), bulk("k")])
+        );
+        assert!(BfCard::new("k").idempotent());
+    }
+
+    #[test]
+    fn bf_card_parse_integer() {
+        assert_eq!(
+            BfCard::new("k").parse_response(Frame::Integer(3)).unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn bf_scandump_to_frame_and_idempotent() {
+        assert_eq!(
+            BfScanDump::new("k", 0).to_frame(),
+            array(vec![bulk("BF.SCANDUMP"), bulk("k"), bulk("0")])
+        );
+        assert!(BfScanDump::new("k", 0).idempotent());
+    }
+
+    #[test]
+    fn cf_scandump_to_frame() {
+        assert_eq!(
+            CfScanDump::new("k", 5).to_frame(),
+            array(vec![bulk("CF.SCANDUMP"), bulk("k"), bulk("5")])
+        );
+        assert!(CfScanDump::new("k", 5).idempotent());
+    }
+
+    #[test]
+    fn scandump_parse_iterator_and_chunk() {
+        let frame = array(vec![Frame::Integer(7), bulk("chunkdata")]);
+        let (iter, data) = parse_scandump(frame).unwrap();
+        assert_eq!(iter, 7);
+        assert_eq!(&data[..], b"chunkdata");
+    }
+
+    #[test]
+    fn scandump_parse_complete_empty_chunk() {
+        let frame = array(vec![Frame::Integer(0), Frame::BulkString(None)]);
+        let (iter, data) = parse_scandump(frame).unwrap();
+        assert_eq!(iter, 0);
+        assert!(data.is_empty());
+    }
+
+    #[test]
+    fn bf_loadchunk_to_frame() {
+        let cmd = BfLoadChunk::new("k", 7, Bytes::from_static(b"chunkdata"));
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("BF.LOADCHUNK"),
+                bulk("k"),
+                bulk("7"),
+                bulk("chunkdata"),
+            ])
+        );
+    }
+
+    #[test]
+    fn cf_loadchunk_to_frame() {
+        let cmd = CfLoadChunk::new("k", 7, Bytes::from_static(b"data"));
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CF.LOADCHUNK"),
+                bulk("k"),
+                bulk("7"),
+                bulk("data"),
+            ])
+        );
     }
 }
