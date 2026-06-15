@@ -330,7 +330,8 @@ impl TlsConfig {
 fn parse_certs_pem(
     pem: &[u8],
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, RedisError> {
-    rustls_pemfile::certs(&mut &pem[..])
+    use rustls::pki_types::pem::PemObject;
+    rustls::pki_types::CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| RedisError::Connection(std::io::Error::other(e)))
 }
@@ -340,14 +341,9 @@ fn parse_certs_pem(
 fn parse_private_key_pem(
     pem: &[u8],
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>, RedisError> {
-    rustls_pemfile::private_key(&mut &pem[..])
-        .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?
-        .ok_or_else(|| {
-            RedisError::Connection(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "no private key found in PEM",
-            ))
-        })
+    use rustls::pki_types::pem::PemObject;
+    rustls::pki_types::PrivateKeyDer::from_pem_slice(pem)
+        .map_err(|e| RedisError::Connection(std::io::Error::other(e)))
 }
 
 /// Certificate verifier that accepts everything. Used when
@@ -446,7 +442,7 @@ aHzx7UOqMKxs4Csh4kTiDRmwUoIq9DISRM1uYUR5dR9MjoMk/NEt3Jxp\n\
     #[cfg(feature = "tls-rustls")]
     #[test]
     fn parse_helpers_reject_garbage() {
-        // Non-cert PEM yields no certs (not an error -- rustls_pemfile skips it).
+        // Non-cert PEM yields no certs (not an error -- the PEM iterator skips it).
         assert!(parse_certs_pem(b"not a pem").unwrap().is_empty());
         // A missing private key is an error.
         assert!(parse_private_key_pem(b"-----BEGIN CERTIFICATE-----\nx\n").is_err());
