@@ -356,6 +356,43 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 ```
 
+## Stability and versioning
+
+redis-tower is pre-1.0. While on the `0.x` series it follows Cargo's `0.x`
+semver convention: a bump of the **minor** version (`0.1 -> 0.2`) may contain
+breaking changes, and a **patch** bump (`0.1.0 -> 0.1.1`) is additive or a fix.
+Breaking changes are called out in the changelog.
+
+- **Deprecations.** Where practical an API is marked `#[deprecated]` (with a
+  migration note) for at least one minor release before it is removed.
+- **MSRV.** The minimum supported Rust version is **1.88**. Raising the MSRV is
+  treated as a minor-version change, never a patch.
+- **Toward 1.0.** The path to 1.0 is a settled command-trait and client API
+  surface, the cluster/sentinel/caching layers stabilized, and the public API
+  fully documented and exercised by integration tests. Until then, expect the
+  occasional breaking minor release as the design is refined.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy. Every
+pull request runs `cargo deny` and `cargo audit` against the RustSec advisory
+database, and the workspace contains no `unsafe` code -- every crate sets
+`#![forbid(unsafe_code)]`.
+
+## Contributing
+
+Contributions are welcome -- see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+development setup, the pre-PR checklist, and conventions.
+
 ## License
 
-MIT OR Apache-2.0
+Licensed under either of
+
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual-licensed as above, without any additional terms or conditions.

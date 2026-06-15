@@ -22,6 +22,7 @@
 //! command frames: [`helpers::bulk`] for bulk strings, [`helpers::array`] for
 //! arrays, and [`helpers::null_bulk`] for null bulk strings.
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod codec;

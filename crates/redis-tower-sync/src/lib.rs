@@ -17,6 +17,8 @@
 //! println!("{val}");
 //! ```
 
+#![forbid(unsafe_code)]
+
 use redis_tower::RedisClient;
 use redis_tower_core::{Command, RedisError};
 

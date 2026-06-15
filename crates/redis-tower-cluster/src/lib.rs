@@ -102,6 +102,8 @@
 //! `.host_override(host)` if your nodes report IPs that don't match your
 //! certificate.
 
+#![forbid(unsafe_code)]
+
 mod client;
 mod connection;
 pub mod key_extractor;

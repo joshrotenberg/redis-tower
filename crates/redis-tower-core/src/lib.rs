@@ -38,6 +38,7 @@
 //! [`FromRedisBytes`] traits for ergonomic conversion between RESP frames and
 //! Rust types.
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
