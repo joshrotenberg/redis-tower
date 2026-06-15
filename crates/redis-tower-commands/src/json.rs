@@ -136,6 +136,10 @@ impl Command for JsonGet {
     fn name(&self) -> &str {
         "JSON.GET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// JSON.DEL key \[path\]
@@ -243,6 +247,10 @@ impl Command for JsonMGet {
     fn name(&self) -> &str {
         "JSON.MGET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// JSON.TYPE key \[path\]
@@ -293,6 +301,10 @@ impl Command for JsonType {
 
     fn name(&self) -> &str {
         "JSON.TYPE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -386,6 +398,10 @@ impl Command for JsonStrLen {
 
     fn name(&self) -> &str {
         "JSON.STRLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -535,6 +551,10 @@ impl Command for JsonArrLen {
     fn name(&self) -> &str {
         "JSON.ARRLEN"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// JSON.ARRINDEX key path value \[start \[stop\]\]
@@ -599,6 +619,10 @@ impl Command for JsonArrIndex {
 
     fn name(&self) -> &str {
         "JSON.ARRINDEX"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -707,6 +731,10 @@ impl Command for JsonObjKeys {
     fn name(&self) -> &str {
         "JSON.OBJKEYS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// JSON.OBJLEN key \[path\]
@@ -750,6 +778,10 @@ impl Command for JsonObjLen {
 
     fn name(&self) -> &str {
         "JSON.OBJLEN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1110,6 +1142,14 @@ mod tests {
     use redis_tower_core::Command;
     use redis_tower_protocol::Frame;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(JsonGet::new("k").idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!JsonSet::new("k", "$", "1").idempotent());
+    }
 
     #[test]
     fn json_mset_to_frame() {

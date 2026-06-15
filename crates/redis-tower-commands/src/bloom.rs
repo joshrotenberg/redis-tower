@@ -119,6 +119,10 @@ impl Command for BfExists {
     fn name(&self) -> &str {
         "BF.EXISTS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// BF.MADD key item \[item ...\]
@@ -195,6 +199,10 @@ impl Command for BfMExists {
 
     fn name(&self) -> &str {
         "BF.MEXISTS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -298,6 +306,10 @@ impl Command for BfInfo {
 
     fn name(&self) -> &str {
         "BF.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -539,6 +551,10 @@ impl Command for CfExists {
     fn name(&self) -> &str {
         "CF.EXISTS"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// CF.MEXISTS key item \[item ...\]
@@ -576,6 +592,10 @@ impl Command for CfMExists {
 
     fn name(&self) -> &str {
         "CF.MEXISTS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -666,6 +686,10 @@ impl Command for CfCount {
 
     fn name(&self) -> &str {
         "CF.COUNT"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -778,6 +802,10 @@ impl Command for CfInfo {
 
     fn name(&self) -> &str {
         "CF.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1193,6 +1221,14 @@ mod tests {
     use redis_tower_core::Command;
     use redis_tower_protocol::Frame;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(BfExists::new("k", "i").idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!BfAdd::new("k", "i").idempotent());
+    }
 
     #[test]
     fn bf_card_to_frame() {

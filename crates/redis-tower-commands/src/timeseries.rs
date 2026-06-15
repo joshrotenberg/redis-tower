@@ -751,6 +751,10 @@ impl Command for TsGet {
     fn name(&self) -> &str {
         "TS.GET"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -820,6 +824,10 @@ impl Command for TsMGet {
 
     fn name(&self) -> &str {
         "TS.MGET"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -944,6 +952,10 @@ impl Command for TsRange {
     fn name(&self) -> &str {
         "TS.RANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TS.REVRANGE key from to \[LATEST\] \[FILTER_BY_TS ts ...\]
@@ -1020,6 +1032,10 @@ impl Command for TsRevRange {
 
     fn name(&self) -> &str {
         "TS.REVRANGE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1164,6 +1180,10 @@ impl Command for TsMRange {
     fn name(&self) -> &str {
         "TS.MRANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TS.MREVRANGE from to \[LATEST\] \[WITHLABELS\] \[FILTER_BY_TS ts ...\]
@@ -1254,6 +1274,10 @@ impl Command for TsMRevRange {
     fn name(&self) -> &str {
         "TS.MREVRANGE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1326,10 @@ impl Command for TsInfo {
 
     fn name(&self) -> &str {
         "TS.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1364,6 +1392,10 @@ impl Command for TsQueryIndex {
 
     fn name(&self) -> &str {
         "TS.QUERYINDEX"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -1511,6 +1543,14 @@ mod tests {
     use super::*;
     use redis_tower_core::Command;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(TsGet::new("k").idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!TsAdd::new("k", 1i64, 1.0).idempotent());
+    }
 
     #[test]
     fn ts_createrule_to_frame() {
