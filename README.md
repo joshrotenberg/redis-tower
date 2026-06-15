@@ -18,13 +18,28 @@ for side-by-side idiom mappings.
 ## Quick start
 
 ```rust,ignore
-use redis_tower::{RedisClient, RedisValueExt, commands::*};
+use redis_tower::{MultiplexedClient, RedisValueExt, commands::*};
 
-let client = RedisClient::connect("127.0.0.1:6379").await?;
+// MultiplexedClient is the recommended default: one auto-pipelined
+// connection, cheap to clone and share across tasks.
+let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 client.execute(Set::new("key", "hello")).await?;
 
 let val: String = client.execute(Get::new("key")).await?.parse_into()?;
 ```
+
+## Choosing a client
+
+| Client | When to use |
+|--------|-------------|
+| `MultiplexedClient` | **The default.** One connection, concurrent commands auto-pipelined; cheap to clone and share across tasks. |
+| `RedisConnection` | A single exclusive connection (`&mut self`), or a building block for the others. |
+| `RedisClient` | `Arc<Mutex<RedisConnection>>` -- a simple shared handle, but serializes commands through one lock (lower throughput than `MultiplexedClient`; a naive benchmark will under-report it). |
+| `ResilientRedisClient` | A shared handle with automatic reconnection + backoff, for long-running services. |
+| `ConnectionPool<S>` | N connections -- for blocking commands (`BLPOP`) or CPU-bound reply parsing, where one multiplexed connection would head-of-line block. |
+| `MultiplexedClusterClient` | Redis Cluster, high concurrency (`redis-tower-cluster`). |
+| `MultiplexedSentinelClient` | Sentinel-managed failover, high concurrency (`redis-tower-sentinel`). |
+| `SyncClient` | Blocking (non-`async`) contexts (`redis-tower-sync`). |
 
 ## Connection pool
 
@@ -336,7 +351,9 @@ redis-tower-protocol     RESP3 codec
 redis-tower-commands     360+ typed command structs
 redis-tower-cluster      Cluster routing and topology
 redis-tower-sentinel     Sentinel discovery and failover
+redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
 redis-tower-sync         Blocking wrapper
+redis-tower-client       UniversalClient over standalone/cluster/sentinel
 ```
 
 ## License

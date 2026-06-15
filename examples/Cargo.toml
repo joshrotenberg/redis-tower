@@ -4,6 +4,12 @@ version = "0.0.0"
 edition.workspace = true
 publish = false
 
+[features]
+# On by default so `cargo run --example tls` works out of the box; disable with
+# `--no-default-features` to skip the TLS example and its rustls dependency.
+default = ["tls"]
+tls = ["redis-tower/tls-rustls"]
+
 [dependencies]
 redis-tower = { workspace = true, features = ["serde"] }
 redis-tower-core = { workspace = true }
@@ -76,3 +82,4 @@ path = "json_api.rs"
 [[example]]
 name = "tls"
 path = "tls.rs"
+required-features = ["tls"]

@@ -8,26 +8,32 @@
 //! # Quick Start
 //!
 //! ```ignore
-//! use redis_tower::{RedisClient, commands::*};
+//! use redis_tower::{MultiplexedClient, commands::*};
 //!
-//! let client = RedisClient::connect("127.0.0.1:6379").await?;
+//! // MultiplexedClient is the recommended default: one auto-pipelined
+//! // connection, cheap to clone and share across tasks.
+//! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 //! client.execute(Set::new("key", "value")).await?;
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
 //! ```
 //!
-//! # Connection Types
+//! # Choosing a client
 //!
-//! redis-tower provides several connection types for different use cases:
+//! | Client | When to use |
+//! |--------|-------------|
+//! | [`MultiplexedClient`] | **The default.** One connection, concurrent commands auto-pipelined; cheap to `clone` and share across tasks. |
+//! | [`RedisConnection`] | A single exclusive connection (`&mut self`), or as a building block for the others. |
+//! | [`RedisClient`] | `Arc<Mutex<RedisConnection>>` -- a simple shared handle, but it serializes commands through one lock (lower throughput than `MultiplexedClient`). |
+//! | [`ResilientRedisClient`] | A shared handle with automatic reconnection and exponential backoff, for long-running services. |
+//! | [`ConnectionPool`] | N connections with configurable [`DispatchStrategy`] -- use for blocking commands (`BLPOP`) or CPU-bound reply parsing, where one multiplexed connection would head-of-line block. |
+//! | `MultiplexedClusterClient` (`redis-tower-cluster`) | Redis Cluster, high concurrency. |
+//! | `MultiplexedSentinelClient` (`redis-tower-sentinel`) | Sentinel-managed failover, high concurrency. |
+//! | `SyncClient` (`redis-tower-sync`) | Blocking (non-`async`) contexts. |
 //!
-//! - [`RedisConnection`] -- the foundational type. Implements
-//!   `tower::Service<Cmd>` with `&mut self`, giving you direct exclusive
-//!   access. Use with `tower::buffer::Buffer` for sharing.
-//! - [`RedisClient`] -- wraps a connection in `Arc<Mutex<>>` for easy
-//!   cross-task sharing. Good for scripts and simple applications.
-//! - [`ResilientRedisClient`] -- shared client with automatic reconnection
-//!   and exponential backoff. Best for long-running services.
-//! - [`ConnectionPool`] -- manages N connections with configurable dispatch
-//!   via [`DispatchStrategy`] (round-robin, random, or least-connections).
+//! Reach for `RedisClient` only when you specifically want serialized,
+//! exclusive access; for most workloads `MultiplexedClient` is both simpler and
+//! faster. A naive benchmark of `RedisClient` will under-report throughput
+//! because every command waits on the mutex.
 //!
 //! # Commands
 //!
