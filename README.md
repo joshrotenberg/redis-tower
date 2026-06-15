@@ -356,6 +356,31 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 ```
 
+## Server compatibility
+
+redis-tower speaks RESP2 and RESP3 over the standard Redis protocol, so it works
+with any RESP-compatible server.
+
+- **Redis.** Every PR runs the full integration suite against **Redis 7.4 and
+  8.0**. Redis 7.x and 8.x are the supported targets; 6.x works for the core
+  commands but is not tested. Commands introduced in a specific server version
+  (for example the hash-field TTL commands `HGETEX`/`HSETEX` in Redis 8.0)
+  return a clear error on older servers rather than misbehaving.
+- **Valkey.** Fully supported -- Valkey speaks the same protocol, and the
+  `valkey://` / `valkeys://` URL schemes are accepted as aliases for `redis://`
+  / `rediss://`.
+- **Redis Stack modules.** The JSON, Search, TimeSeries, probabilistic, and
+  Vector-set command groups target the Redis Stack modules, which ship built in
+  with Redis 8.x. They are feature-gated (on by default) and degrade to a clear
+  error when the module is absent.
+- **Managed services.** Because it uses only the standard protocol plus optional
+  TLS and `AUTH`/`HELLO`, redis-tower is compatible with managed offerings.
+  **AWS ElastiCache**, **AWS MemoryDB**, **Redis Enterprise**, **Redis Cloud**,
+  **Azure Cache for Redis**, and **Google Cloud Memorystore** all speak the
+  standard protocol; cluster mode, TLS, and `AUTH`/ACL credentials are
+  supported -- see the [Cluster](#cluster), [TLS](#tls), and
+  [Credential provider](#credential-provider) sections.
+
 ## Stability and versioning
 
 redis-tower is pre-1.0. While on the `0.x` series it follows Cargo's `0.x`
