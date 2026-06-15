@@ -62,6 +62,7 @@ impl Default for RedisUrl {
 /// Supported schemes:
 /// - `redis://[user:pass@]host[:port][/db]`
 /// - `rediss://[user:pass@]host[:port][/db]` (TLS)
+/// - `valkey://` / `valkeys://` -- aliases for `redis://` / `rediss://`
 /// - `unix:///path/to/socket[?db=N]`
 pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
     if url.starts_with("unix://") {
@@ -83,13 +84,19 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         });
     }
 
+    // `valkey://` / `valkeys://` are accepted as aliases for `redis://` /
+    // `rediss://` -- Valkey speaks the same protocol on the same schemes.
     let (tls, rest) = if let Some(rest) = url.strip_prefix("rediss://") {
         (true, rest)
     } else if let Some(rest) = url.strip_prefix("redis://") {
         (false, rest)
+    } else if let Some(rest) = url.strip_prefix("valkeys://") {
+        (true, rest)
+    } else if let Some(rest) = url.strip_prefix("valkey://") {
+        (false, rest)
     } else {
         return Err(RedisError::InvalidUrl(
-            "expected redis://, rediss://, or unix:// scheme".into(),
+            "expected redis://, rediss://, valkey://, valkeys://, or unix:// scheme".into(),
         ));
     };
 
@@ -179,6 +186,26 @@ mod tests {
     fn parse_tls() {
         let url = parse_redis_url("rediss://host:6380").unwrap();
         assert!(url.tls);
+    }
+
+    #[test]
+    fn parse_valkey_scheme() {
+        // valkey:// is a plaintext alias for redis://
+        let url = parse_redis_url("valkey://user:pass@localhost:6380/2").unwrap();
+        assert_eq!(url.host, "localhost");
+        assert_eq!(url.port, 6380);
+        assert_eq!(url.database, Some(2));
+        assert_eq!(url.username.as_deref(), Some("user"));
+        assert!(!url.tls);
+    }
+
+    #[test]
+    fn parse_valkeys_scheme_is_tls() {
+        // valkeys:// is the TLS alias for rediss://
+        let url = parse_redis_url("valkeys://host:6380").unwrap();
+        assert!(url.tls);
+        assert_eq!(url.host, "host");
+        assert_eq!(url.port, 6380);
     }
 
     #[test]
