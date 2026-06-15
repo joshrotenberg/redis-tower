@@ -164,6 +164,24 @@ pub struct RedisConnection {
     push_tx: Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
     /// Channel to reclaim the framed transport after a `Service::call` completes.
     inflight: Option<oneshot::Receiver<Framed<RedisStream, RespCodec>>>,
+    /// Whether RESP3 has been negotiated via `HELLO 3`. Defaults to RESP2.
+    resp3: bool,
+}
+
+/// Which RESP protocol version to negotiate when connecting.
+///
+/// Used with [`RedisConnection::connect_with_protocol`] to control the
+/// handshake explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProtocolVersion {
+    /// Try RESP3 via `HELLO 3`, falling back to RESP2 if the server does not
+    /// support it (Redis < 6.0, or `HELLO` rejected). The default.
+    #[default]
+    Auto,
+    /// Force RESP2 -- do not send `HELLO 3`.
+    Resp2,
+    /// Force RESP3 -- send `HELLO 3` and return an error if it is rejected.
+    Resp3,
 }
 
 impl RedisConnection {
@@ -173,6 +191,7 @@ impl RedisConnection {
             framed: Some(framed),
             push_tx: None,
             inflight: None,
+            resp3: false,
         }
     }
 
@@ -431,17 +450,80 @@ impl RedisConnection {
         Ok(conn)
     }
 
+    /// Whether this connection has negotiated RESP3 (via `HELLO 3`).
+    ///
+    /// Returns `false` for a plain RESP2 connection. Useful for tests and for
+    /// middleware that behaves differently under the two protocols -- push-based
+    /// features such as client-side caching require RESP3.
+    pub fn is_resp3(&self) -> bool {
+        self.resp3
+    }
+
+    /// Connect and negotiate the protocol explicitly.
+    ///
+    /// - [`ProtocolVersion::Auto`] tries `HELLO 3` and silently falls back to
+    ///   RESP2 on servers that do not support it (Redis < 6.0).
+    /// - [`ProtocolVersion::Resp3`] forces RESP3 and errors if it is rejected.
+    /// - [`ProtocolVersion::Resp2`] stays on RESP2 without sending `HELLO`.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use redis_tower_core::{RedisConnection, ProtocolVersion};
+    /// # tokio_test::block_on(async {
+    /// let conn = RedisConnection::connect_with_protocol(
+    ///     "127.0.0.1:6379",
+    ///     ProtocolVersion::Resp3,
+    /// ).await?;
+    /// assert!(conn.is_resp3());
+    /// # Ok::<(), redis_tower_core::RedisError>(())
+    /// # });
+    /// ```
+    pub async fn connect_with_protocol(
+        addr: &str,
+        version: ProtocolVersion,
+    ) -> Result<Self, RedisError> {
+        let mut conn = Self::connect(addr).await?;
+        conn.negotiate_protocol(version).await?;
+        Ok(conn)
+    }
+
+    /// Negotiate `version` on an already-connected connection.
+    async fn negotiate_protocol(&mut self, version: ProtocolVersion) -> Result<(), RedisError> {
+        match version {
+            ProtocolVersion::Resp2 => {
+                self.resp3 = false;
+                Ok(())
+            }
+            ProtocolVersion::Resp3 => {
+                self.hello(3).await?;
+                Ok(())
+            }
+            ProtocolVersion::Auto => {
+                // An older server that does not understand HELLO leaves us on
+                // RESP2 (`resp3` stays false) -- exactly the desired fallback.
+                let _ = self.hello(3).await;
+                Ok(())
+            }
+        }
+    }
+
     /// Send HELLO to negotiate protocol version.
     ///
     /// `HELLO 3` switches to RESP3, `HELLO 2` switches back to RESP2.
     pub async fn hello(&mut self, version: u8) -> Result<Frame, RedisError> {
         let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
-        let framed = self.framed.as_mut().expect("connection not in flight");
-        framed.send(frame).await.map_err(RedisError::from)?;
-        let response = read_response_from(framed, &self.push_tx).await?;
+        let response = {
+            let framed = self.framed.as_mut().expect("connection not in flight");
+            framed.send(frame).await.map_err(RedisError::from)?;
+            read_response_from(framed, &self.push_tx).await?
+        };
         if let Frame::Error(ref e) = response {
             return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
         }
+        // A successful `HELLO 3` switches the connection to RESP3; `HELLO 2`
+        // switches it back. Track it for introspection and middleware.
+        self.resp3 = version == 3;
         Ok(response)
     }
 
@@ -837,6 +919,7 @@ mod tests {
             framed: None,
             push_tx: None,
             inflight: None,
+            resp3: false,
         };
         match conn.into_framed() {
             Err(RedisError::ConnectionInUse) => {}
@@ -851,6 +934,7 @@ mod tests {
             framed: None,
             push_tx: None,
             inflight: None,
+            resp3: false,
         };
         match conn.ensure_framed().await {
             Err(RedisError::ConnectionClosed) => {}
@@ -867,6 +951,7 @@ mod tests {
             framed: None,
             push_tx: None,
             inflight: Some(rx),
+            resp3: false,
         };
         match conn.ensure_framed().await {
             Err(RedisError::ConnectionClosed) => {}
@@ -887,6 +972,7 @@ mod tests {
             framed: None,
             push_tx: None,
             inflight: Some(rx),
+            resp3: false,
         };
 
         // poll_ready should detect the cancelled sender and return an error
@@ -924,6 +1010,7 @@ mod tests {
             framed: None,
             push_tx: None,
             inflight: None,
+            resp3: false,
         };
         let _rx = conn.subscribe_pushes();
         assert!(conn.push_tx.is_some());
