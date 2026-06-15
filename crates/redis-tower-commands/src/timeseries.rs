@@ -1366,3 +1366,191 @@ impl Command for TsQueryIndex {
         "TS.QUERYINDEX"
     }
 }
+
+// ---------------------------------------------------------------------------
+// TS.CREATERULE
+// ---------------------------------------------------------------------------
+
+/// TS.CREATERULE sourceKey destKey AGGREGATION aggregator bucketDuration
+/// \[alignTimestamp\]
+///
+/// Creates a compaction rule that aggregates samples from `source_key` into
+/// `dest_key` over fixed time buckets. Returns `Ok(())` on success.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::{TsCreateRule, TsAggregation};
+///
+/// let cmd = TsCreateRule::new("src", "dst", TsAggregation::Avg, 60_000);
+/// ```
+#[derive(Clone)]
+pub struct TsCreateRule {
+    source_key: String,
+    dest_key: String,
+    aggregation: TsAggregation,
+    bucket_duration: i64,
+    align_timestamp: Option<i64>,
+}
+
+impl TsCreateRule {
+    pub fn new(
+        source_key: impl Into<String>,
+        dest_key: impl Into<String>,
+        aggregation: TsAggregation,
+        bucket_duration: i64,
+    ) -> Self {
+        Self {
+            source_key: source_key.into(),
+            dest_key: dest_key.into(),
+            aggregation,
+            bucket_duration,
+            align_timestamp: None,
+        }
+    }
+
+    /// Set the alignment timestamp for the aggregation buckets.
+    pub fn align_timestamp(mut self, align_timestamp: i64) -> Self {
+        self.align_timestamp = Some(align_timestamp);
+        self
+    }
+}
+
+impl Command for TsCreateRule {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("TS.CREATERULE"),
+            bulk(self.source_key.as_str()),
+            bulk(self.dest_key.as_str()),
+            bulk("AGGREGATION"),
+            bulk(self.aggregation.as_str()),
+            bulk(self.bucket_duration.to_string()),
+        ];
+        if let Some(align) = self.align_timestamp {
+            args.push(bulk(align.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "TS.CREATERULE"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TS.DELETERULE
+// ---------------------------------------------------------------------------
+
+/// TS.DELETERULE sourceKey destKey
+///
+/// Deletes the compaction rule from `source_key` to `dest_key`. Returns
+/// `Ok(())` on success.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::TsDeleteRule;
+///
+/// let cmd = TsDeleteRule::new("src", "dst");
+/// ```
+#[derive(Clone)]
+pub struct TsDeleteRule {
+    source_key: String,
+    dest_key: String,
+}
+
+impl TsDeleteRule {
+    pub fn new(source_key: impl Into<String>, dest_key: impl Into<String>) -> Self {
+        Self {
+            source_key: source_key.into(),
+            dest_key: dest_key.into(),
+        }
+    }
+}
+
+impl Command for TsDeleteRule {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("TS.DELETERULE"),
+            bulk(self.source_key.as_str()),
+            bulk(self.dest_key.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "TS.DELETERULE"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn ts_createrule_to_frame() {
+        let cmd = TsCreateRule::new("src", "dst", TsAggregation::Avg, 60_000);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("TS.CREATERULE"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("AGGREGATION"),
+                bulk("AVG"),
+                bulk("60000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ts_createrule_with_align_to_frame() {
+        let cmd = TsCreateRule::new("src", "dst", TsAggregation::Sum, 60_000).align_timestamp(0);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("TS.CREATERULE"),
+                bulk("src"),
+                bulk("dst"),
+                bulk("AGGREGATION"),
+                bulk("SUM"),
+                bulk("60000"),
+                bulk("0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ts_deleterule_to_frame() {
+        let cmd = TsDeleteRule::new("src", "dst");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("TS.DELETERULE"), bulk("src"), bulk("dst")])
+        );
+    }
+}

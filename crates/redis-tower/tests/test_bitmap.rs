@@ -77,3 +77,83 @@ async fn bitop() {
     let count = c.execute(BitCount::new(dest)).await.unwrap();
     assert_eq!(count, 4);
 }
+
+#[tokio::test]
+async fn bitfield_set_get_incr() {
+    let mut c = conn().await;
+    let key = "cover2:bitmap:bitfield_set_get_incr";
+    c.execute(Del::new(key)).await.unwrap();
+
+    // SET returns the previous value (0 for a fresh field).
+    let set = c
+        .execute(Bitfield::new(key).set("u8", "0", 200))
+        .await
+        .unwrap();
+    assert_eq!(set, vec![Some(0)]);
+
+    // GET reads back the value just written.
+    let got = c.execute(Bitfield::new(key).get("u8", "0")).await.unwrap();
+    assert_eq!(got, vec![Some(200)]);
+
+    // INCRBY returns the new value.
+    let incr = c
+        .execute(Bitfield::new(key).incr_by("u8", "0", 10))
+        .await
+        .unwrap();
+    assert_eq!(incr, vec![Some(210)]);
+}
+
+#[tokio::test]
+async fn bitfield_overflow_sat_caps() {
+    let mut c = conn().await;
+    let key = "cover2:bitmap:bitfield_overflow_sat";
+    c.execute(Del::new(key)).await.unwrap();
+
+    // u8 max is 255; SAT overflow should cap at 255 rather than wrapping.
+    let result = c
+        .execute(
+            Bitfield::new(key)
+                .set("u8", "0", 250)
+                .overflow(BitfieldOverflow::Sat)
+                .incr_by("u8", "0", 100),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, vec![Some(0), Some(255)]);
+}
+
+#[tokio::test]
+async fn bitfield_overflow_fail_returns_nil() {
+    let mut c = conn().await;
+    let key = "cover2:bitmap:bitfield_overflow_fail";
+    c.execute(Del::new(key)).await.unwrap();
+
+    // FAIL overflow should leave the value unchanged and report nil.
+    let result = c
+        .execute(
+            Bitfield::new(key)
+                .set("u8", "0", 250)
+                .overflow(BitfieldOverflow::Fail)
+                .incr_by("u8", "0", 100),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, vec![Some(0), None]);
+}
+
+#[tokio::test]
+async fn bitfield_ro_get() {
+    let mut c = conn().await;
+    let key = "cover2:bitmap:bitfield_ro_get";
+    c.execute(Del::new(key)).await.unwrap();
+
+    c.execute(Bitfield::new(key).set("u8", "0", 42))
+        .await
+        .unwrap();
+
+    let got = c
+        .execute(BitfieldRo::new(key).get("u8", "0"))
+        .await
+        .unwrap();
+    assert_eq!(got, vec![Some(42)]);
+}

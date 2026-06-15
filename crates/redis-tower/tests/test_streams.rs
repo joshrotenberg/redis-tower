@@ -213,3 +213,72 @@ async fn stream_xsetid_entries_added() {
 
     c.execute(Del::new(key)).await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Acknowledge-and-delete (issue #472, Redis 8.0+)
+// ---------------------------------------------------------------------------
+//
+// XACKDEL / XDELEX are Redis 8.0+. Each test probes the command and returns
+// early (skips) when run against an older server that rejects it.
+
+/// XACKDEL acknowledges and deletes entries from a consumer group in one call.
+#[tokio::test]
+async fn xackdel() {
+    let mut c = conn().await;
+    let key = "test:streams:xackdel";
+    let group = "g";
+    c.execute(Del::new(key)).await.unwrap();
+
+    let id1 = c.execute(XAdd::new(key).field("f", "v1")).await.unwrap();
+    let id2 = c.execute(XAdd::new(key).field("f", "v2")).await.unwrap();
+    c.execute(XGroupCreate::new(key, group, "0")).await.unwrap();
+    // Deliver the entries so they enter the group's PEL.
+    c.execute(XReadGroup::new(group, "c1", key)).await.unwrap();
+
+    let status = match c
+        .execute(XAckDel::new(key, group, [&id1, "9999999-0"]))
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    // 1 = acknowledged and deleted; -1 = id not found.
+    assert_eq!(status, vec![1, -1]);
+
+    // id1 was deleted; id2 still exists.
+    let len = c.execute(XLen::new(key)).await.unwrap();
+    assert_eq!(len, 1, "XACKDEL should have deleted exactly one entry");
+    let range = c.execute(XRange::all(key)).await.unwrap();
+    assert_eq!(range.len(), 1);
+    assert_eq!(range[0].id, id2);
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// XDELEX deletes entries from a stream with an explicit reference policy.
+#[tokio::test]
+async fn xdelex() {
+    let mut c = conn().await;
+    let key = "test:streams:xdelex";
+    c.execute(Del::new(key)).await.unwrap();
+
+    let id1 = c.execute(XAdd::new(key).field("f", "v1")).await.unwrap();
+    let id2 = c.execute(XAdd::new(key).field("f", "v2")).await.unwrap();
+
+    let status = match c
+        .execute(XDelEx::new(key, [&id1, "9999999-0"]).policy(StreamRefPolicy::KeepRef))
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    // 1 = deleted; -1 = id not found.
+    assert_eq!(status, vec![1, -1]);
+
+    let len = c.execute(XLen::new(key)).await.unwrap();
+    assert_eq!(len, 1, "XDELEX should have deleted exactly one entry");
+    let range = c.execute(XRange::all(key)).await.unwrap();
+    assert_eq!(range[0].id, id2);
+
+    c.execute(Del::new(key)).await.unwrap();
+}

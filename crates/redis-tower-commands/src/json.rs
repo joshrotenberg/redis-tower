@@ -803,3 +803,392 @@ impl Command for JsonMerge {
         "JSON.MERGE"
     }
 }
+
+/// JSON.MSET key path value \[key path value ...\]
+///
+/// Sets multiple JSON values across one or more keys in a single atomic call.
+/// Each triple is a `(key, path, value)` where `value` is a serialized JSON
+/// string. Returns `Ok(())` on success.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::JsonMSet;
+///
+/// let cmd = JsonMSet::new()
+///     .entry("k1", "$", "1")
+///     .entry("k2", "$", "{\"a\":2}");
+/// ```
+#[derive(Clone, Default)]
+pub struct JsonMSet {
+    entries: Vec<(String, String, String)>,
+}
+
+impl JsonMSet {
+    /// Create an empty `JSON.MSET` command.
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Add a `(key, path, value)` triple. `value` is a serialized JSON string.
+    pub fn entry(
+        mut self,
+        key: impl Into<String>,
+        path: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.entries.push((key.into(), path.into(), value.into()));
+        self
+    }
+}
+
+impl Command for JsonMSet {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("JSON.MSET")];
+        for (key, path, value) in &self.entries {
+            args.push(bulk(key.as_str()));
+            args.push(bulk(path.as_str()));
+            args.push(bulk(value.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.MSET"
+    }
+}
+
+/// JSON.TOGGLE key path
+///
+/// Toggles boolean values stored at the matching paths. Returns the raw
+/// RedisJSON reply: an array of new booleans (`1`/`0`, with nil for a path
+/// whose value is not a boolean) under a JSONPath, or a scalar under a legacy
+/// path.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::JsonToggle;
+///
+/// let cmd = JsonToggle::new("k", "$.enabled");
+/// ```
+#[derive(Clone)]
+pub struct JsonToggle {
+    key: String,
+    path: String,
+}
+
+impl JsonToggle {
+    pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            path: path.into(),
+        }
+    }
+}
+
+impl Command for JsonToggle {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("JSON.TOGGLE"),
+            bulk(self.key.as_str()),
+            bulk(self.path.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "JSON.TOGGLE"
+    }
+}
+
+/// JSON.CLEAR key \[path\]
+///
+/// Clears container values (arrays and objects) and sets numeric values to `0`
+/// at the matching paths. Returns the number of values cleared.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::JsonClear;
+///
+/// let cmd = JsonClear::new("k").path("$.items");
+/// ```
+#[derive(Clone)]
+pub struct JsonClear {
+    key: String,
+    path: Option<String>,
+}
+
+impl JsonClear {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            path: None,
+        }
+    }
+
+    /// Limit the clear to the given path. Defaults to the root.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
+impl Command for JsonClear {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("JSON.CLEAR"), bulk(self.key.as_str())];
+        if let Some(path) = &self.path {
+            args.push(bulk(path.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.CLEAR"
+    }
+}
+
+/// JSON.ARRINSERT key path index value \[value ...\]
+///
+/// Inserts one or more JSON values into the array at `path` before `index`.
+/// Each `value` is a serialized JSON string. Returns the raw RedisJSON reply:
+/// an array of new array lengths (nil where the path is not an array) under a
+/// JSONPath, or a single length under a legacy path.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::JsonArrInsert;
+///
+/// let cmd = JsonArrInsert::new("k", "$.items", 0).value("1").value("2");
+/// ```
+#[derive(Clone)]
+pub struct JsonArrInsert {
+    key: String,
+    path: String,
+    index: i64,
+    values: Vec<String>,
+}
+
+impl JsonArrInsert {
+    pub fn new(key: impl Into<String>, path: impl Into<String>, index: i64) -> Self {
+        Self {
+            key: key.into(),
+            path: path.into(),
+            index,
+            values: Vec::new(),
+        }
+    }
+
+    /// Add a JSON value to insert.
+    pub fn value(mut self, value: impl Into<String>) -> Self {
+        self.values.push(value.into());
+        self
+    }
+
+    /// Add multiple JSON values to insert.
+    pub fn values(mut self, values: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.values.extend(values.into_iter().map(Into::into));
+        self
+    }
+}
+
+impl Command for JsonArrInsert {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("JSON.ARRINSERT"),
+            bulk(self.key.as_str()),
+            bulk(self.path.as_str()),
+            bulk(self.index.to_string()),
+        ];
+        for value in &self.values {
+            args.push(bulk(value.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "JSON.ARRINSERT"
+    }
+}
+
+/// JSON.ARRTRIM key path start stop
+///
+/// Trims the array at `path` to the inclusive `[start, stop]` range. Returns
+/// the raw RedisJSON reply: an array of new array lengths (nil where the path
+/// is not an array) under a JSONPath, or a single length under a legacy path.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::JsonArrTrim;
+///
+/// let cmd = JsonArrTrim::new("k", "$.items", 0, 10);
+/// ```
+#[derive(Clone)]
+pub struct JsonArrTrim {
+    key: String,
+    path: String,
+    start: i64,
+    stop: i64,
+}
+
+impl JsonArrTrim {
+    pub fn new(key: impl Into<String>, path: impl Into<String>, start: i64, stop: i64) -> Self {
+        Self {
+            key: key.into(),
+            path: path.into(),
+            start,
+            stop,
+        }
+    }
+}
+
+impl Command for JsonArrTrim {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("JSON.ARRTRIM"),
+            bulk(self.key.as_str()),
+            bulk(self.path.as_str()),
+            bulk(self.start.to_string()),
+            bulk(self.stop.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "JSON.ARRTRIM"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::Frame;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn json_mset_to_frame() {
+        let cmd = JsonMSet::new()
+            .entry("k1", "$", "1")
+            .entry("k2", "$", "{\"a\":2}");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("JSON.MSET"),
+                bulk("k1"),
+                bulk("$"),
+                bulk("1"),
+                bulk("k2"),
+                bulk("$"),
+                bulk("{\"a\":2}"),
+            ])
+        );
+    }
+
+    #[test]
+    fn json_toggle_to_frame() {
+        let cmd = JsonToggle::new("k", "$.enabled");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("JSON.TOGGLE"), bulk("k"), bulk("$.enabled")])
+        );
+    }
+
+    #[test]
+    fn json_toggle_parse_returns_raw_frame() {
+        let cmd = JsonToggle::new("k", "$.a");
+        let frame = array(vec![Frame::Integer(1), Frame::Null]);
+        assert_eq!(cmd.parse_response(frame.clone()).unwrap(), frame);
+    }
+
+    #[test]
+    fn json_clear_default_path_to_frame() {
+        let cmd = JsonClear::new("k");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("JSON.CLEAR"), bulk("k")]));
+    }
+
+    #[test]
+    fn json_clear_with_path_to_frame() {
+        let cmd = JsonClear::new("k").path("$.items");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("JSON.CLEAR"), bulk("k"), bulk("$.items")])
+        );
+    }
+
+    #[test]
+    fn json_arrinsert_to_frame() {
+        let cmd = JsonArrInsert::new("k", "$.items", 0).value("1").value("2");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("JSON.ARRINSERT"),
+                bulk("k"),
+                bulk("$.items"),
+                bulk("0"),
+                bulk("1"),
+                bulk("2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn json_arrtrim_to_frame() {
+        let cmd = JsonArrTrim::new("k", "$.items", 0, 10);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("JSON.ARRTRIM"),
+                bulk("k"),
+                bulk("$.items"),
+                bulk("0"),
+                bulk("10"),
+            ])
+        );
+    }
+}
