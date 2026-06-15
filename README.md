@@ -12,6 +12,9 @@ Commands are typed structs with compile-time response types. Middleware
 standard Tower layers. 360+ commands, including Redis Stack modules
 behind feature flags.
 
+**Coming from redis-rs?** See the [migration guide](docs/MIGRATING-FROM-REDIS-RS.md)
+for side-by-side idiom mappings.
+
 ## Quick start
 
 ```rust,ignore
