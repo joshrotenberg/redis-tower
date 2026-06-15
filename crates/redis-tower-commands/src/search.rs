@@ -523,6 +523,9 @@ pub struct FtAggregate {
     limit_offset: Option<u64>,
     limit_num: Option<u64>,
     apply: Vec<(String, String)>,
+    with_cursor: bool,
+    cursor_count: Option<u64>,
+    cursor_maxidle: Option<u64>,
 }
 
 impl FtAggregate {
@@ -536,6 +539,9 @@ impl FtAggregate {
             limit_offset: None,
             limit_num: None,
             apply: Vec::new(),
+            with_cursor: false,
+            cursor_count: None,
+            cursor_maxidle: None,
         }
     }
 
@@ -576,6 +582,31 @@ impl FtAggregate {
     /// Add an APPLY expression with an alias.
     pub fn apply(mut self, expr: impl Into<String>, alias: impl Into<String>) -> Self {
         self.apply.push((expr.into(), alias.into()));
+        self
+    }
+
+    /// Request a cursor for incremental result retrieval (`WITHCURSOR`).
+    ///
+    /// Read subsequent batches with [`FtCursorRead`] and release the cursor
+    /// with [`FtCursorDel`].
+    pub fn with_cursor(mut self) -> Self {
+        self.with_cursor = true;
+        self
+    }
+
+    /// Request a cursor and set its batch size (`WITHCURSOR COUNT n`).
+    pub fn with_cursor_count(mut self, count: u64) -> Self {
+        self.with_cursor = true;
+        self.cursor_count = Some(count);
+        self
+    }
+
+    /// Set the cursor's idle timeout in milliseconds (`MAXIDLE ms`).
+    ///
+    /// Implies `WITHCURSOR`.
+    pub fn cursor_maxidle(mut self, maxidle: u64) -> Self {
+        self.with_cursor = true;
+        self.cursor_maxidle = Some(maxidle);
         self
     }
 }
@@ -639,6 +670,18 @@ impl Command for FtAggregate {
             }
         }
 
+        if self.with_cursor {
+            args.push(bulk("WITHCURSOR"));
+            if let Some(count) = self.cursor_count {
+                args.push(bulk("COUNT"));
+                args.push(bulk(count.to_string()));
+            }
+            if let Some(maxidle) = self.cursor_maxidle {
+                args.push(bulk("MAXIDLE"));
+                args.push(bulk(maxidle.to_string()));
+            }
+        }
+
         array(args)
     }
 
@@ -648,6 +691,123 @@ impl Command for FtAggregate {
 
     fn name(&self) -> &str {
         "FT.AGGREGATE"
+    }
+}
+
+/// FT.CURSOR READ index cursor_id \[COUNT n\]
+///
+/// Reads the next batch of results from a cursor created by an
+/// [`FtAggregate`] with `WITHCURSOR`. Returns the same raw `Frame` shape as
+/// `FT.AGGREGATE`: an array of `[results, next_cursor_id]`. A `next_cursor_id`
+/// of `0` indicates the cursor is exhausted.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::FtCursorRead;
+///
+/// let cmd = FtCursorRead::new("idx", 42).count(100);
+/// ```
+#[derive(Clone)]
+pub struct FtCursorRead {
+    index: String,
+    cursor_id: u64,
+    count: Option<u64>,
+}
+
+impl FtCursorRead {
+    pub fn new(index: impl Into<String>, cursor_id: u64) -> Self {
+        Self {
+            index: index.into(),
+            cursor_id,
+            count: None,
+        }
+    }
+
+    /// Set the number of results to read in this batch (`COUNT n`).
+    pub fn count(mut self, count: u64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for FtCursorRead {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("FT.CURSOR"),
+            bulk("READ"),
+            bulk(self.index.as_str()),
+            bulk(self.cursor_id.to_string()),
+        ];
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "FT.CURSOR"
+    }
+}
+
+/// FT.CURSOR DEL index cursor_id
+///
+/// Releases a cursor created by an [`FtAggregate`] with `WITHCURSOR`. Returns
+/// `Ok(())` on success.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::FtCursorDel;
+///
+/// let cmd = FtCursorDel::new("idx", 42);
+/// ```
+#[derive(Clone)]
+pub struct FtCursorDel {
+    index: String,
+    cursor_id: u64,
+}
+
+impl FtCursorDel {
+    pub fn new(index: impl Into<String>, cursor_id: u64) -> Self {
+        Self {
+            index: index.into(),
+            cursor_id,
+        }
+    }
+}
+
+impl Command for FtCursorDel {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("FT.CURSOR"),
+            bulk("DEL"),
+            bulk(self.index.as_str()),
+            bulk(self.cursor_id.to_string()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "FT.CURSOR"
     }
 }
 
@@ -774,5 +934,99 @@ impl Command for FtAliasUpdate {
 
     fn name(&self) -> &str {
         "FT.ALIASUPDATE"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+    use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn ft_aggregate_with_cursor_count_to_frame() {
+        let cmd = FtAggregate::new("idx", "*").with_cursor_count(100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.AGGREGATE"),
+                bulk("idx"),
+                bulk("*"),
+                bulk("WITHCURSOR"),
+                bulk("COUNT"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ft_aggregate_with_cursor_maxidle_to_frame() {
+        let cmd = FtAggregate::new("idx", "*")
+            .with_cursor()
+            .cursor_maxidle(5000);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.AGGREGATE"),
+                bulk("idx"),
+                bulk("*"),
+                bulk("WITHCURSOR"),
+                bulk("MAXIDLE"),
+                bulk("5000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ft_aggregate_without_cursor_unchanged() {
+        let cmd = FtAggregate::new("idx", "*");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("FT.AGGREGATE"), bulk("idx"), bulk("*")])
+        );
+    }
+
+    #[test]
+    fn ft_cursor_read_to_frame() {
+        let cmd = FtCursorRead::new("idx", 42).count(100);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.CURSOR"),
+                bulk("READ"),
+                bulk("idx"),
+                bulk("42"),
+                bulk("COUNT"),
+                bulk("100"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ft_cursor_read_no_count_to_frame() {
+        let cmd = FtCursorRead::new("idx", 7);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.CURSOR"),
+                bulk("READ"),
+                bulk("idx"),
+                bulk("7")
+            ])
+        );
+    }
+
+    #[test]
+    fn ft_cursor_del_to_frame() {
+        let cmd = FtCursorDel::new("idx", 42);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.CURSOR"),
+                bulk("DEL"),
+                bulk("idx"),
+                bulk("42")
+            ])
+        );
     }
 }

@@ -1298,6 +1298,397 @@ impl Command for HPExpireTime {
     }
 }
 
+/// HGETDEL key FIELDS numfields field \[field ...\]
+///
+/// Gets the values of the given hash fields and deletes them in one atomic
+/// operation (Redis 8.0+). Returns one bulk-or-nil entry per requested field,
+/// in request order; missing fields yield `None`.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::HGetDel;
+///
+/// let cmd = HGetDel::new("h", vec!["f1", "f2"]);
+/// ```
+#[derive(Clone)]
+pub struct HGetDel {
+    key: String,
+    fields: Vec<String>,
+}
+
+impl HGetDel {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+impl Command for HGetDel {
+    type Response = Vec<Option<Bytes>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("HGETDEL"),
+            bulk(self.key.as_str()),
+            bulk("FIELDS"),
+            bulk(self.fields.len().to_string()),
+        ];
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(data) => Ok(data),
+                    Frame::Null => Ok(None),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string or null",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HGETDEL"
+    }
+}
+
+/// HGETEX key \[EX s | PX ms | EXAT ts | PXAT ts | PERSIST\] FIELDS numfields field \[field ...\]
+///
+/// Gets the values of the given hash fields and optionally sets or clears their
+/// TTL in the same call (Redis 8.0+). With no TTL option the fields' TTLs are
+/// left unchanged. Returns one bulk-or-nil entry per requested field.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::HGetEx;
+///
+/// let cmd = HGetEx::new("h", vec!["f1", "f2"]).ex(60);
+/// ```
+#[derive(Clone)]
+pub struct HGetEx {
+    key: String,
+    ex: Option<u64>,
+    px: Option<u64>,
+    exat: Option<u64>,
+    pxat: Option<u64>,
+    persist: bool,
+    fields: Vec<String>,
+}
+
+impl HGetEx {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            ex: None,
+            px: None,
+            exat: None,
+            pxat: None,
+            persist: false,
+            fields: fields.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Set the fields' expiration in seconds.
+    pub fn ex(mut self, seconds: u64) -> Self {
+        self.ex = Some(seconds);
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set the fields' expiration in milliseconds.
+    pub fn px(mut self, milliseconds: u64) -> Self {
+        self.px = Some(milliseconds);
+        self.ex = None;
+        self.exat = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set the fields' expiration as a Unix timestamp in seconds.
+    pub fn exat(mut self, timestamp: u64) -> Self {
+        self.exat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set the fields' expiration as a Unix timestamp in milliseconds.
+    pub fn pxat(mut self, timestamp: u64) -> Self {
+        self.pxat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Remove the existing expiration on the fields.
+    pub fn persist(mut self) -> Self {
+        self.persist = true;
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self
+    }
+}
+
+impl Command for HGetEx {
+    type Response = Vec<Option<Bytes>>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HGETEX"), bulk(self.key.as_str())];
+        if let Some(ex) = self.ex {
+            args.push(bulk("EX"));
+            args.push(bulk(ex.to_string()));
+        }
+        if let Some(px) = self.px {
+            args.push(bulk("PX"));
+            args.push(bulk(px.to_string()));
+        }
+        if let Some(exat) = self.exat {
+            args.push(bulk("EXAT"));
+            args.push(bulk(exat.to_string()));
+        }
+        if let Some(pxat) = self.pxat {
+            args.push(bulk("PXAT"));
+            args.push(bulk(pxat.to_string()));
+        }
+        if self.persist {
+            args.push(bulk("PERSIST"));
+        }
+        args.push(bulk("FIELDS"));
+        args.push(bulk(self.fields.len().to_string()));
+        for f in &self.fields {
+            args.push(bulk(f.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(data) => Ok(data),
+                    Frame::Null => Ok(None),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string or null",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HGETEX"
+    }
+}
+
+/// Condition for HSETEX (FNX or FXX).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HSetExCondition {
+    /// Only set if none of the fields already exist.
+    Fnx,
+    /// Only set if all of the fields already exist.
+    Fxx,
+}
+
+/// HSETEX key \[FNX|FXX\] \[EX s | PX ms | EXAT ts | PXAT ts | KEEPTTL\]
+/// FIELDS numfields field value \[field value ...\]
+///
+/// Sets the given hash field/value pairs and their TTL in one atomic operation
+/// (Redis 8.0+). Returns `1` if the fields were set, `0` otherwise (for example
+/// when a `FNX`/`FXX` condition is not met).
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::HSetEx;
+///
+/// let cmd = HSetEx::new("h", vec![("f1", "v1"), ("f2", "v2")]).ex(60);
+/// ```
+#[derive(Clone)]
+pub struct HSetEx {
+    key: String,
+    condition: Option<HSetExCondition>,
+    ex: Option<u64>,
+    px: Option<u64>,
+    exat: Option<u64>,
+    pxat: Option<u64>,
+    keep_ttl: bool,
+    fields: Vec<(String, String)>,
+}
+
+impl HSetEx {
+    pub fn new(
+        key: impl Into<String>,
+        fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            condition: None,
+            ex: None,
+            px: None,
+            exat: None,
+            pxat: None,
+            keep_ttl: false,
+            fields: fields
+                .into_iter()
+                .map(|(f, v)| (f.into(), v.into()))
+                .collect(),
+        }
+    }
+
+    /// Only set if none of the fields already exist.
+    pub fn fnx(mut self) -> Self {
+        self.condition = Some(HSetExCondition::Fnx);
+        self
+    }
+
+    /// Only set if all of the fields already exist.
+    pub fn fxx(mut self) -> Self {
+        self.condition = Some(HSetExCondition::Fxx);
+        self
+    }
+
+    /// Set the fields' expiration in seconds.
+    pub fn ex(mut self, seconds: u64) -> Self {
+        self.ex = Some(seconds);
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set the fields' expiration in milliseconds.
+    pub fn px(mut self, milliseconds: u64) -> Self {
+        self.px = Some(milliseconds);
+        self.ex = None;
+        self.exat = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set the fields' expiration as a Unix timestamp in seconds.
+    pub fn exat(mut self, timestamp: u64) -> Self {
+        self.exat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set the fields' expiration as a Unix timestamp in milliseconds.
+    pub fn pxat(mut self, timestamp: u64) -> Self {
+        self.pxat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Retain the existing TTL on the fields.
+    pub fn keep_ttl(mut self) -> Self {
+        self.keep_ttl = true;
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self
+    }
+}
+
+impl Command for HSetEx {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HSETEX"), bulk(self.key.as_str())];
+        match &self.condition {
+            Some(HSetExCondition::Fnx) => args.push(bulk("FNX")),
+            Some(HSetExCondition::Fxx) => args.push(bulk("FXX")),
+            None => {}
+        }
+        if let Some(ex) = self.ex {
+            args.push(bulk("EX"));
+            args.push(bulk(ex.to_string()));
+        }
+        if let Some(px) = self.px {
+            args.push(bulk("PX"));
+            args.push(bulk(px.to_string()));
+        }
+        if let Some(exat) = self.exat {
+            args.push(bulk("EXAT"));
+            args.push(bulk(exat.to_string()));
+        }
+        if let Some(pxat) = self.pxat {
+            args.push(bulk("PXAT"));
+            args.push(bulk(pxat.to_string()));
+        }
+        if self.keep_ttl {
+            args.push(bulk("KEEPTTL"));
+        }
+        args.push(bulk("FIELDS"));
+        args.push(bulk(self.fields.len().to_string()));
+        for (f, v) in &self.fields {
+            args.push(bulk(f.as_str()));
+            args.push(bulk(v.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HSETEX"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,5 +2083,133 @@ mod tests {
         let frame = array(vec![Frame::Integer(1700000000000)]);
         let result = cmd.parse_response(frame).unwrap();
         assert_eq!(result, vec![1700000000000]);
+    }
+
+    // -- HGetDel --
+
+    #[test]
+    fn hgetdel_to_frame() {
+        let cmd = HGetDel::new("h", vec!["f1", "f2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HGETDEL"),
+                bulk("h"),
+                bulk("FIELDS"),
+                bulk("2"),
+                bulk("f1"),
+                bulk("f2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hgetdel_parse_bulk_and_nil() {
+        let cmd = HGetDel::new("h", vec!["f1", "f2"]);
+        let frame = array(vec![
+            Frame::BulkString(Some(Bytes::from("v1"))),
+            Frame::Null,
+        ]);
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            vec![Some(Bytes::from("v1")), None]
+        );
+    }
+
+    // -- HGetEx --
+
+    #[test]
+    fn hgetex_no_ttl_to_frame() {
+        let cmd = HGetEx::new("h", vec!["f1"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HGETEX"),
+                bulk("h"),
+                bulk("FIELDS"),
+                bulk("1"),
+                bulk("f1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hgetex_ex_to_frame() {
+        let cmd = HGetEx::new("h", vec!["f1", "f2"]).ex(60);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HGETEX"),
+                bulk("h"),
+                bulk("EX"),
+                bulk("60"),
+                bulk("FIELDS"),
+                bulk("2"),
+                bulk("f1"),
+                bulk("f2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hgetex_persist_to_frame() {
+        let cmd = HGetEx::new("h", vec!["f1"]).persist();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HGETEX"),
+                bulk("h"),
+                bulk("PERSIST"),
+                bulk("FIELDS"),
+                bulk("1"),
+                bulk("f1"),
+            ])
+        );
+    }
+
+    // -- HSetEx --
+
+    #[test]
+    fn hsetex_to_frame() {
+        let cmd = HSetEx::new("h", vec![("f1", "v1"), ("f2", "v2")]).ex(60);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HSETEX"),
+                bulk("h"),
+                bulk("EX"),
+                bulk("60"),
+                bulk("FIELDS"),
+                bulk("2"),
+                bulk("f1"),
+                bulk("v1"),
+                bulk("f2"),
+                bulk("v2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hsetex_fnx_keepttl_to_frame() {
+        let cmd = HSetEx::new("h", vec![("f1", "v1")]).fnx().keep_ttl();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HSETEX"),
+                bulk("h"),
+                bulk("FNX"),
+                bulk("KEEPTTL"),
+                bulk("FIELDS"),
+                bulk("1"),
+                bulk("f1"),
+                bulk("v1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hsetex_parse_integer() {
+        let cmd = HSetEx::new("h", vec![("f1", "v1")]);
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
     }
 }

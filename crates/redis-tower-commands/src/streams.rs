@@ -464,6 +464,189 @@ impl Command for XAck {
     }
 }
 
+/// Reference-trimming policy for `XACKDEL` and `XDELEX` (Redis 8.0+).
+///
+/// Controls what happens to an entry that is still referenced by other
+/// consumer groups when it is deleted:
+/// - `KeepRef` -- delete the entry but keep references in other groups' PELs
+///   (the default).
+/// - `DelRef` -- delete the entry and remove all references to it.
+/// - `Acked` -- only delete the entry if it has been acknowledged by all
+///   consumer groups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamRefPolicy {
+    /// Keep references in other groups' PELs.
+    KeepRef,
+    /// Remove all references to the deleted entries.
+    DelRef,
+    /// Only delete entries acknowledged by all groups.
+    Acked,
+}
+
+impl StreamRefPolicy {
+    fn as_str(&self) -> &str {
+        match self {
+            StreamRefPolicy::KeepRef => "KEEPREF",
+            StreamRefPolicy::DelRef => "DELREF",
+            StreamRefPolicy::Acked => "ACKED",
+        }
+    }
+}
+
+/// Parse a stream ack/del response array of per-id integer status codes.
+fn parse_stream_status_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
+    match frame {
+        Frame::Array(Some(frames)) => frames
+            .into_iter()
+            .map(|f| match f {
+                Frame::Integer(n) => Ok(n),
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "integer",
+                    actual: format!("{other:?}"),
+                }),
+            })
+            .collect(),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// XACKDEL key group \[KEEPREF|DELREF|ACKED\] IDS numids id \[id ...\]
+///
+/// Acknowledges and deletes the given entries from a consumer group in one
+/// atomic operation (Redis 8.0+). With no reference policy the default
+/// `KEEPREF` behavior applies. Returns one status code per requested id, in
+/// request order.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::{XAckDel, StreamRefPolicy};
+///
+/// let cmd = XAckDel::new("s", "g", vec!["1-1", "1-2"]).policy(StreamRefPolicy::DelRef);
+/// ```
+#[derive(Clone)]
+pub struct XAckDel {
+    key: String,
+    group: String,
+    policy: Option<StreamRefPolicy>,
+    ids: Vec<String>,
+}
+
+impl XAckDel {
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            policy: None,
+            ids: ids.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Set the reference-trimming policy. Defaults to `KEEPREF`.
+    pub fn policy(mut self, policy: StreamRefPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+}
+
+impl Command for XAckDel {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("XACKDEL"),
+            bulk(self.key.as_str()),
+            bulk(self.group.as_str()),
+        ];
+        if let Some(policy) = &self.policy {
+            args.push(bulk(policy.as_str()));
+        }
+        args.push(bulk("IDS"));
+        args.push(bulk(self.ids.len().to_string()));
+        for id in &self.ids {
+            args.push(bulk(id.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_stream_status_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "XACKDEL"
+    }
+}
+
+/// XDELEX key \[KEEPREF|DELREF|ACKED\] IDS numids id \[id ...\]
+///
+/// Deletes the given entries from a stream with explicit control over how
+/// references held by consumer groups are handled (Redis 8.0+). With no
+/// reference policy the default `KEEPREF` behavior applies. Returns one status
+/// code per requested id, in request order.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::{XDelEx, StreamRefPolicy};
+///
+/// let cmd = XDelEx::new("s", vec!["1-1", "1-2"]).policy(StreamRefPolicy::Acked);
+/// ```
+#[derive(Clone)]
+pub struct XDelEx {
+    key: String,
+    policy: Option<StreamRefPolicy>,
+    ids: Vec<String>,
+}
+
+impl XDelEx {
+    pub fn new(key: impl Into<String>, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            key: key.into(),
+            policy: None,
+            ids: ids.into_iter().map(Into::into).collect(),
+        }
+    }
+
+    /// Set the reference-trimming policy. Defaults to `KEEPREF`.
+    pub fn policy(mut self, policy: StreamRefPolicy) -> Self {
+        self.policy = Some(policy);
+        self
+    }
+}
+
+impl Command for XDelEx {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("XDELEX"), bulk(self.key.as_str())];
+        if let Some(policy) = &self.policy {
+            args.push(bulk(policy.as_str()));
+        }
+        args.push(bulk("IDS"));
+        args.push(bulk(self.ids.len().to_string()));
+        for id in &self.ids {
+            args.push(bulk(id.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_stream_status_array(frame)
+    }
+
+    fn name(&self) -> &str {
+        "XDELEX"
+    }
+}
+
 /// XGROUP CREATE key group id \[MKSTREAM\]
 ///
 /// Creates a consumer group.
@@ -2343,5 +2526,89 @@ mod tests {
                 bulk("-"),
             ])
         );
+    }
+
+    // -- XAckDel --
+
+    #[test]
+    fn xackdel_default_policy_to_frame() {
+        let cmd = XAckDel::new("s", "g", vec!["1-1", "1-2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XACKDEL"),
+                bulk("s"),
+                bulk("g"),
+                bulk("IDS"),
+                bulk("2"),
+                bulk("1-1"),
+                bulk("1-2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xackdel_with_policy_to_frame() {
+        let cmd = XAckDel::new("s", "g", vec!["1-1"]).policy(StreamRefPolicy::DelRef);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XACKDEL"),
+                bulk("s"),
+                bulk("g"),
+                bulk("DELREF"),
+                bulk("IDS"),
+                bulk("1"),
+                bulk("1-1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xackdel_parse_status_array() {
+        let cmd = XAckDel::new("s", "g", vec!["1-1", "1-2"]);
+        let frame = array(vec![Frame::Integer(1), Frame::Integer(-1)]);
+        assert_eq!(cmd.parse_response(frame).unwrap(), vec![1, -1]);
+    }
+
+    // -- XDelEx --
+
+    #[test]
+    fn xdelex_default_policy_to_frame() {
+        let cmd = XDelEx::new("s", vec!["1-1", "1-2"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XDELEX"),
+                bulk("s"),
+                bulk("IDS"),
+                bulk("2"),
+                bulk("1-1"),
+                bulk("1-2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xdelex_with_policy_to_frame() {
+        let cmd = XDelEx::new("s", vec!["1-1"]).policy(StreamRefPolicy::Acked);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XDELEX"),
+                bulk("s"),
+                bulk("ACKED"),
+                bulk("IDS"),
+                bulk("1"),
+                bulk("1-1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xdelex_parse_status_array() {
+        let cmd = XDelEx::new("s", vec!["1-1"]);
+        let frame = array(vec![Frame::Integer(1)]);
+        assert_eq!(cmd.parse_response(frame).unwrap(), vec![1]);
     }
 }

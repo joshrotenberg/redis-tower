@@ -2,6 +2,7 @@ mod common;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use common::conn;
 use redis_tower::commands::*;
 
@@ -223,6 +224,88 @@ async fn hexpire_nonexistent_field_status_code() {
     // HTTL on a nonexistent field also returns -2.
     let ttls = c.execute(HTtl::new(key, ["ghost_field"])).await.unwrap();
     assert_eq!(ttls[0], -2, "HTTL on nonexistent field should return -2");
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Hash get/set with TTL (issue #472, Redis 8.0+)
+// ---------------------------------------------------------------------------
+//
+// HGETDEL / HGETEX / HSETEX are Redis 8.0+. Each test probes the command and
+// returns early (skips) when run against an older server that rejects it.
+
+/// HGETDEL returns and deletes the requested fields.
+#[tokio::test]
+async fn hgetdel() {
+    let mut c = conn().await;
+    let key = "cover2:hash:hgetdel";
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(HSet::new(key, "f1", "v1").field("f2", "v2"))
+        .await
+        .unwrap();
+
+    let got = match c.execute(HGetDel::new(key, ["f1", "missing"])).await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    assert_eq!(got, vec![Some(Bytes::from("v1")), None]);
+
+    // f1 was deleted; f2 remains.
+    assert!(!c.execute(HExists::new(key, "f1")).await.unwrap());
+    assert!(c.execute(HExists::new(key, "f2")).await.unwrap());
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// HGETEX returns field values and applies/clears their TTL.
+#[tokio::test]
+async fn hgetex() {
+    let mut c = conn().await;
+    let key = "cover2:hash:hgetex";
+    c.execute(Del::new(key)).await.unwrap();
+    c.execute(HSet::new(key, "f1", "v1")).await.unwrap();
+
+    let got = match c.execute(HGetEx::new(key, ["f1"]).ex(100)).await {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    assert_eq!(got, vec![Some(Bytes::from("v1"))]);
+
+    // The EX option should have set a TTL.
+    let ttls = c.execute(HTtl::new(key, ["f1"])).await.unwrap();
+    assert!(ttls[0] > 0, "HGETEX EX should have set a positive TTL");
+
+    // PERSIST clears the TTL again.
+    c.execute(HGetEx::new(key, ["f1"]).persist()).await.unwrap();
+    let ttls = c.execute(HTtl::new(key, ["f1"])).await.unwrap();
+    assert_eq!(ttls[0], -1, "HGETEX PERSIST should clear the TTL");
+
+    c.execute(Del::new(key)).await.unwrap();
+}
+
+/// HSETEX sets fields and their TTL in one call.
+#[tokio::test]
+async fn hsetex() {
+    let mut c = conn().await;
+    let key = "cover2:hash:hsetex";
+    c.execute(Del::new(key)).await.unwrap();
+
+    let set = match c
+        .execute(HSetEx::new(key, [("f1", "v1"), ("f2", "v2")]).ex(100))
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+    assert_eq!(set, 1, "HSETEX should report the fields were set");
+
+    assert_eq!(
+        c.execute(HGet::new(key, "f1")).await.unwrap(),
+        Some(Bytes::from("v1"))
+    );
+    let ttls = c.execute(HTtl::new(key, ["f1"])).await.unwrap();
+    assert!(ttls[0] > 0, "HSETEX EX should have set a positive TTL");
 
     c.execute(Del::new(key)).await.unwrap();
 }
