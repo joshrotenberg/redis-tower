@@ -79,6 +79,53 @@ async fn cluster_routes_to_different_nodes() {
     cluster.execute(Del::new(k2)).await.unwrap();
 }
 
+/// Large values round-trip through the cluster connection (#479). Single-key,
+/// so it stays within one slot; exercises the per-node codec at MB scale.
+#[tokio::test]
+#[ignore]
+async fn cluster_large_value_roundtrip() {
+    let mut cluster = cluster_conn().await;
+    let key = "cluster:large:64mb";
+    let _ = cluster.execute(Del::new(key)).await;
+
+    let value = "v".repeat(64 * 1024 * 1024);
+    cluster.execute(Set::new(key, value.clone())).await.unwrap();
+    let got = cluster
+        .execute(Get::new(key))
+        .await
+        .unwrap()
+        .expect("value should be present");
+    assert_eq!(got.len(), value.len(), "cluster: 64MB round-trip length");
+    assert_eq!(
+        got.as_ref(),
+        value.as_bytes(),
+        "cluster: 64MB round-trip bytes"
+    );
+    cluster.execute(Del::new(key)).await.unwrap();
+}
+
+/// A 1000-member HGETALL through the cluster connection (#479).
+#[tokio::test]
+#[ignore]
+async fn cluster_large_hgetall() {
+    let mut cluster = cluster_conn().await;
+    let key = "cluster:large:hash";
+    let _ = cluster.execute(Del::new(key)).await;
+
+    let fields = (0..1000).map(|i| (format!("f{i}"), format!("v{i}")));
+    cluster
+        .execute(HSet::from_fields(key, fields))
+        .await
+        .unwrap();
+    let all = cluster.execute(HGetAll::new(key)).await.unwrap();
+    assert_eq!(
+        all.len(),
+        1000,
+        "cluster: HGETALL should return 1000 members"
+    );
+    cluster.execute(Del::new(key)).await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn cluster_hash_tag_same_slot() {
