@@ -2,11 +2,102 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 
+use redis_tower::credentials::CredentialProvider;
 use redis_tower_core::{Command, RedisConnection, RedisError};
 
-use crate::discovery;
+use crate::discovery::{self, SentinelConfig};
+
+/// Builder for [`SentinelConnection`].
+///
+/// Obtain one via [`SentinelConnection::builder`].
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower_sentinel::SentinelConnection;
+/// use redis_tower::credentials::StaticCredentials;
+///
+/// let conn = SentinelConnection::builder(
+///     &["127.0.0.1:26379", "127.0.0.1:26380", "127.0.0.1:26381"],
+///     "mymaster",
+/// )
+/// .sentinel_credentials(StaticCredentials::password("sentinel_pass"))
+/// .node_credentials(StaticCredentials::password("redis_pass"))
+/// .connect()
+/// .await?;
+/// ```
+pub struct SentinelConnectionBuilder {
+    sentinel_addrs: Vec<String>,
+    master_name: String,
+    pub(crate) config: SentinelConfig,
+}
+
+impl SentinelConnectionBuilder {
+    /// Authenticate sentinel connections with the given credential provider.
+    ///
+    /// Called once per sentinel query. Supports dynamic credentials (token
+    /// rotation) via a custom [`CredentialProvider`] implementation.
+    pub fn sentinel_credentials(mut self, provider: impl CredentialProvider) -> Self {
+        self.config.sentinel_credentials = Some(Arc::new(provider));
+        self
+    }
+
+    /// Authenticate master (node) connections with the given credential provider.
+    ///
+    /// Used when connecting to the discovered Redis master. Sentinels and the
+    /// data node commonly use different passwords in production.
+    pub fn node_credentials(mut self, provider: impl CredentialProvider) -> Self {
+        self.config.node_credentials = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set the TLS configuration for sentinel connections.
+    ///
+    /// When set, all connections to sentinel nodes use TLS. The hostname for
+    /// SNI verification is derived from each sentinel's address.
+    ///
+    /// Requires the `tls-rustls` or `tls-native-tls` feature.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn sentinel_tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
+        self.config.sentinel_tls = Some(Arc::new(tls));
+        self
+    }
+
+    /// Set the TLS configuration for node (master) connections.
+    ///
+    /// When set, connections to the discovered Redis master use TLS.
+    ///
+    /// Requires the `tls-rustls` or `tls-native-tls` feature.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn node_tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
+        self.config.node_tls = Some(Arc::new(tls));
+        self
+    }
+
+    /// Set the same TLS configuration for both sentinel and node connections.
+    ///
+    /// Convenience method when both hops share the same TLS settings. Equivalent
+    /// to calling `.sentinel_tls(tls.clone())` and `.node_tls(tls)` (the config
+    /// is cloned internally and stored in an `Arc` for each hop).
+    ///
+    /// Requires the `tls-rustls` or `tls-native-tls` feature.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
+        let shared = Arc::new(tls);
+        self.config.sentinel_tls = Some(shared.clone());
+        self.config.node_tls = Some(shared);
+        self
+    }
+
+    /// Connect to the Redis master discovered via sentinel.
+    pub async fn connect(self) -> Result<SentinelConnection, RedisError> {
+        SentinelConnection::connect_with_config(self.sentinel_addrs, self.master_name, self.config)
+            .await
+    }
+}
 
 /// A Redis connection managed by Sentinel.
 ///
@@ -48,10 +139,45 @@ pub struct SentinelConnection {
     current_addr: String,
     /// Whether the connection needs rediscovery.
     needs_rediscovery: bool,
+    /// Sentinel and node configuration (credentials, TLS).
+    config: SentinelConfig,
 }
 
 impl SentinelConnection {
+    /// Create a builder for configuring the connection.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redis_tower_sentinel::SentinelConnection;
+    /// use redis_tower::credentials::StaticCredentials;
+    ///
+    /// let conn = SentinelConnection::builder(
+    ///     &["127.0.0.1:26379"],
+    ///     "mymaster",
+    /// )
+    /// .node_credentials(StaticCredentials::password("secret"))
+    /// .connect()
+    /// .await?;
+    /// ```
+    pub fn builder(
+        sentinel_addrs: &[impl AsRef<str>],
+        master_name: &str,
+    ) -> SentinelConnectionBuilder {
+        SentinelConnectionBuilder {
+            sentinel_addrs: sentinel_addrs
+                .iter()
+                .map(|a| a.as_ref().to_string())
+                .collect(),
+            master_name: master_name.to_string(),
+            config: SentinelConfig::default(),
+        }
+    }
+
     /// Connect to the Redis master discovered via Sentinel.
+    ///
+    /// Uses plain TCP connections to both sentinel and master without
+    /// authentication. For auth or TLS, use [`Self::builder`].
     pub async fn connect(
         sentinel_addrs: &[impl AsRef<str>],
         master_name: &str,
@@ -60,15 +186,32 @@ impl SentinelConnection {
             .iter()
             .map(|a| a.as_ref().to_string())
             .collect();
-        let master_addr = discovery::discover_master(&addrs, master_name).await?;
-        let conn = RedisConnection::connect(&master_addr).await?;
+        Self::connect_with_config(addrs, master_name.to_string(), SentinelConfig::default()).await
+    }
+
+    /// Internal: connect using explicit config.
+    async fn connect_with_config(
+        addrs: Vec<String>,
+        master_name: String,
+        config: SentinelConfig,
+    ) -> Result<Self, RedisError> {
+        let master_addr =
+            discovery::discover_master_with_config(&addrs, &master_name, &config).await?;
+        let conn = discovery::connect_hop(
+            &master_addr,
+            config.node_credentials.as_ref(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            config.node_tls.as_ref(),
+        )
+        .await?;
 
         Ok(Self {
             conn,
             sentinel_addrs: addrs,
-            master_name: master_name.to_string(),
+            master_name,
             current_addr: master_addr,
             needs_rediscovery: false,
+            config,
         })
     }
 
@@ -119,8 +262,17 @@ impl SentinelConnection {
     /// `slave` (the failover has not fully propagated, or we got the demoted
     /// old master back), the attempt is retried with exponential backoff until
     /// a real master is found or the attempt budget is exhausted.
+    ///
+    /// The reconnected master connection respects the node credentials and TLS
+    /// settings configured via [`SentinelConnection::builder`].
     pub async fn rediscover(&mut self) -> Result<(), RedisError> {
-        match discovery::connect_verified_master(&self.sentinel_addrs, &self.master_name).await {
+        match discovery::connect_verified_master_with_config(
+            &self.sentinel_addrs,
+            &self.master_name,
+            &self.config,
+        )
+        .await
+        {
             Ok((conn, master_addr)) => {
                 tracing::info!(
                     old_addr = %self.current_addr,
@@ -152,7 +304,12 @@ impl SentinelConnection {
 
     /// Discover current replica addresses from sentinel.
     pub async fn discover_replicas(&self) -> Result<Vec<String>, RedisError> {
-        discovery::discover_replicas(&self.sentinel_addrs, &self.master_name).await
+        discovery::discover_replicas_with_config(
+            &self.sentinel_addrs,
+            &self.master_name,
+            &self.config,
+        )
+        .await
     }
 }
 
@@ -177,5 +334,71 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {
         <RedisConnection as tower_service::Service<Cmd>>::call(&mut self.conn, cmd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower::credentials::StaticCredentials;
+
+    #[test]
+    fn builder_sets_sentinel_credentials() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster")
+            .sentinel_credentials(StaticCredentials::password("sentinel_pass"));
+        assert!(builder.config.sentinel_credentials.is_some());
+        assert!(builder.config.node_credentials.is_none());
+    }
+
+    #[test]
+    fn builder_sets_node_credentials() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster")
+            .node_credentials(StaticCredentials::new("alice", "redis_pass"));
+        assert!(builder.config.node_credentials.is_some());
+        assert!(builder.config.sentinel_credentials.is_none());
+    }
+
+    #[test]
+    fn builder_sets_independent_credentials() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster")
+            .sentinel_credentials(StaticCredentials::password("s"))
+            .node_credentials(StaticCredentials::password("n"));
+        assert!(builder.config.sentinel_credentials.is_some());
+        assert!(builder.config.node_credentials.is_some());
+    }
+
+    #[test]
+    fn builder_stores_sentinel_addrs_and_name() {
+        let builder =
+            SentinelConnection::builder(&["127.0.0.1:26379", "127.0.0.1:26380"], "mymaster");
+        assert_eq!(builder.sentinel_addrs.len(), 2);
+        assert_eq!(builder.master_name, "mymaster");
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    #[test]
+    fn builder_tls_sets_both_hops() {
+        #[cfg(feature = "tls-rustls")]
+        let tls = redis_tower_core::tls::TlsConfig::default_rustls();
+        #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native-tls"))]
+        let tls = redis_tower_core::tls::TlsConfig::default_native_tls();
+
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster").tls(tls);
+        assert!(builder.config.sentinel_tls.is_some());
+        assert!(builder.config.node_tls.is_some());
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    #[test]
+    fn builder_sentinel_tls_only() {
+        #[cfg(feature = "tls-rustls")]
+        let tls = redis_tower_core::tls::TlsConfig::default_rustls();
+        #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native-tls"))]
+        let tls = redis_tower_core::tls::TlsConfig::default_native_tls();
+
+        let builder =
+            SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster").sentinel_tls(tls);
+        assert!(builder.config.sentinel_tls.is_some());
+        assert!(builder.config.node_tls.is_none());
     }
 }

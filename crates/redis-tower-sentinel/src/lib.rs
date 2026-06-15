@@ -18,6 +18,24 @@
 //! (which may have changed due to a failover event). The connection is
 //! then transparently re-established to the promoted master.
 //!
+//! # Auth and TLS
+//!
+//! Use the builder APIs to configure credentials and TLS independently for the
+//! sentinel hop (connecting to sentinel nodes) and the node hop (connecting to
+//! the discovered master). Sentinels and the master commonly use different
+//! passwords in production.
+//!
+//! ```ignore
+//! use redis_tower_sentinel::SentinelClient;
+//! use redis_tower::credentials::StaticCredentials;
+//!
+//! let client = SentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
+//!     .sentinel_credentials(StaticCredentials::password("sentinel_pass"))
+//!     .node_credentials(StaticCredentials::password("redis_pass"))
+//!     .connect()
+//!     .await?;
+//! ```
+//!
 //! # Usage
 //!
 //! [`SentinelClient`] provides a higher-level API on top of
@@ -33,6 +51,7 @@ mod connection;
 pub mod discovery;
 mod multiplexed;
 
-pub use client::SentinelClient;
-pub use connection::SentinelConnection;
-pub use multiplexed::MultiplexedSentinelClient;
+pub use client::{SentinelClient, SentinelClientBuilder};
+pub use connection::{SentinelConnection, SentinelConnectionBuilder};
+pub use discovery::SentinelConfig;
+pub use multiplexed::{MultiplexedSentinelClient, MultiplexedSentinelClientBuilder};
