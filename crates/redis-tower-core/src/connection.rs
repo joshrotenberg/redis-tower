@@ -245,6 +245,10 @@ impl RedisConnection {
     /// interval, 3 probes. Use [`connect_tls_with_keepalive`](Self::connect_tls_with_keepalive)
     /// to supply custom keepalive parameters.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
     pub async fn connect_tls(
         addr: &str,
         hostname: &str,
@@ -263,6 +267,10 @@ impl RedisConnection {
     /// Returns [`RedisError::Connection`] if the TCP connection or TLS
     /// handshake fails, or if the keepalive socket options cannot be applied.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
     pub async fn connect_tls_with_keepalive(
         addr: &str,
         hostname: &str,
@@ -293,6 +301,10 @@ impl RedisConnection {
     /// fails, or [`RedisError::Connection`] if keepalive socket options
     /// cannot be applied.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
     pub async fn connect_tls_with_timeout(
         addr: &str,
         hostname: &str,
@@ -388,6 +400,10 @@ impl RedisConnection {
     /// .await?;
     /// ```
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
     pub async fn connect_url_with_tls(
         url: &str,
         tls_config: &crate::tls::TlsConfig,

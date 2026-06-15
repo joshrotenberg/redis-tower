@@ -44,6 +44,8 @@
 //!
 //! All command structs are re-exported at the crate root for convenience.
 
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 // -- Core Redis commands (always available) --
 mod acl;
 mod bitmap;
@@ -91,40 +93,48 @@ pub use transaction::*;
 #[cfg(feature = "bloom")]
 mod bloom;
 #[cfg(feature = "bloom")]
+#[cfg_attr(docsrs, doc(cfg(feature = "bloom")))]
 pub use bloom::*;
 
 #[cfg(feature = "json")]
 mod json;
 #[cfg(feature = "json")]
+#[cfg_attr(docsrs, doc(cfg(feature = "json")))]
 pub use json::*;
 
 #[cfg(feature = "search")]
 mod search;
 #[cfg(feature = "search")]
+#[cfg_attr(docsrs, doc(cfg(feature = "search")))]
 pub use search::*;
 #[cfg(feature = "search")]
 mod search_util;
 #[cfg(feature = "search")]
+#[cfg_attr(docsrs, doc(cfg(feature = "search")))]
 pub use search_util::*;
 
 #[cfg(feature = "sketch")]
 mod sketch;
 #[cfg(feature = "sketch")]
+#[cfg_attr(docsrs, doc(cfg(feature = "sketch")))]
 pub use sketch::*;
 
 #[cfg(feature = "tdigest")]
 mod tdigest;
 #[cfg(feature = "tdigest")]
+#[cfg_attr(docsrs, doc(cfg(feature = "tdigest")))]
 pub use tdigest::*;
 
 #[cfg(feature = "timeseries")]
 mod timeseries;
 #[cfg(feature = "timeseries")]
+#[cfg_attr(docsrs, doc(cfg(feature = "timeseries")))]
 pub use timeseries::*;
 
 #[cfg(feature = "vector-sets")]
 mod vector_sets;
 #[cfg(feature = "vector-sets")]
+#[cfg_attr(docsrs, doc(cfg(feature = "vector-sets")))]
 pub use vector_sets::*;
 
 #[cfg(test)]

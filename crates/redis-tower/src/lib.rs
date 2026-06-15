@@ -272,6 +272,7 @@
 //! - `redis-tower-sync` -- blocking wrapper with internal tokio runtime
 
 #![deny(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub mod auto_pipeline;
 pub mod cache_layer;
@@ -298,8 +299,10 @@ pub mod tracing_layer;
 pub mod transaction;
 
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod json_api;
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod search_api;
 
 pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
@@ -329,9 +332,11 @@ pub use tracing_layer::{TracingLayer, TracingService};
 pub use transaction::{Transaction, TransactionExecutor, TransactionResult};
 
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 #[allow(deprecated)]
 pub use json_api::Json;
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 #[allow(deprecated)]
 pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 
