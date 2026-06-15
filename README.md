@@ -259,6 +259,20 @@ let svc = CommandAdapter::new(
 
 `RedisError::is_retryable()` classifies which errors are worth retrying.
 
+Other resilience building blocks:
+
+- **Health checks** -- `ResilientRedisClient::health_check()` for `/health`
+  endpoints and Kubernetes readiness probes.
+- **Per-command timeouts** -- `CommandTimeoutLayer` enforces a deadline on each
+  command.
+- **Pool health** -- `ConnectionPool` replaces dead connections after a failed
+  health check and exposes live `PoolStats`.
+- **Error taxonomy** -- `RedisError::is_retryable()`, `is_connection_error()`,
+  `is_moved()` / `is_ask()`, and `is_wrongtype()` classify failures so callers
+  can respond appropriately.
+
+See [`examples/resilience.rs`](examples/resilience.rs) for a runnable tour.
+
 ## Credential provider
 
 ```rust,ignore

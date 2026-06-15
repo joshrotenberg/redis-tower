@@ -92,13 +92,13 @@
 //!
 //! For production fault tolerance, compose with the
 //! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
-//! for circuit breaking, retry with backoff, rate limiting, and bulkhead
-//! isolation:
+//! for circuit breaking, rate limiting, and bulkhead isolation. Automatic
+//! reconnection with exponential backoff is built in via
+//! [`ResilientRedisClient`]:
 //!
 //! ```ignore
 //! use tower::ServiceBuilder;
 //! use tower_resilience_circuitbreaker::circuit_breaker_builder;
-//! use tower_resilience_retry::RetryLayer;
 //! use redis_tower::{FrameService, CommandAdapter, TracingLayer};
 //!
 //! let cb = circuit_breaker_builder()
@@ -106,23 +106,18 @@
 //!     .wait_duration_in_open(Duration::from_secs(30))
 //!     .build();
 //!
-//! let retry = RetryLayer::<Frame, Frame, RedisError>::builder()
-//!     .max_attempts(3)
-//!     .exponential_backoff(Duration::from_millis(100))
-//!     .retry_on(|err: &RedisError| err.is_retryable())
-//!     .build();
-//!
 //! let svc = CommandAdapter::new(
 //!     ServiceBuilder::new()
-//!         .layer(retry)
 //!         .layer(cb)
 //!         .layer(TracingLayer::new())
 //!         .service(FrameService::connect("127.0.0.1:6379").await?)
 //! );
 //! ```
 //!
-//! [`RedisError::is_retryable`] distinguishes transient connection errors
-//! (worth retrying) from command errors like WRONGTYPE (not worth retrying).
+//! [`RedisError::is_retryable`] classifies which errors are worth retrying
+//! (transient connection errors) versus command errors like WRONGTYPE that are
+//! not. Pair it with [`ResilientRedisClient`] for idempotent-aware
+//! reconnection.
 //!
 //! # Auto-Pipelining
 //!

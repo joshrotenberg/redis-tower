@@ -48,6 +48,10 @@ name = "reconnect"
 path = "reconnect.rs"
 
 [[example]]
+name = "resilience"
+path = "resilience.rs"
+
+[[example]]
 name = "shared_client"
 path = "shared_client.rs"
 
