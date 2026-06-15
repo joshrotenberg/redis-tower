@@ -94,6 +94,13 @@ pub(crate) async fn connect_hop(
     if let Some(provider) = credentials {
         authenticate(&mut conn, provider.as_ref()).await?;
     }
+    // `connect`/`connect_tls` now negotiate RESP3 by default, but the SENTINEL
+    // command parsers (and the master data path discovered through here) still
+    // expect RESP2 frame shapes. Pin sentinel hops to RESP2 -- after AUTH, so
+    // HELLO 2 cannot hit NOAUTH. Proper RESP3 sentinel support is a follow-up.
+    if conn.is_resp3() {
+        let _ = conn.hello(2).await;
+    }
     Ok(conn)
 }
 
