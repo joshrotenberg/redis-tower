@@ -328,6 +328,10 @@ impl Command for FtInfo {
     fn name(&self) -> &str {
         "FT.INFO"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// FT._LIST
@@ -505,6 +509,10 @@ impl Command for FtSearch {
 
     fn name(&self) -> &str {
         "FT.SEARCH"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -942,6 +950,14 @@ mod tests {
     use super::*;
     use redis_tower_core::Command;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(FtSearch::new("idx", "*").idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!FtCreate::new("idx").idempotent());
+    }
 
     #[test]
     fn ft_aggregate_with_cursor_count_to_frame() {

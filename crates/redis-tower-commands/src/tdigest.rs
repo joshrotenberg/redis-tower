@@ -265,6 +265,10 @@ impl Command for TdigestCdf {
     fn name(&self) -> &str {
         "TDIGEST.CDF"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TDIGEST.QUANTILE key quantile \[quantile ...\]
@@ -303,6 +307,10 @@ impl Command for TdigestQuantile {
     fn name(&self) -> &str {
         "TDIGEST.QUANTILE"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TDIGEST.MIN key
@@ -332,6 +340,10 @@ impl Command for TdigestMin {
 
     fn name(&self) -> &str {
         "TDIGEST.MIN"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -363,6 +375,10 @@ impl Command for TdigestMax {
     fn name(&self) -> &str {
         "TDIGEST.MAX"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TDIGEST.INFO key
@@ -392,6 +408,10 @@ impl Command for TdigestInfo {
 
     fn name(&self) -> &str {
         "TDIGEST.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -508,6 +528,10 @@ impl Command for TdigestRank {
     fn name(&self) -> &str {
         "TDIGEST.RANK"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TDIGEST.REVRANK key value \[value ...\]
@@ -545,6 +569,10 @@ impl Command for TdigestRevRank {
 
     fn name(&self) -> &str {
         "TDIGEST.REVRANK"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -584,6 +612,10 @@ impl Command for TdigestByRank {
     fn name(&self) -> &str {
         "TDIGEST.BYRANK"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TDIGEST.BYREVRANK key rank \[rank ...\]
@@ -621,5 +653,23 @@ impl Command for TdigestByRevRank {
 
     fn name(&self) -> &str {
         "TDIGEST.BYREVRANK"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(TdigestMin::new("k").idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!TdigestAdd::new("k", [1.0]).idempotent());
     }
 }

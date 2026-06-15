@@ -242,6 +242,10 @@ impl Command for CmsQuery {
     fn name(&self) -> &str {
         "CMS.QUERY"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// CMS.MERGE destination numkeys source \[source ...\] \[WEIGHTS weight ...\]
@@ -336,6 +340,10 @@ impl Command for CmsInfo {
 
     fn name(&self) -> &str {
         "CMS.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -525,6 +533,10 @@ impl Command for TopkQuery {
     fn name(&self) -> &str {
         "TOPK.QUERY"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TOPK.COUNT key item \[item ...\]
@@ -562,6 +574,10 @@ impl Command for TopkCount {
 
     fn name(&self) -> &str {
         "TOPK.COUNT"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
     }
 }
 
@@ -608,6 +624,10 @@ impl Command for TopkList {
     fn name(&self) -> &str {
         "TOPK.LIST"
     }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
 }
 
 /// TOPK.INFO key
@@ -637,5 +657,23 @@ impl Command for TopkInfo {
 
     fn name(&self) -> &str {
         "TOPK.INFO"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_core::Command;
+
+    #[test]
+    fn idempotency_flags() {
+        // Read-only commands are safe to retry.
+        assert!(CmsQuery::new("k", ["i"]).idempotent());
+        // Mutating commands keep the default (false).
+        assert!(!CmsIncrBy::new("k", [("i", 1)]).idempotent());
     }
 }
