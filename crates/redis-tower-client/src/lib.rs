@@ -25,6 +25,7 @@
 //! implements [`RedisExecutor`], so it drops into any generic code that accepts
 //! `impl RedisExecutor`.
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 use std::future::Future;

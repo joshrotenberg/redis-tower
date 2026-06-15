@@ -1,0 +1,56 @@
+# Supply-chain policy for redis-tower, enforced in CI by cargo-deny.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally with:
+#   cargo deny check
+
+[graph]
+# Check the full dependency tree, including optional TLS / serde / Stack
+# features, not just the default feature set.
+all-features = true
+
+[advisories]
+# RustSec advisory database. Vulnerabilities, unmaintained, unsound, and
+# yanked crates are errors by default. Add an entry here -- with a comment
+# explaining the review decision -- only when an advisory has been assessed
+# and consciously accepted.
+ignore = []
+
+[licenses]
+# Only permissive, procurement-friendly licenses are allowed. A dependency
+# that introduces any other license fails CI until it has been reviewed and
+# added here. redis-tower itself is dual-licensed MIT OR Apache-2.0.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "BSL-1.0",              # Boost Software License (permissive)
+    "CDLA-Permissive-2.0", # webpki-roots' Mozilla CA bundle (permissive data license)
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# The workspace's own publish = false crates (benches, examples) carry no
+# license field and are never shipped, so skip the license check for them.
+ignore = true
+
+[bans]
+# Duplicate versions are common in large trees and are not a procurement
+# blocker, so they warn rather than fail. Wildcard version requirements are
+# denied -- every dependency must be pinned to a real version range.
+multiple-versions = "warn"
+wildcards = "deny"
+# Internal workspace crates depend on each other by path; those wildcards are
+# fine. External dependencies must still be pinned to a real version range.
+allow-wildcard-paths = true
+
+[sources]
+# Every dependency must come from crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

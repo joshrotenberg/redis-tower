@@ -46,6 +46,8 @@
 //! concurrent requests into pipelines automatically using a single shared
 //! connection.
 
+#![forbid(unsafe_code)]
+
 mod client;
 mod connection;
 pub mod discovery;
