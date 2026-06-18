@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
+use sha1::{Digest, Sha1};
 
 use crate::server::FlushMode;
 
@@ -256,6 +257,124 @@ impl Command for EvalShaRo {
 
     fn name(&self) -> &str {
         "EVALSHA_RO"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Script (SHA1-cached helper)
+// ---------------------------------------------------------------------------
+
+/// A Lua script with a pre-computed, cached SHA1 digest.
+///
+/// `Script` is the ergonomic way to run the same Lua script repeatedly. It
+/// hashes the source once at construction and then builds [`EvalSha`] commands
+/// (which send only the 40-character digest over the wire) instead of
+/// re-transmitting the full script body on every call.
+///
+/// The first time a script runs, the server has not cached it yet and EVALSHA
+/// fails with a `NOSCRIPT` error. Callers detect that with
+/// [`RedisError::is_noscript`](redis_tower_core::RedisError::is_noscript) and
+/// fall back to [`Script::eval`] (or the read-only [`Script::eval_ro`]), which
+/// sends the source; the server caches it so subsequent EVALSHA calls succeed.
+///
+/// This type lives in the command layer so every client (connection,
+/// multiplexed, pooled, cluster, ...) can reuse the same caching primitive. See
+/// `redis_tower::Script` for a wrapper that performs the EVALSHA-then-EVAL
+/// fallback automatically against any executor.
+///
+/// # Example
+///
+/// ```
+/// use redis_tower_commands::Script;
+/// use redis_tower_core::Command;
+///
+/// let script = Script::new("return redis.call('GET', KEYS[1])");
+///
+/// // Preferred path: send only the cached digest.
+/// let evalsha = script.evalsha(&["mykey"], &[]);
+/// assert_eq!(evalsha.name(), "EVALSHA");
+///
+/// // Fallback path on NOSCRIPT: send the full source (server caches it).
+/// let eval = script.eval(&["mykey"], &[]);
+/// assert_eq!(eval.name(), "EVAL");
+/// ```
+#[derive(Clone, Debug)]
+pub struct Script {
+    source: String,
+    sha: String,
+}
+
+impl Script {
+    /// Create a new `Script` from Lua source code.
+    ///
+    /// The SHA1 digest is computed immediately and cached for the lifetime of
+    /// the value. It matches the digest `SCRIPT LOAD` returns, so it can be used
+    /// directly with `EVALSHA`.
+    pub fn new(source: impl Into<String>) -> Self {
+        let source = source.into();
+        let sha = hex::encode(Sha1::digest(source.as_bytes()));
+        Self { source, sha }
+    }
+
+    /// Get the cached SHA1 hex digest of the script.
+    pub fn sha(&self) -> &str {
+        &self.sha
+    }
+
+    /// Get the Lua source code.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+
+    /// Build an [`EvalSha`] command (preferred -- sends only the cached digest).
+    pub fn evalsha(&self, keys: &[&str], args: &[&str]) -> EvalSha {
+        let mut cmd = EvalSha::new(&self.sha);
+        for k in keys {
+            cmd = cmd.key(*k);
+        }
+        for a in args {
+            cmd = cmd.arg(*a);
+        }
+        cmd
+    }
+
+    /// Build an [`EvalShaRo`] command, the read-only variant of
+    /// [`evalsha`](Script::evalsha).
+    pub fn evalsha_ro(&self, keys: &[&str], args: &[&str]) -> EvalShaRo {
+        let mut cmd = EvalShaRo::new(&self.sha);
+        for k in keys {
+            cmd = cmd.key(*k);
+        }
+        for a in args {
+            cmd = cmd.arg(*a);
+        }
+        cmd
+    }
+
+    /// Build an [`Eval`] command (fallback when EVALSHA returns NOSCRIPT --
+    /// sends the full source, which the server then caches).
+    pub fn eval(&self, keys: &[&str], args: &[&str]) -> Eval {
+        let mut cmd = Eval::new(&self.source);
+        for k in keys {
+            cmd = cmd.key(*k);
+        }
+        for a in args {
+            cmd = cmd.arg(*a);
+        }
+        cmd
+    }
+
+    /// Build an [`EvalRo`] command, the read-only variant of
+    /// [`eval`](Script::eval).
+    pub fn eval_ro(&self, keys: &[&str], args: &[&str]) -> EvalRo {
+        let mut cmd = EvalRo::new(&self.source);
+        for k in keys {
+            cmd = cmd.key(*k);
+        }
+        for a in args {
+            cmd = cmd.arg(*a);
+        }
+        cmd
     }
 }
 
@@ -1164,6 +1283,101 @@ mod tests {
                 bulk("k1"),
                 bulk("a1"),
             ])
+        );
+    }
+
+    // -- Script (SHA1-cached helper) --
+
+    #[test]
+    fn script_sha_matches_known_digest() {
+        // "return 1" has a well-known SHA1 digest:
+        //   printf 'return 1' | sha1sum
+        let script = Script::new("return 1");
+        assert_eq!(script.sha(), "e0e1f9fabfc9d4800c877a703b823ac0578ff8db");
+    }
+
+    #[test]
+    fn script_source_is_preserved() {
+        let script = Script::new("return redis.call('GET', KEYS[1])");
+        assert_eq!(script.source(), "return redis.call('GET', KEYS[1])");
+    }
+
+    #[test]
+    fn script_evalsha_sends_digest_not_source() {
+        let script = Script::new("return 1");
+        let cmd = script.evalsha(&["key1", "key2"], &["arg1"]);
+        assert_eq!(cmd.name(), "EVALSHA");
+        // The frame must carry the digest, never the source text.
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVALSHA"),
+                bulk(script.sha()),
+                bulk("2"),
+                bulk("key1"),
+                bulk("key2"),
+                bulk("arg1"),
+            ])
+        );
+    }
+
+    #[test]
+    fn script_eval_sends_full_source() {
+        let script = Script::new("return 1");
+        let cmd = script.eval(&["key1"], &["arg1", "arg2"]);
+        assert_eq!(cmd.name(), "EVAL");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("EVAL"),
+                bulk("return 1"),
+                bulk("1"),
+                bulk("key1"),
+                bulk("arg1"),
+                bulk("arg2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn script_ro_variants_use_ro_commands() {
+        let script = Script::new("return redis.call('GET', KEYS[1])");
+
+        let evalsha_ro = script.evalsha_ro(&["k"], &[]);
+        assert_eq!(evalsha_ro.name(), "EVALSHA_RO");
+        assert_eq!(
+            evalsha_ro.to_frame(),
+            array(vec![
+                bulk("EVALSHA_RO"),
+                bulk(script.sha()),
+                bulk("1"),
+                bulk("k"),
+            ])
+        );
+
+        let eval_ro = script.eval_ro(&["k"], &[]);
+        assert_eq!(eval_ro.name(), "EVAL_RO");
+        assert_eq!(
+            eval_ro.to_frame(),
+            array(vec![
+                bulk("EVAL_RO"),
+                bulk("return redis.call('GET', KEYS[1])"),
+                bulk("1"),
+                bulk("k"),
+            ])
+        );
+    }
+
+    #[test]
+    fn script_empty_keys_and_args() {
+        let script = Script::new("return 42");
+        assert_eq!(
+            script.evalsha(&[], &[]).to_frame(),
+            array(vec![bulk("EVALSHA"), bulk(script.sha()), bulk("0")])
+        );
+        assert_eq!(
+            script.eval(&[], &[]).to_frame(),
+            array(vec![bulk("EVAL"), bulk("return 42"), bulk("0")])
         );
     }
 
