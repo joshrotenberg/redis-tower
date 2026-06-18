@@ -223,7 +223,9 @@ impl RedisConnection {
     /// block for the public connectors (which add RESP3 negotiation) and for
     /// `connect_with_protocol` (which negotiates explicitly).
     async fn connect_raw(addr: &str, keepalive: &KeepaliveConfig) -> Result<Self, RedisError> {
-        let stream = TcpStream::connect(addr).await?;
+        let stream = TcpStream::connect(addr)
+            .await
+            .map_err(|e| RedisError::connection(addr, e))?;
         let stream = apply_keepalive(stream, keepalive)?;
         stream.set_nodelay(true)?;
         let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
@@ -255,7 +257,7 @@ impl RedisConnection {
     pub async fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<Self, RedisError> {
         let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(RedisError::Connection(e)),
+            Ok(Err(e)) => return Err(RedisError::connection(addr, e)),
             Err(_elapsed) => return Err(RedisError::ConnectTimeout),
         };
         let stream = apply_keepalive(stream, &KeepaliveConfig::default())?;
@@ -306,7 +308,9 @@ impl RedisConnection {
         tls_config: &crate::tls::TlsConfig,
         keepalive: &KeepaliveConfig,
     ) -> Result<Self, RedisError> {
-        let tcp = TcpStream::connect(addr).await?;
+        let tcp = TcpStream::connect(addr)
+            .await
+            .map_err(|e| RedisError::connection(addr, e))?;
         let tcp = apply_keepalive(tcp, keepalive)?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
@@ -343,7 +347,7 @@ impl RedisConnection {
     ) -> Result<Self, RedisError> {
         let tcp = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
             Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(RedisError::Connection(e)),
+            Ok(Err(e)) => return Err(RedisError::connection(addr, e)),
             Err(_elapsed) => return Err(RedisError::ConnectTimeout),
         };
         let tcp = apply_keepalive(tcp, &KeepaliveConfig::default())?;
@@ -371,7 +375,9 @@ impl RedisConnection {
                     .path
                     .as_deref()
                     .ok_or_else(|| RedisError::InvalidUrl("unix URL missing path".into()))?;
-                let stream = tokio::net::UnixStream::connect(path).await?;
+                let stream = tokio::net::UnixStream::connect(path)
+                    .await
+                    .map_err(|e| RedisError::connection(path, e))?;
                 Self::from_framed_inner(Framed::new(RedisStream::Unix(stream), RespCodec))
             }
             #[cfg(not(unix))]
@@ -992,6 +998,35 @@ mod tests {
         match Service::<DummyCmd>::poll_ready(&mut conn, &mut cx) {
             Poll::Ready(Err(RedisError::ConnectionClosed)) => {}
             other => panic!("expected Ready(Err(ConnectionClosed)), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_failure_carries_target_address() {
+        // Port 1 is reserved and effectively never accepts connections, so the
+        // connect attempt fails. Whatever the underlying io error, the address
+        // it failed against must be attached (#464). `RedisConnection` is not
+        // `Debug`, so match rather than use `expect_err`.
+        let addr = "127.0.0.1:1";
+        match RedisConnection::connect(addr).await {
+            Err(err) => {
+                assert!(err.is_connection_error(), "got: {err:?}");
+                assert_eq!(err.connection_addr(), Some(addr));
+                assert!(err.to_string().contains(addr), "missing addr in: {err}");
+            }
+            Ok(_) => panic!("connecting to a reserved port should fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_with_timeout_failure_carries_target_address() {
+        let addr = "127.0.0.1:1";
+        match RedisConnection::connect_with_timeout(addr, Duration::from_secs(5)).await {
+            // Either a refused connection (addr attached) or, on a slow host, a
+            // ConnectTimeout. The refused path is what we exercise here.
+            Err(RedisError::ConnectTimeout) => {}
+            Err(err) => assert_eq!(err.connection_addr(), Some(addr), "got: {err:?}"),
+            Ok(_) => panic!("connecting to a reserved port should fail"),
         }
     }
 

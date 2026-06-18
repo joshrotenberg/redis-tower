@@ -136,7 +136,7 @@ async fn circuit_breaker_opens_on_repeated_failures() {
     for i in 0..3 {
         let result = svc.ready().await.unwrap().call(ping()).await;
         assert!(
-            matches!(result, Err(RedisError::Connection(_))),
+            matches!(result, Err(RedisError::Connection { .. })),
             "call {i}: expected a Connection error from the dead port, got {result:?}"
         );
     }

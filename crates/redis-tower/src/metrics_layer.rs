@@ -71,7 +71,7 @@ impl ErrorKind {
     /// Map a [`RedisError`] to the most specific [`ErrorKind`].
     pub fn from_error(e: &RedisError) -> Self {
         match e {
-            RedisError::Connection(_) | RedisError::ConnectionClosed => ErrorKind::Connection,
+            RedisError::Connection { .. } | RedisError::ConnectionClosed => ErrorKind::Connection,
             RedisError::PoolAcquisitionTimeout { .. } => ErrorKind::Timeout,
             RedisError::CircuitOpen => ErrorKind::CircuitOpen,
             RedisError::QueueFull => ErrorKind::QueueFull,

@@ -10,8 +10,24 @@ use redis_tower_protocol::ProtocolError;
 #[derive(Debug, thiserror::Error)]
 pub enum RedisError {
     /// Connection-level I/O error.
-    #[error("connection error: {0}")]
-    Connection(#[from] std::io::Error),
+    ///
+    /// When the error originates at a connect site, `addr` carries the address
+    /// the connection attempt failed against (host:port, or a unix socket
+    /// path), which is invaluable for diagnostics when a client manages
+    /// several endpoints (pool, cluster, sentinel). For I/O errors that arise
+    /// after a connection is established -- or where no single address applies
+    /// -- `addr` is `None`.
+    ///
+    /// The blanket `From<std::io::Error>` conversion used by `?` produces
+    /// `addr: None`; use [`RedisError::connection`] to attach an address, and
+    /// read it back with [`RedisError::connection_addr`].
+    #[error("connection error{}: {source}", .addr.as_deref().map(|a| format!(" to {a}")).unwrap_or_default())]
+    Connection {
+        /// The address the connection attempt was made against, if known.
+        addr: Option<String>,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
 
     /// RESP protocol error (parsing or serialization).
     #[error("protocol error: {0}")]
@@ -114,7 +130,54 @@ pub enum RedisError {
     Json(#[from] serde_json::Error),
 }
 
+/// The blanket conversion used by `?`. Produces a [`RedisError::Connection`]
+/// with no address; use [`RedisError::connection`] at connect sites to record
+/// the address the attempt failed against.
+impl From<std::io::Error> for RedisError {
+    fn from(source: std::io::Error) -> Self {
+        RedisError::Connection { addr: None, source }
+    }
+}
+
 impl RedisError {
+    /// Build a [`RedisError::Connection`] that records the address the
+    /// connection attempt failed against.
+    ///
+    /// Connect sites use this instead of the blanket `?` conversion so that
+    /// the resulting error carries the address (host:port or unix socket
+    /// path) for diagnostics.
+    ///
+    /// ```
+    /// use redis_tower_core::RedisError;
+    /// use std::io::{Error, ErrorKind};
+    ///
+    /// let err = RedisError::connection(
+    ///     "127.0.0.1:6379",
+    ///     Error::new(ErrorKind::ConnectionRefused, "refused"),
+    /// );
+    /// assert_eq!(err.connection_addr(), Some("127.0.0.1:6379"));
+    /// assert!(err.to_string().contains("127.0.0.1:6379"));
+    /// ```
+    pub fn connection(addr: impl Into<String>, source: std::io::Error) -> Self {
+        RedisError::Connection {
+            addr: Some(addr.into()),
+            source,
+        }
+    }
+
+    /// Returns the address a connection error failed against, if it was
+    /// recorded.
+    ///
+    /// Returns `None` for non-connection errors and for connection errors that
+    /// did not capture an address (for example I/O errors converted via the
+    /// blanket `?` conversion).
+    pub fn connection_addr(&self) -> Option<&str> {
+        match self {
+            RedisError::Connection { addr, .. } => addr.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Returns true if this error is transient and the operation is worth retrying.
     ///
     /// Connection and protocol errors are retryable. Redis command errors
@@ -137,7 +200,7 @@ impl RedisError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            RedisError::Connection(_) | RedisError::ConnectionClosed | RedisError::Protocol(_)
+            RedisError::Connection { .. } | RedisError::ConnectionClosed | RedisError::Protocol(_)
         )
     }
 
@@ -215,7 +278,7 @@ impl RedisError {
     pub fn is_connection_error(&self) -> bool {
         matches!(
             self,
-            RedisError::Connection(_) | RedisError::ConnectionClosed
+            RedisError::Connection { .. } | RedisError::ConnectionClosed
         )
     }
 }
@@ -228,7 +291,7 @@ mod tests {
 
     #[test]
     fn connection_error_is_retryable() {
-        let err = RedisError::Connection(std::io::Error::new(
+        let err = RedisError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
         ));
@@ -297,7 +360,7 @@ mod tests {
 
     #[test]
     fn connection_io_error_is_connection_error() {
-        let err = RedisError::Connection(std::io::Error::new(
+        let err = RedisError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionReset,
             "reset",
         ));
@@ -335,11 +398,47 @@ mod tests {
 
     #[test]
     fn display_connection_error() {
-        let err = RedisError::Connection(std::io::Error::new(
+        let err = RedisError::from(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
             "refused",
         ));
         assert!(err.to_string().contains("connection error"));
+    }
+
+    // -- address context tests (#464) --
+
+    #[test]
+    fn connection_with_addr_records_address() {
+        let err = RedisError::connection(
+            "127.0.0.1:6379",
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
+        );
+        assert_eq!(err.connection_addr(), Some("127.0.0.1:6379"));
+        // The address is carried in Display so logs/errors name the endpoint.
+        let msg = err.to_string();
+        assert!(msg.contains("127.0.0.1:6379"), "missing addr in: {msg}");
+        assert!(msg.contains("refused"), "missing source in: {msg}");
+        // It is still classified as a (retryable) connection error.
+        assert!(err.is_connection_error());
+        assert!(err.is_retryable());
+    }
+
+    #[test]
+    fn blanket_from_io_error_has_no_addr() {
+        let err = RedisError::from(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "reset",
+        ));
+        assert!(matches!(err, RedisError::Connection { addr: None, .. }));
+        assert_eq!(err.connection_addr(), None);
+        // Display omits the " to <addr>" suffix when no address was recorded.
+        assert!(!err.to_string().contains(" to "));
+    }
+
+    #[test]
+    fn connection_addr_none_for_non_connection_errors() {
+        assert_eq!(RedisError::ConnectionClosed.connection_addr(), None);
+        assert_eq!(RedisError::Redis("ERR boom".into()).connection_addr(), None);
     }
 
     #[test]
