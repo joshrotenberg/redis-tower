@@ -1,8 +1,9 @@
 # roba.toml -- redis-tower (12-crate Tower-based Redis client workspace)
-# Safe, read-only top-level defaults. Autonomous code-dispatch posture lives
-# in [profile.worker]; everything else stays safe.
+# Top-level stays SAFE via roba's BUILT-IN readonly default (Read/Glob/Grep).
+# Do NOT add an explicit top-level `readonly = true`: it suppresses a profile's
+# `full_auto`, so [profile.worker] could not escalate (roba bug). The
+# autonomous code-dispatch posture is the named [profile.worker].
 
-readonly = true   # safe default: Read/Glob/Grep only, no edits
 git_diff = true   # embed the working-tree diff for grounded answers
 
 # Gates the autonomous worker must pass. Deliberately EXCLUDES
