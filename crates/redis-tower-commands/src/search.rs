@@ -945,6 +945,172 @@ impl Command for FtAliasUpdate {
     }
 }
 
+/// The query mode profiled by [`FtProfile`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FtProfileType {
+    /// Profile an `FT.SEARCH` query.
+    Search,
+    /// Profile an `FT.AGGREGATE` query.
+    Aggregate,
+}
+
+impl FtProfileType {
+    fn as_str(self) -> &'static str {
+        match self {
+            FtProfileType::Search => "SEARCH",
+            FtProfileType::Aggregate => "AGGREGATE",
+        }
+    }
+}
+
+/// FT.PROFILE index SEARCH|AGGREGATE \[LIMITED\] QUERY query
+///
+/// Runs a `SEARCH` or `AGGREGATE` query and returns both its results and a
+/// detailed execution profile. The reply is a complex nested structure
+/// returned as a raw [`Frame`].
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::FtProfile;
+///
+/// let cmd = FtProfile::search("idx", "hello world").limited();
+/// ```
+#[derive(Clone)]
+pub struct FtProfile {
+    index: String,
+    query_type: FtProfileType,
+    limited: bool,
+    query: String,
+}
+
+impl FtProfile {
+    /// Profile an `FT.SEARCH` query.
+    pub fn search(index: impl Into<String>, query: impl Into<String>) -> Self {
+        Self::new(index, FtProfileType::Search, query)
+    }
+
+    /// Profile an `FT.AGGREGATE` query.
+    pub fn aggregate(index: impl Into<String>, query: impl Into<String>) -> Self {
+        Self::new(index, FtProfileType::Aggregate, query)
+    }
+
+    fn new(index: impl Into<String>, query_type: FtProfileType, query: impl Into<String>) -> Self {
+        Self {
+            index: index.into(),
+            query_type,
+            limited: false,
+            query: query.into(),
+        }
+    }
+
+    /// Add the `LIMITED` flag, which removes per-record details from the
+    /// reply-shadowing profile to reduce its size.
+    pub fn limited(mut self) -> Self {
+        self.limited = true;
+        self
+    }
+}
+
+impl Command for FtProfile {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("FT.PROFILE"),
+            bulk(self.index.as_str()),
+            bulk(self.query_type.as_str()),
+        ];
+        if self.limited {
+            args.push(bulk("LIMITED"));
+        }
+        args.push(bulk("QUERY"));
+        args.push(bulk(self.query.as_str()));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "FT.PROFILE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// FT.TAGVALS index field_name
+///
+/// Returns the distinct set of indexed values for a `TAG` field. The values
+/// are returned as an array of strings.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::FtTagVals;
+///
+/// let cmd = FtTagVals::new("idx", "city");
+/// ```
+#[derive(Clone)]
+pub struct FtTagVals {
+    index: String,
+    field: String,
+}
+
+impl FtTagVals {
+    pub fn new(index: impl Into<String>, field: impl Into<String>) -> Self {
+        Self {
+            index: index.into(),
+            field: field.into(),
+        }
+    }
+}
+
+impl Command for FtTagVals {
+    type Response = Vec<String>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("FT.TAGVALS"),
+            bulk(self.index.as_str()),
+            bulk(self.field.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) | Frame::Set(frames) => frames
+                .into_iter()
+                .map(|f| match f {
+                    Frame::BulkString(Some(data)) | Frame::SimpleString(data) => {
+                        Ok(String::from_utf8_lossy(&data).into_owned())
+                    }
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            Frame::Array(None) => Ok(Vec::new()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "FT.TAGVALS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1043,6 +1209,62 @@ mod tests {
                 bulk("idx"),
                 bulk("42")
             ])
+        );
+    }
+
+    #[test]
+    fn ft_profile_search_to_frame() {
+        let cmd = FtProfile::search("idx", "hello");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.PROFILE"),
+                bulk("idx"),
+                bulk("SEARCH"),
+                bulk("QUERY"),
+                bulk("hello"),
+            ])
+        );
+    }
+
+    #[test]
+    fn ft_profile_aggregate_limited_to_frame() {
+        let cmd = FtProfile::aggregate("idx", "*").limited();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("FT.PROFILE"),
+                bulk("idx"),
+                bulk("AGGREGATE"),
+                bulk("LIMITED"),
+                bulk("QUERY"),
+                bulk("*"),
+            ])
+        );
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn ft_tagvals_to_frame() {
+        let cmd = FtTagVals::new("idx", "city");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("FT.TAGVALS"), bulk("idx"), bulk("city")])
+        );
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn ft_tagvals_parse_response() {
+        let cmd = FtTagVals::new("idx", "city");
+        let reply = array(vec![bulk("london"), bulk("paris")]);
+        assert_eq!(
+            cmd.parse_response(reply).unwrap(),
+            vec!["london".to_string(), "paris".to_string()]
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::Array(None)).unwrap(),
+            Vec::<String>::new()
         );
     }
 }

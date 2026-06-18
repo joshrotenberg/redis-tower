@@ -697,6 +697,56 @@ impl Command for CommandList {
     }
 }
 
+/// MODULE LIST
+///
+/// Returns information about the modules loaded into the server. The reply is
+/// an array of per-module maps (`name`, `ver`, `path`, `args`) and is returned
+/// as a raw [`Frame`] because its shape differs between RESP2 (flat arrays) and
+/// RESP3 (maps).
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::commands::ModuleList;
+///
+/// let cmd = ModuleList::new();
+/// ```
+#[derive(Clone)]
+pub struct ModuleList;
+
+impl ModuleList {
+    /// Create a `MODULE LIST` command.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ModuleList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ModuleList {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MODULE"), bulk("LIST")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MODULE LIST"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// BGSAVE \[SCHEDULE\]
 ///
 /// Trigger a background save of the dataset. With `schedule`, the save
@@ -3333,5 +3383,21 @@ mod tests {
             cmd.to_frame(),
             array(vec![bulk("CLIENT"), bulk("CACHING"), bulk("no")])
         );
+    }
+
+    // -- ModuleList --
+
+    #[test]
+    fn module_list_to_frame() {
+        let cmd = ModuleList::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("MODULE"), bulk("LIST")]));
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn module_list_parse_passthrough() {
+        let cmd = ModuleList::new();
+        let reply = array(vec![array(vec![bulk("name"), bulk("ReJSON")])]);
+        assert_eq!(cmd.parse_response(reply.clone()).unwrap(), reply);
     }
 }

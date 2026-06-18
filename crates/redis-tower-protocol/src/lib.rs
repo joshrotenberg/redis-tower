@@ -20,7 +20,10 @@
 //!
 //! The [`helpers`] module provides convenience constructors for building
 //! command frames: [`helpers::bulk`] for bulk strings, [`helpers::array`] for
-//! arrays, and [`helpers::null_bulk`] for null bulk strings.
+//! arrays, and [`helpers::null_bulk`] for null bulk strings. It also offers
+//! [`helpers::display`] for `redis-cli`-style rendering of a frame and, behind
+//! the `serde` feature, [`helpers::frame_to_json`] for converting a frame into
+//! a `serde_json::Value`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
