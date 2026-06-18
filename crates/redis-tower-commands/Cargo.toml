@@ -27,6 +27,8 @@ vector-sets = []
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
+sha1 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 redis-test-harness = { path = "../redis-test-harness" }
