@@ -19,11 +19,19 @@
 //! let svc = ServiceBuilder::new()
 //!     .layer(TracingLayer::with_peer("127.0.0.1:6379"))
 //!     .service(frame_service);
+//!
+//! // Warn on commands slower than 50ms (a differentiator neither
+//! // redis-rs nor fred ships):
+//! use std::time::Duration;
+//! let svc = ServiceBuilder::new()
+//!     .layer(TracingLayer::new().with_slow_command_threshold(Duration::from_millis(50)))
+//!     .service(frame_service);
 //! ```
 
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 
 use redis_tower_core::{Frame, RedisError};
 use tower_layer::Layer;
@@ -47,11 +55,14 @@ use tracing::Instrument;
 /// mid-migration.
 ///
 /// Use [`TracingLayer::with_peer`] to set the peer address for per-node flame
-/// graphs in cluster or sentinel topologies.
+/// graphs in cluster or sentinel topologies, or
+/// [`with_slow_command_threshold`](Self::with_slow_command_threshold) to log a
+/// `WARN` event for commands that exceed a latency budget.
 #[derive(Clone, Debug, Default)]
 pub struct TracingLayer {
     server_address: Option<String>,
     legacy_attributes: bool,
+    slow_command_threshold: Option<Duration>,
 }
 
 impl TracingLayer {
@@ -69,6 +80,7 @@ impl TracingLayer {
         Self {
             server_address: Some(addr.into()),
             legacy_attributes: false,
+            slow_command_threshold: None,
         }
     }
 
@@ -76,6 +88,19 @@ impl TracingLayer {
     /// alongside the stable conventions, for dashboards not yet migrated.
     pub fn with_legacy_attributes(mut self) -> Self {
         self.legacy_attributes = true;
+        self
+    }
+
+    /// Log a `WARN`-level event for any command whose round-trip latency meets
+    /// or exceeds `threshold`.
+    ///
+    /// The event is emitted inside the command's span and carries the command
+    /// name, the measured `elapsed_ms`, and the configured `threshold_ms`. Slow
+    /// commands are still recorded as normal spans; this only adds the warning.
+    /// Disabled by default -- a differentiator neither `redis-rs` nor `fred`
+    /// ships out of the box.
+    pub fn with_slow_command_threshold(mut self, threshold: Duration) -> Self {
+        self.slow_command_threshold = Some(threshold);
         self
     }
 }
@@ -88,6 +113,7 @@ impl<S> Layer<S> for TracingLayer {
             inner,
             server_address: self.server_address.clone(),
             legacy_attributes: self.legacy_attributes,
+            slow_command_threshold: self.slow_command_threshold,
         }
     }
 }
@@ -102,6 +128,7 @@ pub struct TracingService<S> {
     inner: S,
     server_address: Option<String>,
     legacy_attributes: bool,
+    slow_command_threshold: Option<Duration>,
 }
 
 impl<S> TracingService<S> {
@@ -111,6 +138,7 @@ impl<S> TracingService<S> {
             inner,
             server_address: None,
             legacy_attributes: false,
+            slow_command_threshold: None,
         }
     }
 
@@ -120,12 +148,20 @@ impl<S> TracingService<S> {
             inner,
             server_address: Some(addr.into()),
             legacy_attributes: false,
+            slow_command_threshold: None,
         }
     }
 
     /// Also emit the deprecated `db.system` / `db.statement` attributes.
     pub fn with_legacy_attributes(mut self) -> Self {
         self.legacy_attributes = true;
+        self
+    }
+
+    /// Log a `WARN`-level event for any command whose round-trip latency meets
+    /// or exceeds `threshold`. See [`TracingLayer::with_slow_command_threshold`].
+    pub fn with_slow_command_threshold(mut self, threshold: Duration) -> Self {
+        self.slow_command_threshold = Some(threshold);
         self
     }
 }
@@ -192,12 +228,25 @@ where
             span.record("db.statement", cmd_name.as_str());
         }
 
+        let slow_threshold = self.slow_command_threshold;
+        let started = Instant::now();
+        let cmd_for_log = cmd_name.clone();
         let future = self.inner.call(request);
 
         Box::pin(
             async move {
                 let result = future.await;
                 let span = tracing::Span::current();
+                let elapsed = started.elapsed();
+                if is_slow(slow_threshold, elapsed) {
+                    let threshold_ms = slow_threshold.map_or(0, |t| t.as_millis() as u64);
+                    tracing::warn!(
+                        command = %cmd_for_log,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        threshold_ms,
+                        "Redis command exceeded slow-command threshold"
+                    );
+                }
                 match &result {
                     Ok(Frame::Error(bytes)) => {
                         let msg = String::from_utf8_lossy(bytes);
@@ -246,6 +295,13 @@ fn error_type(err: &RedisError) -> &str {
         RedisError::QueueFull => "QUEUE_FULL",
         _ => "CLIENT_ERROR",
     }
+}
+
+/// Whether a command's `elapsed` round-trip duration crosses the configured
+/// slow-command `threshold`. Returns `false` when no threshold is set, so a
+/// disabled threshold never flags a command as slow.
+fn is_slow(threshold: Option<Duration>, elapsed: Duration) -> bool {
+    threshold.is_some_and(|t| elapsed >= t)
 }
 
 #[cfg(test)]
@@ -345,5 +401,61 @@ mod tests {
     fn tracing_layer_default_has_no_peer() {
         let layer = TracingLayer::default();
         assert!(layer.server_address.is_none());
+    }
+
+    #[test]
+    fn is_slow_false_without_threshold() {
+        assert!(!is_slow(None, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn is_slow_true_when_elapsed_exceeds_threshold() {
+        assert!(is_slow(
+            Some(Duration::from_millis(50)),
+            Duration::from_millis(75)
+        ));
+    }
+
+    #[test]
+    fn is_slow_true_when_elapsed_equals_threshold() {
+        assert!(is_slow(
+            Some(Duration::from_millis(50)),
+            Duration::from_millis(50)
+        ));
+    }
+
+    #[test]
+    fn is_slow_false_when_elapsed_below_threshold() {
+        assert!(!is_slow(
+            Some(Duration::from_millis(50)),
+            Duration::from_millis(49)
+        ));
+    }
+
+    #[test]
+    fn layer_with_slow_command_threshold_sets_field() {
+        let layer = TracingLayer::new().with_slow_command_threshold(Duration::from_millis(100));
+        assert_eq!(
+            layer.slow_command_threshold,
+            Some(Duration::from_millis(100))
+        );
+    }
+
+    #[test]
+    fn layer_without_slow_command_threshold_is_none() {
+        assert!(TracingLayer::new().slow_command_threshold.is_none());
+    }
+
+    #[test]
+    fn service_with_slow_command_threshold_sets_field() {
+        let svc = TracingService::new(()).with_slow_command_threshold(Duration::from_millis(100));
+        assert_eq!(svc.slow_command_threshold, Some(Duration::from_millis(100)));
+    }
+
+    #[test]
+    fn layer_propagates_slow_command_threshold_to_service() {
+        let layer = TracingLayer::new().with_slow_command_threshold(Duration::from_millis(25));
+        let svc = layer.layer(());
+        assert_eq!(svc.slow_command_threshold, Some(Duration::from_millis(25)));
     }
 }
