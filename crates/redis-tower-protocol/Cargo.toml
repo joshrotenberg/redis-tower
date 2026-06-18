@@ -12,14 +12,20 @@ readme = "../../README.md"
 keywords = ["redis", "resp", "protocol", "codec"]
 categories = ["database", "asynchronous", "network-programming"]
 
+[features]
+# Enables `helpers::frame_to_json` for converting frames into `serde_json::Value`.
+serde = ["dep:serde_json"]
+
 [dependencies]
 resp-rs = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
 thiserror = { workspace = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [[bench]]
