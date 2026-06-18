@@ -136,6 +136,76 @@ jobs:
       - name: Run sentinel integration tests
         run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored --test-threads=1
 
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install OpenSSL dev headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: redis-tls-7.4.3-${{ runner.os }}
+
+      - name: Build Redis 7.4.3
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/7.4.3.tar.gz | tar xz
+            cd redis-7.4.3
+            make -j$(nproc) BUILD_TLS=yes
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> $GITHUB_PATH
+          redis-server --version || ~/redis/bin/redis-server --version
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: coverage
+
+      - name: Clean coverage data
+        run: cargo llvm-cov clean --workspace
+
+      - name: Collect unit test coverage
+        run: cargo llvm-cov --no-report --lib --all-features
+
+      - name: Collect standalone integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower --test '*' --all-features -- --test-threads=1
+
+      - name: Collect universal-client integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower-client --test '*' --all-features -- --test-threads=1
+
+      - name: Collect cluster integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
+
+      - name: Collect sentinel integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored --test-threads=1
+
+      - name: Generate lcov report
+        run: cargo llvm-cov report --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   features:
     name: Feature Checks
     runs-on: ubuntu-latest

@@ -143,7 +143,7 @@ cargo test --test '*' --all-features
 
 ## CI
 
-9 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6). All must be green before merge.
+10 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6), Coverage. All must be green before merge. Coverage uses cargo-llvm-cov with --no-report accumulation across the unit/doc/standalone/cluster/sentinel runs, then uploads an lcov report to Codecov (informational, not a hard gate).
 
 Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` is rejected for this repo). Merge with `gh pr merge --squash`; merged head branches are auto-deleted.
 
