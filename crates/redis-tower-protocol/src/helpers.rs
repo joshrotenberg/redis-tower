@@ -1,6 +1,6 @@
 //! Convenience constructors and formatting helpers for RESP3 frames.
 //!
-//! In addition to the frame constructors ([`bulk`], [`array`], [`null_bulk`]),
+//! In addition to the frame constructors ([`bulk`], [`array()`], [`null_bulk`]),
 //! this module provides:
 //!
 //! - [`display`] / [`FrameDisplay`]: a `Display` adapter that renders a frame in
