@@ -286,7 +286,7 @@ fn split_server_addr(addr: &str) -> (&str, Option<u16>) {
 fn error_type(err: &RedisError) -> &str {
     match err {
         RedisError::Redis(msg) => msg.split_whitespace().next().unwrap_or("ERR"),
-        RedisError::Connection(_) | RedisError::ConnectionClosed => "CONNECTION",
+        RedisError::Connection { .. } | RedisError::ConnectionClosed => "CONNECTION",
         RedisError::Protocol(_) => "PROTOCOL",
         RedisError::CommandTimeout => "COMMAND_TIMEOUT",
         RedisError::ConnectTimeout => "CONNECT_TIMEOUT",

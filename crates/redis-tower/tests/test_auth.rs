@@ -114,7 +114,9 @@ async fn no_credentials_against_protected_server_fails() {
         Err(e) => {
             // Some servers reject pre-auth; that is also an acceptable failure.
             match e {
-                RedisError::Redis(_) | RedisError::Connection(_) | RedisError::ConnectionClosed => {
+                RedisError::Redis(_)
+                | RedisError::Connection { .. }
+                | RedisError::ConnectionClosed => {
                     return;
                 }
                 other => panic!("unexpected connect error against protected server: {other:?}"),

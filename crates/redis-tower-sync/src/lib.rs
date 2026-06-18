@@ -45,14 +45,14 @@ pub struct SyncClient {
 impl SyncClient {
     /// Connect to a Redis server by address (e.g., `"127.0.0.1:6379"`).
     pub fn connect(addr: &str) -> Result<Self, RedisError> {
-        let rt = tokio::runtime::Runtime::new().map_err(RedisError::Connection)?;
+        let rt = tokio::runtime::Runtime::new().map_err(RedisError::from)?;
         let inner = rt.block_on(RedisClient::connect(addr))?;
         Ok(Self { rt, inner })
     }
 
     /// Connect using a Redis URL (e.g., `"redis://localhost:6379/0"`).
     pub fn connect_url(url: &str) -> Result<Self, RedisError> {
-        let rt = tokio::runtime::Runtime::new().map_err(RedisError::Connection)?;
+        let rt = tokio::runtime::Runtime::new().map_err(RedisError::from)?;
         let inner = rt.block_on(RedisClient::connect_url(url))?;
         Ok(Self { rt, inner })
     }

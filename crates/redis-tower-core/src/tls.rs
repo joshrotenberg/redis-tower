@@ -204,24 +204,24 @@ impl TlsConfig {
         builder.danger_accept_invalid_hostnames(self.accept_invalid_hostnames);
         if let Some(ref ca) = self.root_ca_pem {
             let cert = native_tls::Certificate::from_pem(ca)
-                .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+                .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
             builder.add_root_certificate(cert);
         }
         if let Some((ref cert_pem, ref key_pem)) = self.client_auth_pem {
             let identity = native_tls::Identity::from_pkcs8(cert_pem, key_pem)
-                .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+                .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
             builder.identity(identity);
         }
 
         let connector = builder
             .build()
-            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+            .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
         let connector = tokio_native_tls::TlsConnector::from(connector);
 
         let tls_stream = connector
             .connect(hostname, tcp)
             .await
-            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+            .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
 
         Ok(RedisStream::NativeTls(Box::new(tls_stream)))
     }
@@ -237,7 +237,7 @@ impl TlsConfig {
         let tls_stream = connector
             .connect(hostname, tcp)
             .await
-            .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+            .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
 
         Ok(RedisStream::NativeTls(Box::new(tls_stream)))
     }
@@ -251,7 +251,7 @@ impl TlsConfig {
             for cert in parse_certs_pem(ca)? {
                 root_store
                     .add(cert)
-                    .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?;
+                    .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
             }
         } else {
             let native_result = rustls_native_certs::load_native_certs();
@@ -286,20 +286,20 @@ impl TlsConfig {
         let config = match &self.client_auth_pem {
             Some((cert_pem, key_pem)) => builder
                 .with_client_auth_cert(parse_certs_pem(cert_pem)?, parse_private_key_pem(key_pem)?)
-                .map_err(|e| RedisError::Connection(std::io::Error::other(e)))?,
+                .map_err(|e| RedisError::from(std::io::Error::other(e)))?,
             None => builder.with_no_client_auth(),
         };
 
         let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
         let server_name =
             rustls::pki_types::ServerName::try_from(hostname.to_string()).map_err(|e| {
-                RedisError::Connection(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                RedisError::from(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
             })?;
 
         let tls_stream = connector
             .connect(server_name, tcp)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(RedisError::from)?;
 
         Ok(RedisStream::Rustls(Box::new(tls_stream)))
     }
@@ -313,13 +313,13 @@ impl TlsConfig {
         let connector = tokio_rustls::TlsConnector::from(config);
         let server_name =
             rustls::pki_types::ServerName::try_from(hostname.to_string()).map_err(|e| {
-                RedisError::Connection(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+                RedisError::from(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
             })?;
 
         let tls_stream = connector
             .connect(server_name, tcp)
             .await
-            .map_err(RedisError::Connection)?;
+            .map_err(RedisError::from)?;
 
         Ok(RedisStream::Rustls(Box::new(tls_stream)))
     }
@@ -333,7 +333,7 @@ fn parse_certs_pem(
     use rustls::pki_types::pem::PemObject;
     rustls::pki_types::CertificateDer::pem_slice_iter(pem)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| RedisError::Connection(std::io::Error::other(e)))
+        .map_err(|e| RedisError::from(std::io::Error::other(e)))
 }
 
 /// Parse a single PKCS#8 / SEC1 / RSA private key from PEM into rustls DER form.
@@ -343,7 +343,7 @@ fn parse_private_key_pem(
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>, RedisError> {
     use rustls::pki_types::pem::PemObject;
     rustls::pki_types::PrivateKeyDer::from_pem_slice(pem)
-        .map_err(|e| RedisError::Connection(std::io::Error::other(e)))
+        .map_err(|e| RedisError::from(std::io::Error::other(e)))
 }
 
 /// Certificate verifier that accepts everything. Used when
