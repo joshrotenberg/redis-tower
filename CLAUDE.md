@@ -1,6 +1,6 @@
 # redis-tower
 
-A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. Private GitHub repo (crates were published to crates.io on 2026-06-11 then yanked; the Release workflow is gated to manual dispatch -- see Release State below).
+A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. Private GitHub repo. All published crates were yanked on 2026-06-11; the Release workflow is manual-dispatch only and 51 commits sit unreleased since the v0.1.0 tags. See Release State below.
 
 ## Architecture
 
@@ -168,6 +168,8 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 
 ## Current Status
 
+The architecture and bug queues are largely closed. As of 2026-06-18 the `kind: bug` queue is empty (0 open, 15 closed) and the `kind: architecture` queue has 4 open (#399 #442 #444 #505) against 9 closed. The `kind: feature` queue has 30 open. Repo-wide: 64 open issues, 302 closed. This supersedes the earlier "lone open item" framing in the Go-Hard Backlog section below; treat that section as the original filing plan, not the live state.
+
 All three audit passes are complete and merged: the initial audit, the second (#289–#353), and a third test-coverage/completeness pass (#390–#396). TimeSeriesClient (#344) and the high-level module clients (JSON/Search/TimeSeries/probabilistic/Vector) all shipped.
 
 **Every per-file test suite now runs in CI.** As of #400 the standalone integration job runs `cargo test -p redis-tower --test '*' -- --test-threads=1` (all `tests/*.rs` suites, not just `integration.rs`; single-threaded for the `FunctionFlush` quirk above). The #390–#396 pass added: live-server circuit-breaker/command-timeout failure injection (`test_resilience_integration.rs`), `#[ignore]` module-client integration tests (need Redis Stack), server/CLIENT command coverage, EVAL_RO/EVALSHA_RO + XSETID, ACL DRYRUN, an `#[ignore]` ObjectFreq LFU fixture, and `command_tests!` applied to `MultiplexedSentinelClient`. Dead `todo!()` infra stubs were removed.
@@ -181,13 +183,25 @@ All three audit passes are complete and merged: the initial audit, the second (#
 
 ## Release State
 
-- **0.1.0 published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day: the GitHub repo is still private, so the crates.io repository links 404. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (re-publish or `cargo yank --undo` when ready).
-- **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger was removed so merges no longer auto-publish. Release deliberately with `gh workflow run Release --ref main`.
-- **Re-launch checklist** lives in issue #435 (reconcile publish state, decide repo visibility, refresh this file).
+- **0.1.x published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day. All 0.1.x versions of `redis-tower-protocol`, `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, and `redis-tower-sentinel` are yanked. The GitHub repo is still private, so the crates.io repository links 404. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (`cargo yank --undo` or a fresh publish when ready).
+- **51 commits are unreleased** since the v0.1.0 tags (measured `redis-tower-v0.1.0..HEAD`). A re-launch publishes from current `main`, not from the yanked 0.1.0 tree.
+- **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger was removed so merges no longer auto-publish. The workflow (`.github/workflows/release-plz.yml`) runs `release-plz` and is triggered with `gh workflow run Release --ref main`.
+
+### Re-launch runbook
+
+Coordinated republish. Run in order; each step is a gate for the next.
+
+1. **Decide the version line.** The yanked 0.1.0 is burned for the affected crates (a yanked version cannot be re-published at the same number). Bump to 0.1.1+ (or 0.2.0) as `release-plz` proposes from the 51 unreleased commits. `redis-tower-protocol` is already at 0.1.1, so it bumps from there.
+2. **Make the repo public.** Until then the crates.io repository/homepage links 404 and docs.rs cannot build from a private source. `gh repo edit joshrotenberg/redis-tower --visibility public`.
+3. **Confirm secrets.** `CARGO_REGISTRY_TOKEN` must be set in repo secrets for the Release workflow; `GITHUB_TOKEN` is provided by Actions.
+4. **Dry-run locally.** `cargo publish -p <crate> --dry-run` in dependency order (protocol, core, commands, redis-tower, then cluster/sentinel/sync/modules/client) to catch packaging or metadata errors before dispatch.
+5. **Publish.** Re-enable releases by dispatching the workflow: `gh workflow run Release --ref main`. `release-plz` opens or pushes the version-bump PR, tags, and publishes. Do not restore the `push: main` trigger unless the team decides to resume auto-publish.
+6. **Un-yank only if republishing the same tree.** If the decision is to expose the existing 0.1.0 rather than ship the 51 unreleased commits, `cargo yank --undo --version 0.1.0 <crate>` per crate instead of step 5. The default re-launch path is a fresh publish from `main`.
+7. **Verify badges and docs.** After publish, confirm crates.io pages resolve, docs.rs builds (see docs.rs metadata work, #436), and README/badge links are live now that the repo is public.
 
 ## Go-Hard Backlog (filed 2026-06-11)
 
-The lone open item used to be #399. It is now one of 107 issues filed from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
+This section is the original filing plan, not live state. For current open/closed counts see Current Status above; as of 2026-06-18 the architecture and bug queues are largely closed. The plan below filed 107 issues from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
 
 - **Kind** (the execution axis -- work in this order): `kind: architecture` (13, structural / awkward-by-design), then `kind: bug` (13), then `kind: feature` (42). Test/docs/chore/perf issues carry no kind label.
 - **Priority**: `priority: high` (P0), `priority: medium` (P1), `priority: low` (P2).
