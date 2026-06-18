@@ -1,0 +1,57 @@
+# roba.toml -- redis-tower (12-crate Tower-based Redis client workspace)
+# Safe, read-only top-level defaults. Autonomous code-dispatch posture lives
+# in [profile.worker]; everything else stays safe.
+
+readonly = true   # safe default: Read/Glob/Grep only, no edits
+git_diff = true   # embed the working-tree diff for grounded answers
+
+# Gates the autonomous worker must pass. Deliberately EXCLUDES
+# `cargo test --test '*'` (the live-redis integration suites -- they need a
+# running server and are the orchestrator's spot-check, not an autonomous gate).
+[vars]
+GATES = "cargo fmt --all -- --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test --lib --all-features; cargo build --all-features; cargo doc --no-deps --all-features"
+
+# --- read-only human profiles (interactive use) ---
+[profile.review]
+readonly = true
+git_diff = true
+git_log = 5
+
+[profile.explain]
+readonly = true
+
+[profile.fix-build]
+readonly = true
+git_status = true
+
+# --- autonomous code-dispatch worker (the named loaded gun) ---
+[profile.worker]
+full_auto = true
+max_turns = 80
+max_budget_usd = 10.0
+
+# Implement a GitHub issue end-to-end via the worker profile. NOTE: `fix` is a
+# placeholder verb -- the work may be a fix, feature, test, or chore; rename to
+# a generic verb (e.g. `do`/`work`/`land`) on a future refine pass.
+[alias.fix]
+description = "Implement a GitHub issue end-to-end (worker profile; no push/PR)"
+args = ["issue"]
+flags = ["--profile", "worker"]
+template = """
+Implement GitHub issue #${issue} in this repo, end-to-end.
+
+Issue:
+$(gh issue view ${issue})
+
+Requirements:
+- Make the code change AND its tests/docs (new behavior needs a test that
+  would fail without it).
+- Run the gates and make them all pass before committing:
+  {{GATES}}
+- Setup/exploration one tool call at a time; do not parallel-batch git
+  mutations. On a parallel-batch cancellation error, re-run the single
+  failed call -- do not flush-retry.
+- Commit with `git add` of the explicit changed paths (never `git add -A`)
+  and a conventional-commit message whose body contains `Closes #${issue}`.
+- Do NOT push and do NOT open a PR -- stop after the local commit.
+"""
