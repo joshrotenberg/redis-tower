@@ -142,10 +142,12 @@
 //!
 //! [`Pipeline`] batches multiple commands into a single roundtrip.
 //! [`Transaction`] wraps commands in MULTI/EXEC with optional WATCH support
-//! for optimistic locking.
+//! for optimistic locking. The [`transaction()`] helper drives the standard
+//! WATCH/read/EXEC retry loop for you, re-running a closure until EXEC commits
+//! or a retry cap is hit.
 //!
 //! ```ignore
-//! use redis_tower::{Pipeline, Transaction, RedisConnection};
+//! use redis_tower::{transaction, Pipeline, Transaction, RedisConnection};
 //! use redis_tower::commands::*;
 //!
 //! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
@@ -161,6 +163,14 @@
 //!     .push(Incr::new("key"))
 //!     .execute(&mut conn)
 //!     .await?;
+//!
+//! // Optimistic-locking retry loop: read inside the WATCH window, then EXEC,
+//! // retrying automatically if another client touches `counter`.
+//! let results = transaction(&mut conn, ["counter"], async |c| {
+//!     let current: i64 = c.execute(Get::new("counter")).await?.unwrap_or(0);
+//!     Ok(Transaction::new().push(Set::new("counter", (current + 1).to_string())))
+//! })
+//! .await?;
 //! ```
 //!
 //! # Pub/Sub
@@ -325,7 +335,10 @@ pub use resilient::ResilientRedisClient;
 pub use scan_stream::ScanStream;
 pub use script::Script;
 pub use tracing_layer::{TracingLayer, TracingService};
-pub use transaction::{Transaction, TransactionExecutor, TransactionResult};
+pub use transaction::{
+    DEFAULT_TRANSACTION_RETRIES, Transaction, TransactionExecutor, TransactionResult, transaction,
+    transaction_with_retries,
+};
 
 #[cfg(feature = "serde")]
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]

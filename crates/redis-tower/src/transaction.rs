@@ -23,11 +23,13 @@ use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
+use redis_tower_commands::Watch;
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 use tokio::sync::Mutex;
 
 use crate::client::RedisClient;
+use crate::executor::RedisExecutor;
 use crate::pipeline::{PipelineResults, ResponseParser};
 
 /// A connection type that can execute a WATCH/MULTI/EXEC transaction.
@@ -286,6 +288,111 @@ impl Default for Transaction {
     }
 }
 
+/// Default number of WATCH/EXEC attempts used by [`transaction`] before it
+/// gives up and returns [`RedisError::TransactionAborted`].
+pub const DEFAULT_TRANSACTION_RETRIES: usize = 16;
+
+/// Run a WATCH-protected transaction, retrying on optimistic-lock conflicts.
+///
+/// This is the ergonomic port of redis-rs's `transaction`/`transaction_async`
+/// helpers. It implements the standard optimistic-locking loop:
+///
+/// 1. `WATCH` the given keys.
+/// 2. Call `build`, which may read the watched keys on `conn` and returns the
+///    [`Transaction`] body to commit (the commands to run between MULTI/EXEC).
+/// 3. Run MULTI/EXEC. If a watched key was modified by another client, EXEC is
+///    aborted and the whole sequence is retried from step 1.
+///
+/// The loop runs until EXEC commits or the retry cap is reached. On a commit it
+/// returns the [`PipelineResults`]; if the cap is exhausted it returns
+/// [`RedisError::TransactionAborted`].
+///
+/// Because the reads in `build` must happen *inside* the WATCH window, `conn`
+/// must be an exclusively held connection for the duration of the call -- pass
+/// a [`RedisConnection`] (`&mut`) or otherwise ensure no other task issues
+/// commands on the same connection while the transaction is in flight. (This is
+/// the same requirement redis-rs places on its `transaction` helper.) The
+/// returned `Transaction` should carry the commands only; the WATCH is issued
+/// by this helper, so do not also call [`Transaction::watch`] on it.
+///
+/// Uses [`DEFAULT_TRANSACTION_RETRIES`] as the cap. Use
+/// [`transaction_with_retries`] to choose a different cap.
+///
+/// # Example
+///
+/// ```ignore
+/// use redis_tower::{transaction, Transaction, RedisConnection};
+/// use redis_tower::commands::{Get, Set};
+///
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// // Atomically double the value at `counter`, retrying if another client
+/// // touches it between the read and the EXEC.
+/// let results = transaction(&mut conn, ["counter"], async |c| {
+///     let current: i64 = c.execute(Get::new("counter")).await?.unwrap_or(0);
+///     Ok(Transaction::new().push(Set::new("counter", (current * 2).to_string())))
+/// })
+/// .await?;
+/// ```
+pub async fn transaction<C, F>(
+    conn: &mut C,
+    keys: impl IntoIterator<Item = impl Into<String>>,
+    build: F,
+) -> Result<PipelineResults, RedisError>
+where
+    C: RedisExecutor + TransactionExecutor + Send,
+    F: AsyncFnMut(&mut C) -> Result<Transaction, RedisError>,
+{
+    transaction_with_retries(conn, keys, DEFAULT_TRANSACTION_RETRIES, build).await
+}
+
+/// Like [`transaction`], but with an explicit retry cap.
+///
+/// `max_retries` is the number of *additional* attempts made after the first,
+/// so the closure is invoked at most `max_retries + 1` times. A cap of `0`
+/// makes a single attempt and surfaces a WATCH abort immediately as
+/// [`RedisError::TransactionAborted`].
+///
+/// See [`transaction`] for the full contract.
+pub async fn transaction_with_retries<C, F>(
+    conn: &mut C,
+    keys: impl IntoIterator<Item = impl Into<String>>,
+    max_retries: usize,
+    mut build: F,
+) -> Result<PipelineResults, RedisError>
+where
+    C: RedisExecutor + TransactionExecutor + Send,
+    F: AsyncFnMut(&mut C) -> Result<Transaction, RedisError>,
+{
+    let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+    let mut remaining = max_retries;
+
+    loop {
+        // WATCH the keys so the reads in `build` are covered by the optimistic
+        // lock. Skip the round-trip entirely when there is nothing to watch.
+        if !keys.is_empty() {
+            conn.execute(Watch::keys(keys.clone())).await?;
+        }
+
+        // Build the atomic body. The closure may read the watched keys here.
+        let txn = build(conn).await?;
+
+        // Run MULTI/EXEC. The WATCH issued above is still active on the
+        // connection, so the body carries no watch keys of its own.
+        match txn.execute(&mut *conn).await? {
+            TransactionResult::Committed(results) => return Ok(results),
+            TransactionResult::Aborted => {
+                // A watched key changed. EXEC already cleared the WATCH state,
+                // so the next iteration re-watches from scratch.
+                if remaining == 0 {
+                    return Err(RedisError::TransactionAborted);
+                }
+                remaining -= 1;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -380,5 +487,170 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_committed());
+    }
+
+    /// A mock that also implements [`RedisExecutor`] (for the WATCH/read path)
+    /// and can be scripted to abort a fixed number of EXECs before committing,
+    /// so the [`transaction`] retry loop can be exercised without a server.
+    struct RetryMockConn {
+        /// Number of EXECs to abort (WATCH violation) before the next commits.
+        aborts_before_commit: usize,
+        /// How many `execute_transaction` calls were made.
+        exec_calls: usize,
+        /// How many plain commands (i.e. WATCH) were issued via `execute`.
+        watch_calls: usize,
+    }
+
+    impl RedisExecutor for RetryMockConn {
+        fn execute<Cmd: Command>(
+            &mut self,
+            cmd: Cmd,
+        ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            self.watch_calls += 1;
+            // Only WATCH is exercised in these tests; reply OK to it.
+            let result = cmd.parse_response(Frame::SimpleString(bytes::Bytes::from("OK")));
+            async move { result }
+        }
+    }
+
+    impl TransactionExecutor for RetryMockConn {
+        fn execute_transaction(
+            &mut self,
+            _watch_frames: Vec<Frame>,
+            command_frames: Vec<Frame>,
+        ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+            self.exec_calls += 1;
+            let abort = self.aborts_before_commit > 0;
+            if abort {
+                self.aborts_before_commit -= 1;
+            }
+            let responses = if abort {
+                // EXEC aborted by a WATCH violation.
+                None
+            } else {
+                Some(
+                    command_frames
+                        .iter()
+                        .map(|_| Frame::SimpleString(bytes::Bytes::from("OK")))
+                        .collect::<Vec<_>>(),
+                )
+            };
+            async move { Ok(responses) }
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_commits_on_first_attempt() {
+        use redis_tower_commands::Set;
+
+        let mut conn = RetryMockConn {
+            aborts_before_commit: 0,
+            exec_calls: 0,
+            watch_calls: 0,
+        };
+        let results = transaction(&mut conn, ["counter"], async |_c| {
+            Ok(Transaction::new().push(Set::new("counter", "1")))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(conn.exec_calls, 1, "should EXEC exactly once");
+        assert_eq!(conn.watch_calls, 1, "should WATCH exactly once");
+    }
+
+    #[tokio::test]
+    async fn transaction_retries_until_commit() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use redis_tower_commands::Set;
+
+        let mut conn = RetryMockConn {
+            aborts_before_commit: 2,
+            exec_calls: 0,
+            watch_calls: 0,
+        };
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let bc = Arc::clone(&build_calls);
+
+        let results = transaction(&mut conn, ["k"], async move |_c: &mut RetryMockConn| {
+            bc.fetch_add(1, Ordering::SeqCst);
+            Ok(Transaction::new().push(Set::new("k", "1")))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        // Two aborts then a commit -> three attempts, each re-WATCHing.
+        assert_eq!(build_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(conn.exec_calls, 3);
+        assert_eq!(conn.watch_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn transaction_gives_up_after_retry_cap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use redis_tower_commands::Set;
+
+        let mut conn = RetryMockConn {
+            // Always aborts -- the cap, not a commit, must terminate the loop.
+            aborts_before_commit: usize::MAX,
+            exec_calls: 0,
+            watch_calls: 0,
+        };
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let bc = Arc::clone(&build_calls);
+
+        let result =
+            transaction_with_retries(&mut conn, ["k"], 2, async move |_c: &mut RetryMockConn| {
+                bc.fetch_add(1, Ordering::SeqCst);
+                Ok(Transaction::new().push(Set::new("k", "1")))
+            })
+            .await;
+
+        assert!(matches!(result, Err(RedisError::TransactionAborted)));
+        // First attempt + 2 retries = 3 invocations.
+        assert_eq!(build_calls.load(Ordering::SeqCst), 3);
+        assert_eq!(conn.exec_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn transaction_without_keys_skips_watch() {
+        use redis_tower_commands::Set;
+
+        let mut conn = RetryMockConn {
+            aborts_before_commit: 0,
+            exec_calls: 0,
+            watch_calls: 0,
+        };
+        let empty: [&str; 0] = [];
+        let results = transaction(&mut conn, empty, async |_c| {
+            Ok(Transaction::new().push(Set::new("k", "1")))
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(conn.exec_calls, 1);
+        assert_eq!(conn.watch_calls, 0, "no keys means no WATCH round-trip");
+    }
+
+    #[tokio::test]
+    async fn transaction_zero_retries_surfaces_abort_immediately() {
+        use redis_tower_commands::Set;
+
+        let mut conn = RetryMockConn {
+            aborts_before_commit: usize::MAX,
+            exec_calls: 0,
+            watch_calls: 0,
+        };
+        let result = transaction_with_retries(&mut conn, ["k"], 0, async |_c| {
+            Ok(Transaction::new().push(Set::new("k", "1")))
+        })
+        .await;
+
+        assert!(matches!(result, Err(RedisError::TransactionAborted)));
+        assert_eq!(conn.exec_calls, 1, "cap of 0 makes a single attempt");
     }
 }
