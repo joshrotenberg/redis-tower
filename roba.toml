@@ -1,18 +1,38 @@
 # roba.toml -- redis-tower (12-crate Tower-based Redis client workspace)
+# ====================================================================
+# Single-issue worker lifecycle, the durable-context pattern (from roba's
+# examples/roba-worker-lifecycle.toml), Rust-flavored. The work is often a
+# feature / test / chore, not just a fix, so the verb is `ship`.
+#
 # Top-level stays SAFE via roba's BUILT-IN readonly default (Read/Glob/Grep).
-# Do NOT add an explicit top-level `readonly = true`: it suppresses a profile's
-# `full_auto`, so [profile.worker] could not escalate (roba bug). The
-# autonomous code-dispatch posture is the named [profile.worker].
+# Do NOT add a top-level `readonly = true`: it suppresses a profile's
+# `full_auto` (roba #343), so [profile.worker] could not escalate. The
+# autonomous posture is the named [profile.worker] -- an explicit loaded gun.
 
 git_diff = true   # embed the working-tree diff for grounded answers
 
-# Gates the autonomous worker must pass. Deliberately EXCLUDES
-# `cargo test --test '*'` (the live-redis integration suites -- they need a
-# running server and are the orchestrator's spot-check, not an autonomous gate).
+# The gate the autonomous worker must pass. Deliberately EXCLUDES the live-redis
+# integration suites (`cargo test --test '*'`): they need a running server and
+# run in CI (the test-integration job, Redis 7.4.3 / 8.0.6), not locally.
 [vars]
-GATES = "cargo fmt --all -- --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test --lib --all-features; cargo build --all-features; cargo doc --no-deps --all-features"
+GATE = "cargo fmt --all -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --lib --all-features && cargo test --doc --all-features && cargo build --all-features && cargo doc --no-deps --all-features"
 
-# --- read-only human profiles (interactive use) ---
+# === Lifecycle profiles =====================================================
+
+# PLAN -- read-only orientation.
+[profile.plan]
+readonly = true
+git_log = 10
+
+# WORKER -- the dispatch posture (the named loaded gun): full_auto + caps. No
+# worktree: work in the main checkout to keep the cargo build cache warm; the
+# no-`git add -A` discipline below protects untracked files (dump.rdb / tmp).
+[profile.worker]
+full_auto = true
+max_turns = 80
+max_budget_usd = 10.0
+
+# Read-only human profiles (interactive use).
 [profile.review]
 readonly = true
 git_diff = true
@@ -25,34 +45,126 @@ readonly = true
 readonly = true
 git_status = true
 
-# --- autonomous code-dispatch worker (the named loaded gun) ---
-[profile.worker]
-full_auto = true
-max_turns = 80
-max_budget_usd = 10.0
+# === Verbs ==================================================================
+#   issue N  -> read-only PLAN (summarize + propose; no code)
+#   ship N   -> the shepherd: plan -> implement -> gate -> commit -> draft PR
+#   revise P -> apply review feedback to an open PR's branch and push
+#   review P -> review a PR and POST the verdict to it
+#
+# Durable context: ship records decisions in the PR body and posts a clarifying
+# issue comment when the spec is ambiguous OR the issue is value-uncertain
+# (#375); review always posts its verdict; revise pushes commits (the record)
+# and posts nothing, so review's rolling verdict stays the one editable comment.
 
-# Implement a GitHub issue end-to-end via the worker profile. NOTE: `fix` is a
-# placeholder verb -- the work may be a fix, feature, test, or chore; rename to
-# a generic verb (e.g. `do`/`work`/`land`) on a future refine pass.
-[alias.fix]
-description = "Implement a GitHub issue end-to-end (worker profile; no push/PR)"
-args = ["issue"]
+# PLAN by issue number: summarize + propose, no code.  ->  roba issue 447
+[alias.issue]
+description = "Summarize an issue and propose an approach (read-only)"
+args = ["n"]
+flags = ["--readonly"]
+template = """
+Summarize issue #${n} in redis-tower and propose an implementation approach.
+Cite the crate(s) and file(s):line(s); respect the workspace dependency
+direction (protocol -> core -> commands -> redis-tower -> cluster/sentinel/
+sync/modules -> client). Do not write code.
+
+$(gh issue view ${n})
+"""
+
+# SHIP: the shepherd. One run, to a draft PR.  ->  roba ship 447
+[alias.ship]
+description = "Shepherd an issue to a draft PR (full_auto)"
+args = ["n"]
 flags = ["--profile", "worker"]
 template = """
-Implement GitHub issue #${issue} in this repo, end-to-end.
+Shepherd redis-tower issue #${n} through our process, in this one run.
 
-Issue:
-$(gh issue view ${issue})
+PLAN     Read the issue; state the plan in one short paragraph. POST a
+         clarifying comment to the issue (gh issue comment ${n}) and proceed on
+         a stated default IF the spec is AMBIGUOUS (no clear file:line, two
+         plausible designs, an undecided tradeoff) OR VALUE-UNCERTAIN (the issue
+         flags its own reachability / justification -- "uncertain whether it
+         justifies a change", a wontfix candidate, marginal). Never make a
+         load-bearing OR a value call silently.
+BRANCH   git fetch origin && git switch -c <type>/${n} origin/main
+         (<type> = fix / feat / test / chore, per the work).
+IMPLEMENT Make the change AND its tests/docs (new behavior needs a test that
+         would fail without it). Respect the 12-crate dependency direction and
+         the Tower service / Command trait / RedisError conventions; no unsafe.
+         Setup/exploration ONE tool call at a time -- do not parallel-batch git
+         mutations; on a parallel-batch cancellation error re-run the single
+         failed call, do not flush-retry.
+GATE     Run and pass, in order:  {{GATE}}
+COMMIT   `git add` the EXPLICIT changed paths (NEVER `git add -A` -- dump.rdb /
+         tmp / target are untracked). One conventional-commit subject, no em
+         dashes, no AI-attribution trailer.
+PUSH+PR  Push the branch and open a DRAFT PR with `closes #${n}` and a COMPLETE
+         body (factual, not wordy, no em dashes):
+           ## What  / ## Why (closes #${n} + crate:file:line) / ## Decisions
+           (each load-bearing choice + reason; include any clarification
+           answered on the issue) / ## Tests / ## Gate ({{GATE}} green locally)
 
-Requirements:
-- Make the code change AND its tests/docs (new behavior needs a test that
-  would fail without it).
-- Run the gates and make them all pass before committing:
-  {{GATES}}
-- Setup/exploration one tool call at a time; do not parallel-batch git
-  mutations. On a parallel-batch cancellation error, re-run the single
-  failed call -- do not flush-retry.
-- Commit with `git add` of the explicit changed paths (never `git add -A`)
-  and a conventional-commit message whose body contains `Closes #${issue}`.
-- Do NOT push and do NOT open a PR -- stop after the local commit.
+STOP at the draft PR. Do NOT watch CI, mark ready, or merge -- that tail is
+cross-turn. Local gate green is necessary but NOT the final word: CI runs the
+live-redis integration suites (test-integration, Redis 7.4.3 / 8.0.6) that the
+local gate skips -- the PR's CI is the authority.
+
+Surface anything that does not fit rather than forcing it.
+
+$(gh issue view ${n})
+"""
+
+# REVISE: apply a CHANGES REQUESTED verdict to a PR's branch.  ->  roba revise 86
+[alias.revise]
+description = "Apply review feedback to an open PR's branch and push (full_auto)"
+args = ["pr"]
+flags = ["--profile", "worker"]
+template = """
+Apply the review feedback on PR #${pr} in redis-tower, in this one run.
+
+CHECKOUT  gh pr checkout ${pr}
+ADDRESS   Read the latest **CHANGES REQUESTED** verdict (below) and address each
+          blocker. Preserve the workspace dependency direction and the Tower /
+          Command / RedisError conventions; no unsafe.
+TEST      Extend test coverage for the change (unit / doc; no live redis).
+GATE      Run and pass, in order:  {{GATE}}
+COMMIT    `git add` explicit paths (NEVER `git add -A`). One conventional-commit
+          subject, no em dashes, no AI-attribution trailer.
+PUSH      git push   (updates the open PR)
+
+Do NOT post a PR comment; the pushed commits ARE the record, and a later
+`roba review ${pr}` updates the rolling verdict. STOP after the push. CI (incl.
+the live-redis integration suites) is the authority and runs on the PR.
+
+Latest verdict and PR conversation:
+$(gh pr view ${pr} --comments)
+"""
+
+# REVIEW a PR and POST the verdict to it (read-only code; posts via gh).
+# Narrow grant: read code, post via gh pr comment (NOT gh pr review -- the PR
+# author 422s a self-review). --edit-last keeps ONE rolling verdict.  ->  roba review 86
+[alias.review]
+description = "Review a PR by number and post the verdict to the PR (read-only code; posts via gh)"
+args = ["pr"]
+flags = ["--readonly", "--allow-tool", "Bash(gh pr view:*)", "--allow-tool", "Bash(gh pr comment:*)"]
+template = """
+Review PR #${pr} in redis-tower for correctness and regressions, then POST your
+verdict as a comment ON THE PR. Do not change any code.
+
+Check (cite crate:file:line; no style nits): the change is sound and respects
+the 12-crate dependency direction and the Tower / Command / RedisError
+conventions; it has a test that would fail without it; no unsafe; a clean
+conventional-commit subject.
+
+Post (or update) the single rolling verdict:
+  gh pr comment ${pr} --edit-last --create-if-none --body "<your verdict>"
+The comment MUST start with EXACTLY one of:
+  **LGTM** -- one line of why
+  **CHANGES REQUESTED** -- one line of why
+followed by findings (each crate:file:line + the concrete problem and the fix).
+On LGTM still state what you checked. You authored this PR, so gh pr comment is
+correct. The live-redis integration suites run in CI, not in this read-only
+review.
+
+Title: $(gh pr view ${pr} --json title -q '.title')
+$(gh pr diff ${pr})
 """
