@@ -1,14 +1,16 @@
 [package]
-name = "redis-test-harness"
+name = "redis-tower-test"
 version = "0.1.0"
-description = "Test utilities for redis-tower (mock connections, command test macros)"
+description = "Test utilities for redis-tower: MockConnection and the command_tests! integration macro"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
-publish = false
+readme = "../../README.md"
+keywords = ["redis", "testing", "mock", "tower"]
+categories = ["database", "development-tools::testing"]
 
 [dependencies]
 redis-tower-protocol = { workspace = true }

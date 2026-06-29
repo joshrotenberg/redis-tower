@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```
-//! use redis_test_harness::mock::MockConnection;
+//! use redis_tower_test::mock::MockConnection;
 //! use redis_tower_protocol::Frame;
 //! use bytes::Bytes;
 //!

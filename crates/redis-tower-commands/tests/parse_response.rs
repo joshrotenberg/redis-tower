@@ -4,9 +4,9 @@
 //! against a real Redis server.
 
 use bytes::Bytes;
-use redis_test_harness::mock::MockConnection;
 use redis_tower_commands::*;
 use redis_tower_core::Frame;
+use redis_tower_test::mock::MockConnection;
 
 // -- Strings --
 
