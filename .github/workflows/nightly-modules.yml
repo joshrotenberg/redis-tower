@@ -1,0 +1,68 @@
+name: Nightly Module Tests
+
+# Runs the five `#[ignore]`d redis-tower-modules integration suites (JSON,
+# Search, TimeSeries, probabilistic, Vector) against real Redis servers that
+# ship the modules. The main CI Redis is built without modules, so these suites
+# never run there; this nightly job is the only place they execute.
+#
+# Two legs:
+#   - redis:8           bundles all former Stack modules natively, and Vector
+#                       Sets require Redis 8.0+, so this leg runs all five suites.
+#   - redis-stack 7.x   covers the 7.x module line (no Vector Sets), so it runs
+#                       the four non-vector suites.
+#
+# The suites read REDIS_URL (default redis://127.0.0.1:6399) and need no
+# test-code changes -- pointing them at a module-enabled server is enough.
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  REDIS_URL: redis://127.0.0.1:6399
+
+jobs:
+  modules:
+    name: Module Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: redis-8
+            image: redis:8
+            test-args: "--all-features"
+          - name: redis-stack-7.x
+            image: redis/redis-stack-server:7.4.0-v3
+            test-args: >-
+              --features json,search,timeseries,probabilistic
+              --test json_integration
+              --test search_integration
+              --test timeseries_integration
+              --test probabilistic_integration
+    services:
+      redis:
+        image: ${{ matrix.image }}
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-modules
+
+      - name: Run module integration tests
+        run: cargo test -p redis-tower-modules ${{ matrix.test-args }} -- --ignored
