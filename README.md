@@ -16,6 +16,10 @@ behind feature flags.
 **Coming from redis-rs?** See the [migration guide](docs/MIGRATING-FROM-REDIS-RS.md)
 for side-by-side idiom mappings.
 
+**Comparing clients?** The [feature matrix](docs/FEATURE-MATRIX.md) weighs
+redis-tower against redis-rs, fred, Lettuce, go-redis, StackExchange.Redis, and
+ioredis, with every redis-tower cell linked to the code that backs it.
+
 ## Quick start
 
 ```rust,ignore
