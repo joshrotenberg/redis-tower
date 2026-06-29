@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
 
 use crate::executor::RedisExecutor;
 
@@ -220,6 +220,61 @@ impl<F: PoolFactory> ErasedPoolFactory for F {
     type Connection = F::Connection;
     fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
         PoolFactory::create(self)
+    }
+}
+
+impl<S> PoolInner<S> {
+    /// Acquire a connection guard, avoiding head-of-line blocking.
+    ///
+    /// `preferred` is the strategy-selected slot whose in-flight counter has
+    /// already been incremented by [`ConnectionPool::next_index`]. If that slot
+    /// is immediately lockable it is used directly. Otherwise a `try_lock` scan
+    /// looks for any idle connection so the request is not forced to queue
+    /// behind a long-running command on the preferred slot while another
+    /// connection sits free; when a free slot is found the in-flight accounting
+    /// is moved from `preferred` to it. If every slot is busy, the call awaits
+    /// the preferred slot, honoring the acquisition timeout.
+    ///
+    /// Returns the slot index actually acquired together with its guard.
+    async fn acquire(&self, preferred: usize) -> Result<(usize, MutexGuard<'_, S>), RedisError> {
+        // Fast path: the preferred slot is free.
+        if let Ok(guard) = self.connections[preferred].try_lock() {
+            return Ok((preferred, guard));
+        }
+
+        // Head-of-line-blocking avoidance: the preferred slot is busy, so scan
+        // the remaining slots for any immediately free connection before
+        // committing to an await on the busy slot.
+        let len = self.connections.len();
+        for offset in 1..len {
+            let i = (preferred + offset) % len;
+            if let Ok(guard) = self.connections[i].try_lock() {
+                // Move the in-flight accounting from the preferred slot to the
+                // one we actually acquired.
+                self.inflight[i].fetch_add(1, Ordering::Release);
+                self.inflight[preferred].fetch_sub(1, Ordering::Release);
+                return Ok((i, guard));
+            }
+        }
+
+        // Every slot is busy. Await the preferred slot, honoring the optional
+        // acquisition timeout.
+        let guard = if self.acquisition_timeout_ns > 0 {
+            let timeout_dur = Duration::from_nanos(self.acquisition_timeout_ns);
+            match tokio::time::timeout(timeout_dur, self.connections[preferred].lock()).await {
+                Ok(guard) => guard,
+                Err(_elapsed) => {
+                    self.inflight[preferred].fetch_sub(1, Ordering::Release);
+                    return Err(RedisError::PoolAcquisitionTimeout {
+                        waited: timeout_dur,
+                        pool_size: len,
+                    });
+                }
+            }
+        } else {
+            self.connections[preferred].lock().await
+        };
+        Ok((preferred, guard))
     }
 }
 
@@ -507,25 +562,13 @@ where
         cmd: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
         let inner = Arc::clone(&self.inner);
-        let idx = self.next_index();
+        let preferred = self.next_index();
         async move {
-            // inflight already incremented by next_index()
-            // Acquire with optional timeout.
-            let mut conn = if inner.acquisition_timeout_ns > 0 {
-                let timeout_dur = Duration::from_nanos(inner.acquisition_timeout_ns);
-                match tokio::time::timeout(timeout_dur, inner.connections[idx].lock()).await {
-                    Ok(guard) => guard,
-                    Err(_elapsed) => {
-                        inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                        return Err(RedisError::PoolAcquisitionTimeout {
-                            waited: timeout_dur,
-                            pool_size: inner.connections.len(),
-                        });
-                    }
-                }
-            } else {
-                inner.connections[idx].lock().await
-            };
+            // inflight already incremented by next_index().
+            // Acquire a connection, scanning for a free slot first to avoid
+            // head-of-line blocking on a busy one, then falling back to an
+            // awaited (optionally timed) lock on the preferred slot.
+            let (idx, mut conn) = inner.acquire(preferred).await?;
 
             // Lazy health check: PING if idle beyond the threshold.
             // Gate the syscall behind the interval check to avoid calling
@@ -579,7 +622,11 @@ where
     /// Execute a command through the pool.
     ///
     /// This is the primary API. The pool selects a connection via the
-    /// configured dispatch strategy and executes the command on it.
+    /// configured dispatch strategy and executes the command on it. To avoid
+    /// head-of-line blocking, if the strategy-selected connection is currently
+    /// busy the pool first scans for any idle connection (via `try_lock`) and
+    /// uses that instead, only awaiting a busy slot when every connection is in
+    /// use.
     ///
     /// If `health_check_interval` is configured and the selected connection
     /// has been idle longer than the interval, a PING is sent first to
@@ -589,24 +636,12 @@ where
     /// command is executed. If no factory is available, the PING error is
     /// returned to the caller.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let idx = self.next_index();
-        // inflight already incremented by next_index()
-        // Acquire with optional timeout.
-        let mut conn = if self.inner.acquisition_timeout_ns > 0 {
-            let timeout_dur = Duration::from_nanos(self.inner.acquisition_timeout_ns);
-            match tokio::time::timeout(timeout_dur, self.inner.connections[idx].lock()).await {
-                Ok(guard) => guard,
-                Err(_elapsed) => {
-                    self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
-                    return Err(RedisError::PoolAcquisitionTimeout {
-                        waited: timeout_dur,
-                        pool_size: self.inner.connections.len(),
-                    });
-                }
-            }
-        } else {
-            self.inner.connections[idx].lock().await
-        };
+        let preferred = self.next_index();
+        // inflight already incremented by next_index().
+        // Acquire a connection, scanning for a free slot first to avoid
+        // head-of-line blocking on a busy one, then falling back to an awaited
+        // (optionally timed) lock on the preferred slot.
+        let (idx, mut conn) = self.inner.acquire(preferred).await?;
 
         // Lazy health check: PING if idle beyond the threshold.
         // Gate the syscall behind the interval check to avoid calling
@@ -1270,6 +1305,52 @@ mod tests {
         // execute() should block until the background task releases, then succeed.
         let result: String = pool.execute(Ping::new()).await.unwrap();
         assert_eq!(result, "PONG");
+    }
+
+    /// Head-of-line-blocking avoidance: when the strategy-preferred connection
+    /// is busy but another sits idle, execute() dispatches to the idle one via
+    /// the try_lock scan instead of queuing behind the busy slot.
+    #[tokio::test]
+    async fn pool_avoids_head_of_line_blocking() {
+        use redis_tower_commands::Ping;
+        use std::time::Instant;
+
+        let conns = vec![
+            MockConn::new(0, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+            MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
+        ];
+
+        // RoundRobin with a fresh index counter: the first execute prefers
+        // slot 0.
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
+
+        // Simulate a long-running command holding the preferred slot (0).
+        let busy = pool.inner.connections[0].lock().await;
+
+        // execute() prefers slot 0 (busy) but should fall through to the idle
+        // slot 1 and return promptly rather than waiting on the held lock.
+        let start = Instant::now();
+        let pong: String = pool.execute(Ping::new()).await.unwrap();
+        let elapsed = start.elapsed();
+
+        assert_eq!(pong, "PONG");
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "execute should not block on the busy slot, took {elapsed:?}"
+        );
+
+        drop(busy);
+
+        // The command ran on the idle slot 1, not the busy slot 0.
+        assert_eq!(pool.inner.connections[1].lock().await.calls(), 1);
+        assert_eq!(pool.inner.connections[0].lock().await.calls(), 0);
+        // Inflight accounting was moved off the preferred slot and released.
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 0);
+        assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
