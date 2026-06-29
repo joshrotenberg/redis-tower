@@ -3,7 +3,7 @@ mod common;
 use bytes::Bytes;
 use redis_tower::RedisConnection;
 use redis_tower::commands::*;
-use redis_tower::pool::ConnectionPool;
+use redis_tower::pool::{ConnectionPool, PoolConfig};
 
 // ---------------------------------------------------------------------------
 // ConnectionPool<RedisConnection> integration tests (issue #345)
@@ -60,6 +60,56 @@ async fn pool_concurrent_100_tasks_5_connections() {
     for h in handles {
         h.await.expect("task panicked");
     }
+}
+
+/// Pool exhaustion under load: drive far more concurrent requests than there
+/// are connections and verify every request still completes correctly.
+///
+/// A pool of 2 connections is saturated by 200 concurrent tasks (each doing
+/// SET/GET/DEL). With the acquisition timeout disabled, every request must
+/// eventually run and observe its own value; the head-of-line-blocking
+/// `try_lock` scan keeps a request from queuing behind a busy connection when
+/// the other is free. The pool must drain back to fully idle afterwards.
+#[tokio::test]
+async fn pool_saturation_under_load() {
+    let addr = common::redis_addr().await.to_string();
+    let pool = ConnectionPool::connect_with_config(
+        PoolConfig::default().size(2).disable_acquisition_timeout(),
+        || {
+            let a = addr.clone();
+            async move { RedisConnection::connect(&a).await }
+        },
+    )
+    .await
+    .expect("failed to create pool");
+
+    assert_eq!(pool.size(), 2);
+
+    let tasks = 200_usize;
+    let mut handles = Vec::with_capacity(tasks);
+    for i in 0..tasks {
+        let p = pool.clone();
+        handles.push(tokio::spawn(async move {
+            let k = format!("test:pool:saturation:{i}");
+            p.execute(Set::new(&k, format!("v{i}"))).await.unwrap();
+            let v: Option<Bytes> = p.execute(Get::new(&k)).await.unwrap();
+            assert_eq!(
+                v,
+                Some(Bytes::from(format!("v{i}"))),
+                "value mismatch for key {k}"
+            );
+            p.execute(Del::new(&k)).await.unwrap();
+        }));
+    }
+
+    for h in handles {
+        h.await.expect("task panicked");
+    }
+
+    // Once the load drains, every connection is idle again.
+    let stats = pool.stats();
+    assert_eq!(stats.total_inflight, 0, "pool did not return to idle");
+    assert_eq!(stats.idle_count, stats.size);
 }
 
 /// A simple PING via the pool verifies the connection is alive.
