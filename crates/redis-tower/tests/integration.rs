@@ -61,7 +61,7 @@ async fn standalone_conn() -> RedisConnection {
 }
 
 // Generate shared command tests for standalone (RESP2).
-redis_test_harness::command_tests!(standalone_conn, "standalone_cmd");
+redis_tower_test::command_tests!(standalone_conn, "standalone_cmd");
 
 // RESP3 connection factory.
 async fn resp3_conn() -> RedisConnection {
@@ -74,7 +74,7 @@ async fn resp3_conn() -> RedisConnection {
 // Generate shared command tests for RESP3 in a submodule to avoid name conflicts.
 mod resp3 {
     use super::*;
-    redis_test_harness::command_tests!(resp3_conn, "resp3_cmd");
+    redis_tower_test::command_tests!(resp3_conn, "resp3_cmd");
 }
 
 /// Explicit protocol negotiation via `connect_with_protocol` (#478).

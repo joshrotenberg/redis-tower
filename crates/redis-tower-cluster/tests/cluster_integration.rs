@@ -42,12 +42,12 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
 }
 
 // Generate the shared command tests for cluster.
-redis_test_harness::command_tests!(cluster_conn, "cluster_cmd", ignored);
+redis_tower_test::command_tests!(cluster_conn, "cluster_cmd", ignored);
 
 // Replay the shared command tests against the multiplexed cluster client.
 mod multiplexed {
     use super::*;
-    redis_test_harness::command_tests!(mux_cluster_conn, "mux_cluster_cmd", ignored);
+    redis_tower_test::command_tests!(mux_cluster_conn, "mux_cluster_cmd", ignored);
 }
 
 // -- Cluster-specific tests --

@@ -51,12 +51,12 @@ fn key(test: &str, name: &str) -> String {
 }
 
 // Generate shared command tests for sentinel topology.
-redis_test_harness::command_tests!(sentinel_conn, "sentinel_cmd", ignored);
+redis_tower_test::command_tests!(sentinel_conn, "sentinel_cmd", ignored);
 
 // Replay the shared command tests against the multiplexed sentinel client.
 mod multiplexed {
     use super::*;
-    redis_test_harness::command_tests!(mux_sentinel_conn, "mux_sentinel_cmd", ignored);
+    redis_tower_test::command_tests!(mux_sentinel_conn, "mux_sentinel_cmd", ignored);
 }
 
 // -- Sentinel-specific tests --

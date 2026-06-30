@@ -373,6 +373,50 @@ redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
+redis-tower-test         Test utilities: MockConnection and the command_tests! macro
+```
+
+## Testing
+
+`redis-tower-test` ships two test utilities that let you write Redis tests without a running server.
+
+### MockConnection
+
+`MockConnection` is an in-memory frame queue. Enqueue responses before calling
+`execute`, and the mock returns them in FIFO order through the standard
+`Command::parse_response` path. This is the recommended way to test
+`parse_response` error branches that a real Redis server cannot trigger.
+
+```toml
+[dev-dependencies]
+redis-tower-test = "0.1"
+```
+
+```rust
+use redis_tower_test::mock::MockConnection;
+use redis_tower_commands::strings::Get;
+use redis_tower_protocol::Frame;
+use bytes::Bytes;
+
+let mut mock = MockConnection::new();
+mock.enqueue(Frame::BulkString(Some(Bytes::from("hello"))));
+let val: Option<Bytes> = mock.execute(Get::new("key")).unwrap();
+assert_eq!(val, Some(Bytes::from("hello")));
+```
+
+### command_tests! macro
+
+`command_tests!` generates a cross-backend suite of async integration tests
+(strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams)
+against any connection factory that exposes an `execute` method. The standalone,
+cluster, and sentinel integration suites all use it to verify consistent
+behavior across every client type.
+
+```rust
+// In a test file, after defining a `my_conn()` async factory:
+redis_tower_test::command_tests!(my_conn, "prefix");
+// or for #[ignore]-gated cluster/sentinel tests:
+redis_tower_test::command_tests!(my_conn, "prefix", ignored);
 ```
 
 ## Server compatibility

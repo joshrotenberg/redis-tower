@@ -1,6 +1,6 @@
 //! Cluster throughput baseline: redis-tower-cluster vs redis-rs (sync & async).
 //!
-//! Spins up a 3-master Redis cluster via redis-test-harness, runs a fixed-duration
+//! Spins up a 3-master Redis cluster via redis-server-wrapper, runs a fixed-duration
 //! workload across several concurrency levels, and prints a comparison table.
 //!
 //! Clients under test (all four always run):
