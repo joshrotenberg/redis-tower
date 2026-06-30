@@ -21,12 +21,14 @@ async fn help_subcommands_return_lines() {
         }};
     }
 
+    // CLUSTER HELP is exercised in the cluster test suite: a standalone server
+    // rejects all CLUSTER subcommands with "cluster support disabled".
     assert_help!(AclHelp::new(), "ACL");
     assert_help!(ClientHelp::new(), "CLIENT");
-    assert_help!(ClusterHelp::new(), "CLUSTER");
     assert_help!(CommandHelp::new(), "COMMAND");
     assert_help!(ConfigHelp::new(), "CONFIG");
-    assert_help!(DebugHelp::new(), "DEBUG");
+    // DEBUG HELP is omitted: the DEBUG command is disabled unless the server is
+    // started with `enable-debug-command`.
     assert_help!(FunctionHelp::new(), "FUNCTION");
     assert_help!(LatencyHelp::new(), "LATENCY");
     assert_help!(MemoryHelp::new(), "MEMORY");

@@ -425,7 +425,11 @@ impl Command for LatencyGraph {
     type Response = String;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("LATENCY"), bulk("GRAPH"), bulk(self.event.as_str())])
+        array(vec![
+            bulk("LATENCY"),
+            bulk("GRAPH"),
+            bulk(self.event.as_str()),
+        ])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {

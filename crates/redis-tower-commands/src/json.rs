@@ -1365,7 +1365,12 @@ mod tests {
         );
         assert_eq!(
             JsonDebugMemory::new("doc").path(".").to_frame(),
-            array(vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk("doc"), bulk(".")])
+            array(vec![
+                bulk("JSON.DEBUG"),
+                bulk("MEMORY"),
+                bulk("doc"),
+                bulk(".")
+            ])
         );
     }
 
