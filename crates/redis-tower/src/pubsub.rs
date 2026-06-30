@@ -61,6 +61,87 @@ pub enum MessageKind {
     SMessage,
 }
 
+/// Which family a keyspace notification belongs to.
+///
+/// Redis publishes every key event twice when `notify-keyspace-events` is
+/// configured with both `K` and `E`: once on the keyspace channel and once on
+/// the keyevent channel. They carry the same `(key, event)` pair but differ in
+/// how it is split between the channel name and the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotificationKind {
+    /// A `__keyspace@<db>__:<key>` notification: the channel names the key and
+    /// the payload is the event name.
+    Keyspace,
+    /// A `__keyevent@<db>__:<event>` notification: the channel names the event
+    /// and the payload is the key.
+    Keyevent,
+}
+
+/// A parsed Redis keyspace/keyevent notification.
+///
+/// Redis publishes keyspace notifications on channels of the form
+/// `__keyspace@<db>__:<key>` (payload is the event name) and
+/// `__keyevent@<db>__:<event>` (payload is the key), gated on the server's
+/// `notify-keyspace-events` config. [`KeyspaceEvent`] normalizes both forms
+/// into the same `(db, key, event)` triple, recording which channel family it
+/// came from in [`kind`](Self::kind).
+///
+/// Build one from a received [`PubSubMessage`] with
+/// [`from_message`](Self::from_message), or stream them directly with
+/// [`PubSubConnection::into_keyspace_events`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyspaceEvent {
+    /// Which channel family this notification arrived on.
+    pub kind: NotificationKind,
+    /// The logical database number from the channel (`@<db>`).
+    pub db: u32,
+    /// The key the event happened to.
+    pub key: String,
+    /// The event name (for example `set`, `del`, `expired`).
+    pub event: String,
+}
+
+impl KeyspaceEvent {
+    /// Parse a keyspace/keyevent notification channel into its
+    /// `(kind, db, tail)` parts, where `tail` is the key (for keyspace) or the
+    /// event (for keyevent). Returns `None` if `channel` is not a keyspace or
+    /// keyevent channel.
+    fn parse_channel(channel: &str) -> Option<(NotificationKind, u32, &str)> {
+        for (prefix, kind) in [
+            ("__keyspace@", NotificationKind::Keyspace),
+            ("__keyevent@", NotificationKind::Keyevent),
+        ] {
+            if let Some(rest) = channel.strip_prefix(prefix)
+                && let Some((db_str, tail)) = rest.split_once("__:")
+                && let Ok(db) = db_str.parse::<u32>()
+            {
+                return Some((kind, db, tail));
+            }
+        }
+        None
+    }
+
+    /// Parse a [`KeyspaceEvent`] from a received [`PubSubMessage`].
+    ///
+    /// Returns `None` when the message's channel is not a keyspace or keyevent
+    /// channel, so it can be used to filter a mixed [`PubSubConnection`] stream.
+    /// The payload is decoded with [`String::from_utf8_lossy`].
+    pub fn from_message(msg: &PubSubMessage) -> Option<KeyspaceEvent> {
+        let (kind, db, tail) = Self::parse_channel(&msg.channel)?;
+        let payload = String::from_utf8_lossy(&msg.payload).into_owned();
+        let (key, event) = match kind {
+            NotificationKind::Keyspace => (tail.to_string(), payload),
+            NotificationKind::Keyevent => (payload, tail.to_string()),
+        };
+        Some(KeyspaceEvent {
+            kind,
+            db,
+            key,
+            event,
+        })
+    }
+}
+
 /// The subscriptions a [`PubSubConnection`] is tracking, so they can be
 /// replayed after a reconnect.
 ///
@@ -205,6 +286,54 @@ impl PubSubConnection {
             .await?;
         Subscriptions::add(&mut self.subs.patterns, patterns);
         Ok(())
+    }
+
+    /// Subscribe to keyspace notifications for `db`, matching keys against
+    /// `key_pattern` (a glob, for example `*` or `user:*`).
+    ///
+    /// This pattern-subscribes to `__keyspace@<db>__:<key_pattern>`; received
+    /// messages carry the event name as the payload. The server must have
+    /// keyspace notifications enabled (`notify-keyspace-events` must include
+    /// `K` plus the relevant class flags). Decode messages with
+    /// [`KeyspaceEvent::from_message`], or convert the connection with
+    /// [`into_keyspace_events`](Self::into_keyspace_events).
+    pub async fn psubscribe_keyspace(
+        &mut self,
+        db: u32,
+        key_pattern: &str,
+    ) -> Result<(), RedisError> {
+        let pattern = format!("__keyspace@{db}__:{key_pattern}");
+        self.psubscribe(&[pattern.as_str()]).await
+    }
+
+    /// Subscribe to keyevent notifications for `db`, matching events against
+    /// `event_pattern` (a glob, for example `*` or `expired`).
+    ///
+    /// This pattern-subscribes to `__keyevent@<db>__:<event_pattern>`; received
+    /// messages carry the affected key as the payload. The server must have
+    /// keyspace notifications enabled (`notify-keyspace-events` must include
+    /// `E` plus the relevant class flags). Decode messages with
+    /// [`KeyspaceEvent::from_message`], or convert the connection with
+    /// [`into_keyspace_events`](Self::into_keyspace_events).
+    pub async fn psubscribe_keyevent(
+        &mut self,
+        db: u32,
+        event_pattern: &str,
+    ) -> Result<(), RedisError> {
+        let pattern = format!("__keyevent@{db}__:{event_pattern}");
+        self.psubscribe(&[pattern.as_str()]).await
+    }
+
+    /// Consume this connection and yield a [`Stream`] of typed
+    /// [`KeyspaceEvent`] values instead of raw [`PubSubMessage`]s.
+    ///
+    /// Messages whose channel is not a keyspace/keyevent channel are skipped,
+    /// so it is safe to use even if other subscriptions are active. Subscribe
+    /// to the relevant channels first with
+    /// [`psubscribe_keyspace`](Self::psubscribe_keyspace) or
+    /// [`psubscribe_keyevent`](Self::psubscribe_keyevent).
+    pub fn into_keyspace_events(self) -> KeyspaceEventStream {
+        KeyspaceEventStream { inner: self }
     }
 
     /// Unsubscribe from one or more channels.
@@ -603,6 +732,53 @@ impl Stream for PubSubConnection {
     }
 }
 
+/// A [`Stream`] of typed [`KeyspaceEvent`] values, layered over a
+/// [`PubSubConnection`].
+///
+/// Created by [`PubSubConnection::into_keyspace_events`]. Messages received on
+/// channels that are not keyspace/keyevent channels are silently skipped;
+/// transport errors are surfaced as `Err` items.
+pub struct KeyspaceEventStream {
+    inner: PubSubConnection,
+}
+
+impl KeyspaceEventStream {
+    /// Borrow the underlying [`PubSubConnection`], for example to inspect
+    /// [`subscriptions`](PubSubConnection::subscriptions).
+    pub fn get_ref(&self) -> &PubSubConnection {
+        &self.inner
+    }
+
+    /// Mutably borrow the underlying [`PubSubConnection`], for example to add
+    /// or remove subscriptions while streaming.
+    pub fn get_mut(&mut self) -> &mut PubSubConnection {
+        &mut self.inner
+    }
+
+    /// Recover the underlying [`PubSubConnection`].
+    pub fn into_inner(self) -> PubSubConnection {
+        self.inner
+    }
+}
+
+impl Stream for KeyspaceEventStream {
+    type Item = Result<KeyspaceEvent, RedisError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match Pin::new(&mut self.inner).poll_next(cx) {
+                Poll::Ready(Some(Ok(msg))) => match KeyspaceEvent::from_message(&msg) {
+                    Some(event) => return Poll::Ready(Some(Ok(event))),
+                    None => continue, // not a keyspace notification -- skip
+                },
+                Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,5 +929,115 @@ mod tests {
     #[test]
     fn replay_frames_is_empty_when_nothing_subscribed() {
         assert!(Subscriptions::default().replay_frames().is_empty());
+    }
+
+    // -- keyspace notifications --
+
+    /// Build a `pmessage` frame the way Redis delivers a keyspace notification.
+    fn keyspace_pmessage(pattern: &str, channel: &str, payload: &str) -> Frame {
+        array(vec![
+            bulk("pmessage"),
+            bulk(pattern),
+            bulk(channel),
+            bulk(payload),
+        ])
+    }
+
+    #[test]
+    fn keyspace_event_parses_keyspace_channel() {
+        let msg = PubSubConnection::parse_message(keyspace_pmessage(
+            "__keyspace@0__:*",
+            "__keyspace@0__:foo",
+            "set",
+        ))
+        .unwrap()
+        .unwrap();
+        let event = KeyspaceEvent::from_message(&msg).unwrap();
+        assert_eq!(event.kind, NotificationKind::Keyspace);
+        assert_eq!(event.db, 0);
+        assert_eq!(event.key, "foo");
+        assert_eq!(event.event, "set");
+    }
+
+    #[test]
+    fn keyspace_event_parses_keyevent_channel() {
+        let msg = PubSubConnection::parse_message(keyspace_pmessage(
+            "__keyevent@3__:*",
+            "__keyevent@3__:expired",
+            "session:42",
+        ))
+        .unwrap()
+        .unwrap();
+        let event = KeyspaceEvent::from_message(&msg).unwrap();
+        assert_eq!(event.kind, NotificationKind::Keyevent);
+        assert_eq!(event.db, 3);
+        assert_eq!(event.key, "session:42");
+        assert_eq!(event.event, "expired");
+    }
+
+    #[test]
+    fn keyspace_event_preserves_colons_in_key() {
+        // Keys containing the `__:` delimiter's `:` must survive: `split_once`
+        // splits on the first `__:` only.
+        let msg = PubSubConnection::parse_message(keyspace_pmessage(
+            "__keyspace@0__:*",
+            "__keyspace@0__:a:b:c",
+            "del",
+        ))
+        .unwrap()
+        .unwrap();
+        let event = KeyspaceEvent::from_message(&msg).unwrap();
+        assert_eq!(event.key, "a:b:c");
+        assert_eq!(event.event, "del");
+    }
+
+    #[test]
+    fn keyspace_event_returns_none_for_ordinary_channel() {
+        let msg = PubSubConnection::parse_message(array(vec![
+            bulk("message"),
+            bulk("events"),
+            bulk("payload"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert!(KeyspaceEvent::from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn keyspace_event_returns_none_for_non_numeric_db() {
+        let msg = PubSubConnection::parse_message(keyspace_pmessage(
+            "__keyspace@x__:*",
+            "__keyspace@x__:foo",
+            "set",
+        ))
+        .unwrap()
+        .unwrap();
+        assert!(KeyspaceEvent::from_message(&msg).is_none());
+    }
+
+    #[test]
+    fn keyspace_event_stream_filter_skips_non_keyspace() {
+        // KeyspaceEventStream::poll_next maps each PubSubMessage through
+        // KeyspaceEvent::from_message and skips the `None`s: a plain message is
+        // dropped while a keyspace notification is converted.
+        let plain = PubSubConnection::parse_message(array(vec![
+            bulk("message"),
+            bulk("events"),
+            bulk("hi"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert!(KeyspaceEvent::from_message(&plain).is_none());
+
+        let ks = PubSubConnection::parse_message(keyspace_pmessage(
+            "__keyspace@0__:*",
+            "__keyspace@0__:k",
+            "lpush",
+        ))
+        .unwrap()
+        .unwrap();
+        let event = KeyspaceEvent::from_message(&ks).unwrap();
+        assert_eq!(event.event, "lpush");
+        assert_eq!(event.key, "k");
     }
 }

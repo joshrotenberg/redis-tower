@@ -328,7 +328,10 @@ pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
-pub use pubsub::{MessageKind, PubSubConnection, PubSubMessage};
+pub use pubsub::{
+    KeyspaceEvent, KeyspaceEventStream, MessageKind, NotificationKind, PubSubConnection,
+    PubSubMessage,
+};
 pub use reconnect::ResilientConnection;
 pub use reconnect_layer::ReconnectService;
 pub use resilient::ResilientRedisClient;
