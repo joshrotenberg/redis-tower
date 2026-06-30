@@ -36,7 +36,8 @@
 //!
 //! The [`value`] module provides the [`RedisConvert`], [`RedisValueExt`], and
 //! [`FromRedisBytes`] traits for ergonomic conversion between RESP frames and
-//! Rust types.
+//! Rust types. For dynamic commands that return a raw [`Frame`], the
+//! [`FromFrame`] trait decodes a frame straight into a Rust type.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -46,6 +47,7 @@ mod command;
 mod connection;
 mod error;
 mod frame_service;
+mod from_frame;
 mod stream;
 #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
 pub mod tls;
@@ -56,6 +58,7 @@ pub use command::Command;
 pub use connection::{KeepaliveConfig, ProtocolVersion, RedisConnection};
 pub use error::RedisError;
 pub use frame_service::FrameService;
+pub use from_frame::FromFrame;
 pub use stream::RedisStream;
 pub use url::{RedisUrl, parse_redis_url};
 
