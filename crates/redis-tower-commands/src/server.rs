@@ -2750,6 +2750,266 @@ impl Command for ClientCaching {
     }
 }
 
+/// CLIENT GETREDIR
+///
+/// Returns the client ID this connection's client-side-caching invalidation
+/// messages are redirected to. Returns `-1` when tracking is disabled and `0`
+/// when no redirection is set.
+#[derive(Clone)]
+pub struct ClientGetRedir;
+
+impl ClientGetRedir {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientGetRedir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientGetRedir {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("GETREDIR")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT GETREDIR"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// CLIENT HELP
+///
+/// Returns helpful text describing the CLIENT subcommands.
+#[derive(Clone)]
+pub struct ClientHelp;
+
+impl ClientHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClientHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClientHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLIENT"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "CLIENT HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// COMMAND HELP
+///
+/// Returns helpful text describing the COMMAND subcommands.
+#[derive(Clone)]
+pub struct CommandHelp;
+
+impl CommandHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CommandHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for CommandHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("COMMAND"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "COMMAND HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// CONFIG HELP
+///
+/// Returns helpful text describing the CONFIG subcommands.
+#[derive(Clone)]
+pub struct ConfigHelp;
+
+impl ConfigHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ConfigHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ConfigHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CONFIG"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "CONFIG HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// MODULE HELP
+///
+/// Returns helpful text describing the MODULE subcommands.
+#[derive(Clone)]
+pub struct ModuleHelp;
+
+impl ModuleHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ModuleHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ModuleHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MODULE"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MODULE HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// LOLWUT \[VERSION version\]
+///
+/// Returns the Redis version and, depending on the server, a piece of
+/// generative art rendered as text. Primarily a fun diagnostic that also
+/// reports the server version string.
+#[derive(Clone)]
+pub struct Lolwut {
+    version: Option<u32>,
+}
+
+impl Lolwut {
+    pub fn new() -> Self {
+        Self { version: None }
+    }
+
+    /// Request a specific art version via the `VERSION` argument.
+    pub fn version(mut self, version: u32) -> Self {
+        self.version = Some(version);
+        self
+    }
+}
+
+impl Default for Lolwut {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Lolwut {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("LOLWUT")];
+        if let Some(version) = self.version {
+            args.push(bulk("VERSION"));
+            args.push(bulk(version.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // RESP3 returns LOLWUT as a verbatim string.
+            Frame::BulkString(Some(s)) | Frame::VerbatimString(_, s) => {
+                Ok(String::from_utf8_lossy(&s).into_owned())
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk or verbatim string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LOLWUT"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3399,5 +3659,84 @@ mod tests {
         let cmd = ModuleList::new();
         let reply = array(vec![array(vec![bulk("name"), bulk("ReJSON")])]);
         assert_eq!(cmd.parse_response(reply.clone()).unwrap(), reply);
+    }
+
+    // -- CLIENT GETREDIR --
+
+    #[test]
+    fn client_getredir_to_frame() {
+        let cmd = ClientGetRedir::new();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("GETREDIR")])
+        );
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn client_getredir_parse_integer() {
+        let cmd = ClientGetRedir::new();
+        assert_eq!(cmd.parse_response(Frame::Integer(-1)).unwrap(), -1);
+    }
+
+    // -- HELP subcommands --
+
+    #[test]
+    fn help_subcommands_to_frame() {
+        assert_eq!(
+            ClientHelp::new().to_frame(),
+            array(vec![bulk("CLIENT"), bulk("HELP")])
+        );
+        assert_eq!(
+            CommandHelp::new().to_frame(),
+            array(vec![bulk("COMMAND"), bulk("HELP")])
+        );
+        assert_eq!(
+            ConfigHelp::new().to_frame(),
+            array(vec![bulk("CONFIG"), bulk("HELP")])
+        );
+        assert_eq!(
+            ModuleHelp::new().to_frame(),
+            array(vec![bulk("MODULE"), bulk("HELP")])
+        );
+        assert!(ClientHelp::new().idempotent());
+    }
+
+    #[test]
+    fn client_help_parse_lines() {
+        let cmd = ClientHelp::new();
+        let reply = array(vec![bulk("CLIENT <subcommand>"), bulk("ID")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[1][..], b"ID");
+    }
+
+    // -- LOLWUT --
+
+    #[test]
+    fn lolwut_to_frame() {
+        assert_eq!(Lolwut::new().to_frame(), array(vec![bulk("LOLWUT")]));
+        assert_eq!(
+            Lolwut::new().version(5).to_frame(),
+            array(vec![bulk("LOLWUT"), bulk("VERSION"), bulk("5")])
+        );
+    }
+
+    #[test]
+    fn lolwut_parse_strings() {
+        let cmd = Lolwut::new();
+        assert_eq!(
+            cmd.parse_response(Frame::BulkString(Some(Bytes::from("Redis ver. 7.4.0"))))
+                .unwrap(),
+            "Redis ver. 7.4.0"
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::VerbatimString(
+                Bytes::from("txt"),
+                Bytes::from("Redis ver. 8.0.0")
+            ))
+            .unwrap(),
+            "Redis ver. 8.0.0"
+        );
     }
 }

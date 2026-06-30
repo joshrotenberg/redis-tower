@@ -55,6 +55,7 @@ mod cluster;
 mod diagnostics;
 mod geo;
 mod hashes;
+mod help;
 mod hyperloglog;
 mod keys;
 mod lists;

@@ -503,6 +503,44 @@ impl Command for PubSubShardNumSub {
     }
 }
 
+/// PUBSUB HELP
+///
+/// Returns helpful text describing the PUBSUB subcommands.
+#[derive(Clone)]
+pub struct PubSubHelp;
+
+impl PubSubHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for PubSubHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for PubSubHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("PUBSUB"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "PUBSUB HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -708,5 +746,21 @@ mod tests {
         )]);
         let resp = cmd.parse_response(frame).unwrap();
         assert_eq!(resp, vec![(Bytes::from("sc1"), 4)]);
+    }
+
+    #[test]
+    fn pubsub_help_to_frame() {
+        let cmd = PubSubHelp::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("PUBSUB"), bulk("HELP")]));
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn pubsub_help_parse_lines() {
+        let cmd = PubSubHelp::new();
+        let reply = array(vec![bulk("PUBSUB <subcommand>"), bulk("CHANNELS")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[1][..], b"CHANNELS");
     }
 }
