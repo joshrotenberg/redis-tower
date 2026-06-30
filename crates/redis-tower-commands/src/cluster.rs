@@ -600,6 +600,44 @@ impl Command for ClusterKeySlot {
     }
 }
 
+/// CLUSTER HELP
+///
+/// Returns helpful text describing the CLUSTER subcommands.
+#[derive(Clone)]
+pub struct ClusterHelp;
+
+impl ClusterHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ClusterHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ClusterHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("CLUSTER"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "CLUSTER HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,5 +871,21 @@ mod tests {
         let frame = Frame::Integer(14687);
         let resp = cmd.parse_response(frame).unwrap();
         assert_eq!(resp, 14687);
+    }
+
+    #[test]
+    fn cluster_help_to_frame() {
+        let cmd = ClusterHelp::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("CLUSTER"), bulk("HELP")]));
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn cluster_help_parse_lines() {
+        let cmd = ClusterHelp::new();
+        let reply = array(vec![bulk("CLUSTER <subcommand>"), bulk("INFO")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[1][..], b"INFO");
     }
 }

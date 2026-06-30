@@ -579,6 +579,44 @@ impl Command for AclDryRun {
     }
 }
 
+/// ACL HELP
+///
+/// Returns helpful text describing the ACL subcommands.
+#[derive(Clone)]
+pub struct AclHelp;
+
+impl AclHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AclHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for AclHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("ACL"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "ACL HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -775,5 +813,21 @@ mod tests {
         let cmd = AclLogReset::new();
         let frame = Frame::SimpleString(Bytes::from("OK"));
         cmd.parse_response(frame).unwrap();
+    }
+
+    #[test]
+    fn acl_help_to_frame() {
+        let cmd = AclHelp::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("HELP")]));
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn acl_help_parse_lines() {
+        let cmd = AclHelp::new();
+        let reply = array(vec![bulk("ACL <subcommand>"), bulk("WHOAMI")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[1][..], b"WHOAMI");
     }
 }

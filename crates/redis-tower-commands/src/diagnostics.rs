@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -404,6 +405,207 @@ impl Command for LatencyReset {
     }
 }
 
+/// LATENCY GRAPH event
+///
+/// Returns a latency graph for the given event, rendered as ASCII art text.
+#[derive(Clone)]
+pub struct LatencyGraph {
+    event: String,
+}
+
+impl LatencyGraph {
+    pub fn new(event: impl Into<String>) -> Self {
+        Self {
+            event: event.into(),
+        }
+    }
+}
+
+impl Command for LatencyGraph {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("LATENCY"), bulk("GRAPH"), bulk(self.event.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            // RESP3 may return the graph as a verbatim string.
+            Frame::BulkString(Some(s)) | Frame::VerbatimString(_, s) => {
+                Ok(String::from_utf8_lossy(&s).into_owned())
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk or verbatim string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LATENCY GRAPH"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HELP subcommands
+// ---------------------------------------------------------------------------
+
+/// MEMORY HELP
+///
+/// Returns helpful text describing the MEMORY subcommands.
+#[derive(Clone)]
+pub struct MemoryHelp;
+
+impl MemoryHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MEMORY"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MEMORY HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// SLOWLOG HELP
+///
+/// Returns helpful text describing the SLOWLOG subcommands.
+#[derive(Clone)]
+pub struct SlowlogHelp;
+
+impl SlowlogHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for SlowlogHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for SlowlogHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("SLOWLOG"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "SLOWLOG HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// LATENCY HELP
+///
+/// Returns helpful text describing the LATENCY subcommands.
+#[derive(Clone)]
+pub struct LatencyHelp;
+
+impl LatencyHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LatencyHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for LatencyHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("LATENCY"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "LATENCY HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// DEBUG HELP
+///
+/// Returns helpful text describing the DEBUG subcommands.
+#[derive(Clone)]
+pub struct DebugHelp;
+
+impl DebugHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for DebugHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for DebugHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("DEBUG"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "DEBUG HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +629,54 @@ mod tests {
         );
         let out = cmd.parse_response(frame).unwrap();
         assert!(out.contains("issues"));
+    }
+
+    #[test]
+    fn latency_graph_to_frame() {
+        let cmd = LatencyGraph::new("command");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("LATENCY"), bulk("GRAPH"), bulk("command")])
+        );
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn latency_graph_parse_string() {
+        let cmd = LatencyGraph::new("command");
+        let out = cmd
+            .parse_response(Frame::BulkString(Some(Bytes::from("command - high . low"))))
+            .unwrap();
+        assert!(out.contains("command"));
+    }
+
+    #[test]
+    fn help_subcommands_to_frame() {
+        assert_eq!(
+            MemoryHelp::new().to_frame(),
+            array(vec![bulk("MEMORY"), bulk("HELP")])
+        );
+        assert_eq!(
+            SlowlogHelp::new().to_frame(),
+            array(vec![bulk("SLOWLOG"), bulk("HELP")])
+        );
+        assert_eq!(
+            LatencyHelp::new().to_frame(),
+            array(vec![bulk("LATENCY"), bulk("HELP")])
+        );
+        assert_eq!(
+            DebugHelp::new().to_frame(),
+            array(vec![bulk("DEBUG"), bulk("HELP")])
+        );
+        assert!(MemoryHelp::new().idempotent());
+    }
+
+    #[test]
+    fn memory_help_parse_lines() {
+        let cmd = MemoryHelp::new();
+        let reply = array(vec![bulk("MEMORY <subcommand>"), bulk("USAGE <key>")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[1][..], b"USAGE <key>");
     }
 }

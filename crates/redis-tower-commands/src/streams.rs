@@ -2193,6 +2193,82 @@ impl Command for XSetId {
     }
 }
 
+/// XINFO HELP
+///
+/// Returns helpful text describing the XINFO subcommands.
+#[derive(Clone)]
+pub struct XInfoHelp;
+
+impl XInfoHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for XInfoHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for XInfoHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("XINFO"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "XINFO HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// XGROUP HELP
+///
+/// Returns helpful text describing the XGROUP subcommands.
+#[derive(Clone)]
+pub struct XGroupHelp;
+
+impl XGroupHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for XGroupHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for XGroupHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("XGROUP"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "XGROUP HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2698,5 +2774,28 @@ mod tests {
         let cmd = XDelEx::new("s", vec!["1-1"]);
         let frame = array(vec![Frame::Integer(1)]);
         assert_eq!(cmd.parse_response(frame).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn stream_help_subcommands_to_frame() {
+        assert_eq!(
+            XInfoHelp::new().to_frame(),
+            array(vec![bulk("XINFO"), bulk("HELP")])
+        );
+        assert_eq!(
+            XGroupHelp::new().to_frame(),
+            array(vec![bulk("XGROUP"), bulk("HELP")])
+        );
+        assert!(XInfoHelp::new().idempotent());
+        assert!(XGroupHelp::new().idempotent());
+    }
+
+    #[test]
+    fn xinfo_help_parse_lines() {
+        let cmd = XInfoHelp::new();
+        let reply = array(vec![bulk("XINFO <subcommand>"), bulk("STREAM <key>")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[0][..], b"XINFO <subcommand>");
     }
 }

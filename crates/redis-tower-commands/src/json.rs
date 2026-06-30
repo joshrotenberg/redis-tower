@@ -1136,6 +1136,112 @@ impl Command for JsonArrTrim {
     }
 }
 
+/// JSON.FORGET key \[path\]
+///
+/// An alias for [`JsonDel`]. Deletes a value at `path` in the JSON document
+/// stored at `key` and returns the number of paths deleted.
+#[derive(Clone)]
+pub struct JsonForget {
+    key: String,
+    path: Option<String>,
+}
+
+impl JsonForget {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            path: None,
+        }
+    }
+
+    /// Set the path to delete. If omitted, the entire key is deleted.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
+impl Command for JsonForget {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("JSON.FORGET"), bulk(self.key.as_str())];
+        if let Some(path) = &self.path {
+            args.push(bulk(path.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.FORGET"
+    }
+}
+
+/// JSON.DEBUG MEMORY key \[path\]
+///
+/// Reports the memory usage in bytes of a value in the JSON document stored at
+/// `key`. With no path the size of the whole document is returned.
+#[derive(Clone)]
+pub struct JsonDebugMemory {
+    key: String,
+    path: Option<String>,
+}
+
+impl JsonDebugMemory {
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            path: None,
+        }
+    }
+
+    /// Report memory for the value at a specific (legacy) path.
+    pub fn path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+}
+
+impl Command for JsonDebugMemory {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk(self.key.as_str())];
+        if let Some(path) = &self.path {
+            args.push(bulk(path.as_str()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.DEBUG MEMORY"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,5 +1336,43 @@ mod tests {
                 bulk("10"),
             ])
         );
+    }
+
+    #[test]
+    fn json_forget_to_frame() {
+        let cmd = JsonForget::new("doc").path("$.a");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("JSON.FORGET"), bulk("doc"), bulk("$.a")])
+        );
+        assert_eq!(
+            JsonForget::new("doc").to_frame(),
+            array(vec![bulk("JSON.FORGET"), bulk("doc")])
+        );
+    }
+
+    #[test]
+    fn json_forget_parse_integer() {
+        let cmd = JsonForget::new("doc");
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    #[test]
+    fn json_debug_memory_to_frame() {
+        assert_eq!(
+            JsonDebugMemory::new("doc").to_frame(),
+            array(vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk("doc")])
+        );
+        assert_eq!(
+            JsonDebugMemory::new("doc").path(".").to_frame(),
+            array(vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk("doc"), bulk(".")])
+        );
+    }
+
+    #[test]
+    fn json_debug_memory_parse_integer() {
+        let cmd = JsonDebugMemory::new("doc");
+        assert_eq!(cmd.parse_response(Frame::Integer(64)).unwrap(), 64);
+        assert!(cmd.idempotent());
     }
 }

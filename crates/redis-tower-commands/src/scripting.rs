@@ -1121,6 +1121,158 @@ impl Command for FunctionStats {
     }
 }
 
+/// FUNCTION HELP
+///
+/// Returns helpful text describing the FUNCTION subcommands.
+#[derive(Clone)]
+pub struct FunctionHelp;
+
+impl FunctionHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FunctionHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for FunctionHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("FUNCTION"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "FUNCTION HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// SCRIPT HELP
+///
+/// Returns helpful text describing the SCRIPT subcommands.
+#[derive(Clone)]
+pub struct ScriptHelp;
+
+impl ScriptHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for ScriptHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for ScriptHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("SCRIPT"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "SCRIPT HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// Debug mode for [`ScriptDebug`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptDebugMode {
+    /// Enable non-blocking asynchronous debugging of Lua scripts (YES).
+    Yes,
+    /// Enable blocking synchronous debugging of Lua scripts (SYNC).
+    Sync,
+    /// Disable script debugging (NO).
+    No,
+}
+
+impl ScriptDebugMode {
+    fn as_arg(self) -> &'static str {
+        match self {
+            ScriptDebugMode::Yes => "YES",
+            ScriptDebugMode::Sync => "SYNC",
+            ScriptDebugMode::No => "NO",
+        }
+    }
+}
+
+/// SCRIPT DEBUG YES|SYNC|NO
+///
+/// Sets the debug mode for subsequent EVAL executions on this connection.
+#[derive(Clone)]
+pub struct ScriptDebug {
+    mode: ScriptDebugMode,
+}
+
+impl ScriptDebug {
+    pub fn new(mode: ScriptDebugMode) -> Self {
+        Self { mode }
+    }
+
+    /// Enable non-blocking asynchronous debugging (`SCRIPT DEBUG YES`).
+    pub fn yes() -> Self {
+        Self::new(ScriptDebugMode::Yes)
+    }
+
+    /// Enable blocking synchronous debugging (`SCRIPT DEBUG SYNC`).
+    pub fn sync() -> Self {
+        Self::new(ScriptDebugMode::Sync)
+    }
+
+    /// Disable script debugging (`SCRIPT DEBUG NO`).
+    pub fn no() -> Self {
+        Self::new(ScriptDebugMode::No)
+    }
+}
+
+impl Command for ScriptDebug {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("SCRIPT"),
+            bulk("DEBUG"),
+            bulk(self.mode.as_arg()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "SCRIPT DEBUG"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,5 +1645,52 @@ mod tests {
         assert_eq!(out[1], Frame::Null);
         assert_eq!(out[2], bulk("engines"));
         assert_eq!(out[3], Frame::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn help_subcommands_to_frame() {
+        assert_eq!(
+            FunctionHelp::new().to_frame(),
+            array(vec![bulk("FUNCTION"), bulk("HELP")])
+        );
+        assert_eq!(
+            ScriptHelp::new().to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("HELP")])
+        );
+        assert!(FunctionHelp::new().idempotent());
+        assert!(ScriptHelp::new().idempotent());
+    }
+
+    #[test]
+    fn script_help_parse_lines() {
+        let cmd = ScriptHelp::new();
+        let reply = array(vec![bulk("SCRIPT <subcommand>"), bulk("LOAD <script>")]);
+        let lines = cmd.parse_response(reply).unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(&lines[0][..], b"SCRIPT <subcommand>");
+    }
+
+    #[test]
+    fn script_debug_to_frame() {
+        assert_eq!(
+            ScriptDebug::yes().to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("DEBUG"), bulk("YES")])
+        );
+        assert_eq!(
+            ScriptDebug::sync().to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("DEBUG"), bulk("SYNC")])
+        );
+        assert_eq!(
+            ScriptDebug::no().to_frame(),
+            array(vec![bulk("SCRIPT"), bulk("DEBUG"), bulk("NO")])
+        );
+    }
+
+    #[test]
+    fn script_debug_parse_ok() {
+        ScriptDebug::no()
+            .parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(ScriptDebug::no().parse_response(Frame::Integer(1)).is_err());
     }
 }

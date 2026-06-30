@@ -1264,24 +1264,7 @@ impl Command for ObjectHelp {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) => frames
-                .into_iter()
-                .map(|f| match f {
-                    Frame::BulkString(Some(data)) => Ok(data),
-                    // Redis may return OBJECT HELP lines as SimpleString frames.
-                    Frame::SimpleString(data) => Ok(data),
-                    other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string or simple string",
-                        actual: format!("{other:?}"),
-                    }),
-                })
-                .collect(),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            }),
-        }
+        crate::help::parse_help_lines(frame)
     }
 
     fn name(&self) -> &str {
