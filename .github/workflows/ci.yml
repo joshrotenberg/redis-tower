@@ -134,7 +134,7 @@ jobs:
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
 
       - name: Run sentinel integration tests
-        run: cargo test -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored --test-threads=1
+        run: cargo test -p redis-tower-sentinel --test 'sentinel_*' --all-features -- --ignored --test-threads=1
 
   coverage:
     name: Coverage
@@ -193,7 +193,7 @@ jobs:
         run: cargo llvm-cov --no-report -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
 
       - name: Collect sentinel integration coverage
-        run: cargo llvm-cov --no-report -p redis-tower-sentinel --test sentinel_integration --all-features -- --ignored --test-threads=1
+        run: cargo llvm-cov --no-report -p redis-tower-sentinel --test 'sentinel_*' --all-features -- --ignored --test-threads=1
 
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
