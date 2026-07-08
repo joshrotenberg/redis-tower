@@ -106,13 +106,13 @@ Must run **single-threaded** (`-- --ignored`, no `--test-threads`). Tests are `#
 
 ### Sentinel tests (`crates/redis-tower-sentinel/tests/`)
 
-Starts master on **6390**, 2 replicas on **6391-6392**, 3 sentinels on **26389-26391**, quorum 2.
+Two binaries. `sentinel_integration.rs` (healthy suite) starts master on **6390**, 2 replicas on **6391-6392**, 3 sentinels on **26389-26391**, quorum 2. `sentinel_failover.rs` (destructive suite) starts its own topology on a separate port block: master **6393**, replicas **6394-6395**, sentinels **26392-26394**.
 
 ```bash
-cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored
+cargo test -p redis-tower-sentinel --test 'sentinel_*' -- --ignored
 ```
 
-Also single-threaded. The sentinel topology is a shared `OnceCell` -- the `sentinel_failover_simulation` test kills the master (kills `pids()[0]`), which degrades the topology for subsequent tests. Run it last or in isolation.
+Also single-threaded. The healthy suite shares a topology via `OnceCell` but never kills it, so its tests are robust to reordering and parallel execution. The destructive phases (kill a sentinel, fail the master over, reconnect afterward) live in `sentinel_failover.rs` as a single orchestrating `sentinel_failover_sequence` test on the separate port block, so they no longer degrade the healthy topology and their internal order is fixed regardless of how the runner schedules tests (#509).
 
 ### `command_tests!` macro (`redis-test-harness`)
 
@@ -162,7 +162,7 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 - **`BLMove` timeout response** -- Redis 7.4+ returns `Frame::Array(None)` on a blocking timeout for BLMOVE (not `Frame::Null`). Fixed in `blocking.rs`.
 - **Let-chains** -- MSRV is 1.88; clippy will suggest let-chains and they are valid.
 - **`FunctionFlush` ordering** -- global operation; tests using it should run with `--test-threads=1` to avoid interfering with function-load tests.
-- **Sentinel failover sim is destructive** -- `sentinel_failover_simulation` kills the shared topology. Run it last or alone; `sentinel_reconnects_after_failover` creates a fresh connection and works correctly after.
+- **Sentinel failover sim is destructive** -- the failover phases kill processes in their topology (a sentinel, then the master). As of #509 they live in their own binary (`sentinel_failover.rs`) on a separate port block, wrapped in a single `sentinel_failover_sequence` test that fixes their order, so they no longer degrade the healthy `sentinel_integration` suite and the sentinel tests are robust to parallel and reordered execution.
 - **`idempotent()` on `Command` trait** -- defaults to `false`. Read-only commands override to `true`. `ReconnectService` will not retry non-idempotent commands on `ConnectionClosed` to prevent silent data duplication.
 - **RESP3 changes response frame shapes** -- as of #478 `connect()`/`connect_url` (and siblings) negotiate RESP3 by default (Auto + `HELLO 3`, RESP2 fallback). RESP3 swaps several wire types vs RESP2, so any command's `parse_response` that touches them must accept BOTH: map-shaped replies arrive as `Frame::Map(pairs)` instead of a flat `Frame::Array` (FUNCTION STATS, COMMAND DOCS, XINFO STREAM/GROUPS/CONSUMERS, XREAD/XREADGROUP), and human-readable text arrives as `Frame::VerbatimString(format, data)` instead of `Frame::BulkString` (INFO, CLIENT INFO, CLIENT LIST, MEMORY DOCTOR, LOLWUT). The fix pattern is to add the RESP3 arm alongside the RESP2 one (flatten maps to the `[k,v,...]` array shape; treat verbatim like bulk). `standalone_cmd` in `integration.rs` is pinned to RESP2 via `connect_with_protocol(.., Resp2)` so the suite still exercises both wire formats; every other standalone test runs RESP3 through `conn()`.
 
