@@ -222,6 +222,17 @@ impl RedisConnection {
     /// TCP connect + CLIENT SETINFO, WITHOUT protocol negotiation. The building
     /// block for the public connectors (which add RESP3 negotiation) and for
     /// `connect_with_protocol` (which negotiates explicitly).
+    ///
+    /// Instrumented with a `redis.connect` span so every plain-TCP connector
+    /// (`connect`, `connect_with_keepalive`, `connect_with_protocol`, and
+    /// `connect_resp3`, which all funnel through here) emits exactly one
+    /// connection-lifecycle span carrying the target address.
+    #[tracing::instrument(
+        name = "redis.connect",
+        skip_all,
+        fields(server.address = %addr, tls = false),
+        err
+    )]
     async fn connect_raw(addr: &str, keepalive: &KeepaliveConfig) -> Result<Self, RedisError> {
         let stream = TcpStream::connect(addr)
             .await
@@ -254,6 +265,12 @@ impl RedisConnection {
     /// let conn = RedisConnection::connect_with_timeout("127.0.0.1:6379", Duration::from_secs(3)).await;
     /// # });
     /// ```
+    #[tracing::instrument(
+        name = "redis.connect",
+        skip_all,
+        fields(server.address = %addr, tls = false),
+        err
+    )]
     pub async fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<Self, RedisError> {
         let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
             Ok(Ok(s)) => s,
@@ -302,6 +319,12 @@ impl RedisConnection {
         docsrs,
         doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
     )]
+    #[tracing::instrument(
+        name = "redis.connect",
+        skip_all,
+        fields(server.address = %addr, server.tls.hostname = %hostname, tls = true),
+        err
+    )]
     pub async fn connect_tls_with_keepalive(
         addr: &str,
         hostname: &str,
@@ -338,6 +361,12 @@ impl RedisConnection {
     #[cfg_attr(
         docsrs,
         doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
+    #[tracing::instrument(
+        name = "redis.connect",
+        skip_all,
+        fields(server.address = %addr, server.tls.hostname = %hostname, tls = true),
+        err
     )]
     pub async fn connect_tls_with_timeout(
         addr: &str,
@@ -1060,5 +1089,66 @@ mod tests {
         };
         let _rx = conn.subscribe_pushes();
         assert!(conn.push_tx.is_some());
+    }
+
+    // -- redis.connect span --
+
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    /// A tracing layer that records each new span as `"<name> field=value ..."`.
+    #[derive(Clone, Default)]
+    struct SpanCapture {
+        spans: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldCollector(String);
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl<S> Layer<S> for SpanCapture
+    where
+        S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            _id: &tracing::span::Id,
+            _ctx: Context<'_, S>,
+        ) {
+            let mut collector = FieldCollector(String::new());
+            attrs.record(&mut collector);
+            self.spans
+                .lock()
+                .unwrap()
+                .push(format!("{}{}", attrs.metadata().name(), collector.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_emits_redis_connect_span() {
+        let capture = SpanCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Port 1 is closed, so the connect fails fast. The `redis.connect` span
+        // is still created around the attempt, which is what we assert on.
+        let _ = RedisConnection::connect("127.0.0.1:1").await;
+
+        let spans = capture.spans.lock().unwrap();
+        assert!(
+            spans.iter().any(|s| {
+                s.starts_with("redis.connect")
+                    && s.contains("server.address")
+                    && s.contains("127.0.0.1:1")
+                    && s.contains("tls=false")
+            }),
+            "expected a redis.connect span with server.address and tls=false, got: {spans:?}"
+        );
     }
 }

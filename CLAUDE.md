@@ -48,9 +48,9 @@ multiplexed clients (the only crate that sees all of them).
 ## Middleware Layers (Tower)
 
 All live in `redis-tower/src/`:
-- `reconnect_layer.rs` / `reconnect.rs` -- `ConnectionFactory`-based reconnect with exponential backoff + jitter
+- `reconnect_layer.rs` / `reconnect.rs` -- `ConnectionFactory`-based reconnect with exponential backoff + jitter; the `ResilientConnection` success log carries `elapsed_ms` (total time from connection loss to reconnect, threaded through every attempt)
 - `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls; bounded queue with real back-pressure (`poll_ready` awaits capacity via `PollSender`), opt-in `QueueFull` load-shedding (`AutoPipelineConfig::shed_load_on_full`)
-- `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`)
+- `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`). Separately, `redis-tower-core`'s connectors emit a `redis.connect` span (fields `server.address`, `tls`, plus `server.tls.hostname` for TLS) around every transport connect, so connection setup is observable even without the command layer.
 - `metrics_layer.rs` -- `MetricsRecorder` hook with `ErrorKind` enum (7 variants, not just `bool`)
 - `cache_layer.rs` / `caching.rs` -- client-side caching
 - `circuit_breaker.rs` -- `CircuitBreakerLayer`: three-state machine, Arc-shared across clones
