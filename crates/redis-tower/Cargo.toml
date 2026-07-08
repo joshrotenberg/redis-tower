@@ -48,7 +48,7 @@ tower-layer = { workspace = true }
 rand = "0.9"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true, features = ["buffer", "timeout"] }
 bytes = { workspace = true }
@@ -56,6 +56,7 @@ redis-tower-protocol = { workspace = true }
 redis-tower-test = { path = "../redis-test-harness" }
 redis-server-wrapper = { workspace = true }
 criterion = { version = "0.5", features = ["async_tokio"] }
+tracing-subscriber = { workspace = true }
 
 [[bench]]
 name = "commands"

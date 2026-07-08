@@ -35,7 +35,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use redis_tower_core::{Command, RedisConnection, RedisError};
 
@@ -314,10 +314,15 @@ pub(crate) enum ConnState {
     WaitingToReconnect {
         attempt: usize,
         sleep: Pin<Box<tokio::time::Sleep>>,
+        /// When the connection was first lost, carried across attempts so the
+        /// success log can report the total reconnection duration.
+        started: Instant,
     },
     Reconnecting {
         attempt: usize,
         future: ReconnectFuture,
+        /// See `WaitingToReconnect::started`; carried across the transition.
+        started: Instant,
     },
     Failed,
 }
@@ -493,7 +498,11 @@ impl ResilientConnection {
         }
     }
 
-    fn trigger_reconnect(&mut self, attempt: usize) {
+    /// Schedule the next reconnect attempt. `started` marks when the connection
+    /// was first lost; it is threaded through every attempt so the eventual
+    /// success log can report the total reconnection duration rather than the
+    /// duration of the final attempt alone.
+    fn trigger_reconnect(&mut self, attempt: usize, started: Instant) {
         if let Some(max) = self.config.max_retries
             && attempt > max
         {
@@ -505,6 +514,7 @@ impl ResilientConnection {
         self.state = ConnState::WaitingToReconnect {
             attempt,
             sleep: Box::pin(tokio::time::sleep(delay)),
+            started,
         };
     }
 }
@@ -523,7 +533,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
         if self.needs_reconnect.swap(false, Ordering::Acquire)
             && matches!(self.state, ConnState::Connected(_))
         {
-            self.trigger_reconnect(0);
+            self.trigger_reconnect(0, Instant::now());
         }
 
         loop {
@@ -535,9 +545,14 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                         last_error: Box::new(RedisError::ConnectionClosed),
                     }));
                 }
-                ConnState::WaitingToReconnect { attempt, sleep } => match sleep.as_mut().poll(cx) {
+                ConnState::WaitingToReconnect {
+                    attempt,
+                    sleep,
+                    started,
+                } => match sleep.as_mut().poll(cx) {
                     Poll::Ready(()) => {
                         let attempt = *attempt;
+                        let started = *started;
                         let connect_timeout = self.config.connect_timeout;
                         let future: ReconnectFuture = if let Some(t) = connect_timeout {
                             let inner = self.factory.connect();
@@ -549,15 +564,24 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                         } else {
                             self.factory.connect()
                         };
-                        self.state = ConnState::Reconnecting { attempt, future };
+                        self.state = ConnState::Reconnecting {
+                            attempt,
+                            future,
+                            started,
+                        };
                     }
                     Poll::Pending => return Poll::Pending,
                 },
-                ConnState::Reconnecting { attempt, future } => match future.as_mut().poll(cx) {
+                ConnState::Reconnecting {
+                    attempt,
+                    future,
+                    started,
+                } => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(conn)) => {
                         let attempt = *attempt;
+                        let elapsed_ms = started.elapsed().as_millis();
                         self.state = ConnState::Connected(conn);
-                        tracing::info!(attempt, "redis: reconnected successfully");
+                        tracing::info!(attempt, elapsed_ms, "redis: reconnected successfully");
                         if attempt > 0
                             && let Some(ref cb) = self.on_reconnect
                         {
@@ -570,8 +594,9 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                     }
                     Poll::Ready(Err(e)) => {
                         let attempt = *attempt;
+                        let started = *started;
                         tracing::warn!(attempt, error = %e, "redis: reconnect attempt failed");
-                        self.trigger_reconnect(attempt + 1);
+                        self.trigger_reconnect(attempt + 1, started);
                     }
                     Poll::Pending => return Poll::Pending,
                 },
@@ -704,5 +729,83 @@ mod tests {
         let attempt = 9999usize;
         let should_fail = config.max_retries.map(|max| attempt > max).unwrap_or(false);
         assert!(!should_fail, "max_retries: None should never fail");
+    }
+
+    // -- reconnect success log includes duration --
+
+    use std::future::poll_fn;
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+
+    /// A tracing layer that records each event's fields as `"field=value ..."`.
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldCollector(String);
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={:?}", field.name(), value));
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for EventCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut collector = FieldCollector(String::new());
+            event.record(&mut collector);
+            self.events.lock().unwrap().push(collector.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_success_log_includes_duration() {
+        use tower_service::Service;
+
+        // A local listener whose accept loop keeps the server side of each
+        // loopback connection alive. The factory just needs `connect()` to
+        // succeed; no Redis protocol is exchanged.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+
+        let factory = move || async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|e| RedisError::connection(addr.to_string(), e))?;
+            Ok::<_, RedisError>(RedisConnection::from_stream(
+                redis_tower_core::RedisStream::Tcp(stream),
+            ))
+        };
+
+        let config = ReconnectConfig {
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(1),
+            jitter: false,
+            ..Default::default()
+        };
+        let mut conn = ResilientConnection::new(factory, config).await.unwrap();
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // Force a reconnect cycle and drive the state machine to completion.
+        conn.needs_reconnect.store(true, Ordering::Release);
+        poll_fn(|cx| {
+            <ResilientConnection as Service<redis_tower_commands::Ping>>::poll_ready(&mut conn, cx)
+        })
+        .await
+        .expect("reconnect should succeed against the loopback listener");
+
+        let events = capture.events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| e.contains("reconnected successfully") && e.contains("elapsed_ms")),
+            "expected a reconnect success log carrying elapsed_ms, got: {events:?}"
+        );
     }
 }
