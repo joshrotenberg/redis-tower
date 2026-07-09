@@ -926,7 +926,7 @@ pub(crate) fn tls_feature_required() -> RedisError {
 
 /// Remap all node addresses in a topology to use a specific host.
 pub(crate) fn remap_topology(topology: &mut ClusterTopology, host: &str) {
-    for range in &mut topology.slot_ranges {
+    for range in topology.slot_ranges_mut() {
         range.master.host = host.to_string();
         for replica in &mut range.replicas {
             replica.host = host.to_string();
@@ -942,7 +942,7 @@ pub(crate) fn remap_topology_with_map(
     topology: &mut ClusterTopology,
     map: &HashMap<String, String>,
 ) {
-    for range in &mut topology.slot_ranges {
+    for range in topology.slot_ranges_mut() {
         remap_node_addr(&mut range.master, map);
         for replica in &mut range.replicas {
             remap_node_addr(replica, map);
@@ -1063,43 +1063,41 @@ mod tests {
     // -- remap_topology tests --
 
     fn make_topology() -> ClusterTopology {
-        ClusterTopology {
-            slot_ranges: vec![
-                SlotRange {
-                    start: 0,
-                    end: 5460,
-                    master: NodeAddr {
-                        host: "10.0.0.1".to_string(),
-                        port: 7000,
-                    },
-                    replicas: vec![NodeAddr {
-                        host: "10.0.0.4".to_string(),
-                        port: 7003,
-                    }],
+        ClusterTopology::new(vec![
+            SlotRange {
+                start: 0,
+                end: 5460,
+                master: NodeAddr {
+                    host: "10.0.0.1".to_string(),
+                    port: 7000,
                 },
-                SlotRange {
-                    start: 5461,
-                    end: 10922,
-                    master: NodeAddr {
-                        host: "10.0.0.2".to_string(),
-                        port: 7001,
-                    },
-                    replicas: vec![],
+                replicas: vec![NodeAddr {
+                    host: "10.0.0.4".to_string(),
+                    port: 7003,
+                }],
+            },
+            SlotRange {
+                start: 5461,
+                end: 10922,
+                master: NodeAddr {
+                    host: "10.0.0.2".to_string(),
+                    port: 7001,
                 },
-                SlotRange {
-                    start: 10923,
-                    end: 16383,
-                    master: NodeAddr {
-                        host: "10.0.0.3".to_string(),
-                        port: 7002,
-                    },
-                    replicas: vec![NodeAddr {
-                        host: "10.0.0.5".to_string(),
-                        port: 7004,
-                    }],
+                replicas: vec![],
+            },
+            SlotRange {
+                start: 10923,
+                end: 16383,
+                master: NodeAddr {
+                    host: "10.0.0.3".to_string(),
+                    port: 7002,
                 },
-            ],
-        }
+                replicas: vec![NodeAddr {
+                    host: "10.0.0.5".to_string(),
+                    port: 7004,
+                }],
+            },
+        ])
     }
 
     #[test]
@@ -1107,7 +1105,7 @@ mod tests {
         let mut topo = make_topology();
         remap_topology(&mut topo, "127.0.0.1");
 
-        for range in &topo.slot_ranges {
+        for range in topo.slot_ranges() {
             assert_eq!(range.master.host, "127.0.0.1");
             for replica in &range.replicas {
                 assert_eq!(replica.host, "127.0.0.1");
@@ -1120,9 +1118,9 @@ mod tests {
         let mut topo = make_topology();
         remap_topology(&mut topo, "localhost");
 
-        assert_eq!(topo.slot_ranges[0].master.port, 7000);
-        assert_eq!(topo.slot_ranges[1].master.port, 7001);
-        assert_eq!(topo.slot_ranges[2].master.port, 7002);
+        assert_eq!(topo.slot_ranges()[0].master.port, 7000);
+        assert_eq!(topo.slot_ranges()[1].master.port, 7001);
+        assert_eq!(topo.slot_ranges()[2].master.port, 7002);
     }
 
     // -- remap_addr tests --
@@ -1240,14 +1238,14 @@ mod tests {
         remap_topology_with_map(&mut topo, &map);
 
         // Matched master is remapped.
-        assert_eq!(topo.slot_ranges[0].master.host, "ext1.example.com");
-        assert_eq!(topo.slot_ranges[0].master.port, 17000);
+        assert_eq!(topo.slot_ranges()[0].master.host, "ext1.example.com");
+        assert_eq!(topo.slot_ranges()[0].master.port, 17000);
         // Matched replica is remapped.
-        assert_eq!(topo.slot_ranges[0].replicas[0].host, "ext4.example.com");
-        assert_eq!(topo.slot_ranges[0].replicas[0].port, 17003);
+        assert_eq!(topo.slot_ranges()[0].replicas[0].host, "ext4.example.com");
+        assert_eq!(topo.slot_ranges()[0].replicas[0].port, 17003);
         // Unmatched addresses are unchanged.
-        assert_eq!(topo.slot_ranges[1].master.host, "10.0.0.2");
-        assert_eq!(topo.slot_ranges[1].master.port, 7001);
+        assert_eq!(topo.slot_ranges()[1].master.host, "10.0.0.2");
+        assert_eq!(topo.slot_ranges()[1].master.port, 7001);
     }
 
     // -- route_command tests --
@@ -1255,28 +1253,26 @@ mod tests {
     #[test]
     fn route_to_correct_master() {
         // Verify topology lookup routes to the right master based on slot.
-        let topo = ClusterTopology {
-            slot_ranges: vec![
-                SlotRange {
-                    start: 0,
-                    end: 5460,
-                    master: NodeAddr {
-                        host: "127.0.0.1".to_string(),
-                        port: 7000,
-                    },
-                    replicas: vec![],
+        let topo = ClusterTopology::new(vec![
+            SlotRange {
+                start: 0,
+                end: 5460,
+                master: NodeAddr {
+                    host: "127.0.0.1".to_string(),
+                    port: 7000,
                 },
-                SlotRange {
-                    start: 5461,
-                    end: 16383,
-                    master: NodeAddr {
-                        host: "127.0.0.1".to_string(),
-                        port: 7001,
-                    },
-                    replicas: vec![],
+                replicas: vec![],
+            },
+            SlotRange {
+                start: 5461,
+                end: 16383,
+                master: NodeAddr {
+                    host: "127.0.0.1".to_string(),
+                    port: 7001,
                 },
-            ],
-        };
+                replicas: vec![],
+            },
+        ]);
 
         // We need real entries in the map for routing to match.
         // Use a trick: insert with empty connections isn't possible,

@@ -41,8 +41,18 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         _ => return None,
     };
 
-    let upper: Vec<u8> = cmd_name.iter().map(|b| b.to_ascii_uppercase()).collect();
-    match upper.as_slice() {
+    // Uppercase into a stack buffer to avoid a heap allocation on every routed
+    // command. Every command matched below fits in this buffer; a longer name
+    // can only fall through to the default arm (key at argv[1]), so route it
+    // there directly rather than allocating to compare a name that cannot match.
+    let mut buf = [0u8; 24];
+    if cmd_name.len() > buf.len() {
+        return as_key(items.get(1)?);
+    }
+    for (i, b) in cmd_name.iter().enumerate() {
+        buf[i] = b.to_ascii_uppercase();
+    }
+    match &buf[..cmd_name.len()] {
         // Keyless commands route to the default node.
         //
         // MULTI/EXEC/DISCARD are keyless and route to the default node, but the
