@@ -190,6 +190,37 @@ async fn mux_cluster_refresh_topology() {
     assert_eq!(topo.master_addrs().len(), 3);
 }
 
+/// A clone keeps working after another clone calls `shutdown()`; only the last
+/// live clone actually drains the per-node workers.
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_shutdown_drains_and_last_clone_wins() {
+    let cluster = mux_cluster_conn().await;
+    let clone = cluster.clone();
+
+    // Run a command so the per-node workers are live, then shut down one clone.
+    cluster
+        .execute(Set::new("mux_cluster_shutdown", "v"))
+        .await
+        .unwrap();
+
+    // `cluster` is not the last clone, so this returns immediately and leaves
+    // the shared workers running for `clone`.
+    cluster.shutdown().await;
+    let v = clone
+        .execute(Get::new("mux_cluster_shutdown"))
+        .await
+        .unwrap();
+    assert_eq!(v, Some(Bytes::from("v")));
+    clone
+        .execute(Del::new("mux_cluster_shutdown"))
+        .await
+        .unwrap();
+
+    // The last clone drains the workers cleanly.
+    clone.shutdown().await;
+}
+
 /// The kill-a-master test a customer evaluation runs first: a master dies and
 /// the client must keep serving the rest of the cluster instead of wedging.
 ///

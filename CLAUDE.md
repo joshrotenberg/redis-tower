@@ -176,7 +176,7 @@ All three audit passes are complete and merged: the initial audit, the second (#
 
 **What's been hardened (since the second audit):**
 - Circuit breaker, command/connect timeouts, pool acquisition timeout
-- TCP keepalive, reconnect backoff jitter, graceful `MultiplexedClient` shutdown
+- TCP keepalive, reconnect backoff jitter, graceful shutdown across `MultiplexedClient`, `MultiplexedClusterClient::shutdown()`, and `ConnectionPool::close()` (the SIGTERM drain path)
 - Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
 - Dead pool connection replacement after health check failure
 - Cluster MOVED/ASK refresh, CROSSSLOT errors, eager sentinel rediscovery on failover

@@ -834,6 +834,50 @@ impl MultiplexedClusterClient {
         self.inner.read().await.read_preference
     }
 
+    /// Gracefully shut down the cluster client, draining every per-node worker.
+    ///
+    /// Signals each master and replica [`AutoPipelineService`] to stop
+    /// accepting new requests, then waits for their in-flight batches to flush
+    /// and the background workers to exit. This is the cluster analogue of
+    /// [`MultiplexedClient::shutdown`](redis_tower::MultiplexedClient::shutdown)
+    /// and the SIGTERM drain path for a cluster deployment: without it,
+    /// dropping the client abandons the per-node workers and any requests still
+    /// queued in them are silently dropped.
+    ///
+    /// Only the last live clone drains the workers. If other clones of this
+    /// client are still alive (they share one worker set through an `Arc`),
+    /// this returns immediately and the workers keep running until the final
+    /// clone shuts down or is dropped -- mirroring
+    /// [`MultiplexedClient::shutdown`](redis_tower::MultiplexedClient::shutdown).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // On SIGTERM: stop accepting new work and drain the cluster client.
+    /// tokio::signal::ctrl_c().await?;
+    /// cluster.shutdown().await;
+    /// ```
+    pub async fn shutdown(self) {
+        // Only the last clone owns the workers outright; earlier clones return
+        // immediately so a shutdown from one task does not strand the others.
+        if Arc::strong_count(&self.inner) > 1 {
+            return;
+        }
+        // Take the per-node services out from under the lock, then drain them
+        // outside it. An alive service flushes its in-flight batch and joins
+        // its worker; a dead one returns immediately.
+        let (masters, replicas) = {
+            let mut inner = self.inner.write().await;
+            (
+                std::mem::take(&mut inner.masters),
+                std::mem::take(&mut inner.replicas),
+            )
+        };
+        for svc in masters.into_values().chain(replicas.into_values()) {
+            svc.shutdown().await;
+        }
+    }
+
     // -- internals --
 
     /// Resolve the command to a target service, honoring read preference.
