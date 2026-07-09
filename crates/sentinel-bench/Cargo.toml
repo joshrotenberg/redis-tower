@@ -1,0 +1,22 @@
+[package]
+name = "sentinel-bench"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "sentinel-bench"
+path = "src/main.rs"
+
+[dependencies]
+redis-tower = { path = "../redis-tower" }
+redis-tower-commands = { path = "../redis-tower-commands" }
+redis-tower-core = { path = "../redis-tower-core" }
+redis-tower-sentinel = { path = "../redis-tower-sentinel" }
+redis-server-wrapper = { workspace = true }
+
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
+bytes = { workspace = true }
+futures = { workspace = true }
+hdrhistogram = { workspace = true }
+serde_json = { workspace = true }
