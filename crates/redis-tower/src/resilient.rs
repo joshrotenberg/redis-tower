@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 use crate::reconnect::{
     AddrConnectionFactory, ConnectionFactory, ReconnectConfig, UrlConnectionFactory,
 };
+use crate::retry::{RetryClient, RetryPolicy};
 
 /// A shared, auto-reconnecting Redis client.
 ///
@@ -113,6 +114,30 @@ impl ResilientRedisClient {
         let mut conn = self.conn.lock().await;
         conn.execute(Ping::new()).await?;
         Ok(())
+    }
+
+    /// Wrap this client in idempotent-aware automatic retries.
+    ///
+    /// Returns a [`RetryClient`](crate::RetryClient) whose `execute` reissues
+    /// idempotent commands on retryable errors per the
+    /// [`RetryPolicy`](crate::RetryPolicy). Reconnection already happens
+    /// underneath on connection loss; layering retries on top means an
+    /// idempotent command that failed with a connection error is
+    /// automatically re-sent after the client reconnects, up to the policy
+    /// budget. Non-idempotent writes are never retried.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redis_tower::{ResilientRedisClient, RetryPolicy};
+    /// use redis_tower::commands::Get;
+    ///
+    /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    /// let retrying = client.retry(RetryPolicy::default());
+    /// let value: Option<bytes::Bytes> = retrying.execute(Get::new("key")).await?;
+    /// ```
+    pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
+        RetryClient::new(self.clone(), policy)
     }
 
     /// Attempt to reconnect, single-flighting across clones.

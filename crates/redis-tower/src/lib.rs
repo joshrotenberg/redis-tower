@@ -299,6 +299,7 @@ pub mod pubsub;
 pub mod reconnect;
 pub mod reconnect_layer;
 mod resilient;
+pub mod retry;
 pub mod scan_stream;
 pub mod script;
 pub mod tracing_layer;
@@ -335,6 +336,7 @@ pub use pubsub::{
 pub use reconnect::ResilientConnection;
 pub use reconnect_layer::ReconnectService;
 pub use resilient::ResilientRedisClient;
+pub use retry::{RetryClient, RetryLayer, RetryPolicy, RetryService};
 pub use scan_stream::ScanStream;
 pub use script::Script;
 pub use tracing_layer::{TracingLayer, TracingService};

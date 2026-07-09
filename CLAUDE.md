@@ -55,6 +55,7 @@ All live in `redis-tower/src/`:
 - `cache_layer.rs` / `caching.rs` -- client-side caching
 - `circuit_breaker.rs` -- `CircuitBreakerLayer`: three-state machine, Arc-shared across clones
 - `command_timeout.rs` -- `CommandTimeoutLayer`: per-command deadline
+- `retry.rs` -- `RetryLayer`/`RetryService`: idempotent-aware automatic retries at the **command altitude** (needs `Command::idempotent`, so it sits above the frame lowering). Default policy `idempotent && err.is_retryable()`, configurable attempt budget and exponential backoff + jitter (`RetryPolicy`). Opt in on a client via `.retry(policy)`, which returns a `RetryClient` bridging through `ExecutorService`. A non-idempotent write is never re-sent, so a retry cannot silently duplicate data.
 - `resilient.rs` -- `ResilientRedisClient` combining reconnect + auto-pipeline
 
 ## Command Groups
