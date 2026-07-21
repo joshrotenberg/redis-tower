@@ -5,15 +5,19 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::ScanStream;
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{RedisConnection, ScanStream};
 //! use tokio_stream::StreamExt;
 //!
-//! let mut stream = ScanStream::scan(&mut conn, "user:*");
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut stream = std::pin::pin!(ScanStream::scan(&mut conn, "user:*"));
 //! while let Some(key) = stream.next().await {
 //!     let key = key?;
 //!     println!("Found: {}", String::from_utf8_lossy(&key));
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use bytes::Bytes;
@@ -37,15 +41,19 @@ impl ScanStream {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use redis_tower::ScanStream;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::{RedisConnection, ScanStream};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut stream = ScanStream::scan(&mut conn, "user:*");
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    /// let mut stream = std::pin::pin!(ScanStream::scan(&mut conn, "user:*"));
     /// while let Some(key) = stream.next().await {
     ///     let key = key?;
     ///     println!("{}", String::from_utf8_lossy(&key));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn scan<'a>(
         conn: &'a mut RedisConnection,
@@ -107,15 +115,19 @@ impl ScanStream {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use redis_tower::ScanStream;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::{RedisConnection, ScanStream};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut stream = ScanStream::hscan(&mut conn, "myhash", "*");
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    /// let mut stream = std::pin::pin!(ScanStream::hscan(&mut conn, "myhash", "*"));
     /// while let Some(pair) = stream.next().await {
     ///     let (field, value) = pair?;
     ///     println!("{}: {}", String::from_utf8_lossy(&field), String::from_utf8_lossy(&value));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn hscan<'a>(
         conn: &'a mut RedisConnection,
@@ -148,15 +160,19 @@ impl ScanStream {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use redis_tower::ScanStream;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::{RedisConnection, ScanStream};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut stream = ScanStream::sscan(&mut conn, "myset", "*");
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    /// let mut stream = std::pin::pin!(ScanStream::sscan(&mut conn, "myset", "*"));
     /// while let Some(member) = stream.next().await {
     ///     let member = member?;
     ///     println!("{}", String::from_utf8_lossy(&member));
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn sscan<'a>(
         conn: &'a mut RedisConnection,
@@ -189,15 +205,19 @@ impl ScanStream {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// use redis_tower::ScanStream;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::{RedisConnection, ScanStream};
     /// use tokio_stream::StreamExt;
     ///
-    /// let mut stream = ScanStream::zscan(&mut conn, "myzset", "*");
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    /// let mut stream = std::pin::pin!(ScanStream::zscan(&mut conn, "myzset", "*"));
     /// while let Some(entry) = stream.next().await {
     ///     let (member, score) = entry?;
     ///     println!("{}: {}", String::from_utf8_lossy(&member), score);
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn zscan<'a>(
         conn: &'a mut RedisConnection,
