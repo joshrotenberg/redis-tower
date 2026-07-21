@@ -34,7 +34,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use redis_tower_commands::Ping;
@@ -204,6 +204,9 @@ struct PoolInner<S> {
     acquisition_timeout_ns: u64,
     /// Optional factory used to replace dead connections after a failed PING.
     factory: Option<Arc<dyn ErasedPoolFactory<Connection = S>>>,
+    /// Set once [`ConnectionPool::close`] is called. Shared across clones, so a
+    /// close on any clone makes every clone reject new commands.
+    closed: AtomicBool,
 }
 
 /// Object-safe wrapper around [`PoolFactory`] that erases the concrete type.
@@ -368,6 +371,7 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: None,
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -420,6 +424,7 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: Some(Arc::new(factory)),
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -467,6 +472,7 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: None,
+                closed: AtomicBool::new(false),
             }),
         })
     }
@@ -509,6 +515,58 @@ where
             idle_count,
             total_inflight,
             max_inflight,
+        }
+    }
+
+    /// Returns `true` once [`close`](Self::close) has been called on this pool
+    /// or any of its clones.
+    pub fn is_closed(&self) -> bool {
+        self.inner.closed.load(Ordering::Acquire)
+    }
+
+    /// Gracefully close the pool, draining in-flight commands.
+    ///
+    /// Flips a shared "closed" flag so that every clone of this pool rejects
+    /// new commands with [`RedisError::ConnectionClosed`], then waits for all
+    /// in-flight commands to finish before returning. Each accepted command
+    /// increments a per-slot in-flight counter for its whole duration, so the
+    /// pool is drained once every counter reaches zero.
+    ///
+    /// This is the SIGTERM drain path: stop accepting work, let outstanding
+    /// commands complete, then exit. It does not itself close the underlying
+    /// connections -- dropping the pool (and its last clone) releases them --
+    /// but it guarantees no command is mid-flight when the connections are
+    /// dropped.
+    ///
+    /// Because the flag is shared through the pool's `Arc`, calling `close` on
+    /// one clone drains and closes the pool seen by every clone. The draining
+    /// wait is best-effort with respect to a command submitted at the exact
+    /// instant the flag flips; such a command may still slip through and run to
+    /// completion.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // On SIGTERM: stop accepting new work and drain the pool before exit.
+    /// tokio::signal::ctrl_c().await?;
+    /// pool.close().await;
+    /// ```
+    pub async fn close(self) {
+        // Signal all clones to stop accepting new commands.
+        self.inner.closed.store(true, Ordering::Release);
+        // Wait for in-flight commands to drain. A closed pool accepts no new
+        // work, so this sum is monotonically non-increasing and reaches zero.
+        loop {
+            let inflight: usize = self
+                .inner
+                .inflight
+                .iter()
+                .map(|c| c.load(Ordering::Acquire))
+                .sum();
+            if inflight == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 
@@ -562,8 +620,14 @@ where
         cmd: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
         let inner = Arc::clone(&self.inner);
-        let preferred = self.next_index();
+        // Reject new commands on a closed pool before reserving a slot, so
+        // close() can drain the in-flight counters to zero.
+        let closed = inner.closed.load(Ordering::Acquire);
+        let preferred = if closed { 0 } else { self.next_index() };
         async move {
+            if closed {
+                return Err(RedisError::ConnectionClosed);
+            }
             // inflight already incremented by next_index().
             // Acquire a connection, scanning for a free slot first to avoid
             // head-of-line blocking on a busy one, then falling back to an
@@ -636,6 +700,11 @@ where
     /// command is executed. If no factory is available, the PING error is
     /// returned to the caller.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        // Reject new commands on a closed pool before reserving a slot, so
+        // close() can drain the in-flight counters to zero.
+        if self.inner.closed.load(Ordering::Acquire) {
+            return Err(RedisError::ConnectionClosed);
+        }
         let preferred = self.next_index();
         // inflight already incremented by next_index().
         // Acquire a connection, scanning for a free slot first to avoid
@@ -1414,5 +1483,98 @@ mod tests {
         let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
         let result = pool.health_check().await;
         assert!(result.is_err());
+    }
+
+    /// A connection whose `execute` blocks until the test releases it, used to
+    /// hold a command in-flight while `close()` is observed.
+    struct BlockingConn {
+        started: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    impl RedisExecutor for BlockingConn {
+        fn execute<Cmd: Command>(
+            &mut self,
+            cmd: Cmd,
+        ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                cmd.parse_response(Frame::SimpleString(Bytes::from("PONG")))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn pool_close_rejects_new_commands() {
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        assert!(!pool.is_closed());
+
+        let executor_view = pool.clone();
+        pool.close().await;
+
+        assert!(executor_view.is_closed());
+
+        // The inherent execute path rejects new commands.
+        let result: Result<String, _> = executor_view.execute(Ping::new()).await;
+        assert!(matches!(result, Err(RedisError::ConnectionClosed)));
+
+        // The RedisExecutor path rejects them too.
+        let mut executor_view = executor_view;
+        let result: Result<String, _> =
+            RedisExecutor::execute(&mut executor_view, Ping::new()).await;
+        assert!(matches!(result, Err(RedisError::ConnectionClosed)));
+    }
+
+    #[tokio::test]
+    async fn pool_close_is_prompt_when_idle() {
+        let conns = vec![MockConn::new(
+            0,
+            vec![Frame::SimpleString(Bytes::from("PONG"))],
+        )];
+        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        // An idle pool drains immediately; guard against a hang with a timeout.
+        tokio::time::timeout(Duration::from_secs(1), pool.close())
+            .await
+            .expect("close on an idle pool should return promptly");
+    }
+
+    #[tokio::test]
+    async fn pool_close_drains_in_flight_command() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let conn = BlockingConn {
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        };
+        let pool = ConnectionPool::from_connections(vec![conn], PoolConfig::default()).unwrap();
+
+        // Start a command and wait until it is actually in-flight.
+        let cmd_pool = pool.clone();
+        let cmd_task = tokio::spawn(async move { cmd_pool.execute(Ping::new()).await });
+        started.notified().await;
+
+        // close() must not return while the command is still in-flight.
+        let close_task = tokio::spawn(async move { pool.close().await });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !close_task.is_finished(),
+            "close() should block until in-flight commands drain"
+        );
+
+        // Release the command; both it and close() then complete.
+        release.notify_one();
+        let cmd_result: Result<String, _> = cmd_task.await.unwrap();
+        assert!(cmd_result.is_ok());
+        tokio::time::timeout(Duration::from_secs(1), close_task)
+            .await
+            .expect("close() should return once the pool drains")
+            .unwrap();
     }
 }
