@@ -16,7 +16,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::MultiplexedClient;
 //! use redis_tower::commands::*;
 //!
@@ -29,6 +30,9 @@
 //! });
 //!
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -79,7 +83,8 @@ use crate::transaction::TransactionExecutor;
 /// breakers, timeouts, retries), build a `Service<Frame>` stack and pass it to
 /// [`from_layered`](Self::from_layered):
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::time::Duration;
 /// use tower::ServiceBuilder;
 /// use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandTimeoutLayer,
@@ -90,6 +95,9 @@ use crate::transaction::TransactionExecutor;
 ///     .layer(CommandTimeoutLayer::new(Duration::from_secs(1)))
 ///     .service(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
 /// let client = MultiplexedClient::from_layered(inner);
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Transactions
@@ -168,7 +176,8 @@ impl MultiplexedClient<AutoPipelineService> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::time::Duration;
     /// use redis_tower::MultiplexedClient;
     /// use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
@@ -182,6 +191,9 @@ impl MultiplexedClient<AutoPipelineService> {
     ///         ReconnectConfig::default().base_delay(Duration::from_millis(50)),
     ///     ),
     /// ).await?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn from_factory(
         factory: impl ConnectionFactory,
@@ -217,13 +229,17 @@ impl MultiplexedClient<AutoPipelineService> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use redis_tower::{MultiplexedClient, RetryPolicy};
     /// use redis_tower::commands::Get;
     ///
     /// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
     /// let retrying = client.retry(RetryPolicy::default());
     /// let value: Option<bytes::Bytes> = retrying.execute(Get::new("key")).await?;
+    /// # let _ = value;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
         RetryClient::new(self.clone(), policy)
@@ -247,7 +263,8 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use std::time::Duration;
     /// use tower::ServiceBuilder;
     /// use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandTimeoutLayer,
@@ -259,6 +276,9 @@ where
     ///     .service(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
     /// let client = MultiplexedClient::from_layered(inner);
     /// let pong = client.health_check().await?;
+    /// # let _ = pong;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_layered(service: S) -> Self {
         Self {
