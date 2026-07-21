@@ -17,7 +17,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, ResilientConnection};
 //! use redis_tower::commands::*;
 //!
@@ -28,6 +29,9 @@
 //!
 //! // Transparently reconnects after connection loss.
 //! let val: Option<bytes::Bytes> = conn.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -356,8 +360,9 @@ pub(crate) enum ConnState {
 /// To replay custom commands after every (re)connection, implement
 /// [`ConnectionFactory`] and issue the setup commands in `connect()`:
 ///
-/// ```ignore
-/// use redis_tower::reconnect::{ConnectionFactory, ResilientConnection, ReconnectConfig};
+/// ```no_run
+/// use redis_tower::reconnect::ConnectionFactory;
+/// use redis_tower::commands::ClientTracking;
 /// use redis_tower_core::{RedisConnection, RedisError};
 /// use std::future::Future;
 /// use std::pin::Pin;
@@ -381,19 +386,27 @@ pub(crate) enum ConnState {
 ///
 /// Alternatively, use a closure factory for simple cases:
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower::reconnect::{ReconnectConfig, ResilientConnection};
+/// use redis_tower::commands::ClientTracking;
+/// use redis_tower_core::{RedisConnection, RedisError};
+///
 /// let addr = "127.0.0.1:6379".to_string();
-/// let mut conn = ResilientConnection::new(
+/// let conn = ResilientConnection::new(
 ///     move || {
 ///         let addr = addr.clone();
 ///         async move {
 ///             let mut c = RedisConnection::connect_resp3(&addr).await?;
 ///             c.execute(ClientTracking::on()).await?;
-///             Ok(c)
+///             Ok::<_, RedisError>(c)
 ///         }
 ///     },
 ///     ReconnectConfig::default(),
 /// ).await?;
+/// # let _ = conn;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Behavior During Reconnection
@@ -411,7 +424,8 @@ pub(crate) enum ConnState {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, ResilientConnection};
 /// use redis_tower::commands::*;
 ///
@@ -422,6 +436,9 @@ pub(crate) enum ConnState {
 ///
 /// // Reconnects automatically after connection loss.
 /// let val = conn.execute(Get::new("key")).await?;
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ResilientConnection {
     pub(crate) factory: Arc<dyn ConnectionFactory>,
