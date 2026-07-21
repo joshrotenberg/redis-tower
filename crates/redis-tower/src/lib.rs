@@ -7,7 +7,8 @@
 //!
 //! # Quick Start
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{MultiplexedClient, commands::*};
 //!
 //! // MultiplexedClient is the recommended default: one auto-pipelined
@@ -15,6 +16,9 @@
 //! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 //! client.execute(Set::new("key", "value")).await?;
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Choosing a client
@@ -44,23 +48,30 @@
 //!
 //! Commands with optional parameters use builder methods:
 //!
-//! ```ignore
+//! ```no_run
+//! # fn example() {
 //! use redis_tower::commands::*;
 //!
 //! let cmd = Set::new("key", "value").ex(60).nx();
 //! let cmd = ZAdd::new("leaderboard").member(100.0, "alice").member(200.0, "bob");
+//! # let _ = cmd;
+//! # }
 //! ```
 //!
 //! Use [`RedisValueExt::parse_into`] for ergonomic type conversion from
 //! command responses:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{RedisClient, RedisValueExt, commands::*};
 //!
 //! let client = RedisClient::connect("127.0.0.1:6379").await?;
 //! client.execute(Set::new("counter", "42")).await?;
 //! let raw = client.execute(Get::new("counter")).await?;
 //! let count: i64 = raw.parse_into()?;
+//! # let _ = count;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Middleware
@@ -126,7 +137,8 @@
 //! to each caller. Configure batch size and window via
 //! [`AutoPipelineConfig`].
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandAdapter, RedisConnection};
 //! use redis_tower::commands::*;
 //! use tower::Service;
@@ -136,6 +148,9 @@
 //!     AutoPipelineService::new(conn, AutoPipelineConfig::default()),
 //! );
 //! let val: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Pipeline and Transactions
@@ -179,7 +194,9 @@
 //! Messages are delivered as a [`futures::Stream`] of [`PubSubMessage`]
 //! values with channel and payload fields.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # use futures::StreamExt;
 //! use redis_tower::{PubSubConnection, RedisConnection};
 //!
 //! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
@@ -190,6 +207,8 @@
 //!     let msg = msg?;
 //!     println!("{}: {:?}", msg.channel, msg.payload);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Streams
@@ -198,7 +217,8 @@
 //! automatic acknowledgement and consumer group management. Configure batch
 //! size, block timeout, and auto-ack behavior via [`ConsumerConfig`].
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::consumer::{StreamConsumer, ConsumerConfig};
 //! use redis_tower::RedisConnection;
 //! use tokio_stream::StreamExt;
@@ -207,11 +227,13 @@
 //! let consumer = StreamConsumer::new("my-group", "worker-1", ["my-stream"])
 //!     .config(ConsumerConfig { batch_size: 20, auto_ack: true, ..Default::default() });
 //!
-//! let mut stream = consumer.into_stream(conn);
+//! let mut stream = std::pin::pin!(consumer.into_stream(conn));
 //! while let Some(msg) = stream.next().await {
 //!     let msg = msg?;
 //!     println!("{}: {} fields", msg.id, msg.fields.len());
 //! }
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Scripting
@@ -221,11 +243,16 @@
 //! back to EVAL on NOSCRIPT. This avoids sending the full script text on
 //! every call.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut conn = redis_tower::RedisConnection::connect("127.0.0.1:6379").await?;
 //! use redis_tower::Script;
 //!
 //! let script = Script::new("return redis.call('GET', KEYS[1])");
 //! let result = script.execute(&mut conn, &["mykey"], &[]).await?;
+//! # let _ = result;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # JSON and Search APIs (serde feature)
@@ -237,7 +264,10 @@
 //! - `Search` -- query builder for RediSearch with automatic result
 //!   deserialization into user-defined types.
 //!
-//! ```ignore
+//! ```no_run
+//! # #[allow(deprecated)]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let mut conn = redis_tower::RedisConnection::connect("127.0.0.1:6379").await?;
 //! use redis_tower::Json;
 //! use serde::{Serialize, Deserialize};
 //!
@@ -247,6 +277,9 @@
 //! let mut json = Json::new(&mut conn);
 //! json.set("user:1", "$", &User { name: "Alice".into(), age: 30 }).await?;
 //! let user: User = json.get("user:1", "$").await?;
+//! # let _ = user;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Feature Flags
