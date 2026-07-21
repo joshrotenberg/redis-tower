@@ -65,7 +65,7 @@ All live in `redis-tower/src/`:
 
 Redis Stack commands (`json`, `search`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`) are behind feature flags, all enabled by default via `commands-stack`.
 
-Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands.
+Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG).
 
 ## Module Clients (`redis-tower-modules`)
 
