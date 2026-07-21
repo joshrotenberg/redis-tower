@@ -13,6 +13,7 @@ members = [
     "crates/redis-test-harness",
     "crates/cluster-bench",
     "crates/standalone-bench",
+    "crates/sentinel-bench",
     "examples",
 ]
 
