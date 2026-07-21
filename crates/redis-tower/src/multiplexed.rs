@@ -41,6 +41,7 @@ use tower_service::Service;
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::command_adapter::CommandAdapter;
 use crate::reconnect::ConnectionFactory;
+use crate::retry::{RetryClient, RetryPolicy};
 use crate::transaction::TransactionExecutor;
 
 /// A multiplexed Redis client that batches concurrent requests.
@@ -205,6 +206,27 @@ impl MultiplexedClient<AutoPipelineService> {
     /// simply dropping the client.
     pub async fn shutdown(self) {
         self.inner.into_inner().shutdown().await;
+    }
+
+    /// Wrap this client in idempotent-aware automatic retries.
+    ///
+    /// Returns a [`RetryClient`] whose `execute` reissues idempotent commands
+    /// on retryable errors per the [`RetryPolicy`], and never retries a
+    /// non-idempotent write (so it cannot be silently duplicated). The retry
+    /// wrapper shares this client's connection -- it is a cheap handle clone.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use redis_tower::{MultiplexedClient, RetryPolicy};
+    /// use redis_tower::commands::Get;
+    ///
+    /// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+    /// let retrying = client.retry(RetryPolicy::default());
+    /// let value: Option<bytes::Bytes> = retrying.execute(Get::new("key")).await?;
+    /// ```
+    pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
+        RetryClient::new(self.clone(), policy)
     }
 }
 
