@@ -3,6 +3,14 @@
 use redis_tower_core::{Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+/// Number of hash slots in a Redis cluster (fixed by the protocol).
+const SLOT_COUNT: usize = 16_384;
+
+/// Sentinel stored in the slot table for a slot that no range currently owns.
+/// A range index can never reach this value: after single-slot splits there are
+/// at most `SLOT_COUNT` ranges, so the largest valid index is `SLOT_COUNT - 1`.
+const UNMAPPED: u16 = u16::MAX;
+
 /// A slot range owned by a node.
 #[derive(Debug, Clone)]
 pub struct SlotRange {
@@ -36,18 +44,90 @@ impl std::fmt::Display for NodeAddr {
 }
 
 /// The full cluster topology: a list of slot ranges with their owners.
+///
+/// Alongside the ranges, the topology keeps a flat `slot -> range index` table
+/// so slot lookups are O(1) rather than a linear scan of the ranges. The table
+/// is the only routing cost that would otherwise grow with the number of shards
+/// (a live scan is O(ranges); a scan over a 200-shard cluster with fragmented
+/// slots is noticeably slower than one over three). It is rebuilt whenever the
+/// set of ranges changes, so it always agrees with `slot_ranges`.
 #[derive(Debug, Clone)]
 pub struct ClusterTopology {
-    pub slot_ranges: Vec<SlotRange>,
+    slot_ranges: Vec<SlotRange>,
+    /// `slot -> index into slot_ranges`, or [`UNMAPPED`] for an unowned slot.
+    /// Boxed so the 32 KiB table lives on the heap and `ClusterTopology` stays
+    /// cheap to move.
+    slot_owner: Box<[u16; SLOT_COUNT]>,
 }
 
 impl ClusterTopology {
+    /// Build a topology from a set of slot ranges, computing the flat
+    /// slot-to-owner lookup table.
+    pub fn new(slot_ranges: Vec<SlotRange>) -> Self {
+        let mut topology = ClusterTopology {
+            slot_ranges,
+            slot_owner: Box::new([UNMAPPED; SLOT_COUNT]),
+        };
+        topology.rebuild_slot_owner();
+        topology
+    }
+
+    /// The slot ranges backing this topology.
+    pub fn slot_ranges(&self) -> &[SlotRange] {
+        &self.slot_ranges
+    }
+
+    /// Mutable access to the ranges for in-place node-address rewriting (e.g.
+    /// remapping hosts behind a NAT).
+    ///
+    /// Callers must not change any range's `start`/`end` or add or remove
+    /// ranges through this handle: only node addresses may be edited, so the
+    /// flat slot table stays valid. Structural changes must go through
+    /// [`reassign_slot`](Self::reassign_slot) or [`ClusterTopology::new`].
+    pub(crate) fn slot_ranges_mut(&mut self) -> &mut [SlotRange] {
+        &mut self.slot_ranges
+    }
+
+    /// Rebuild the flat slot-to-owner table from `slot_ranges`. O(SLOT_COUNT +
+    /// total slots covered); called only when the ranges change, not per
+    /// lookup.
+    ///
+    /// When ranges overlap (they should not in a healthy topology) the
+    /// last-written owner wins. This matches the pre-table behaviour after a
+    /// [`reassign_slot`] split, which keeps ranges disjoint, and the CLUSTER
+    /// SLOTS contract, which reports disjoint ranges.
+    fn rebuild_slot_owner(&mut self) {
+        // Split the borrow so the range iterator and the table can be held at
+        // once.
+        let ClusterTopology {
+            slot_ranges,
+            slot_owner,
+        } = self;
+        slot_owner.fill(UNMAPPED);
+        for (idx, range) in slot_ranges.iter().enumerate() {
+            let owner = idx as u16;
+            let start = range.start as usize;
+            let end = (range.end as usize).min(SLOT_COUNT - 1);
+            for slot in slot_owner[start..=end].iter_mut() {
+                *slot = owner;
+            }
+        }
+    }
+
+    /// The range owning `slot`, via the flat table, or `None` when the slot is
+    /// unowned or out of range.
+    fn range_for_slot(&self, slot: u16) -> Option<&SlotRange> {
+        let idx = *self.slot_owner.get(slot as usize)?;
+        if idx == UNMAPPED {
+            None
+        } else {
+            self.slot_ranges.get(idx as usize)
+        }
+    }
+
     /// Find the master node responsible for a given slot.
     pub fn master_for_slot(&self, slot: u16) -> Option<&NodeAddr> {
-        self.slot_ranges
-            .iter()
-            .find(|r| slot >= r.start && slot <= r.end)
-            .map(|r| &r.master)
+        self.range_for_slot(slot).map(|r| &r.master)
     }
 
     /// Get all unique master addresses, in first-seen order.
@@ -67,10 +147,7 @@ impl ClusterTopology {
 
     /// Find replica nodes for a given slot.
     pub fn replicas_for_slot(&self, slot: u16) -> Option<&[NodeAddr]> {
-        self.slot_ranges
-            .iter()
-            .find(|r| slot >= r.start && slot <= r.end)
-            .map(|r| r.replicas.as_slice())
+        self.range_for_slot(slot).map(|r| r.replicas.as_slice())
     }
 
     /// Get all unique replica addresses.
@@ -114,6 +191,7 @@ impl ClusterTopology {
                 master,
                 replicas: Vec::new(),
             });
+            self.rebuild_slot_owner();
             return;
         };
 
@@ -150,6 +228,7 @@ impl ClusterTopology {
             });
         }
         self.slot_ranges.splice(idx..=idx, replacement);
+        self.rebuild_slot_owner();
     }
 }
 
@@ -214,7 +293,7 @@ fn parse_cluster_slots(frame: &Frame) -> Result<ClusterTopology, RedisError> {
         });
     }
 
-    Ok(ClusterTopology { slot_ranges })
+    Ok(ClusterTopology::new(slot_ranges))
 }
 
 /// Parse a node address from a CLUSTER SLOTS node entry.
@@ -416,8 +495,8 @@ mod tests {
     }
 
     fn topo_with(ranges: &[(u16, u16, u16)]) -> ClusterTopology {
-        ClusterTopology {
-            slot_ranges: ranges
+        ClusterTopology::new(
+            ranges
                 .iter()
                 .map(|&(start, end, port)| SlotRange {
                     start,
@@ -426,7 +505,7 @@ mod tests {
                     replicas: vec![],
                 })
                 .collect(),
-        }
+        )
     }
 
     #[test]
@@ -488,14 +567,12 @@ mod tests {
 
     #[test]
     fn reassign_slot_clears_moved_replicas_but_keeps_flank_replicas() {
-        let mut topo = ClusterTopology {
-            slot_ranges: vec![SlotRange {
-                start: 0,
-                end: 100,
-                master: node(7000),
-                replicas: vec![node(7100)],
-            }],
-        };
+        let mut topo = ClusterTopology::new(vec![SlotRange {
+            start: 0,
+            end: 100,
+            master: node(7000),
+            replicas: vec![node(7100)],
+        }]);
         topo.reassign_slot(50, node(7009));
         // A MOVED gives the new master but not its replicas.
         assert_eq!(topo.replicas_for_slot(50).unwrap().len(), 0);
@@ -510,5 +587,64 @@ mod tests {
         topo.reassign_slot(50, node(7009));
         // slot_ranges now owns [7000, 7009, 7000]; 7000 must be reported once.
         assert_eq!(topo.master_addrs().len(), 2);
+    }
+
+    // -- flat slot-to-owner table (O(1) routing) --
+
+    #[test]
+    fn slot_table_routes_every_slot_across_a_full_cluster() {
+        // Sixteen even ranges covering all 16384 slots, so lookups exercise the
+        // whole table, not just the boundaries.
+        let ranges: Vec<(u16, u16, u16)> = (0..16u16)
+            .map(|i| {
+                let start = i * 1024;
+                (start, start + 1023, 7000 + i)
+            })
+            .collect();
+        let topo = topo_with(&ranges);
+
+        for slot in 0..16_384u16 {
+            let expected_port = 7000 + (slot / 1024);
+            assert_eq!(
+                topo.master_for_slot(slot).unwrap().port,
+                expected_port,
+                "slot {slot} routed to the wrong master",
+            );
+        }
+    }
+
+    #[test]
+    fn slot_table_reports_unowned_and_out_of_range_slots_as_none() {
+        // A gap between two ranges leaves the middle slots unowned.
+        let topo = topo_with(&[(0, 100, 7000), (200, 300, 7001)]);
+        assert_eq!(topo.master_for_slot(100).unwrap().port, 7000);
+        assert!(topo.master_for_slot(150).is_none());
+        assert_eq!(topo.master_for_slot(200).unwrap().port, 7001);
+        // Slots at or beyond SLOT_COUNT are never valid.
+        assert!(topo.master_for_slot(16_384).is_none());
+        assert!(topo.master_for_slot(u16::MAX).is_none());
+    }
+
+    #[test]
+    fn slot_table_stays_consistent_after_reassign_splits() {
+        let mut topo = topo_with(&[(0, 16_383, 7000)]);
+        // A live resharding moves a scatter of individual slots to a new owner.
+        for slot in [42u16, 4242, 8484, 12_726] {
+            topo.reassign_slot(slot, node(7009));
+        }
+        for slot in [42u16, 4242, 8484, 12_726] {
+            assert_eq!(topo.master_for_slot(slot).unwrap().port, 7009);
+            assert_eq!(topo.master_for_slot(slot - 1).unwrap().port, 7000);
+            assert_eq!(topo.master_for_slot(slot + 1).unwrap().port, 7000);
+        }
+        // The table agrees with a fresh linear scan of the ranges.
+        for slot in 0..16_384u16 {
+            let scanned = topo
+                .slot_ranges()
+                .iter()
+                .find(|r| slot >= r.start && slot <= r.end)
+                .map(|r| r.master.port);
+            assert_eq!(topo.master_for_slot(slot).map(|a| a.port), scanned);
+        }
     }
 }
