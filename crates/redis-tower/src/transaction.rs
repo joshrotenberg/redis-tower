@@ -8,7 +8,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{Transaction, RedisConnection, commands::*};
 //!
 //! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
@@ -17,6 +18,9 @@
 //!     .push(Incr::new("x"))
 //!     .execute(&mut conn)
 //!     .await?;
+//! # let _ = result;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::any::Any;
@@ -119,15 +123,16 @@ struct TransactionEntry {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::{Transaction, RedisConnection};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower::{Transaction, TransactionResult, RedisConnection};
 /// use redis_tower::commands::*;
 ///
-/// let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 /// let result = Transaction::new()
 ///     .push(Set::new("x", "1"))
 ///     .push(Incr::new("x"))
-///     .execute(&conn)
+///     .execute(&mut conn)
 ///     .await?;
 ///
 /// match result {
@@ -139,6 +144,8 @@ struct TransactionEntry {
 ///         // WATCH key was modified
 ///     }
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct Transaction {
     watch_keys: Vec<String>,
@@ -320,7 +327,8 @@ pub const DEFAULT_TRANSACTION_RETRIES: usize = 16;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::{transaction, Transaction, RedisConnection};
 /// use redis_tower::commands::{Get, Set};
 ///
@@ -329,10 +337,16 @@ pub const DEFAULT_TRANSACTION_RETRIES: usize = 16;
 /// // Atomically double the value at `counter`, retrying if another client
 /// // touches it between the read and the EXEC.
 /// let results = transaction(&mut conn, ["counter"], async |c| {
-///     let current: i64 = c.execute(Get::new("counter")).await?.unwrap_or(0);
+///     let current: i64 = match c.execute(Get::new("counter")).await? {
+///         Some(bytes) => String::from_utf8_lossy(&bytes).parse().unwrap_or(0),
+///         None => 0,
+///     };
 ///     Ok(Transaction::new().push(Set::new("counter", (current * 2).to_string())))
 /// })
 /// .await?;
+/// # let _ = results;
+/// # Ok(())
+/// # }
 /// ```
 pub async fn transaction<C, F>(
     conn: &mut C,
