@@ -31,15 +31,24 @@
 //!
 //! # Builder Pattern
 //!
-//! Commands with optional parameters use builder methods that return `&mut Self`
-//! for fluent configuration:
+//! Commands with optional parameters use builder methods that take and return
+//! `Self` for fluent configuration:
 //!
-//! ```ignore
-//! use redis_tower::commands::Set;
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_commands::Set;
+//! use redis_tower_core::RedisConnection;
+//!
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //!
 //! let cmd = Set::new("key", "value")
 //!     .ex(60)       // expire in 60 seconds
 //!     .nx();        // only set if key does not exist
+//!
+//! let previous = conn.execute(cmd).await?;
+//! # let _ = previous;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! All command structs are re-exported at the crate root for convenience.
