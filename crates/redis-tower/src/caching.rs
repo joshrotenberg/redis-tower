@@ -9,17 +9,21 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::caching::CachedClient;
 //! use redis_tower::commands::*;
 //!
-//! let client = CachedClient::connect("127.0.0.1:6379").await?;
+//! let mut client = CachedClient::connect("127.0.0.1:6379").await?;
 //!
 //! // First call hits Redis and caches the result.
 //! let val = client.execute(Get::new("key")).await?;
 //!
 //! // Second call returns cached value (no roundtrip).
 //! let val = client.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::sync::Arc;
@@ -46,7 +50,8 @@ use crate::cache_state::{CacheState, extract_cache_entry, parse_invalidation};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::caching::CachedClient;
 /// use redis_tower::commands::*;
 ///
@@ -57,6 +62,9 @@ use crate::cache_state::{CacheState, extract_cache_entry, parse_invalidation};
 ///
 /// // Second call returns cached value (no roundtrip).
 /// let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 pub struct CachedClient {
     conn: RedisConnection,
