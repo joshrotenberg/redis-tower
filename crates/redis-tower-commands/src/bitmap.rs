@@ -367,13 +367,24 @@ enum BitfieldOp {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::{Bitfield, BitfieldOverflow};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::{Bitfield, BitfieldOverflow};
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = Bitfield::new("mykey")
-///     .set("u8", "0", 255)
-///     .overflow(BitfieldOverflow::Sat)
-///     .incr_by("u8", "0", 10);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let results = conn
+///     .execute(
+///         Bitfield::new("mykey")
+///             .set("u8", "0", 255)
+///             .overflow(BitfieldOverflow::Sat)
+///             .incr_by("u8", "0", 10),
+///     )
+///     .await?;
+/// # let _ = results;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct Bitfield {
@@ -519,10 +530,19 @@ impl Command for Bitfield {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::BitfieldRo;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::BitfieldRo;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = BitfieldRo::new("mykey").get("u8", "0").get("u8", "8");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let values = conn
+///     .execute(BitfieldRo::new("mykey").get("u8", "0").get("u8", "8"))
+///     .await?;
+/// # let _ = values;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct BitfieldRo {
