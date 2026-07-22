@@ -7,7 +7,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{PubSubConnection, RedisConnection};
 //! use tokio_stream::StreamExt;
 //!
@@ -19,6 +20,8 @@
 //!     let msg = msg?;
 //!     println!("{}: {:?}", msg.channel, msg.payload);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
@@ -216,7 +219,8 @@ impl Subscriptions {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::{PubSubConnection, RedisConnection};
 /// use tokio_stream::StreamExt;
 ///
@@ -228,6 +232,8 @@ impl Subscriptions {
 ///     let msg = msg?;
 ///     println!("{}: {:?}", msg.channel, msg.payload);
 /// }
+/// # Ok(())
+/// # }
 /// ```
 pub struct PubSubConnection {
     framed: Framed<RedisStream, RespCodec>,
