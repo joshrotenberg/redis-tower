@@ -706,8 +706,8 @@ impl Command for CommandList {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::ModuleList;
+/// ```rust,no_run
+/// use redis_tower_commands::ModuleList;
 ///
 /// let cmd = ModuleList::new();
 /// ```
