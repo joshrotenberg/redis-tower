@@ -844,12 +844,21 @@ impl Command for JsonMerge {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::JsonMSet;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::JsonMSet;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = JsonMSet::new()
-///     .entry("k1", "$", "1")
-///     .entry("k2", "$", "{\"a\":2}");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// conn.execute(
+///     JsonMSet::new()
+///         .entry("k1", "$", "1")
+///         .entry("k2", "$", "{\"a\":2}"),
+/// )
+/// .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Default)]
 pub struct JsonMSet {
@@ -913,10 +922,17 @@ impl Command for JsonMSet {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::JsonToggle;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::JsonToggle;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = JsonToggle::new("k", "$.enabled");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let toggled = conn.execute(JsonToggle::new("k", "$.enabled")).await?;
+/// # let _ = toggled;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct JsonToggle {
@@ -960,10 +976,17 @@ impl Command for JsonToggle {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::JsonClear;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::JsonClear;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = JsonClear::new("k").path("$.items");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let cleared = conn.execute(JsonClear::new("k").path("$.items")).await?;
+/// # let _ = cleared;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct JsonClear {
@@ -1021,10 +1044,19 @@ impl Command for JsonClear {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::JsonArrInsert;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::JsonArrInsert;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = JsonArrInsert::new("k", "$.items", 0).value("1").value("2");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let lengths = conn
+///     .execute(JsonArrInsert::new("k", "$.items", 0).value("1").value("2"))
+///     .await?;
+/// # let _ = lengths;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct JsonArrInsert {
@@ -1090,10 +1122,19 @@ impl Command for JsonArrInsert {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::JsonArrTrim;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::JsonArrTrim;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = JsonArrTrim::new("k", "$.items", 0, 10);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let lengths = conn
+///     .execute(JsonArrTrim::new("k", "$.items", 0, 10))
+///     .await?;
+/// # let _ = lengths;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct JsonArrTrim {
