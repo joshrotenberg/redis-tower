@@ -6,7 +6,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{Pipeline, RedisConnection, commands::*};
 //!
 //! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
@@ -18,6 +19,9 @@
 //!     .await?;
 //!
 //! let val: &Option<bytes::Bytes> = results.get(2)?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::any::Any;
@@ -99,19 +103,23 @@ struct PipelineEntry {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::{Pipeline, RedisConnection};
 /// use redis_tower::commands::*;
 ///
-/// let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 /// let results = Pipeline::new()
 ///     .push(Set::new("a", "1"))
 ///     .push(Set::new("b", "2"))
 ///     .push(Get::new("a"))
-///     .execute(&conn)
+///     .execute(&mut conn)
 ///     .await?;
 ///
-/// let val: Option<bytes::Bytes> = results.get(2)?;
+/// let val: &Option<bytes::Bytes> = results.get(2)?;
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 pub struct Pipeline {
     entries: Vec<PipelineEntry>,
