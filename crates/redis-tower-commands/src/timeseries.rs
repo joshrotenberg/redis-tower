@@ -1411,10 +1411,17 @@ impl Command for TsQueryIndex {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::{TsCreateRule, TsAggregation};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::{TsAggregation, TsCreateRule};
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = TsCreateRule::new("src", "dst", TsAggregation::Avg, 60_000);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// conn.execute(TsCreateRule::new("src", "dst", TsAggregation::Avg, 60_000))
+///     .await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct TsCreateRule {
@@ -1492,10 +1499,16 @@ impl Command for TsCreateRule {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::TsDeleteRule;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::TsDeleteRule;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = TsDeleteRule::new("src", "dst");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// conn.execute(TsDeleteRule::new("src", "dst")).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct TsDeleteRule {
