@@ -522,10 +522,19 @@ fn parse_stream_status_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::{XAckDel, StreamRefPolicy};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::{StreamRefPolicy, XAckDel};
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = XAckDel::new("s", "g", vec!["1-1", "1-2"]).policy(StreamRefPolicy::DelRef);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let statuses = conn
+///     .execute(XAckDel::new("s", "g", vec!["1-1", "1-2"]).policy(StreamRefPolicy::DelRef))
+///     .await?;
+/// # let _ = statuses;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct XAckDel {
@@ -594,10 +603,19 @@ impl Command for XAckDel {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::{XDelEx, StreamRefPolicy};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::{StreamRefPolicy, XDelEx};
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = XDelEx::new("s", vec!["1-1", "1-2"]).policy(StreamRefPolicy::Acked);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let statuses = conn
+///     .execute(XDelEx::new("s", vec!["1-1", "1-2"]).policy(StreamRefPolicy::Acked))
+///     .await?;
+/// # let _ = statuses;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct XDelEx {
