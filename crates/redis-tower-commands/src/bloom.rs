@@ -1023,18 +1023,25 @@ impl Command for BfCard {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::{BfScanDump, BfLoadChunk};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::{BfLoadChunk, BfScanDump};
+/// use redis_tower_core::RedisConnection;
+///
+/// let mut src = RedisConnection::connect("127.0.0.1:6379").await?;
+/// let mut dst = RedisConnection::connect("127.0.0.1:6380").await?;
 ///
 /// let mut iter = 0;
 /// loop {
-///     let (next, chunk) = client.execute(BfScanDump::new("src", iter)).await?;
+///     let (next, chunk) = src.execute(BfScanDump::new("filter", iter)).await?;
 ///     if next == 0 {
 ///         break;
 ///     }
-///     client.execute(BfLoadChunk::new("dst", next, chunk)).await?;
+///     dst.execute(BfLoadChunk::new("filter", next, chunk)).await?;
 ///     iter = next;
 /// }
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct BfScanDump {
