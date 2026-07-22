@@ -10,9 +10,9 @@ use crate::error::RedisError;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_core::{Command, Frame, RedisError};
-/// use bytes::Bytes;
+/// use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// pub struct Ping;
 ///
@@ -20,7 +20,7 @@ use crate::error::RedisError;
 ///     type Response = String;
 ///
 ///     fn to_frame(&self) -> Frame {
-///         Frame::array(vec![Frame::bulk("PING")])
+///         array(vec![bulk("PING")])
 ///     }
 ///
 ///     fn parse_response(&self, frame: Frame) -> Result<String, RedisError> {
