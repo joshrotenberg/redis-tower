@@ -78,7 +78,10 @@ impl HSet {
     ///
     /// Produces the same wire frame as the incremental builder:
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// use redis_tower_commands::HSet;
+    /// use redis_tower_core::Command;
+    ///
     /// // These two are equivalent:
     /// let a = HSet::new("h", "f1", "v1").field("f2", "v2");
     /// let b = HSet::from_fields("h", [("f1", "v1"), ("f2", "v2")]);
@@ -1306,10 +1309,17 @@ impl Command for HPExpireTime {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::HGetDel;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::HGetDel;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = HGetDel::new("h", vec!["f1", "f2"]);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let values = conn.execute(HGetDel::new("h", vec!["f1", "f2"])).await?;
+/// # let _ = values;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct HGetDel {
@@ -1378,10 +1388,19 @@ impl Command for HGetDel {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::HGetEx;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::HGetEx;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = HGetEx::new("h", vec!["f1", "f2"]).ex(60);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let values = conn
+///     .execute(HGetEx::new("h", vec!["f1", "f2"]).ex(60))
+///     .await?;
+/// # let _ = values;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct HGetEx {
@@ -1536,10 +1555,19 @@ pub enum HSetExCondition {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::HSetEx;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::HSetEx;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = HSetEx::new("h", vec![("f1", "v1"), ("f2", "v2")]).ex(60);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let set = conn
+///     .execute(HSetEx::new("h", vec![("f1", "v1"), ("f2", "v2")]).ex(60))
+///     .await?;
+/// # let _ = set;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct HSetEx {
