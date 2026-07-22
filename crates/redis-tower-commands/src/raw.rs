@@ -10,8 +10,15 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::RawCommand;
+/// use redis_tower_core::RedisConnection;
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 /// let result = conn.execute(RawCommand::new("CUSTOM.CMD").arg("key").arg("val")).await?;
+/// # let _ = result;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct RawCommand {
@@ -44,10 +51,17 @@ impl RawCommand {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_commands::RawCommand;
+    /// use redis_tower_core::RedisConnection;
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
     /// let count: i64 = conn.execute(RawCommand::new("SCARD").arg("s").query()).await?;
     /// let members: Vec<String> =
     ///     conn.execute(RawCommand::new("SMEMBERS").arg("s").query()).await?;
+    /// # let _ = (count, members);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn query<T: FromFrame>(self) -> TypedRawCommand<T> {
         TypedRawCommand {
