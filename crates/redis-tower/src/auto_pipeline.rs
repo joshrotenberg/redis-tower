@@ -7,7 +7,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{AutoPipelineConfig, AutoPipelineService, CommandAdapter, RedisConnection};
 //! use redis_tower::commands::*;
 //! use tower::Service;
@@ -15,6 +16,9 @@
 //! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //! let mut svc = CommandAdapter::new(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
 //! let value: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
+//! # let _ = value;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -223,8 +227,15 @@ impl WorkerRequest {
 ///
 /// Compose with [`CommandAdapter`](crate::CommandAdapter) for typed commands:
 ///
-/// ```ignore
+/// ```no_run
+/// # use redis_tower::{AutoPipelineConfig, AutoPipelineService, CommandAdapter, RedisConnection};
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// # let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+/// # let config = AutoPipelineConfig::default();
 /// let svc = CommandAdapter::new(AutoPipelineService::new(conn, config));
+/// # let _ = svc;
+/// # Ok(())
+/// # }
 /// ```
 pub struct AutoPipelineService {
     tx: mpsc::Sender<WorkerRequest>,
