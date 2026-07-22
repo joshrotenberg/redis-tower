@@ -15,9 +15,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::pool::{ConnectionPool, PoolConfig};
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::pool::ConnectionPool;
 //! use redis_tower::RedisConnection;
+//! use redis_tower::commands::Set;
 //!
 //! // Standalone pool
 //! let pool = ConnectionPool::connect(4, || async {
@@ -29,6 +31,9 @@
 //! tokio::spawn(async move {
 //!     p.execute(Set::new("key", "val")).await.unwrap();
 //! });
+//! # let _ = pool;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
