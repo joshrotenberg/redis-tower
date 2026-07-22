@@ -39,14 +39,28 @@ impl ZAdd {
     ///
     /// Option flags (`nx`, `xx`, `gt`, `lt`, `ch`) can be chained as usual:
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_commands::ZAdd;
+    /// use redis_tower_core::RedisConnection;
+    ///
+    /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+    ///
     /// let scores = vec![(100.0, "alice"), (200.0, "bob")];
-    /// let cmd = ZAdd::from_members("leaderboard", scores).ch();
+    /// let added = conn
+    ///     .execute(ZAdd::from_members("leaderboard", scores).ch())
+    ///     .await?;
+    /// # let _ = added;
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// Produces the same wire frame as the incremental builder for the same members:
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// use redis_tower_commands::ZAdd;
+    /// use redis_tower_core::Command;
+    ///
     /// // These two are equivalent:
     /// let a = ZAdd::new("z").member(1.0, "a").member(2.0, "b");
     /// let b = ZAdd::from_members("z", [(1.0, "a"), (2.0, "b")]);
