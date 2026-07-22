@@ -711,10 +711,17 @@ impl Command for FtAggregate {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::FtCursorRead;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::FtCursorRead;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = FtCursorRead::new("idx", 42).count(100);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let batch = conn.execute(FtCursorRead::new("idx", 42).count(100)).await?;
+/// # let _ = batch;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct FtCursorRead {
@@ -772,10 +779,16 @@ impl Command for FtCursorRead {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::FtCursorDel;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::FtCursorDel;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = FtCursorDel::new("idx", 42);
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// conn.execute(FtCursorDel::new("idx", 42)).await?;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct FtCursorDel {
@@ -971,10 +984,19 @@ impl FtProfileType {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::FtProfile;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::FtProfile;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = FtProfile::search("idx", "hello world").limited();
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let profile = conn
+///     .execute(FtProfile::search("idx", "hello world").limited())
+///     .await?;
+/// # let _ = profile;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct FtProfile {
@@ -1049,10 +1071,17 @@ impl Command for FtProfile {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::commands::FtTagVals;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower_commands::FtTagVals;
+/// use redis_tower_core::RedisConnection;
 ///
-/// let cmd = FtTagVals::new("idx", "city");
+/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
+///
+/// let cities = conn.execute(FtTagVals::new("idx", "city")).await?;
+/// # let _ = cities;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct FtTagVals {
