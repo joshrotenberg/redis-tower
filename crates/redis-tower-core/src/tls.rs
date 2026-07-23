@@ -13,17 +13,21 @@ use tokio::net::TcpStream;
 ///
 /// # Example
 ///
-/// ```ignore
+/// Each constructor is available only when its own backend feature is enabled;
+/// this example shows both together.
+///
+/// ```no_run
 /// use redis_tower_core::tls::TlsConfig;
 ///
 /// // Use platform defaults (system root certs, verify hostname).
-/// let config = TlsConfig::default_native_tls();
+/// let native = TlsConfig::default_native_tls();
 ///
 /// // Or with rustls:
-/// let config = TlsConfig::default_rustls();
+/// let rustls = TlsConfig::default_rustls();
 ///
 /// // Disable certificate verification (DANGEROUS, for testing only).
-/// let config = TlsConfig::default_native_tls().danger_accept_invalid_certs(true);
+/// let insecure = TlsConfig::default_native_tls().danger_accept_invalid_certs(true);
+/// # let _ = (native, rustls, insecure);
 /// ```
 pub struct TlsConfig {
     pub(crate) backend: TlsBackend,
@@ -139,9 +143,15 @@ impl TlsConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_core::tls::TlsConfig;
+    ///
     /// let tls = TlsConfig::default_rustls()
     ///     .with_root_ca_pem(std::fs::read("ca.pem")?);
+    /// # let _ = tls;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_root_ca_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
         self.root_ca_pem = Some(pem.into());
@@ -157,10 +167,16 @@ impl TlsConfig {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_core::tls::TlsConfig;
+    ///
     /// let tls = TlsConfig::default_rustls()
     ///     .with_root_ca_pem(std::fs::read("ca.pem")?)
     ///     .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
+    /// # let _ = tls;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_client_auth_pem(
         mut self,
