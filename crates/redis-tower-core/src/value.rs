@@ -5,23 +5,30 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::{RedisConnection, RedisValueExt};
-//! use redis_tower::commands::*;
+//! The values below are what command execution hands back: a `GET` reply is an
+//! `Option<Bytes>`, so `.parse_into()` is called directly on it.
 //!
-//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
-//! conn.execute(Set::new("name", "alice")).await?;
+//! ```no_run
+//! use bytes::Bytes;
+//! use redis_tower_core::RedisValueExt;
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Convert Option<Bytes> to String
-//! let name: String = conn.execute(Get::new("name")).await?.parse_into()?;
+//! let reply: Option<Bytes> = Some(Bytes::from("alice"));
+//! let name: String = reply.parse_into()?;
+//! assert_eq!(name, "alice");
 //!
 //! // Convert Option<Bytes> to integer (Redis stores numbers as strings)
-//! conn.execute(Set::new("counter", "42")).await?;
-//! let count: u32 = conn.execute(Get::new("counter")).await?.parse_into()?;
+//! let reply: Option<Bytes> = Some(Bytes::from("42"));
+//! let count: u32 = reply.parse_into()?;
+//! assert_eq!(count, 42);
 //!
 //! // Handle missing keys with Option
-//! let missing: Option<String> = conn.execute(Get::new("nope")).await?.parse_into()?;
+//! let reply: Option<Bytes> = None;
+//! let missing: Option<String> = reply.parse_into()?;
 //! assert_eq!(missing, None);
+//! # Ok(())
+//! # }
 //! ```
 
 use bytes::Bytes;
@@ -35,7 +42,7 @@ use crate::error::RedisError;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use bytes::Bytes;
 /// use redis_tower_core::{FromRedisBytes, RedisError};
 ///
@@ -52,6 +59,8 @@ use crate::error::RedisError;
 ///         Ok(UserId(id))
 ///     }
 /// }
+/// # let id = UserId::from_redis_bytes(Bytes::from("7")).unwrap();
+/// # assert_eq!(id.0, 7);
 /// ```
 pub trait FromRedisBytes: Sized {
     /// Parse raw bytes from a Redis bulk string into this type.
@@ -65,12 +74,17 @@ pub trait FromRedisBytes: Sized {
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::{RedisConnection, RedisValueExt, commands::*};
+/// ```no_run
+/// use bytes::Bytes;
+/// use redis_tower_core::RedisValueExt;
 ///
-/// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
-/// conn.execute(Set::new("counter", "42")).await?;
-/// let count: u32 = conn.execute(Get::new("counter")).await?.parse_into()?;
+/// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// // The GET reply for a counter Redis stores as the string "42"
+/// let reply: Option<Bytes> = Some(Bytes::from("42"));
+/// let count: u32 = reply.parse_into()?;
+/// assert_eq!(count, 42);
+/// # Ok(())
+/// # }
 /// ```
 pub trait RedisValueExt<T> {
     /// Convert this Redis response value into the target type `U`.
