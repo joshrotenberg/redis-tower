@@ -7,26 +7,37 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::credentials::{AuthenticatedConnection, Credentials, StaticCredentials};
-//! use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
+//! ```no_run
+//! use std::future::Future;
+//! use std::pin::Pin;
+//! use redis_tower::credentials::{
+//!     AuthenticatedConnection, CredentialProvider, Credentials, StaticCredentials,
+//! };
+//! use redis_tower::commands::Ping;
+//! use redis_tower::RedisError;
 //!
+//! # async fn fetch_iam_token() -> Result<String, RedisError> { Ok("token".into()) }
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Static credentials (simple case).
 //! let creds = StaticCredentials::password("my_secret");
-//! let mut conn = AuthenticatedConnection::connect(
-//!     "127.0.0.1:6379",
-//!     creds,
-//! ).await?;
+//! let mut conn = AuthenticatedConnection::connect("127.0.0.1:6379", creds).await?;
 //! conn.execute(Ping::new()).await?;
 //!
-//! // Dynamic credentials (cloud IAM).
-//! struct IamProvider { /* ... */ }
+//! // Dynamic credentials (cloud IAM). The provider re-fetches on each
+//! // reconnect, so a rotated token is picked up automatically.
+//! struct IamProvider;
 //! impl CredentialProvider for IamProvider {
-//!     async fn get_credentials(&self) -> Result<Credentials, RedisError> {
-//!         // Fetch short-lived token from IAM service
-//!         Ok(Credentials::new("default", fetch_iam_token().await?))
+//!     fn get_credentials(
+//!         &self,
+//!     ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+//!         // Fetch a short-lived token from an IAM service.
+//!         Box::pin(async { Ok(Credentials::new("default", fetch_iam_token().await?)) })
 //!     }
 //! }
+//! let mut conn = AuthenticatedConnection::connect("127.0.0.1:6379", IamProvider).await?;
+//! conn.reauthenticate().await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -192,7 +203,8 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::time::Duration;
 /// use redis_tower::credentials::{RotatingAuthClient, StaticCredentials};
 ///
@@ -202,6 +214,9 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
 ///     provider,
 ///     Duration::from_secs(300),
 /// ).await?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 pub struct RotatingAuthClient<P> {
     conn: std::sync::Arc<tokio::sync::Mutex<RedisConnection>>,

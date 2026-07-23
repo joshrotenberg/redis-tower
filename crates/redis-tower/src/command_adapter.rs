@@ -19,12 +19,12 @@ use tower_service::Service;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use tower::ServiceBuilder;
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use tower::{Service, ServiceBuilder};
 /// use redis_tower::{CommandAdapter, FrameService};
 /// use redis_tower::tracing_layer::TracingLayer;
-/// use redis_tower::commands::*;
-/// use tower::ServiceExt;
+/// use redis_tower::commands::Get;
 ///
 /// let frame_svc = FrameService::connect("127.0.0.1:6379").await?;
 /// let mut svc = CommandAdapter::new(
@@ -33,6 +33,9 @@ use tower_service::Service;
 ///         .service(frame_svc),
 /// );
 /// let val: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 pub struct CommandAdapter<S> {
     inner: S,
