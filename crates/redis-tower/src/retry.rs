@@ -23,7 +23,8 @@
 //!
 //! Compose it as a Tower layer over a bridged client:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{ExecutorService, MultiplexedClient, RetryLayer, RetryPolicy};
 //! use tower::ServiceBuilder;
 //!
@@ -31,18 +32,25 @@
 //! let service = ServiceBuilder::new()
 //!     .layer(RetryLayer::new(RetryPolicy::default()))
 //!     .service(ExecutorService::new(client));
+//! # let _ = service;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! Or opt in directly on a client via its `retry` combinator, which returns a
 //! [`RetryClient`] with an ergonomic `execute`:
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{MultiplexedClient, RetryPolicy};
 //! use redis_tower::commands::Get;
 //!
 //! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 //! let retrying = client.retry(RetryPolicy::default());
 //! let value: Option<bytes::Bytes> = retrying.execute(Get::new("key")).await?;
+//! # let _ = value;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
