@@ -36,9 +36,10 @@ use crate::retry::{RetryClient, RetryPolicy};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::ResilientRedisClient;
-/// use redis_tower::commands::*;
+/// use redis_tower::commands::Set;
 ///
 /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
 ///
@@ -46,6 +47,8 @@ use crate::retry::{RetryClient, RetryPolicy};
 /// tokio::spawn(async move {
 ///     c.execute(Set::new("key", "value")).await.unwrap();
 /// });
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct ResilientRedisClient {
@@ -128,13 +131,17 @@ impl ResilientRedisClient {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use redis_tower::{ResilientRedisClient, RetryPolicy};
     /// use redis_tower::commands::Get;
     ///
     /// let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
     /// let retrying = client.retry(RetryPolicy::default());
     /// let value: Option<bytes::Bytes> = retrying.execute(Get::new("key")).await?;
+    /// # let _ = value;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
         RetryClient::new(self.clone(), policy)
