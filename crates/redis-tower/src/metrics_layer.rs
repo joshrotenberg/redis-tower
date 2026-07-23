@@ -5,8 +5,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use std::sync::Arc;
+//! ```no_run
 //! use std::time::Duration;
 //! use redis_tower::metrics_layer::{MetricsLayer, MetricsRecorder, ErrorKind};
 //!
@@ -22,6 +21,7 @@
 //! }
 //!
 //! let layer = MetricsLayer::new(MyRecorder);
+//! # let _ = layer;
 //! ```
 
 use std::future::Future;
@@ -141,14 +141,29 @@ pub trait MetricsRecorder: Send + Sync + 'static {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use tower::ServiceBuilder;
-/// use redis_tower::metrics_layer::{MetricsLayer, MetricsRecorder};
+/// use redis_tower::FrameService;
+/// use redis_tower::metrics_layer::MetricsLayer;
+/// #
+/// # use std::time::Duration;
+/// # use redis_tower::metrics_layer::{ErrorKind, MetricsRecorder};
+/// # struct MyRecorder;
+/// # impl MetricsRecorder for MyRecorder {
+/// #     fn command_completed(&self, command: &str, duration: Duration, error: Option<ErrorKind>) {
+/// #         let _ = (command, duration, error);
+/// #     }
+/// # }
 ///
+/// let frame_service = FrameService::connect("127.0.0.1:6379").await?;
 /// let layer = MetricsLayer::new(MyRecorder);
 /// let svc = ServiceBuilder::new()
 ///     .layer(layer)
 ///     .service(frame_service);
+/// # let _ = svc;
+/// # Ok(())
+/// # }
 /// ```
 pub struct MetricsLayer<R> {
     recorder: Arc<R>,
