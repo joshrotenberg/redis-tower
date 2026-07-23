@@ -14,20 +14,28 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! Decoding the frames a dynamic command would return. `RawCommand::query::<T>()`
+//! calls `T::from_frame` on the reply, so these are the shapes it handles.
+//!
+//! ```no_run
+//! use std::collections::HashMap;
+//!
 //! use redis_tower_core::FromFrame;
-//! use redis_tower_commands::RawCommand;
+//! use redis_tower_protocol::Frame;
+//! use redis_tower_protocol::helpers::{array, bulk};
 //!
-//! // Scalar
-//! let n: i64 = conn.execute(RawCommand::new("INCR").arg("ctr").query()).await?;
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! // Scalar -- the INCR reply
+//! let n = i64::from_frame(Frame::Integer(1))?;
 //!
-//! // Array
-//! let members: Vec<String> =
-//!     conn.execute(RawCommand::new("SMEMBERS").arg("s").query()).await?;
+//! // Array -- the SMEMBERS reply
+//! let members = Vec::<String>::from_frame(array(vec![bulk("a"), bulk("b")]))?;
 //!
-//! // Map (RESP3 map or RESP2 flat array)
-//! let fields: std::collections::HashMap<String, String> =
-//!     conn.execute(RawCommand::new("HGETALL").arg("h").query()).await?;
+//! // Map (RESP3 map or RESP2 flat array) -- the HGETALL reply
+//! let fields = HashMap::<String, String>::from_frame(array(vec![bulk("f"), bulk("v")]))?;
+//! # let _ = (n, members, fields);
+//! # Ok(())
+//! # }
 //! ```
 
 use std::collections::HashMap;

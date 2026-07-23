@@ -29,13 +29,19 @@ use redis_tower_protocol::{Frame, RespCodec};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use futures::future::poll_fn;
 /// use redis_tower_core::FrameService;
 /// use redis_tower_protocol::helpers::{array, bulk};
-/// use tower::ServiceExt;
+/// use tower_service::Service;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut svc = FrameService::connect("127.0.0.1:6379").await?;
-/// let response = svc.oneshot(array(vec![bulk("PING")])).await?;
+/// poll_fn(|cx| svc.poll_ready(cx)).await?;
+/// let response = svc.call(array(vec![bulk("PING")])).await?;
+/// # let _ = response;
+/// # Ok(())
+/// # }
 /// ```
 pub struct FrameService {
     /// The framed transport. `None` while a `Service::call` future is in flight.
