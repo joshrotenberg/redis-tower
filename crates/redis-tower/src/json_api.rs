@@ -6,8 +6,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::Json;
+//! ```no_run
+//! # #[allow(deprecated)]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{Json, MultiplexedClient, RedisConnection};
 //! use serde::{Serialize, Deserialize};
 //!
 //! #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -23,6 +25,9 @@
 //! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 //! let mut json = Json::new(client.clone());
 //! json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
+//! # let _ = user;
+//! # Ok(())
+//! # }
 //! ```
 
 // `Json` is deprecated in favor of `redis_tower_modules::json::JsonClient`, but
@@ -49,8 +54,10 @@ use crate::RedisExecutor;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::Json;
+/// ```no_run
+/// # #[allow(deprecated)]
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower::{Json, MultiplexedClient, RedisConnection};
 /// use serde::{Serialize, Deserialize};
 ///
 /// #[derive(Serialize, Deserialize, Debug, PartialEq)]
@@ -66,6 +73,9 @@ use crate::RedisExecutor;
 /// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 /// let mut json = Json::new(client.clone());
 /// json.set("user:2", "$", &User { name: "Bob".into(), age: 25 }).await?;
+/// # let _ = user;
+/// # Ok(())
+/// # }
 /// ```
 #[deprecated(
     since = "0.2.0",

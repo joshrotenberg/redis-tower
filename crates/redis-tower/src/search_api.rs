@@ -6,16 +6,21 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # #[allow(deprecated)]
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::RedisConnection;
 //! use redis_tower::search_api::{Search, SearchResults, SortDir};
 //! use serde::Deserialize;
 //!
-//! #[derive(Deserialize)]
+//! #[derive(Debug, Deserialize)]
 //! struct Product {
 //!     name: String,
 //!     price: String,
 //!     category: String,
 //! }
+//!
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //!
 //! let results: SearchResults<Product> = Search::new("products_idx", "shoes")
 //!     .filter("@price:[0 100]")
@@ -28,6 +33,8 @@
 //! for doc in &results.docs {
 //!     println!("{}: {:?}", doc.key, doc.doc);
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 // `Search` is deprecated in favor of `redis_tower_modules::search::SearchClient`,
@@ -75,16 +82,29 @@ pub struct SearchDoc<T> {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # #[allow(deprecated)]
+/// # async fn example(
+/// #     conn: &mut redis_tower::RedisConnection,
+/// # ) -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::search_api::{Search, SearchResults, SortDir};
+/// # #[derive(Debug, serde::Deserialize)]
+/// # struct Product {
+/// #     name: String,
+/// #     price: String,
+/// #     category: String,
+/// # }
 ///
 /// let results: SearchResults<Product> = Search::new("products_idx", "shoes")
 ///     .filter("@price:[0 100]")
 ///     .sort_by("price", SortDir::Asc)
 ///     .return_fields(&["name", "price", "category"])
 ///     .limit(0, 10)
-///     .search(&mut conn)
+///     .search(conn)
 ///     .await?;
+/// # let _ = results;
+/// # Ok(())
+/// # }
 /// ```
 #[deprecated(
     since = "0.2.0",
