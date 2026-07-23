@@ -6,26 +6,31 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
 //! use tower::ServiceBuilder;
+//! use redis_tower::FrameService;
 //! use redis_tower::tracing_layer::TracingLayer;
 //!
 //! // Basic -- no peer address:
-//! let svc = ServiceBuilder::new()
+//! let basic = ServiceBuilder::new()
 //!     .layer(TracingLayer::new())
-//!     .service(frame_service);
+//!     .service(FrameService::connect("127.0.0.1:6379").await?);
 //!
 //! // With server address for OTel per-node flame graphs:
-//! let svc = ServiceBuilder::new()
+//! let with_peer = ServiceBuilder::new()
 //!     .layer(TracingLayer::with_peer("127.0.0.1:6379"))
-//!     .service(frame_service);
+//!     .service(FrameService::connect("127.0.0.1:6379").await?);
 //!
 //! // Warn on commands slower than 50ms (a differentiator neither
 //! // redis-rs nor fred ships):
-//! use std::time::Duration;
-//! let svc = ServiceBuilder::new()
+//! let slow_command_warnings = ServiceBuilder::new()
 //!     .layer(TracingLayer::new().with_slow_command_threshold(Duration::from_millis(50)))
-//!     .service(frame_service);
+//!     .service(FrameService::connect("127.0.0.1:6379").await?);
+//! # let _ = (basic, with_peer, slow_command_warnings);
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
