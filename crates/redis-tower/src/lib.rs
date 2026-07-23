@@ -76,8 +76,9 @@
 //!
 //! # Middleware
 //!
-//! Since [`RedisConnection`] implements `tower::Service`, you can compose it
-//! with any Tower middleware. redis-tower also ships built-in layers:
+//! Middleware composes at the *frame* altitude. [`FrameService`] is the
+//! `tower::Service<Frame>` at the bottom of the stack, so any Tower layer that
+//! speaks `Frame` stacks on top of it. redis-tower also ships built-in layers:
 //!
 //! - [`TracingLayer`] -- emits tracing spans for each command.
 //! - [`MetricsLayer`] -- records command latency and counts via a pluggable
@@ -85,45 +86,67 @@
 //! - [`CacheService`] -- client-side frame caching with invalidation.
 //! - [`ReconnectService`] -- automatic reconnection with configurable backoff.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use tower::ServiceBuilder;
 //! use tower::timeout::TimeoutLayer;
 //! use tower::buffer::BufferLayer;
-//! use redis_tower::{RedisConnection, TracingLayer};
+//! use redis_tower::{Frame, FrameService, TracingLayer};
 //!
-//! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let conn = FrameService::connect("127.0.0.1:6379").await?;
 //! let svc = ServiceBuilder::new()
-//!     .layer(BufferLayer::new(64))
+//!     .layer(BufferLayer::<Frame>::new(64))
 //!     .layer(TimeoutLayer::new(std::time::Duration::from_secs(5)))
-//!     .layer(TracingLayer)
+//!     .layer(TracingLayer::new())
 //!     .service(conn);
+//! # let _ = svc;
+//! # Ok(())
+//! # }
 //! ```
 //!
-//! # Resilience with tower-resilience
+//! Layers like `BufferLayer` and `TimeoutLayer` box their error type, so a
+//! stack that includes them no longer meets [`CommandAdapter`]'s
+//! `Error = RedisError` bound. Keep such layers outside the adapter, or stick
+//! to layers that preserve [`RedisError`] when you want typed commands on top
+//! (see the next section).
 //!
-//! For production fault tolerance, compose with the
-//! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
-//! for circuit breaking, rate limiting, and bulkhead isolation. Automatic
-//! reconnection with exponential backoff is built in via
-//! [`ResilientRedisClient`]:
+//! # Resilience
 //!
-//! ```ignore
+//! Circuit breaking ships in this crate as [`CircuitBreakerLayer`], and
+//! automatic reconnection with exponential backoff is built in via
+//! [`ResilientRedisClient`]. Both are ordinary Tower layers, so they stack
+//! under a `ServiceBuilder` at the frame altitude, with [`CommandAdapter`]
+//! wrapping the result to accept typed commands:
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//!
 //! use tower::ServiceBuilder;
-//! use tower_resilience_circuitbreaker::circuit_breaker_builder;
-//! use redis_tower::{FrameService, CommandAdapter, TracingLayer};
+//! use redis_tower::{
+//!     CircuitBreakerConfig, CircuitBreakerLayer, CommandAdapter, FrameService, TracingLayer,
+//! };
 //!
-//! let cb = circuit_breaker_builder()
-//!     .failure_rate_threshold(50.0)
-//!     .wait_duration_in_open(Duration::from_secs(30))
-//!     .build();
+//! let cb = CircuitBreakerLayer::new(CircuitBreakerConfig {
+//!     failure_threshold: 5,
+//!     recovery_probe_interval: Duration::from_secs(30),
+//! });
 //!
 //! let svc = CommandAdapter::new(
 //!     ServiceBuilder::new()
 //!         .layer(cb)
 //!         .layer(TracingLayer::new())
-//!         .service(FrameService::connect("127.0.0.1:6379").await?)
+//!         .service(FrameService::connect("127.0.0.1:6379").await?),
 //! );
+//! # let _ = svc;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! For fault-tolerance primitives this crate does not ship -- rate limiting and
+//! bulkhead isolation -- the
+//! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
+//! provides layers that compose into the same builder.
 //!
 //! [`RedisError::is_retryable`] classifies which errors are worth retrying
 //! (transient connection errors) versus command errors like WRONGTYPE that are
@@ -161,19 +184,20 @@
 //! WATCH/read/EXEC retry loop for you, re-running a closure until EXEC commits
 //! or a retry cap is hit.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{transaction, Pipeline, Transaction, RedisConnection};
-//! use redis_tower::commands::*;
+//! use redis_tower::commands::{Get, Incr, Set};
 //!
 //! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //!
-//! let results = Pipeline::new()
+//! let pipelined = Pipeline::new()
 //!     .push(Set::new("a", "1"))
 //!     .push(Get::new("a"))
 //!     .execute(&mut conn)
 //!     .await?;
 //!
-//! let result = Transaction::new()
+//! let watched = Transaction::new()
 //!     .watch(["key"])
 //!     .push(Incr::new("key"))
 //!     .execute(&mut conn)
@@ -181,11 +205,17 @@
 //!
 //! // Optimistic-locking retry loop: read inside the WATCH window, then EXEC,
 //! // retrying automatically if another client touches `counter`.
-//! let results = transaction(&mut conn, ["counter"], async |c| {
-//!     let current: i64 = c.execute(Get::new("counter")).await?.unwrap_or(0);
+//! let incremented = transaction(&mut conn, ["counter"], async |c| {
+//!     let current: i64 = match c.execute(Get::new("counter")).await? {
+//!         Some(bytes) => String::from_utf8_lossy(&bytes).parse().unwrap_or(0),
+//!         None => 0,
+//!     };
 //!     Ok(Transaction::new().push(Set::new("counter", (current + 1).to_string())))
 //! })
 //! .await?;
+//! # let _ = (pipelined, watched, incremented);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Pub/Sub
