@@ -149,13 +149,40 @@ async fn read_response_from(
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower_core::RedisConnection;
-/// use redis_tower_commands::Get;
-/// use tower::Service;
+/// Typed command types such as `Get` live in the `redis-tower-commands` crate,
+/// which depends on this one, so the example below stands in a minimal local
+/// [`Command`] implementation (hidden) and runs it with
+/// [`execute`](Self::execute):
 ///
+/// ```no_run
+/// use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+/// # use redis_tower_protocol::helpers::{array, bulk};
+/// #
+/// # struct Get(String);
+/// #
+/// # impl Command for Get {
+/// #     type Response = Option<String>;
+/// #
+/// #     fn to_frame(&self) -> Frame {
+/// #         array(vec![bulk("GET"), bulk(&self.0)])
+/// #     }
+/// #
+/// #     fn parse_response(&self, frame: Frame) -> Result<Option<String>, RedisError> {
+/// #         match frame {
+/// #             Frame::BulkString(Some(b)) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+/// #             _ => Ok(None),
+/// #         }
+/// #     }
+/// #
+/// #     fn name(&self) -> &str { "GET" }
+/// # }
+/// #
+/// # async fn example() -> Result<(), RedisError> {
 /// let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
-/// let response = conn.call(Get::new("my_key")).await?;
+/// let value = conn.execute(Get("my_key".to_string())).await?;
+/// # let _ = value;
+/// # Ok(())
+/// # }
 /// ```
 pub struct RedisConnection {
     /// The framed transport. `None` while a `Service::call` future is in flight.
@@ -455,8 +482,11 @@ impl RedisConnection {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// use redis_tower_core::RedisConnection;
     /// use redis_tower_core::tls::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let tls = TlsConfig::default_rustls()
     ///     .with_root_ca_pem(std::fs::read("ca.pem")?)
     ///     .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
@@ -465,6 +495,9 @@ impl RedisConnection {
     ///     &tls,
     /// )
     /// .await?;
+    /// # let _ = conn;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     #[cfg_attr(
@@ -598,27 +631,27 @@ impl RedisConnection {
     /// To handle this, implement [`ConnectionFactory`](https://docs.rs/redis-tower)
     /// yourself and replay setup commands (e.g., `CLIENT TRACKING ON`) inside
     /// `connect()`. This ensures the setup runs on every fresh connection,
-    /// including reconnections. For example:
+    /// including reconnections.
     ///
-    /// ```ignore
-    /// use redis_tower::reconnect::{ConnectionFactory, ResilientConnection, ReconnectConfig};
-    /// use redis_tower_core::{RedisConnection, RedisError};
+    /// `ConnectionFactory` lives in the `redis-tower` crate, which depends on
+    /// this one, so the setup below is shown as the standalone function that
+    /// the factory's `connect()` body calls:
     ///
-    /// struct TrackingFactory {
-    ///     addr: String,
-    /// }
+    /// ```no_run
+    /// use redis_tower_core::{Frame, RedisConnection, RedisError};
+    /// use redis_tower_protocol::helpers::{array, bulk};
+    /// use tokio::sync::mpsc::UnboundedReceiver;
     ///
-    /// impl ConnectionFactory for TrackingFactory {
-    ///     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
-    ///         let addr = self.addr.clone();
-    ///         Box::pin(async move {
-    ///             let mut conn = RedisConnection::connect_resp3(&addr).await?;
-    ///             // Replay CLIENT TRACKING on every new connection.
-    ///             conn.execute(ClientTracking::on()).await?;
-    ///             Ok(conn)
-    ///         })
-    ///     }
-    /// }
+    /// # async fn connect_tracking(
+    /// #     addr: &str,
+    /// # ) -> Result<(RedisConnection, UnboundedReceiver<Frame>), RedisError> {
+    /// let mut conn = RedisConnection::connect_resp3(addr).await?;
+    /// // Replay CLIENT TRACKING and re-subscribe on every new connection.
+    /// conn.execute_pipeline(vec![array(vec![bulk("CLIENT"), bulk("TRACKING"), bulk("ON")])])
+    ///     .await?;
+    /// let pushes = conn.subscribe_pushes();
+    /// Ok((conn, pushes))
+    /// # }
     /// ```
     pub fn subscribe_pushes(&mut self) -> tokio::sync::mpsc::UnboundedReceiver<Frame> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
