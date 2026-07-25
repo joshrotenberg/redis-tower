@@ -25,7 +25,8 @@
 //! the discovered master). Sentinels and the master commonly use different
 //! passwords in production.
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower_sentinel::SentinelClient;
 //! use redis_tower::credentials::StaticCredentials;
 //!
@@ -34,6 +35,9 @@
 //!     .node_credentials(StaticCredentials::password("redis_pass"))
 //!     .connect()
 //!     .await?;
+//! # let _ = client;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Usage
