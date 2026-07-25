@@ -5,19 +5,24 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use tower::ServiceBuilder;
-//! use redis_tower::reconnect_layer::ReconnectLayer;
-//! use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
-//! use redis_tower::cache_layer::{CacheService, CacheConfig};
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::cache_layer::{CacheConfig, CacheService};
 //! use redis_tower::command_adapter::CommandAdapter;
+//! use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig};
+//! use redis_tower::reconnect_layer::ReconnectService;
+//!
+//! let factory = AddrConnectionFactory::new("127.0.0.1:6379");
 //!
 //! let svc = CommandAdapter::new(
 //!     CacheService::new(
-//!         ReconnectService::new(factory, config).await?,
+//!         ReconnectService::new(factory, ReconnectConfig::default()).await?,
 //!         CacheConfig::default(),
 //!     )
 //! );
+//! # let _ = svc;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;

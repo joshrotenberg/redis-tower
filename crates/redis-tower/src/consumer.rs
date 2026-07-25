@@ -5,7 +5,8 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{RedisConnection, consumer::{StreamConsumer, ConsumerConfig}};
 //! use tokio_stream::StreamExt;
 //!
@@ -17,11 +18,14 @@
 //!         ..Default::default()
 //!     });
 //!
-//! let mut stream = consumer.into_stream(conn);
+//! // The stream is not `Unpin`, so pin it before polling.
+//! let mut stream = Box::pin(consumer.into_stream(conn));
 //! while let Some(msg) = stream.next().await {
 //!     let msg = msg?;
 //!     println!("{}: {} fields", msg.id, msg.fields.len());
 //! }
+//! # Ok(())
+//! # }
 //! ```
 
 use bytes::Bytes;

@@ -9,13 +9,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower::Script;
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{RedisConnection, Script};
 //!
+//! let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //! let script = Script::new("return redis.call('GET', KEYS[1])");
 //!
 //! // Preferred: EVALSHA with automatic NOSCRIPT fallback to EVAL.
 //! let result = script.execute(&mut conn, &["mykey"], &[]).await?;
+//! # let _ = result;
+//! # Ok(())
+//! # }
 //! ```
 
 use redis_tower_commands::{Eval, EvalRo, EvalSha, EvalShaRo};
