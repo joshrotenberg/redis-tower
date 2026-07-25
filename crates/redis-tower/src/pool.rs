@@ -551,10 +551,18 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// // On SIGTERM: stop accepting new work and drain the pool before exit.
-    /// tokio::signal::ctrl_c().await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::{ConnectionPool, RedisConnection};
+    ///
+    /// let pool =
+    ///     ConnectionPool::connect(4, || RedisConnection::connect("127.0.0.1:6379")).await?;
+    ///
+    /// // On shutdown (SIGTERM, ctrl-c, ...): stop accepting new work and drain
+    /// // the pool before exit.
     /// pool.close().await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn close(self) {
         // Signal all clones to stop accepting new commands.
