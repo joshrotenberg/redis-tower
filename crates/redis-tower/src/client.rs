@@ -32,8 +32,9 @@ use tokio::sync::Mutex;
 ///
 /// # Example
 ///
-/// ```ignore
-/// use redis_tower::{RedisClient, commands::*};
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower::{RedisClient, commands::{Get, Set}};
 ///
 /// let client = RedisClient::connect("127.0.0.1:6379").await?;
 ///
@@ -44,6 +45,9 @@ use tokio::sync::Mutex;
 /// });
 ///
 /// let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct RedisClient {

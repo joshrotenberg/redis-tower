@@ -25,10 +25,18 @@ use crate::resilient::ResilientRedisClient;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// use redis_tower::RedisExecutor;
+/// use redis_tower::commands::Incr;
+/// # use redis_tower::{RedisClient, RedisError};
+///
 /// async fn increment(redis: &mut impl RedisExecutor, key: &str) -> Result<i64, RedisError> {
 ///     redis.execute(Incr::new(key)).await
 /// }
+/// # async fn call(mut client: RedisClient) -> Result<(), RedisError> {
+/// #     let _count = increment(&mut client, "visits").await?;
+/// #     Ok(())
+/// # }
 /// ```
 pub trait RedisExecutor {
     /// Execute a Redis command and return its typed response.
@@ -135,15 +143,20 @@ impl RedisExecutor for MultiplexedClient {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use std::time::Duration;
 /// use tower::ServiceBuilder;
-/// use redis_tower::{CommandTimeoutLayer, ExecutorService};
+/// use redis_tower::{CommandTimeoutLayer, ExecutorService, MultiplexedClient};
 ///
 /// // `client` is any cloneable RedisExecutor (e.g. a MultiplexedClient).
+/// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 /// let service = ServiceBuilder::new()
 ///     .layer(CommandTimeoutLayer::new(Duration::from_secs(1)))
 ///     .service(ExecutorService::new(client));
+/// # let _ = service;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone, Debug)]
 pub struct ExecutorService<P> {
