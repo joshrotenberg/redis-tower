@@ -10,13 +10,17 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::{RedisConnection, CommandTimeoutLayer};
 //! use tower_layer::Layer;
 //! use std::time::Duration;
 //!
 //! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-//! let mut svc = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(conn);
+//! let svc = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(conn);
+//! # let _ = svc;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
@@ -40,13 +44,17 @@ use tower_service::Service;
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower::{RedisConnection, CommandTimeoutLayer};
 /// use tower_layer::Layer;
 /// use std::time::Duration;
 ///
 /// let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-/// let mut svc = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(conn);
+/// let svc = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(conn);
+/// # let _ = svc;
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct CommandTimeoutLayer {

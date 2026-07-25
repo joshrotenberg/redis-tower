@@ -12,9 +12,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::time::Duration;
 //! use tower::ServiceBuilder;
+//! use redis_tower::FrameService;
 //! use redis_tower::circuit_breaker::{CircuitBreakerLayer, CircuitBreakerConfig};
 //!
 //! let svc = ServiceBuilder::new()
@@ -22,7 +24,10 @@
 //!         failure_threshold: 5,
 //!         recovery_probe_interval: Duration::from_secs(5),
 //!     }))
-//!     .service(inner_service);
+//!     .service(FrameService::connect("127.0.0.1:6379").await?);
+//! # let _ = svc;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::future::Future;
