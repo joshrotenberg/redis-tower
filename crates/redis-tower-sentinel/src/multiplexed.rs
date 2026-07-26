@@ -18,10 +18,11 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower_sentinel::MultiplexedSentinelClient;
-//! use redis_tower::commands::*;
+//! use redis_tower_commands::{Get, Set};
 //!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let client = MultiplexedSentinelClient::connect(
 //!     &["127.0.0.1:26379"],
 //!     "mymaster",
@@ -34,6 +35,9 @@
 //! });
 //!
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 
 use std::sync::Arc;
@@ -54,10 +58,11 @@ use crate::discovery::{self, SentinelConfig};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_sentinel::MultiplexedSentinelClient;
 /// use redis_tower::credentials::StaticCredentials;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let client = MultiplexedSentinelClient::builder(
 ///     &["127.0.0.1:26379"],
 ///     "mymaster",
@@ -66,6 +71,9 @@ use crate::discovery::{self, SentinelConfig};
 /// .node_credentials(StaticCredentials::password("redis_pass"))
 /// .connect_with_reconnect()
 /// .await?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 pub struct MultiplexedSentinelClientBuilder {
     sentinel_addrs: Vec<String>,
@@ -210,15 +218,19 @@ impl MultiplexedSentinelClientBuilder {
 /// For auth or TLS, use [`MultiplexedSentinelClient::builder`] to configure
 /// sentinel credentials, node credentials, and TLS independently:
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_sentinel::MultiplexedSentinelClient;
 /// use redis_tower::credentials::StaticCredentials;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let client = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
 ///     .sentinel_credentials(StaticCredentials::password("sentinel_pass"))
 ///     .node_credentials(StaticCredentials::password("redis_pass"))
 ///     .connect_with_reconnect()
 ///     .await?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Middleware
