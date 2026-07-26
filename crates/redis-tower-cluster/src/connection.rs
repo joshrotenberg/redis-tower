@@ -154,9 +154,10 @@ pub enum ReadPreference {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower_cluster::{ClusterConnection, ReadPreference};
-/// use redis_tower::commands::*;
+/// use redis_tower_commands::{Get, Set};
 ///
 /// let mut cluster = ClusterConnection::builder("127.0.0.1:7000")
 ///     .read_preference(ReadPreference::PreferReplica)
@@ -165,6 +166,9 @@ pub enum ReadPreference {
 ///
 /// cluster.execute(Set::new("key", "value")).await?;
 /// let val = cluster.execute(Get::new("key")).await?; // routed to replica
+/// # let _ = val;
+/// # Ok(())
+/// # }
 /// ```
 pub struct ClusterConnection {
     /// Connections to nodes, keyed by "host:port".
@@ -348,10 +352,16 @@ impl ClusterConnection {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_cluster::ClusterConnection;
+    ///
     /// let cluster =
     ///     ClusterConnection::connect_url("rediss://default:secret@cluster.example.com:6379")
     ///         .await?;
+    /// # let _ = cluster;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let (seed, credentials, tls) = parse_cluster_url(url)?;
