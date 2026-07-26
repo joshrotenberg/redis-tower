@@ -36,9 +36,10 @@ use crate::connection::{ClusterConnection, ClusterConnectionBuilder, ReadPrefere
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower_cluster::ClusterClient;
-/// use redis_tower::commands::*;
+/// use redis_tower_commands::Set;
 ///
 /// let client = ClusterClient::connect("127.0.0.1:7000").await?;
 ///
@@ -46,6 +47,8 @@ use crate::connection::{ClusterConnection, ClusterConnectionBuilder, ReadPrefere
 /// tokio::spawn(async move {
 ///     c.execute(Set::new("key", "value")).await.unwrap();
 /// });
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct ClusterClient {
