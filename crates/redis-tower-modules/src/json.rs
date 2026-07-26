@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower::RedisClient;
 //! use redis_tower_modules::json::JsonClient;
 //! use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@
 //! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = RedisClient::connect("redis://127.0.0.1:6379").await?;
+//! let client = RedisClient::connect_url("redis://127.0.0.1:6379").await?;
 //! let mut json = JsonClient::new(client);
 //!
 //! let user = User { name: "Ada".into(), age: 36 };
@@ -49,14 +49,14 @@ use serde::{Serialize, de::DeserializeOwned};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_modules::json::JsonClient;
 /// use serde::{Deserialize, Serialize};
 ///
 /// #[derive(Serialize, Deserialize, Debug, PartialEq)]
 /// struct Point { x: f64, y: f64 }
 ///
-/// # async fn run(mut conn: impl redis_tower::RedisExecutor) -> Result<(), Box<dyn std::error::Error>> {
+/// # async fn run(mut conn: impl redis_tower::RedisExecutor + Send) -> Result<(), Box<dyn std::error::Error>> {
 /// let mut json = JsonClient::new(&mut conn);
 /// json.set("pt:1", "$", &Point { x: 1.0, y: 2.0 }).await?;
 /// let pt: Option<Point> = json.get("pt:1", "$").await?;
@@ -74,12 +74,13 @@ impl<C: RedisExecutor> JsonClient<C> {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// # use redis_tower::RedisClient;
     /// # use redis_tower_modules::json::JsonClient;
     /// # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    /// let client = RedisClient::connect("redis://127.0.0.1:6379").await?;
-    /// let mut json = JsonClient::new(client);
+    /// let client = RedisClient::connect_url("redis://127.0.0.1:6379").await?;
+    /// let json = JsonClient::new(client);
+    /// # let _ = json;
     /// # Ok(())
     /// # }
     /// ```
