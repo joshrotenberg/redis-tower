@@ -16,10 +16,11 @@ use crate::discovery::{self, SentinelConfig};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_sentinel::SentinelConnection;
 /// use redis_tower::credentials::StaticCredentials;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let conn = SentinelConnection::builder(
 ///     &["127.0.0.1:26379", "127.0.0.1:26380", "127.0.0.1:26381"],
 ///     "mymaster",
@@ -28,6 +29,9 @@ use crate::discovery::{self, SentinelConfig};
 /// .node_credentials(StaticCredentials::password("redis_pass"))
 /// .connect()
 /// .await?;
+/// # let _ = conn;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SentinelConnectionBuilder {
     sentinel_addrs: Vec<String>,
@@ -115,15 +119,19 @@ impl SentinelConnectionBuilder {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
 /// use redis_tower_sentinel::SentinelConnection;
+/// use redis_tower_commands::Set;
 ///
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut conn = SentinelConnection::connect(
 ///     &["127.0.0.1:26379", "127.0.0.1:26380", "127.0.0.1:26381"],
 ///     "mymaster",
 /// ).await?;
 ///
 /// conn.execute(Set::new("key", "value")).await?;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SentinelConnection {
     /// Current connection to the master.
@@ -148,10 +156,11 @@ impl SentinelConnection {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
     /// use redis_tower_sentinel::SentinelConnection;
     /// use redis_tower::credentials::StaticCredentials;
     ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let conn = SentinelConnection::builder(
     ///     &["127.0.0.1:26379"],
     ///     "mymaster",
@@ -159,6 +168,9 @@ impl SentinelConnection {
     /// .node_credentials(StaticCredentials::password("secret"))
     /// .connect()
     /// .await?;
+    /// # let _ = conn;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder(
         sentinel_addrs: &[impl AsRef<str>],
