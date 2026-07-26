@@ -17,9 +17,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower_cluster::MultiplexedClusterClient;
-//! use redis_tower::commands::*;
+//! use redis_tower_commands::Set;
 //!
 //! let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
 //!
@@ -28,6 +29,8 @@
 //! tokio::spawn(async move {
 //!     c.execute(Set::new("key", "value")).await.unwrap();
 //! });
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Redirect handling
@@ -271,7 +274,9 @@ impl MultiplexedClusterClientBuilder {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # #[cfg(feature = "tls-rustls")]
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use redis_tower_cluster::MultiplexedClusterClient;
     /// use redis_tower_core::tls::TlsConfig;
     ///
@@ -279,6 +284,9 @@ impl MultiplexedClusterClientBuilder {
     ///     .tls(TlsConfig::default_rustls())
     ///     .connect()
     ///     .await?;
+    /// # let _ = client;
+    /// # Ok(())
+    /// # }
     /// ```
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     pub fn tls(mut self, tls: TlsConfig) -> Self {
@@ -852,10 +860,18 @@ impl MultiplexedClusterClient {
     ///
     /// # Example
     ///
-    /// ```ignore
-    /// // On SIGTERM: stop accepting new work and drain the cluster client.
-    /// tokio::signal::ctrl_c().await?;
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_cluster::MultiplexedClusterClient;
+    ///
+    /// let cluster = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
+    ///
+    /// // On SIGTERM: stop accepting new work, then drain the cluster client.
+    /// // Wire the wait to your runtime's signal handler, such as
+    /// // `tokio::signal::ctrl_c` (tokio's `signal` feature).
     /// cluster.shutdown().await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn shutdown(self) {
         // Only the last clone owns the workers outright; earlier clones return
