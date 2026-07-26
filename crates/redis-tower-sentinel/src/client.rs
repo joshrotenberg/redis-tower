@@ -15,7 +15,8 @@ use crate::connection::{SentinelConnection, SentinelConnectionBuilder};
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower_sentinel::SentinelClient;
 /// use redis_tower::credentials::StaticCredentials;
 ///
@@ -27,6 +28,9 @@ use crate::connection::{SentinelConnection, SentinelConnectionBuilder};
 /// .node_credentials(StaticCredentials::password("redis_pass"))
 /// .connect()
 /// .await?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 pub struct SentinelClientBuilder {
     inner: SentinelConnectionBuilder,
@@ -98,7 +102,8 @@ impl SentinelClientBuilder {
 /// For auth or TLS, use [`SentinelClient::builder`] to configure sentinel
 /// credentials, node credentials, and TLS independently for each hop:
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower_sentinel::SentinelClient;
 /// use redis_tower::credentials::StaticCredentials;
 ///
@@ -107,6 +112,9 @@ impl SentinelClientBuilder {
 ///     .node_credentials(StaticCredentials::password("redis_pass"))
 ///     .connect()
 ///     .await?;
+/// # let _ = client;
+/// # Ok(())
+/// # }
 /// ```
 ///
 /// # Concurrency
@@ -118,8 +126,10 @@ impl SentinelClientBuilder {
 ///
 /// # Example
 ///
-/// ```ignore
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// use redis_tower_sentinel::SentinelClient;
+/// use redis_tower_commands::Set;
 ///
 /// let client = SentinelClient::connect(
 ///     &["127.0.0.1:26379", "127.0.0.1:26380"],
@@ -130,6 +140,8 @@ impl SentinelClientBuilder {
 /// tokio::spawn(async move {
 ///     c.execute(Set::new("key", "value")).await.unwrap();
 /// });
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct SentinelClient {
