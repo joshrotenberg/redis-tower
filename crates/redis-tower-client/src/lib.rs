@@ -7,9 +7,10 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::commands::{Get, Set};
 //! use redis_tower_client::UniversalClient;
-//! use redis_tower::commands::*;
 //!
 //! // Pick the topology from the URL scheme:
 //! //   redis://host:port            -> standalone
@@ -19,6 +20,9 @@
 //!
 //! client.execute(Set::new("key", "value")).await?;
 //! let val: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+//! # let _ = val;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! `UniversalClient` is [`Clone`] (every variant is a cheap handle) and

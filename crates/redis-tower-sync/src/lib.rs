@@ -6,15 +6,18 @@
 //!
 //! # Example
 //!
-//! ```ignore
-//! use redis_tower_sync::SyncClient;
-//! use redis_tower::commands::*;
+//! ```no_run
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use redis_tower::RedisValueExt;
+//! use redis_tower::commands::{Get, Set};
+//! use redis_tower_sync::SyncClient;
 //!
 //! let client = SyncClient::connect("127.0.0.1:6379")?;
 //! client.execute(Set::new("key", "hello"))?;
 //! let val: String = client.execute(Get::new("key"))?.parse_into()?;
 //! println!("{val}");
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Parity with the async clients
@@ -98,9 +101,11 @@ impl SyncClient {
     /// Execute a [`Pipeline`] synchronously, batching the queued commands into
     /// a single roundtrip and returning the per-command [`PipelineResults`].
     ///
-    /// ```ignore
+    /// ```no_run
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// use redis_tower_sync::SyncClient;
-    /// use redis_tower_sync::{Pipeline, commands::*};
+    /// use redis_tower_sync::commands::{Get, Set};
+    /// use redis_tower_sync::Pipeline;
     ///
     /// let client = SyncClient::connect("127.0.0.1:6379")?;
     /// let results = client.pipeline(
@@ -109,6 +114,9 @@ impl SyncClient {
     ///         .push(Get::new("a")),
     /// )?;
     /// let val: &Option<bytes::Bytes> = results.get(1)?;
+    /// # let _ = val;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn pipeline(&self, pipeline: Pipeline) -> Result<PipelineResults, RedisError> {
         // `RedisClient` is a cheap `Arc<Mutex<_>>` handle; clone it to satisfy

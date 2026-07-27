@@ -1,6 +1,13 @@
 /// Generate command tests for any connection type that has an `execute` method.
 ///
 /// Usage:
+///
+/// This block stays `ignore` rather than becoming `no_run` (#465): it is a
+/// syntax sketch, not compilable code. `my_conn_fn` is a placeholder, and the
+/// expansion emits `#[tokio::test]` functions that need `tokio`, `bytes`, and
+/// every command type in scope. This crate has no dev-dependencies, so nothing
+/// short of adding a test-only dependency tree would make it compile.
+///
 /// ```ignore
 /// // Standalone (tests run normally):
 /// command_tests!(my_conn_fn, "prefix");
