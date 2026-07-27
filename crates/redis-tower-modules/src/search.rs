@@ -6,7 +6,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower::RedisClient;
 //! use redis_tower_modules::search::{IndexBuilder, SearchClient, SearchQuery, SortDir};
 //! use serde::Deserialize;
@@ -18,7 +18,7 @@
 //! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut client = RedisClient::connect("redis://127.0.0.1:6379").await?;
+//! let mut client = RedisClient::connect_url("redis://127.0.0.1:6379").await?;
 //! let mut search = SearchClient::new(&mut client);
 //!
 //! search

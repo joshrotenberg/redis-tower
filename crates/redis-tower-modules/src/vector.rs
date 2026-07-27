@@ -12,7 +12,7 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower::RedisConnection;
 //! use redis_tower_modules::vector::{VectorSetClient, VectorQuery};
 //!

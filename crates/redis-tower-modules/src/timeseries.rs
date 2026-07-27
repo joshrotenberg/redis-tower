@@ -5,12 +5,12 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower::RedisClient;
 //! use redis_tower_modules::timeseries::{TimeSeriesClient, TsKeyConfig, TsRangeQuery};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = RedisClient::connect("redis://127.0.0.1:6379").await?;
+//! let client = RedisClient::connect_url("redis://127.0.0.1:6379").await?;
 //! let mut ts = TimeSeriesClient::new(client);
 //!
 //! // Create a key with a 1-hour retention window and a label.

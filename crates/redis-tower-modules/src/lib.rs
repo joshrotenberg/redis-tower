@@ -28,7 +28,7 @@
 //!
 //! # Quick start
 //!
-//! ```ignore
+//! ```no_run
 //! use redis_tower::RedisClient;
 //! use redis_tower_modules::json::JsonClient;
 //! use serde::{Deserialize, Serialize};
@@ -40,14 +40,14 @@
 //! }
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let client = RedisClient::connect("redis://127.0.0.1:6379").await?;
+//! let client = RedisClient::connect_url("redis://127.0.0.1:6379").await?;
 //! let mut json = JsonClient::new(client);
 //!
 //! let user = User { name: "Ada".into(), age: 36 };
 //! json.set("user:1", "$", &user).await?;
 //!
-//! let fetched: User = json.get("user:1", "$").await?;
-//! assert_eq!(fetched.name, "Ada");
+//! let fetched: Option<User> = json.get("user:1", "$").await?;
+//! assert_eq!(fetched.expect("user:1 was just written").name, "Ada");
 //! # Ok(())
 //! # }
 //! ```
