@@ -1,14 +1,72 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, criterion_group};
+use redis_server_wrapper::{RedisServer, RedisServerHandle};
 use redis_tower::auto_pipeline::AutoPipelineConfig;
 use redis_tower::commands::*;
 use redis_tower::pool::{ConnectionPool, PoolConfig};
 use redis_tower::{
     MultiplexedClient, Pipeline, RedisClient, RedisConnection, Transaction, TransactionResult,
 };
+use std::sync::OnceLock;
+
+/// Port the benches start their own server on.
+///
+/// Deliberately not 6379: a bench run writes and deletes `bench:*` keys, so it
+/// must not land on whatever a developer has running there. 6399 (standalone
+/// integration tests) and 6480 (standalone-bench) are taken as well, so all
+/// three can run side by side.
+const BENCH_PORT: u16 = 6482;
+
+static ADDR: OnceLock<String> = OnceLock::new();
+
+/// Address every benchmark connects to. Set by [`start_server`], which `main`
+/// calls before any benchmark runs.
+fn addr() -> &'static str {
+    ADDR.get()
+        .expect("benchmark server address not set; start_server must run first")
+        .as_str()
+}
+
+/// Start the Redis server the benches run against.
+///
+/// Returns the handle so `main` can keep it alive for the whole run and stop
+/// the server on the way out, or `None` when `REDIS_URL` points the benches at
+/// a server someone else owns.
+///
+/// The benches used to connect to a hardcoded `127.0.0.1:6379`, which made an
+/// otherwise fine checkout fail: ten benchmark functions panicked outright and
+/// four silently returned without measuring anything when nothing was
+/// listening there.
+fn start_server() -> Option<RedisServerHandle> {
+    let (address, handle) = match std::env::var("REDIS_URL") {
+        Ok(url) => (
+            url.strip_prefix("redis://")
+                .unwrap_or(&url)
+                .trim_end_matches('/')
+                .to_string(),
+            None,
+        ),
+        Err(_) => {
+            // A runtime just for startup. Each benchmark builds its own, and
+            // `RedisServerHandle`'s shutdown path is synchronous, so nothing
+            // depends on this one outliving the call.
+            let rt = tokio::runtime::Runtime::new().expect("failed to build a startup runtime");
+            let server = rt
+                .block_on(RedisServer::new().port(BENCH_PORT).start())
+                .expect(
+                    "failed to start redis-server for the benches; \
+                     install redis-server or set REDIS_URL to an existing instance",
+                );
+            (server.addr(), Some(server))
+        }
+    };
+
+    ADDR.set(address).expect("start_server called twice");
+    handle
+}
 
 fn bench_ping(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     c.bench_function("ping", |b| {
         b.to_async(&rt)
@@ -18,7 +76,7 @@ fn bench_ping(c: &mut Criterion) {
 
 fn bench_set(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     c.bench_function("set", |b| {
         b.to_async(&rt).iter(|| async {
@@ -34,7 +92,7 @@ fn bench_set(c: &mut Criterion) {
 
 fn bench_get(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     rt.block_on(async {
         client
@@ -53,7 +111,7 @@ fn bench_get(c: &mut Criterion) {
 
 fn bench_incr(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     rt.block_on(async {
         client
@@ -72,7 +130,7 @@ fn bench_incr(c: &mut Criterion) {
 
 fn bench_hset_hget(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     c.bench_function("hset", |b| {
         b.to_async(&rt).iter(|| async {
@@ -97,7 +155,7 @@ fn bench_hset_hget(c: &mut Criterion) {
 
 fn bench_lpush_lpop(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     c.bench_function("lpush+lpop", |b| {
         b.to_async(&rt).iter(|| async {
@@ -114,7 +172,7 @@ fn bench_lpush_lpop(c: &mut Criterion) {
 
 fn bench_sadd_sismember(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     rt.block_on(async {
         client
@@ -137,7 +195,7 @@ fn bench_sadd_sismember(c: &mut Criterion) {
 
 fn bench_pipeline(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut conn = rt.block_on(async { RedisConnection::connect("127.0.0.1:6379").await.unwrap() });
+    let mut conn = rt.block_on(async { RedisConnection::connect(addr()).await.unwrap() });
 
     let mut group = c.benchmark_group("pipeline");
 
@@ -166,7 +224,7 @@ fn bench_pipeline(c: &mut Criterion) {
 
 fn bench_transaction(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut conn = rt.block_on(async { RedisConnection::connect("127.0.0.1:6379").await.unwrap() });
+    let mut conn = rt.block_on(async { RedisConnection::connect(addr()).await.unwrap() });
 
     c.bench_function("transaction_3_commands", |b| {
         b.iter(|| {
@@ -192,7 +250,7 @@ fn bench_transaction(c: &mut Criterion) {
 
 fn bench_mixed_workload(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await.unwrap() });
+    let client = rt.block_on(async { RedisClient::connect(addr()).await.unwrap() });
 
     c.bench_function("mixed_10_ops", |b| {
         b.to_async(&rt).iter(|| async {
@@ -249,7 +307,7 @@ fn bench_multiplexed_concurrent(c: &mut Criterion) {
         .build()
         .unwrap();
 
-    let client = match rt.block_on(async { MultiplexedClient::connect("127.0.0.1:6379").await }) {
+    let client = match rt.block_on(async { MultiplexedClient::connect(addr()).await }) {
         Ok(c) => c,
         Err(_) => return, // skip if no server available
     };
@@ -337,7 +395,7 @@ fn bench_pool_throughput(c: &mut Criterion) {
 
     // Verify server is available before building the group.
     if rt
-        .block_on(async { RedisConnection::connect("127.0.0.1:6379").await })
+        .block_on(async { RedisConnection::connect(addr()).await })
         .is_err()
     {
         return;
@@ -349,7 +407,7 @@ fn bench_pool_throughput(c: &mut Criterion) {
     for pool_size in [1usize, 4, 8] {
         let pool: ConnectionPool<RedisConnection> = rt.block_on(async {
             ConnectionPool::connect_with_config(PoolConfig::default().size(pool_size), || async {
-                RedisConnection::connect("127.0.0.1:6379").await
+                RedisConnection::connect(addr()).await
             })
             .await
             .unwrap()
@@ -386,7 +444,7 @@ fn bench_pool_throughput(c: &mut Criterion) {
 /// workloads using Redis as a cache for large objects.
 fn bench_large_values(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let client = match rt.block_on(async { RedisClient::connect("127.0.0.1:6379").await }) {
+    let client = match rt.block_on(async { RedisClient::connect(addr()).await }) {
         Ok(c) => c,
         Err(_) => return,
     };
@@ -451,7 +509,7 @@ fn bench_batch_window(c: &mut Criterion) {
         .unwrap();
 
     if rt
-        .block_on(async { RedisConnection::connect("127.0.0.1:6379").await })
+        .block_on(async { RedisConnection::connect(addr()).await })
         .is_err()
     {
         return;
@@ -462,7 +520,7 @@ fn bench_batch_window(c: &mut Criterion) {
 
     for window_ms in [0u64, 1, 5] {
         let client = rt.block_on(async {
-            let conn = RedisConnection::connect("127.0.0.1:6379").await.unwrap();
+            let conn = RedisConnection::connect(addr()).await.unwrap();
             let config = AutoPipelineConfig {
                 batch_window: std::time::Duration::from_millis(window_ms),
                 ..Default::default()
@@ -512,4 +570,11 @@ criterion_group!(
     bench_large_values,
     bench_batch_window,
 );
-criterion_main!(benches);
+/// Written out rather than using `criterion_main!` so the server handle lives
+/// for the whole run and stops the server on the way out. The rest of the body
+/// is what that macro expands to.
+fn main() {
+    let _server = start_server();
+    benches();
+    Criterion::default().configure_from_args().final_summary();
+}

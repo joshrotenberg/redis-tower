@@ -115,6 +115,15 @@ cargo test -p redis-tower-sentinel --test 'sentinel_*' -- --ignored
 
 Also single-threaded. The healthy suite shares a topology via `OnceCell` but never kills it, so its tests are robust to reordering and parallel execution. The destructive phases (kill a sentinel, fail the master over, reconnect afterward) live in `sentinel_failover.rs` as a single orchestrating `sentinel_failover_sequence` test on the separate port block, so they no longer degrade the healthy topology and their internal order is fixed regardless of how the runner schedules tests (#509).
 
+### Criterion benches (`crates/redis-tower/benches/`)
+
+`commands.rs` starts its own `redis-server` on port **6482** and stops it when the run ends, so it needs no server set up in advance. Set `REDIS_URL` to run against an existing one instead.
+
+```bash
+cargo bench -p redis-tower --bench commands
+cargo test -p redis-tower --benches --all-features   # criterion test mode: one iteration each, also runs in CI
+```
+
 ### `command_tests!` macro (`redis-test-harness`)
 
 Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node).

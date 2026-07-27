@@ -361,6 +361,15 @@ Cluster throughput at c=128 on a local 3-master cluster (Apple M3 Max):
 See [`crates/cluster-bench`](crates/cluster-bench/) for full results and
 how to reproduce.
 
+The single-node command benches start their own `redis-server` on port 6482
+and stop it when the run ends, so they need no server set up in advance:
+
+```bash
+cargo bench -p redis-tower --bench commands
+```
+
+Set `REDIS_URL` to benchmark against an existing server instead.
+
 ## Workspace
 
 ```
