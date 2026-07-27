@@ -490,16 +490,20 @@ mod tests {
             err.to_string().contains("scan refused"),
             "unexpected error: {err}"
         );
-        assert!(ok < 9, "the stream stopped short of a full cluster scan");
-
-        // The failing node's position in sorted order decides how far the scan
-        // got, so assert on where it stopped rather than on a fixed count: no
-        // node after the failure was asked.
-        let log = log.lock().unwrap();
-        let failed_at = visit_order_of_scanned(&log, &sorted_addrs);
+        // Which node fails depends on where its ephemeral port sorts, so assert
+        // the shape rather than a fixed count: every node before the failure
+        // completed (three keys each), the failing one yielded nothing, and no
+        // node after it was asked at all.
         assert!(
-            failed_at.len() < 3,
-            "a node past the failure was scanned anyway: {failed_at:?}"
+            ok.is_multiple_of(3) && ok < 9,
+            "expected whole nodes before the failure, got {ok} keys"
+        );
+        let log = log.lock().unwrap();
+        let scanned = visit_order_of_scanned(&log, &sorted_addrs);
+        assert_eq!(
+            scanned.len(),
+            ok / 3 + 1,
+            "the scan should stop at the failing node, having scanned {scanned:?}"
         );
     }
 
