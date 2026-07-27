@@ -69,6 +69,14 @@
 //! which guarantees the two frames land contiguously on the wire with
 //! no interleaving from other concurrent callers.
 //!
+//! # Cluster-wide SCAN
+//!
+//! `SCAN` iterates one node's keyspace and carries no key, so slot routing
+//! sends it to the default node and it returns a fraction of the cluster's
+//! keys. [`ScanClusterStream`] runs the cursor loop against every master in
+//! turn and yields each key tagged with its source node. See [`scan_stream`]
+//! for the guarantees it does and does not give during a resharding.
+//!
 //! # Read Preference
 //!
 //! [`ReadPreference`] controls whether read-only commands are routed to
@@ -108,6 +116,7 @@ mod client;
 mod connection;
 pub mod key_extractor;
 mod multiplexed;
+pub mod scan_stream;
 pub mod slot;
 pub mod topology;
 
@@ -117,5 +126,6 @@ pub use connection::{
     ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
+pub use scan_stream::{ClusterScanItem, ScanClusterStream};
 pub use slot::{SLOT_COUNT, extract_hash_tag, slot_for_key};
 pub use topology::{ClusterTopology, NodeAddr, SlotRange};

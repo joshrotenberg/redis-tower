@@ -3,10 +3,14 @@
 //! Run with: `cargo test -p redis-tower-cluster --test cluster_integration -- --ignored`
 
 use bytes::Bytes;
+use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
 use redis_tower::pool::ConnectionPool;
-use redis_tower_cluster::{ClusterConnection, MultiplexedClusterClient};
+use redis_tower_cluster::{
+    ClusterConnection, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
+};
 use redis_tower_commands::*;
+use std::collections::HashSet;
 use tokio::sync::OnceCell;
 
 static CLUSTER: OnceCell<RedisClusterHandle> = OnceCell::const_new();
@@ -188,6 +192,56 @@ async fn mux_cluster_refresh_topology() {
         .expect("refresh should succeed on a healthy cluster");
     let topo = cluster.topology().await;
     assert_eq!(topo.master_addrs().len(), 3);
+}
+
+/// A cluster-wide SCAN reaches every master, where a plain keyless `SCAN`
+/// reaches only the node it happened to route to (#456).
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_scan_stream_covers_the_whole_keyspace() {
+    let cluster = mux_cluster_conn().await;
+
+    // Distinct hash tags so the keys land on different slots, and therefore --
+    // on a three-master cluster with an even slot split -- on different nodes.
+    let keys: Vec<String> = (0..60).map(|i| format!("scan456:{{{i}}}:k")).collect();
+    for key in &keys {
+        cluster.execute(Set::new(key, "v")).await.unwrap();
+    }
+
+    let items: Vec<ClusterScanItem> =
+        std::pin::pin!(ScanClusterStream::scan(&cluster, "scan456:*"))
+            .map(|r| r.expect("cluster scan should succeed"))
+            .collect()
+            .await;
+
+    let found: HashSet<String> = items
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.key).into_owned())
+        .collect();
+    for key in &keys {
+        assert!(found.contains(key), "cluster scan missed {key}");
+    }
+
+    let nodes: HashSet<&str> = items.iter().map(|i| i.node.as_str()).collect();
+    assert!(
+        nodes.len() > 1,
+        "60 keys across 60 slots should span more than one master, saw {nodes:?}"
+    );
+
+    // The contrast: a keyless SCAN routes to one node and silently returns a
+    // fraction of the keyspace.
+    let single = cluster
+        .execute(Scan::new().match_pattern("scan456:*").count(1000))
+        .await
+        .unwrap();
+    assert!(
+        single.results.len() < keys.len(),
+        "a plain SCAN should not have covered the cluster"
+    );
+
+    for key in &keys {
+        cluster.execute(Del::new(key)).await.unwrap();
+    }
 }
 
 /// A clone keeps working after another clone calls `shutdown()`; only the last

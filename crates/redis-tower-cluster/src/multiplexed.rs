@@ -846,6 +846,54 @@ impl MultiplexedClusterClient {
         self.inner.read().await.read_preference
     }
 
+    /// Snapshot the addresses of every master node this client currently holds
+    /// a live service for, in a stable (sorted) order.
+    ///
+    /// Taken from the service map rather than from the topology, so a master
+    /// listed by `CLUSTER SLOTS` that has no service -- pruned, or skipped by a
+    /// best-effort refresh -- is not reported as scannable.
+    pub(crate) async fn master_service_addrs(&self) -> Vec<String> {
+        let inner = self.inner.read().await;
+        let mut addrs: Vec<String> = inner.masters.keys().cloned().collect();
+        // `masters` is a HashMap, so its iteration order varies run to run.
+        // Sorting makes any per-node traversal reproducible.
+        addrs.sort();
+        addrs
+    }
+
+    /// Execute a command against one specific master node, bypassing slot
+    /// routing and the redirect loop.
+    ///
+    /// This exists for commands that are node-scoped rather than key-scoped:
+    /// `SCAN` iterates the keyspace of the node it is sent to, so a cluster-wide
+    /// scan has to address each master in turn. Slot routing cannot express
+    /// that -- `SCAN` carries no key, so [`execute`](Self::execute) sends it to
+    /// the default node and returns that one node's keys.
+    ///
+    /// No redirect handling: a MOVED reply surfaces as an error rather than
+    /// being followed, because following it would defeat the point of pinning
+    /// the command to a node.
+    pub(crate) async fn execute_on_node<Cmd: Command>(
+        &self,
+        addr: &str,
+        cmd: Cmd,
+    ) -> Result<Cmd::Response, RedisError> {
+        let mut target = self.master_service(addr).await?;
+        let response = match call_service(&mut target.svc, cmd.to_frame()).await {
+            Ok(r) => r,
+            Err(e) => {
+                if e.is_connection_error() {
+                    self.trigger_refresh();
+                }
+                return Err(e);
+            }
+        };
+        if let Frame::Error(ref e) = response {
+            return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+        }
+        cmd.parse_response(response)
+    }
+
     /// Gracefully shut down the cluster client, draining every per-node worker.
     ///
     /// Signals each master and replica [`AutoPipelineService`] to stop
