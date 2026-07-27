@@ -11,6 +11,9 @@
 //! - Concurrent requests from multiple tasks are batched into Redis pipelines
 //!   automatically (per node).
 //! - No global mutex -- slot routing is a short read-lock lookup.
+//! - Startup connects to every node concurrently (bounded), so a large
+//!   cluster does not pay one connect round trip per node before the client
+//!   is usable.
 //! - Each per-node connection transparently reconnects on failure via a
 //!   [`ConnectionFactory`], with configurable backoff.
 //! - Factories are the place to replay per-node session setup (AUTH, READONLY).
@@ -60,6 +63,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use futures::stream::{StreamExt, TryStreamExt};
 use redis_tower::AutoPipelineService;
 use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
@@ -157,6 +161,16 @@ const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1000);
 /// unbounded retries the worker would loop on the dead address forever and no
 /// refresh would ever fire.
 const NODE_RECONNECT_MAX_RETRIES: usize = 3;
+
+/// Maximum number of per-node connections opened concurrently when building
+/// node services (startup and topology refresh).
+///
+/// Connecting to every node serially costs one TCP -- and, under TLS, one full
+/// handshake -- round trip per node, so a large cluster pays N round trips
+/// before the client is usable. Building them concurrently collapses that to
+/// roughly one, but an unbounded fan-out on a 100-node cluster would open 100
+/// sockets in the same instant. This caps the in-flight burst.
+const MAX_CONCURRENT_CONNECTS: usize = 16;
 
 /// Default per-node reconnect policy: bounded retries over the standard backoff.
 fn default_node_reconnect() -> AutoPipelineReconnectConfig {
@@ -432,41 +446,33 @@ impl MultiplexedClusterClient {
             remap_topology(&mut topology, host);
         }
 
-        let mut masters: HashMap<String, AutoPipelineService> = HashMap::new();
-        let mut default_node = String::new();
-
         // Connect to all masters through factory-backed auto-pipeline services.
-        for addr in topology.master_addrs() {
-            let addr_str = addr.addr_string();
-            if masters.contains_key(&addr_str) {
-                continue;
-            }
-            let svc = build_node_service(
-                &addr_str,
-                /* readonly = */ false,
-                pipeline_config.clone(),
-                reconnect_config.clone(),
-                credentials.clone(),
-                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                tls.clone(),
-            )
-            .await?;
-            if default_node.is_empty() {
-                default_node.clone_from(&addr_str);
-            }
-            masters.insert(addr_str, svc);
-        }
+        // The handshakes run concurrently (bounded by MAX_CONCURRENT_CONNECTS);
+        // a large cluster would otherwise serialize one connect round trip per
+        // node before `connect` returns.
+        let master_addrs = dedup_addrs(topology.master_addrs());
+        // Taken from the address list, not from completion order, so the
+        // default node stays the first master in topology order no matter
+        // which handshake finishes first.
+        let mut default_node = master_addrs.first().cloned().unwrap_or_default();
+        let mut masters: HashMap<String, AutoPipelineService> = build_node_services(
+            master_addrs,
+            /* readonly = */ false,
+            pipeline_config.clone(),
+            reconnect_config.clone(),
+            credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.clone(),
+        )
+        .await?;
 
         // Connect to replicas if the read preference uses them.
-        let mut replicas: HashMap<String, AutoPipelineService> = HashMap::new();
-        if read_preference != ReadPreference::Master {
-            for addr in topology.replica_addrs() {
-                let addr_str = addr.addr_string();
-                if replicas.contains_key(&addr_str) {
-                    continue;
-                }
-                let svc = build_node_service(
-                    &addr_str,
+        let replicas: HashMap<String, AutoPipelineService> =
+            if read_preference == ReadPreference::Master {
+                HashMap::new()
+            } else {
+                build_node_services(
+                    dedup_addrs(topology.replica_addrs()),
                     /* readonly = */ true,
                     pipeline_config.clone(),
                     reconnect_config.clone(),
@@ -474,10 +480,8 @@ impl MultiplexedClusterClient {
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     tls.clone(),
                 )
-                .await?;
-                replicas.insert(addr_str, svc);
-            }
-        }
+                .await?
+            };
 
         if default_node.is_empty() {
             // No masters discovered -- fall back to the seed addr via a fresh
@@ -1095,6 +1099,64 @@ async fn discover_from_seed(
     discover_topology(&mut conn).await
 }
 
+/// Collect node addresses as strings, dropping duplicates and preserving
+/// first-seen order.
+///
+/// A master that owns several slot ranges appears once per range in
+/// `CLUSTER SLOTS`, and one service per node is enough. Order is preserved so
+/// the caller can take the first entry as the default node deterministically.
+fn dedup_addrs(addrs: Vec<&NodeAddr>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let addr_str = addr.addr_string();
+        if seen.insert(addr_str.clone()) {
+            out.push(addr_str);
+        }
+    }
+    out
+}
+
+/// Build one [`AutoPipelineService`] per address, running up to
+/// [`MAX_CONCURRENT_CONNECTS`] handshakes at a time.
+///
+/// Fails on the first node that fails to connect; the remaining in-flight
+/// connects are dropped. Because the connects overlap, the error surfaced when
+/// several nodes are unreachable is whichever failed first in time, not
+/// whichever comes first in `addrs`.
+async fn build_node_services(
+    addrs: Vec<String>,
+    readonly: bool,
+    pipeline_config: AutoPipelineConfig,
+    reconnect_config: AutoPipelineReconnectConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
+) -> Result<HashMap<String, AutoPipelineService>, RedisError> {
+    futures::stream::iter(addrs.into_iter().map(|addr| {
+        let pipeline_config = pipeline_config.clone();
+        let reconnect_config = reconnect_config.clone();
+        let credentials = credentials.clone();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let tls = tls.clone();
+        async move {
+            let svc = build_node_service(
+                &addr,
+                readonly,
+                pipeline_config,
+                reconnect_config,
+                credentials,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls,
+            )
+            .await?;
+            Ok((addr, svc))
+        }
+    }))
+    .buffer_unordered(MAX_CONCURRENT_CONNECTS)
+    .try_collect()
+    .await
+}
+
 async fn build_node_service(
     addr: &str,
     readonly: bool,
@@ -1322,5 +1384,152 @@ mod diff_tests {
         gate.finish();
         // Not in flight, but within the min interval -> denied.
         assert!(!gate.try_begin());
+    }
+}
+
+#[cfg(test)]
+mod parallel_connect_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// How long each fake node stalls before answering its first command.
+    /// Long enough that serialized connects cannot overlap by accident.
+    const HANDSHAKE_STALL: Duration = Duration::from_millis(250);
+
+    #[derive(Default)]
+    struct ConcurrencyProbe {
+        in_handshake: AtomicUsize,
+        peak: AtomicUsize,
+    }
+
+    impl ConcurrencyProbe {
+        fn enter(&self) {
+            let now = self.in_handshake.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+        }
+
+        fn leave(&self) {
+            self.in_handshake.fetch_sub(1, Ordering::SeqCst);
+        }
+
+        fn peak(&self) -> usize {
+            self.peak.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Spawn a fake node that answers every command with an error frame.
+    ///
+    /// `RedisConnection::connect` opens with CLIENT SETINFO twice and HELLO 3,
+    /// all of which tolerate an error reply (SETINFO is best-effort and a
+    /// failed HELLO is the RESP2 fallback), so `-ERR` is enough for the
+    /// connect to succeed without implementing Redis.
+    ///
+    /// Each accepted connection counts itself as in-handshake for
+    /// [`HANDSHAKE_STALL`] before it replies to anything, so the probe's peak
+    /// is the number of connects that were genuinely in flight at once.
+    async fn spawn_fake_node(probe: Arc<ConcurrencyProbe>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let probe = probe.clone();
+                tokio::spawn(async move {
+                    probe.enter();
+                    tokio::time::sleep(HANDSHAKE_STALL).await;
+                    probe.leave();
+                    let mut buf = [0u8; 1024];
+                    while let Ok(n) = sock.read(&mut buf).await {
+                        if n == 0 || sock.write_all(b"-ERR fake node\r\n").await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    async fn build_against_fakes(count: usize) -> (HashMap<String, AutoPipelineService>, usize) {
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let mut addrs = Vec::with_capacity(count);
+        for _ in 0..count {
+            addrs.push(spawn_fake_node(probe.clone()).await);
+        }
+        let services = build_node_services(
+            addrs,
+            false,
+            AutoPipelineConfig::default(),
+            default_node_reconnect(),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        )
+        .await
+        .expect("every fake node should connect");
+        (services, probe.peak())
+    }
+
+    /// The regression #458 guards: node connects must overlap. Serialized
+    /// connects can only ever have one handshake in flight, so a peak above
+    /// one proves the fan-out, and the cap proves it stays bounded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn node_connects_run_concurrently_within_the_bound() {
+        let node_count = MAX_CONCURRENT_CONNECTS + 4;
+        let (services, peak) = build_against_fakes(node_count).await;
+
+        assert_eq!(
+            services.len(),
+            node_count,
+            "every node should get a service"
+        );
+        assert!(
+            peak > 1,
+            "connects were serialized: peak in-flight handshakes was {peak}"
+        );
+        assert!(
+            peak <= MAX_CONCURRENT_CONNECTS,
+            "fan-out exceeded the bound: peak {peak} > {MAX_CONCURRENT_CONNECTS}"
+        );
+    }
+
+    /// Serialized connects would cost `node_count * HANDSHAKE_STALL`; the
+    /// bounded fan-out costs one stall per wave. Generous margin so the
+    /// assertion is about the shape of the work, not CI timing noise.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connecting_many_nodes_beats_the_serial_cost() {
+        let node_count = 8;
+        let started = Instant::now();
+        let (services, _) = build_against_fakes(node_count).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(services.len(), node_count);
+        let serial_cost = HANDSHAKE_STALL * node_count as u32;
+        assert!(
+            elapsed < serial_cost / 2,
+            "took {elapsed:?}, which is not meaningfully better than the \
+             serial cost of {serial_cost:?}"
+        );
+    }
+
+    #[test]
+    fn dedup_addrs_keeps_first_seen_order() {
+        let node = |host: &str| NodeAddr {
+            host: host.to_string(),
+            port: 6379,
+        };
+        let nodes = [
+            node("10.0.0.2"),
+            node("10.0.0.1"),
+            // Same master, second slot range -- one service is enough.
+            node("10.0.0.2"),
+        ];
+        let deduped = dedup_addrs(nodes.iter().collect());
+        assert_eq!(
+            deduped,
+            vec!["10.0.0.2:6379".to_string(), "10.0.0.1:6379".to_string()],
+            "duplicates dropped, first-seen order preserved so the default \
+             node stays deterministic"
+        );
     }
 }
