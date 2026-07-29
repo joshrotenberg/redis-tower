@@ -45,6 +45,10 @@ multiplexed clients (the only crate that sees all of them).
 
 `ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClient`, `MultiplexedClusterClient`, and `UniversalClient`.
 
+### Cluster-wide SCAN (`redis-tower-cluster/scan_stream.rs`)
+
+`SCAN` is keyless, so `MultiplexedClusterClient::execute` routes it to the default node and returns one node's keys. `ScanClusterStream::scan(&client, pattern)` (and `scan_with_count`) runs the cursor loop against every master in turn and yields `ClusterScanItem { node, key }`. Nodes are visited sequentially in sorted address order; the node set is snapshotted on first poll, so a slot migrating mid-scan can be missed or double-counted. Concurrent per-node scanning and mid-scan membership re-checking are follow-up slices of #456.
+
 ## Middleware Layers (Tower)
 
 All live in `redis-tower/src/`:
@@ -126,7 +130,7 @@ cargo test -p redis-tower --benches --all-features   # criterion test mode: one 
 
 ### `command_tests!` macro (`redis-test-harness`)
 
-Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node).
+Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node). For a cluster-wide scan use `ScanClusterStream` (see below); the macro still excludes SCAN because it asserts identical behavior across backends and a per-node SCAN does not have any.
 
 ## Definition of Done
 
