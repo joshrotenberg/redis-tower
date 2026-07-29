@@ -266,7 +266,8 @@ impl RedisConnection {
             .map_err(|e| RedisError::connection(addr, e))?;
         let stream = apply_keepalive(stream, keepalive)?;
         stream.set_nodelay(true)?;
-        let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
+        let mut conn =
+            Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec::new()));
         conn.identify_client().await;
         Ok(conn)
     }
@@ -306,7 +307,8 @@ impl RedisConnection {
         };
         let stream = apply_keepalive(stream, &KeepaliveConfig::default())?;
         stream.set_nodelay(true)?;
-        let mut conn = Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec));
+        let mut conn =
+            Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec::new()));
         conn.identify_client().await;
         conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
@@ -364,7 +366,7 @@ impl RedisConnection {
         let tcp = apply_keepalive(tcp, keepalive)?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
-        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
+        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec::new()));
         conn.identify_client().await;
         conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
@@ -409,7 +411,7 @@ impl RedisConnection {
         let tcp = apply_keepalive(tcp, &KeepaliveConfig::default())?;
         tcp.set_nodelay(true)?;
         let stream = tls_config.connect(tcp, hostname).await?;
-        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec));
+        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec::new()));
         conn.identify_client().await;
         conn.negotiate_protocol(ProtocolVersion::Auto).await?;
         Ok(conn)
@@ -434,7 +436,7 @@ impl RedisConnection {
                 let stream = tokio::net::UnixStream::connect(path)
                     .await
                     .map_err(|e| RedisError::connection(path, e))?;
-                Self::from_framed_inner(Framed::new(RedisStream::Unix(stream), RespCodec))
+                Self::from_framed_inner(Framed::new(RedisStream::Unix(stream), RespCodec::new()))
             }
             #[cfg(not(unix))]
             {
@@ -608,7 +610,7 @@ impl RedisConnection {
 
     /// Wrap an existing stream in a `RedisConnection`.
     pub fn from_stream(stream: RedisStream) -> Self {
-        Self::from_framed_inner(Framed::new(stream, RespCodec))
+        Self::from_framed_inner(Framed::new(stream, RespCodec::new()))
     }
 
     /// Subscribe to RESP3 push messages.

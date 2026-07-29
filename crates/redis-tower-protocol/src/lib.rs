@@ -16,6 +16,16 @@
 //! `tokio_util::codec::Framed` for non-blocking read/write on any `AsyncRead +
 //! AsyncWrite` transport.
 //!
+//! # Decode Limits
+//!
+//! Decoding is bounded by [`RespLimits`]: a maximum single-frame size and a
+//! maximum nesting depth, both applied before a frame is materialized. They
+//! exist so a malicious or compromised server cannot drive unbounded
+//! allocation or overflow the stack with a deeply nested reply. The defaults
+//! ([`DEFAULT_MAX_FRAME_SIZE`], [`DEFAULT_MAX_DEPTH`]) sit above anything a
+//! Redis server sends in normal operation; use [`RespCodec::with_limits`] to
+//! tighten them.
+//!
 //! # Helpers
 //!
 //! The [`helpers`] module provides convenience constructors for building
@@ -32,7 +42,7 @@ mod codec;
 mod error;
 pub mod helpers;
 
-pub use codec::RespCodec;
+pub use codec::{DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, RespCodec, RespLimits};
 pub use error::ProtocolError;
 
 // Re-export the frame type and serializer directly from resp-rs.

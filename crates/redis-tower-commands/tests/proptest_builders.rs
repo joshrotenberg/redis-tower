@@ -47,7 +47,7 @@ fn command_args(frame: &Frame) -> Vec<Vec<u8>> {
 
 /// Asserts the frame encodes and decodes back to an equal frame via `RespCodec`.
 fn assert_codec_roundtrip(frame: &Frame) {
-    let mut codec = RespCodec;
+    let mut codec = RespCodec::new();
     let mut buf = BytesMut::new();
     codec
         .encode(frame.clone(), &mut buf)
