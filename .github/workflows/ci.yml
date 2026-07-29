@@ -136,6 +136,12 @@ jobs:
       - name: Run sentinel integration tests
         run: cargo test -p redis-tower-sentinel --test 'sentinel_*' --all-features -- --ignored --test-threads=1
 
+      # Criterion's test mode runs each benchmark once. Nothing listens on
+      # 6379 in this job, so this fails if the benches stop starting their own
+      # server.
+      - name: Smoke-run the benchmarks
+        run: cargo test -p redis-tower --benches --all-features
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
