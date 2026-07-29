@@ -734,49 +734,32 @@ impl MultiplexedClusterClient {
             )
         };
 
-        // Build (re)placement services without holding the write lock. A node
+        // Build (re)placement services without holding the write lock, with the
+        // handshakes overlapping (bounded by MAX_CONCURRENT_CONNECTS). A node
         // that is unreachable right now (e.g. a master still listed by CLUSTER
         // SLOTS mid-failover) is skipped, not fatal: committing the reachable
         // nodes and pruning departed ones still makes progress, and the next
         // refresh picks up the rest once it settles.
-        let mut built_masters: Vec<(String, AutoPipelineService)> = Vec::new();
-        for addr in &master_diff.to_build {
-            match build_node_service(
-                addr,
-                false,
-                pipeline_config.clone(),
-                reconnect_config.clone(),
-                credentials.clone(),
-                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                tls.clone(),
-            )
-            .await
-            {
-                Ok(svc) => built_masters.push((addr.clone(), svc)),
-                Err(e) => {
-                    tracing::debug!(addr, error = %e, "cluster: master unreachable during refresh; skipping")
-                }
-            }
-        }
-        let mut built_replicas: Vec<(String, AutoPipelineService)> = Vec::new();
-        for addr in &replica_diff.to_build {
-            match build_node_service(
-                addr,
-                true,
-                pipeline_config.clone(),
-                reconnect_config.clone(),
-                credentials.clone(),
-                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                tls.clone(),
-            )
-            .await
-            {
-                Ok(svc) => built_replicas.push((addr.clone(), svc)),
-                Err(e) => {
-                    tracing::debug!(addr, error = %e, "cluster: replica unreachable during refresh; skipping")
-                }
-            }
-        }
+        let built_masters = build_node_services_best_effort(
+            master_diff.to_build.clone(),
+            false,
+            pipeline_config.clone(),
+            reconnect_config.clone(),
+            credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.clone(),
+        )
+        .await;
+        let built_replicas = build_node_services_best_effort(
+            replica_diff.to_build.clone(),
+            true,
+            pipeline_config.clone(),
+            reconnect_config.clone(),
+            credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls.clone(),
+        )
+        .await;
 
         // Commit under the write lock; collect replaced/pruned services to drain
         // after the lock is released.
@@ -1157,6 +1140,64 @@ async fn build_node_services(
     .await
 }
 
+/// Build one [`AutoPipelineService`] per address with the same bounded fan-out
+/// as [`build_node_services`], but keeping only the nodes that answered.
+///
+/// This is the topology-refresh counterpart: an address that fails to connect
+/// is logged at debug and dropped instead of failing the batch. A node can be
+/// legitimately unreachable mid-failover while still listed by `CLUSTER SLOTS`,
+/// and committing the reachable nodes makes progress that the next refresh
+/// builds on. Startup ([`build_node_services`]) wants the opposite -- a node it
+/// cannot reach is a failed connect -- so the two cannot share one helper.
+///
+/// The returned pairs are in completion order, not `addrs` order. Callers must
+/// not derive anything order-dependent from them.
+async fn build_node_services_best_effort(
+    addrs: Vec<String>,
+    readonly: bool,
+    pipeline_config: AutoPipelineConfig,
+    reconnect_config: AutoPipelineReconnectConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
+) -> Vec<(String, AutoPipelineService)> {
+    let role = if readonly { "replica" } else { "master" };
+    futures::stream::iter(addrs.into_iter().map(|addr| {
+        let pipeline_config = pipeline_config.clone();
+        let reconnect_config = reconnect_config.clone();
+        let credentials = credentials.clone();
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let tls = tls.clone();
+        async move {
+            match build_node_service(
+                &addr,
+                readonly,
+                pipeline_config,
+                reconnect_config,
+                credentials,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls,
+            )
+            .await
+            {
+                Ok(svc) => Some((addr, svc)),
+                Err(e) => {
+                    tracing::debug!(
+                        addr,
+                        role,
+                        error = %e,
+                        "cluster: node unreachable during refresh; skipping"
+                    );
+                    None
+                }
+            }
+        }
+    }))
+    .buffer_unordered(MAX_CONCURRENT_CONNECTS)
+    .filter_map(|built| async move { built })
+    .collect()
+    .await
+}
+
 async fn build_node_service(
     addr: &str,
     readonly: bool,
@@ -1509,6 +1550,99 @@ mod parallel_connect_tests {
             elapsed < serial_cost / 2,
             "took {elapsed:?}, which is not meaningfully better than the \
              serial cost of {serial_cost:?}"
+        );
+    }
+
+    /// An address nothing is listening on. Port 1 on the loopback is refused
+    /// immediately, so this is a fast connect failure rather than a timeout.
+    const UNREACHABLE: &str = "127.0.0.1:1";
+
+    async fn build_best_effort_against_fakes(
+        reachable: usize,
+        unreachable: usize,
+    ) -> (Vec<(String, AutoPipelineService)>, Vec<String>, usize) {
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let mut addrs = Vec::with_capacity(reachable + unreachable);
+        for _ in 0..reachable {
+            addrs.push(spawn_fake_node(probe.clone()).await);
+        }
+        let live: Vec<String> = addrs.clone();
+        for _ in 0..unreachable {
+            addrs.push(UNREACHABLE.to_string());
+        }
+        let built = build_node_services_best_effort(
+            addrs,
+            false,
+            AutoPipelineConfig::default(),
+            default_node_reconnect(),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        )
+        .await;
+        (built, live, probe.peak())
+    }
+
+    /// The refresh-path half of the #458 fan-out (#631). Serialized connects
+    /// can only ever have one handshake in flight, so a peak above one proves
+    /// the overlap and the cap proves it stays bounded.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_node_connects_run_concurrently_within_the_bound() {
+        let node_count = MAX_CONCURRENT_CONNECTS + 4;
+        let (built, _, peak) = build_best_effort_against_fakes(node_count, 0).await;
+
+        assert_eq!(built.len(), node_count, "every node should get a service");
+        assert!(
+            peak > 1,
+            "connects were serialized: peak in-flight handshakes was {peak}"
+        );
+        assert!(
+            peak <= MAX_CONCURRENT_CONNECTS,
+            "fan-out exceeded the bound: peak {peak} > {MAX_CONCURRENT_CONNECTS}"
+        );
+    }
+
+    /// Refresh is best-effort, unlike startup: a node that will not answer
+    /// right now (a master still listed by CLUSTER SLOTS mid-failover) must be
+    /// dropped from the batch, not fail it. This is what a naive swap to
+    /// `build_node_services`, which is fail-fast, would break.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn refresh_skips_unreachable_nodes_instead_of_failing() {
+        let (built, live, _) = build_best_effort_against_fakes(3, 2).await;
+
+        let mut got: Vec<String> = built.into_iter().map(|(addr, _)| addr).collect();
+        got.sort();
+        let mut want = live;
+        want.sort();
+        assert_eq!(
+            got, want,
+            "the reachable nodes should all be built, and only those"
+        );
+    }
+
+    /// The fail-fast sibling still fails fast: the same unreachable address
+    /// that refresh skips must abort a startup build.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn startup_build_still_fails_on_an_unreachable_node() {
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let addrs = vec![
+            spawn_fake_node(probe.clone()).await,
+            UNREACHABLE.to_string(),
+        ];
+        let result = build_node_services(
+            addrs,
+            false,
+            AutoPipelineConfig::default(),
+            default_node_reconnect(),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "startup must not silently drop a node it cannot reach"
         );
     }
 
