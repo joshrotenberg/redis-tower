@@ -1,0 +1,77 @@
+name: Weekly Benchmarks
+
+on:
+  schedule:
+    - cron: "0 8 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-benchmarks
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  REDIS_VERSION: "8.0.6"
+  BENCH_SECS: "5"
+  BENCH_WARMUP: "2"
+  BENCH_RUNS: "3"
+  BENCH_CONCURRENCY: "1,8,32,128"
+
+jobs:
+  comparison:
+    name: ${{ matrix.package }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - standalone-bench
+          - cluster-bench
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: weekly-${{ matrix.package }}
+
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: benchmark-redis-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build Redis
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/${REDIS_VERSION}.tar.gz | tar xz
+            cd redis-${REDIS_VERSION}
+            make -j$(nproc)
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> $GITHUB_PATH
+
+      - name: Run comparison benchmark
+        run: |
+          mkdir -p benchmark-results
+          redis-server --version > benchmark-results/redis-version.txt
+          rustc -Vv > benchmark-results/rust-version.txt
+          cargo run -p ${{ matrix.package }} --release -- --json \
+            > benchmark-results/${{ matrix.package }}.json
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package }}-${{ github.run_id }}
+          path: benchmark-results
+          retention-days: 90

@@ -370,6 +370,21 @@ cargo bench -p redis-tower --bench commands
 
 Set `REDIS_URL` to benchmark against an existing server instead.
 
+Pull requests compare the RESP codec Criterion benchmarks against the target
+branch. A check fails when mean time regresses by more than 10% and the two
+confidence intervals do not overlap; the full `critcmp` report is attached to
+the workflow run.
+
+The `Weekly Benchmarks` workflow runs both comparison binaries with five-second
+measurement windows and retains their JSON output for 90 days. These
+GitHub-hosted results are useful for trends. Run headline measurements on
+dedicated, otherwise-idle hardware:
+
+```bash
+BENCH_SECS=5 cargo run -p standalone-bench --release -- --json
+BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
+```
+
 ## Workspace
 
 ```
@@ -384,6 +399,10 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: MockConnection and the command_tests! macro
 ```
+
+Typed command conformance against the pinned Redis 8.8 documentation metadata
+is tracked in [`COMMAND_COVERAGE.md`](COMMAND_COVERAGE.md). The report is
+generated from the command implementations and checked in CI.
 
 ## Testing
 

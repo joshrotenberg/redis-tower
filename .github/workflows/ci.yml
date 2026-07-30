@@ -59,6 +59,107 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  command-coverage:
+    name: Command Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test coverage generator
+        run: python3 scripts/test_generate_command_coverage.py
+
+      - name: Check generated report
+        run: python3 scripts/generate_command_coverage.py --check
+
+  fuzz:
+    name: Fuzz Targets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+
+      - name: Build fuzz targets
+        run: cargo fuzz build
+
+      - name: Smoke-test fuzz targets
+        run: |
+          cargo fuzz run decode -- -max_total_time=10 -verbosity=0
+          cargo fuzz run decode_chunked -- -max_total_time=10 -verbosity=0
+
+      - name: Upload fuzzing artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzzing-artifacts-${{ github.sha }}
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
+  bench-regression:
+    name: Codec Benchmark Regression
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codec-benchmark
+
+      - name: Benchmark main
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --detach "$BASE_SHA"
+          cargo bench -p redis-tower-protocol --bench codec -- \
+            --warm-up-time 1 --measurement-time 2 --sample-size 50 \
+            --save-baseline main
+
+      - name: Benchmark pull request
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout --detach "$CANDIDATE_SHA"
+          cargo bench -p redis-tower-protocol --bench codec -- \
+            --warm-up-time 1 --measurement-time 2 --sample-size 50 \
+            --save-baseline candidate
+
+      - name: Compare results
+        run: |
+          critcmp main candidate --list | tee benchmark-comparison.txt
+          python3 scripts/check_criterion_regressions.py \
+            --baseline main --candidate candidate --threshold 10
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-${{ github.event.pull_request.number }}
+          path: benchmark-comparison.txt
+          if-no-files-found: ignore
+
   test-unit:
     name: Unit Tests
     runs-on: ubuntu-latest

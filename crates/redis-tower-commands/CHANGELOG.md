@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- generated Redis 8.8 typed-command conformance report with CI drift detection
+
+### Fixed
+
+- accept RedisJSON's nested JSONPath match arrays in `JSON.TYPE` responses
+
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-commands-v0.1.0) - 2026-06-05
 
 ### Added

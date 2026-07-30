@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- configurable frame-size and nesting limits plus `cargo-fuzz` targets for the RESP2/RESP3 decoder
+- pull-request performance gating for the RESP codec Criterion benchmarks
+
 ## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-protocol-v0.1.0...redis-tower-protocol-v0.1.1) - 2026-06-05
 
 ### Added
