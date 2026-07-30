@@ -74,8 +74,9 @@
 //! `SCAN` iterates one node's keyspace and carries no key, so slot routing
 //! sends it to the default node and it returns a fraction of the cluster's
 //! keys. [`ScanClusterStream`] runs the cursor loop against every master in
-//! turn and yields each key tagged with its source node. See [`scan_stream`]
-//! for the guarantees it does and does not give during a resharding.
+//! turn and yields each key tagged with its source node; [`ClusterScan`] is the
+//! configurable form, which can page several masters at once. See
+//! [`scan_stream`] for what ordering and resharding guarantees each gives.
 //!
 //! # Read Preference
 //!
@@ -126,6 +127,6 @@ pub use connection::{
     ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
-pub use scan_stream::{ClusterScanItem, ScanClusterStream};
+pub use scan_stream::{ClusterScan, ClusterScanItem, MAX_SCAN_CONCURRENCY, ScanClusterStream};
 pub use slot::{SLOT_COUNT, extract_hash_tag, slot_for_key};
 pub use topology::{ClusterTopology, NodeAddr, SlotRange};
