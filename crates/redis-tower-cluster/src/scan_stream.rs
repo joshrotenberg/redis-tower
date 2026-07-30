@@ -68,12 +68,33 @@
 //! order within a node either, so treat the sequence as unordered unless you
 //! specifically want the sequential traversal.
 //!
-//! The node set is snapshotted once, when the stream is first polled. A slot
-//! migrating between masters mid-scan can therefore be missed (if it moves from
-//! a node not yet visited to one already visited) or seen twice. Re-checking
-//! membership mid-scan is left for a follow-up; until then, treat a scan run
-//! during a live resharding as approximate.
+//! # Membership changes
+//!
+//! The set of masters is not snapshotted once. Each time the scan finishes the
+//! masters it knows about it asks the client again, and scans any it has not
+//! scanned yet, until a round turns up nothing new. So a master the client
+//! learns about part-way through -- a node added by a reshard, or a replica
+//! promoted at a new address -- is still scanned rather than missed entirely.
+//! Conversely, a master the client drops part-way through is skipped: the
+//! cluster no longer lists it as owning slots, so whoever owns them now is
+//! either already scanned or picked up by a later round.
+//!
+//! Rounds are capped at [`MAX_MEMBERSHIP_ROUNDS`]. A scan that keeps finding
+//! new masters past that fails, because a scan that stopped quietly could not
+//! be told apart from one that covered the cluster.
+//!
+//! By itself this only sees membership the client has already learned, and a
+//! `SCAN` never triggers that learning: it carries no key, so it is never
+//! answered with a MOVED. [`ClusterScan::refresh_membership`] makes the scan ask
+//! the cluster itself between rounds, which is what to use when a scan has to
+//! stay correct across a live resharding.
+//!
+//! One gap remains either way. A slot that migrates from a master not yet
+//! scanned to one already scanned is missed, and one that migrates the other way
+//! is seen twice, because nothing about a per-node cursor tracks slots. Closing
+//! that needs slot-level scan state, not membership checking.
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 
 use bytes::Bytes;
@@ -90,6 +111,14 @@ use crate::multiplexed::MultiplexedClusterClient;
 /// cluster cannot turn into an unbounded burst of concurrent work against every
 /// master at once, not because any particular width is optimal.
 pub const MAX_SCAN_CONCURRENCY: usize = 16;
+
+/// The most membership re-check rounds a cluster scan will run before giving up.
+///
+/// A round runs only when the re-check turned up a master the scan has not
+/// scanned yet, so a cluster whose membership is settled uses exactly one. The
+/// ceiling exists so that a cluster reshaping itself faster than it can be
+/// scanned ends the scan with an error instead of looping indefinitely.
+pub const MAX_MEMBERSHIP_ROUNDS: usize = 8;
 
 /// A per-node scan stream, boxed so the fan-out can hold several at once.
 type NodeScan = Pin<Box<dyn Stream<Item = Result<ClusterScanItem, RedisError>> + Send>>;
@@ -189,6 +218,7 @@ pub struct ClusterScan {
     pattern: String,
     count: Option<u64>,
     concurrency: usize,
+    refresh_membership: bool,
 }
 
 impl ClusterScan {
@@ -198,6 +228,7 @@ impl ClusterScan {
             pattern: pattern.into(),
             count: None,
             concurrency: 1,
+            refresh_membership: false,
         }
     }
 
@@ -224,10 +255,41 @@ impl ClusterScan {
         self
     }
 
+    /// Refresh the cluster topology before each membership re-check.
+    ///
+    /// Off by default. The scan always re-checks which masters the client holds
+    /// between rounds, but on its own that only sees membership the client has
+    /// already learned, and a `SCAN` never teaches it any: `SCAN` carries no key,
+    /// so it is never answered with the MOVED that would drive a refresh. A
+    /// scan-only workload can therefore run start to finish against a stale node
+    /// set while the cluster reshards underneath it.
+    ///
+    /// Turning this on runs
+    /// [`refresh_topology`](MultiplexedClusterClient::refresh_topology) between
+    /// rounds, so the re-check sees the cluster's current slot map. The costs, in
+    /// exchange:
+    ///
+    /// - one extra `CLUSTER SLOTS` round trip per round, including the final
+    ///   round that confirms nothing new appeared;
+    /// - the refresh's usual reconciliation of the client's own services, which
+    ///   is to say a read-only scan can now prune a departed node and rebuild a
+    ///   dead one;
+    /// - a failed refresh ends the scan, because a scan asked to keep up with
+    ///   membership cannot vouch for its coverage if it could not look.
+    ///
+    /// Refreshes only ever happen at a round boundary, when no `SCAN` is in
+    /// flight, so a service rebuilt underneath the scan never interrupts a
+    /// node's paging.
+    pub fn refresh_membership(mut self, refresh: bool) -> Self {
+        self.refresh_membership = refresh;
+        self
+    }
+
     /// Run the scan against `client`.
     ///
     /// The returned stream is owned rather than borrowing `client`, and does
-    /// nothing until first polled -- which is when the node set is snapshotted.
+    /// nothing until first polled -- which is when the first membership check
+    /// happens.
     pub fn run(
         self,
         client: &MultiplexedClusterClient,
@@ -236,7 +298,14 @@ impl ClusterScan {
     }
 }
 
-/// Drive a [`ClusterScan`] over the client's masters.
+/// Drive a [`ClusterScan`] over the client's masters, re-checking membership
+/// between rounds.
+///
+/// Each round scans the masters the client holds that have not been scanned yet,
+/// then asks again. A settled cluster spends one round on every master and a
+/// second that finds nothing, so this is the same traversal as a single snapshot
+/// would give; a cluster that gained a master mid-scan spends a further round on
+/// it. See the module docs for what that does and does not cover.
 ///
 /// An error from any node ends the whole stream: a partial cluster-wide scan
 /// that reported success would be indistinguishable from a complete one, and
@@ -251,31 +320,68 @@ fn scan_inner(
         pattern,
         count,
         concurrency,
+        refresh_membership,
     } = scan;
     async_stream::try_stream! {
-        // Snapshotted once, on first poll. See the module docs on resharding.
-        let nodes = client.master_service_addrs().await;
+        let mut scanned: BTreeSet<String> = BTreeSet::new();
+        let mut rounds = 0usize;
 
-        if concurrency <= 1 {
-            // Kept as an explicit loop rather than a width-1 fan-out: the
-            // sorted visit order is a documented property of this path, and
-            // this way it follows from the code instead of from a combinator's
-            // internal polling order.
-            for node in nodes {
-                let mut per_node = scan_node(client.clone(), node, pattern.clone(), count);
-                while let Some(item) = per_node.next().await {
+        loop {
+            if refresh_membership {
+                // Ask the cluster who owns what now, so the check below sees the
+                // current slot map rather than only what other traffic on this
+                // client happened to reveal. Safe here and nowhere else in this
+                // loop: no SCAN is in flight at a round boundary, so a service
+                // this rebuilds cannot interrupt a node mid-paging.
+                client.refresh_topology().await?;
+            }
+
+            // Re-read rather than reuse a snapshot. A master the client has
+            // learned about since the last round gets scanned; one it has
+            // dropped never appears, so its slots are covered by whoever owns
+            // them now.
+            let pending: Vec<String> = client
+                .master_service_addrs()
+                .await
+                .into_iter()
+                .filter(|addr| !scanned.contains(addr))
+                .collect();
+            if pending.is_empty() {
+                break;
+            }
+
+            rounds += 1;
+            if rounds > MAX_MEMBERSHIP_ROUNDS {
+                // Stopping quietly here would report a cluster-wide scan that
+                // knowingly left masters unscanned.
+                Err::<(), _>(RedisError::Redis(format!(
+                    "cluster scan: still finding unscanned masters after \
+                     {MAX_MEMBERSHIP_ROUNDS} membership rounds"
+                )))?;
+            }
+            scanned.extend(pending.iter().cloned());
+
+            if concurrency <= 1 {
+                // Kept as an explicit loop rather than a width-1 fan-out: the
+                // sorted visit order is a documented property of this path, and
+                // this way it follows from the code instead of from a combinator's
+                // internal polling order.
+                for node in pending {
+                    let mut per_node = scan_node(client.clone(), node, pattern.clone(), count);
+                    while let Some(item) = per_node.next().await {
+                        yield item?;
+                    }
+                }
+            } else {
+                let per_node = pending
+                    .into_iter()
+                    .map(|node| scan_node(client.clone(), node, pattern.clone(), count));
+                // Polls up to `concurrency` node scans at a time, pulling the next
+                // node in only as an earlier one finishes.
+                let mut merged = futures::stream::iter(per_node).flatten_unordered(concurrency);
+                while let Some(item) = merged.next().await {
                     yield item?;
                 }
-            }
-        } else {
-            let per_node = nodes
-                .into_iter()
-                .map(|node| scan_node(client.clone(), node, pattern.clone(), count));
-            // Polls up to `concurrency` node scans at a time, pulling the next
-            // node in only as an earlier one finishes.
-            let mut merged = futures::stream::iter(per_node).flatten_unordered(concurrency);
-            while let Some(item) = merged.next().await {
-                yield item?;
             }
         }
     }
@@ -286,6 +392,14 @@ fn scan_inner(
 /// Pages that node until its own cursor comes back `"0"`, one command at a time:
 /// the next cursor is only known once the previous page returns, so there is no
 /// concurrency to be had within a node.
+///
+/// A node the client stops holding a master service for part-way through ends
+/// this stream without an error. That is a membership change rather than a scan
+/// failure -- the cluster no longer lists the node as owning slots, so their
+/// current owner is either scanned already or picked up by a later round -- and
+/// failing here would turn an ordinary reshard into a failed scan. Checked after
+/// the failure rather than before each page, so a node that is merely failing
+/// still surfaces its error.
 fn scan_node(
     client: MultiplexedClusterClient,
     node: String,
@@ -299,7 +413,22 @@ fn scan_node(
             if let Some(n) = count {
                 cmd = cmd.count(n);
             }
-            let result = client.execute_on_node(&node, cmd).await?;
+            let result = match client.execute_on_node(&node, cmd).await {
+                Ok(result) => result,
+                Err(e) => {
+                    if client.holds_master(&node).await {
+                        Err::<(), _>(e)?;
+                    } else {
+                        tracing::debug!(
+                            node = %node,
+                            error = %e,
+                            "cluster scan: node is no longer a master this client holds, \
+                             ending its scan"
+                        );
+                    }
+                    break;
+                }
+            };
             cursor = result.cursor;
             for key in result.results {
                 yield ClusterScanItem {
@@ -423,6 +552,44 @@ mod tests {
         out
     }
 
+    /// What every fake node answers `CLUSTER SLOTS` with, shared by all of them,
+    /// and mutable so a test can reshape the cluster mid-scan.
+    #[derive(Default)]
+    struct FakeTopology {
+        /// The addresses currently published as masters. Empty before the
+        /// cluster is wired up, which is answered with an error.
+        masters: Vec<String>,
+        /// Addresses to publish one at a time, one per `CLUSTER SLOTS` call, so
+        /// a test can build a cluster whose membership a scan can never catch up
+        /// with. Empty for a settled cluster, which is every other test.
+        reveal_one_per_call: Vec<String>,
+        /// How many times any node has been asked for the topology. Lets a test
+        /// pin what a scan costs in `CLUSTER SLOTS` round trips.
+        calls: usize,
+    }
+
+    impl FakeTopology {
+        fn settled(masters: Vec<String>) -> Self {
+            Self {
+                masters,
+                ..Self::default()
+            }
+        }
+
+        /// The reply to serve now, revealing one more master first if this
+        /// cluster is set up to grow.
+        fn take_reply(&mut self) -> Option<Vec<u8>> {
+            self.calls += 1;
+            if let Some(next) = self.reveal_one_per_call.pop() {
+                self.masters.push(next);
+            }
+            if self.masters.is_empty() {
+                return None;
+            }
+            Some(cluster_slots_reply(&self.masters))
+        }
+    }
+
     /// A CLUSTER SLOTS reply splitting the slot space evenly across `addrs`.
     fn cluster_slots_reply(addrs: &[String]) -> Vec<u8> {
         let per = 16384 / addrs.len();
@@ -467,7 +634,7 @@ mod tests {
     /// never sends SCAN, so per-connection state is per-node state here.
     async fn spawn_node(
         behavior: ScanBehavior,
-        slots: Arc<Mutex<Option<Vec<u8>>>>,
+        slots: Arc<Mutex<FakeTopology>>,
         log: ScanLog,
         probe: ScanProbe,
     ) -> String {
@@ -500,7 +667,7 @@ mod tests {
                         let mut out: Vec<u8> = Vec::new();
                         while let Some(args) = take_request(&mut buf) {
                             match args[0].to_uppercase().as_str() {
-                                "CLUSTER" => match slots.lock().unwrap().clone() {
+                                "CLUSTER" => match slots.lock().unwrap().take_reply() {
                                     Some(bytes) => out.extend_from_slice(&bytes),
                                     None => out.extend_from_slice(b"-ERR no topology\r\n"),
                                 },
@@ -544,19 +711,66 @@ mod tests {
         sorted_addrs: Vec<String>,
         log: ScanLog,
         probe: ScanProbe,
+        topology: Arc<Mutex<FakeTopology>>,
+    }
+
+    impl FakeCluster {
+        /// Spawn another master and publish it, so the next `CLUSTER SLOTS` sees
+        /// a four-master cluster. The client only learns about it once something
+        /// refreshes its topology.
+        async fn add_master(&self) -> String {
+            let addr = spawn_node(
+                ScanBehavior::TwoPages,
+                self.topology.clone(),
+                self.log.clone(),
+                self.probe.clone(),
+            )
+            .await;
+            let mut topology = self.topology.lock().unwrap();
+            topology.masters.push(addr.clone());
+            addr
+        }
+
+        /// Unpublish a master, as a reshard that moved every one of its slots
+        /// elsewhere would. The node keeps listening; the client only stops
+        /// holding it once something refreshes its topology.
+        fn remove_master(&self, addr: &str) {
+            let mut topology = self.topology.lock().unwrap();
+            topology.masters.retain(|a| a != addr);
+        }
+
+        /// Publish `count` further masters one at a time, one per `CLUSTER SLOTS`
+        /// call, so a scan re-checking membership always finds another unscanned
+        /// one.
+        async fn grow_on_every_topology_call(&self, count: usize) {
+            for _ in 0..count {
+                let addr = spawn_node(
+                    ScanBehavior::TwoPages,
+                    self.topology.clone(),
+                    self.log.clone(),
+                    self.probe.clone(),
+                )
+                .await;
+                self.topology.lock().unwrap().reveal_one_per_call.push(addr);
+            }
+        }
+
+        fn topology_calls(&self) -> usize {
+            self.topology.lock().unwrap().calls
+        }
     }
 
     async fn fake_cluster_holding(behaviors: [ScanBehavior; 3], hold: Duration) -> FakeCluster {
-        let slots: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
+        let topology: Arc<Mutex<FakeTopology>> = Arc::new(Mutex::new(FakeTopology::default()));
         let log: ScanLog = Arc::new(Mutex::new(HashMap::new()));
         let probe = ScanProbe::new(hold);
 
         let mut addrs = Vec::new();
         for behavior in behaviors {
-            addrs.push(spawn_node(behavior, slots.clone(), log.clone(), probe.clone()).await);
+            addrs.push(spawn_node(behavior, topology.clone(), log.clone(), probe.clone()).await);
         }
         // Every node can serve discovery, so seeding from any of them works.
-        *slots.lock().unwrap() = Some(cluster_slots_reply(&addrs));
+        *topology.lock().unwrap() = FakeTopology::settled(addrs.clone());
 
         let client = MultiplexedClusterClient::connect(&addrs[0])
             .await
@@ -569,6 +783,7 @@ mod tests {
             sorted_addrs,
             log,
             probe,
+            topology,
         }
     }
 
@@ -855,6 +1070,223 @@ mod tests {
         assert!(
             err.to_string().contains("scan refused"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// The behaviour this slice adds. A master published part-way through a scan
+    /// is scanned by a later round rather than missed entirely.
+    ///
+    /// The first key is what makes this exact: by the time it arrives, the first
+    /// round has already fixed the list of masters it is going to scan, so a
+    /// master added afterwards can only be reached by a re-check.
+    #[tokio::test]
+    async fn a_master_that_appears_mid_scan_is_still_scanned() {
+        let fake = healthy_cluster().await;
+
+        let mut stream = std::pin::pin!(
+            ClusterScan::new("*")
+                .refresh_membership(true)
+                .run(&fake.client)
+        );
+        let first = stream
+            .next()
+            .await
+            .expect("a first key")
+            .expect("scan should succeed");
+
+        let added = fake.add_master().await;
+
+        let mut items = vec![first];
+        while let Some(item) = stream.next().await {
+            items.push(item.expect("scan should succeed"));
+        }
+
+        assert_eq!(items.len(), 12, "three keys from each of four masters");
+        assert_eq!(
+            visit_order(&items),
+            {
+                // The three original masters in sorted order, then the late
+                // arrival last -- it is the only master its round has, wherever
+                // its ephemeral port happens to sort.
+                let mut expected = fake.sorted_addrs.clone();
+                expected.push(added.clone());
+                expected
+            },
+            "the late master is scanned, after the round that did not know about it"
+        );
+        assert_eq!(
+            fake.log.lock().unwrap().get(&added).map(Vec::len),
+            Some(2),
+            "the late master is paged to its own cursor 0, like any other"
+        );
+    }
+
+    /// The other half of a membership change. A master unpublished part-way
+    /// through -- a reshard moved its slots elsewhere -- is skipped rather than
+    /// failing the scan, even though the round that is running snapshotted it.
+    ///
+    /// A node that is present and merely failing still ends the stream; that is
+    /// what `an_error_from_one_node_ends_the_stream` pins, and it is why the
+    /// departed check is made after a failure rather than before each page.
+    #[tokio::test]
+    async fn a_master_that_leaves_mid_scan_is_skipped_rather_than_failing() {
+        let fake = healthy_cluster().await;
+        let departing = fake.sorted_addrs.last().unwrap().clone();
+
+        let mut stream = std::pin::pin!(ScanClusterStream::scan(&fake.client, "*"));
+        let first = stream
+            .next()
+            .await
+            .expect("a first key")
+            .expect("scan should succeed");
+
+        // Unpublish the last master the sequential scan would reach, then let the
+        // client reconcile -- which is what a background refresh triggered by
+        // other traffic on this client would do.
+        fake.remove_master(&departing);
+        fake.client
+            .refresh_topology()
+            .await
+            .expect("refresh should succeed");
+
+        let mut items = vec![first];
+        while let Some(item) = stream.next().await {
+            items.push(item.expect("a departed master must not fail the scan"));
+        }
+
+        assert_eq!(
+            items.len(),
+            6,
+            "three keys from each of the two that remain"
+        );
+        assert!(
+            items.iter().all(|i| i.node != departing),
+            "the departed master yielded nothing"
+        );
+        assert!(
+            !fake.log.lock().unwrap().contains_key(&departing),
+            "the departed master was never asked for a page"
+        );
+    }
+
+    /// A cluster reshaping itself faster than it can be scanned ends the scan
+    /// with an error. Stopping quietly would report a cluster-wide scan that
+    /// knowingly left masters unscanned.
+    #[tokio::test]
+    async fn a_cluster_that_keeps_growing_ends_the_scan_with_an_error() {
+        let fake = healthy_cluster().await;
+        // One more master per topology call, for more calls than the scan is
+        // allowed rounds, so every re-check finds another unscanned master.
+        fake.grow_on_every_topology_call(MAX_MEMBERSHIP_ROUNDS + 2)
+            .await;
+
+        let mut stream = std::pin::pin!(
+            ClusterScan::new("*")
+                .refresh_membership(true)
+                .run(&fake.client)
+        );
+        let mut err = None;
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                err = Some(e);
+                break;
+            }
+        }
+
+        let err = err.expect("a cluster that never settles should fail the scan");
+        assert!(
+            err.to_string().contains("membership rounds"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Re-checking membership is free by default: it re-reads what the client
+    /// already holds. Asking the cluster itself is what costs a round trip, and
+    /// only happens when requested.
+    ///
+    /// Two clusters rather than two scans of one: a fake node counts SCAN pages
+    /// per connection and the client holds one connection per node, so a second
+    /// scan of the same fixture would find every node already at its last page.
+    #[tokio::test]
+    async fn only_a_refreshing_scan_asks_the_cluster_for_its_topology() {
+        let quiet = healthy_cluster().await;
+        let quiet_after_connect = quiet.topology_calls();
+        let items = collect_ok(ScanClusterStream::scan(&quiet.client, "*")).await;
+        assert_eq!(items.len(), 9);
+        assert_eq!(
+            quiet.topology_calls(),
+            quiet_after_connect,
+            "the default path must not add a CLUSTER SLOTS round trip"
+        );
+
+        let refreshing = healthy_cluster().await;
+        let refreshing_after_connect = refreshing.topology_calls();
+        let items = collect_ok(
+            ClusterScan::new("*")
+                .refresh_membership(true)
+                .run(&refreshing.client),
+        )
+        .await;
+        assert_eq!(items.len(), 9, "the same keys either way");
+        assert_eq!(
+            refreshing.topology_calls() - refreshing_after_connect,
+            2,
+            "one refresh before the round that scans, one before the round that \
+             confirms nothing new appeared"
+        );
+    }
+
+    /// A refresh the scan asked for and could not get ends the scan: it was asked
+    /// to keep up with membership and cannot vouch for its coverage if it could
+    /// not look.
+    #[tokio::test]
+    async fn a_refreshing_scan_fails_when_the_topology_is_unreachable() {
+        let fake = healthy_cluster().await;
+        // Every node answers CLUSTER SLOTS with an error once no master is
+        // published, which is how a refresh finds no usable seed.
+        fake.topology.lock().unwrap().masters.clear();
+
+        let mut stream = std::pin::pin!(
+            ClusterScan::new("*")
+                .refresh_membership(true)
+                .run(&fake.client)
+        );
+        let first = stream
+            .next()
+            .await
+            .expect("the scan should report something");
+
+        let err = first.expect_err("an unusable topology should fail the scan");
+        assert!(
+            err.to_string().contains("no topology"),
+            "the failure should be the refresh's, not a scan's: {err}"
+        );
+        assert!(
+            fake.log.lock().unwrap().is_empty(),
+            "the scan should fail before paging any node"
+        );
+    }
+
+    #[test]
+    fn the_membership_round_cap_is_the_documented_one() {
+        // Named in the module docs and in the error a scan fails with, so a
+        // change here is a documentation change too.
+        assert_eq!(MAX_MEMBERSHIP_ROUNDS, 8);
+    }
+
+    #[test]
+    fn membership_refreshing_is_off_unless_asked_for() {
+        assert!(!ClusterScan::new("*").refresh_membership);
+        assert!(
+            ClusterScan::new("*")
+                .refresh_membership(true)
+                .refresh_membership
+        );
+        assert!(
+            !ClusterScan::new("*")
+                .refresh_membership(true)
+                .refresh_membership(false)
+                .refresh_membership
         );
     }
 

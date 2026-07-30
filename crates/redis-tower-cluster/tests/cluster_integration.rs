@@ -319,6 +319,63 @@ async fn mux_cluster_scan_stream_covers_the_keyspace_concurrently() {
     }
 }
 
+/// Refreshing membership between rounds finds the same keys on a cluster that is
+/// not resharding, and really does re-run discovery -- the topology it comes back
+/// with still holds every master the scan reached.
+///
+/// The case it exists for, a slot migrating mid-scan, needs a reshard this fixture
+/// cannot drive; the unit tests cover that with a fake cluster whose membership a
+/// test can change between two polls of the stream.
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_scan_stream_refreshing_membership_covers_the_keyspace() {
+    let cluster = mux_cluster_conn().await;
+
+    let keys: Vec<String> = (0..60).map(|i| format!("scan456m:{{{i}}}:k")).collect();
+    for key in &keys {
+        cluster.execute(Set::new(key, "v")).await.unwrap();
+    }
+
+    let refreshing: Vec<ClusterScanItem> = std::pin::pin!(
+        ClusterScan::new("scan456m:*")
+            .count(10)
+            .refresh_membership(true)
+            .run(&cluster)
+    )
+    .map(|r| r.expect("refreshing cluster scan should succeed"))
+    .collect()
+    .await;
+
+    let found: HashSet<String> = refreshing
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.key).into_owned())
+        .collect();
+    for key in &keys {
+        assert!(found.contains(key), "refreshing cluster scan missed {key}");
+    }
+
+    // The refreshes reconcile the client's own services, so a scan that finished
+    // must have left the masters it scanned in place.
+    let masters: HashSet<String> = cluster
+        .topology()
+        .await
+        .master_addrs()
+        .iter()
+        .map(|a| a.addr_string())
+        .collect();
+    for item in &refreshing {
+        assert!(
+            masters.contains(&item.node),
+            "{} was scanned but is not a master after the refreshes",
+            item.node
+        );
+    }
+
+    for key in &keys {
+        cluster.execute(Del::new(key)).await.unwrap();
+    }
+}
+
 /// A clone keeps working after another clone calls `shutdown()`; only the last
 /// live clone actually drains the per-node workers.
 #[tokio::test]

@@ -75,8 +75,9 @@
 //! sends it to the default node and it returns a fraction of the cluster's
 //! keys. [`ScanClusterStream`] runs the cursor loop against every master in
 //! turn and yields each key tagged with its source node; [`ClusterScan`] is the
-//! configurable form, which can page several masters at once. See
-//! [`scan_stream`] for what ordering and resharding guarantees each gives.
+//! configurable form, which can page several masters at once and can re-check
+//! cluster membership as it goes. See [`scan_stream`] for what ordering and
+//! resharding guarantees each gives.
 //!
 //! # Read Preference
 //!
@@ -127,6 +128,8 @@ pub use connection::{
     ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
-pub use scan_stream::{ClusterScan, ClusterScanItem, MAX_SCAN_CONCURRENCY, ScanClusterStream};
+pub use scan_stream::{
+    ClusterScan, ClusterScanItem, MAX_MEMBERSHIP_ROUNDS, MAX_SCAN_CONCURRENCY, ScanClusterStream,
+};
 pub use slot::{SLOT_COUNT, extract_hash_tag, slot_for_key};
 pub use topology::{ClusterTopology, NodeAddr, SlotRange};
