@@ -57,7 +57,7 @@ All live in `redis-tower/src/`:
 - `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`). Separately, `redis-tower-core`'s connectors emit a `redis.connect` span (fields `server.address`, `tls`, plus `server.tls.hostname` for TLS) around every transport connect, so connection setup is observable even without the command layer.
 - `metrics_layer.rs` -- `MetricsRecorder` hook with `ErrorKind` enum (7 variants, not just `bool`)
 - `cache_layer.rs` / `caching.rs` -- client-side caching
-- `circuit_breaker.rs` -- `CircuitBreakerLayer`: three-state machine, Arc-shared across clones
+- `circuit_breaker.rs` -- Redis-aware adapter over `tower-resilience-circuitbreaker`; connection/timeout classifier, shared state handle, deprecated legacy aliases
 - `command_timeout.rs` -- `CommandTimeoutLayer`: per-command deadline
 - `retry.rs` -- `RetryLayer`/`RetryService`: idempotent-aware automatic retries at the **command altitude** (needs `Command::idempotent`, so it sits above the frame lowering). Default policy `idempotent && err.is_retryable()`, configurable attempt budget and exponential backoff + jitter (`RetryPolicy`). Opt in on a client via `.retry(policy)`, which returns a `RetryClient` bridging through `ExecutorService`. A non-idempotent write is never re-sent, so a retry cannot silently duplicate data.
 - `resilient.rs` -- `ResilientRedisClient` combining reconnect + auto-pipeline

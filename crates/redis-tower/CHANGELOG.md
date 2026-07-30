@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Redis-aware `tower-resilience` circuit breaker adapter, operational handle, and high-level client options
+
+### Changed
+
+- circuit health now counts only connection and timeout failures; Redis command errors such as `WRONGTYPE` no longer trip the breaker
+
+### Deprecated
+
+- `CircuitBreakerLayer`, `CircuitBreakerConfig`, and `CircuitBreakerService` are compatibility aliases for the new `RedisCircuitBreaker*` names
+
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-v0.1.0) - 2026-06-05
 
 ### Added

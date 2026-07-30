@@ -43,6 +43,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 use tower_service::Service;
 
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
+use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::command_adapter::CommandAdapter;
 use crate::reconnect::ConnectionFactory;
 use crate::retry::{RetryClient, RetryPolicy};
@@ -251,6 +252,18 @@ where
     S: Service<Frame, Response = Frame, Error = RedisError> + Clone,
     S::Future: Send + 'static,
 {
+    /// Protect this client's frame service with a Redis-aware circuit breaker.
+    ///
+    /// The returned client shares breaker state across clones and exposes an
+    /// operational handle through
+    /// [`RedisCircuitBreakerClient::circuit_breaker_handle`].
+    pub fn with_circuit_breaker(
+        self,
+        config: RedisCircuitBreakerConfig,
+    ) -> RedisCircuitBreakerClient<S> {
+        RedisCircuitBreakerClient::new(self.inner.into_inner(), config)
+    }
+
     /// Build a multiplexed client from a layered Frame-level [`Service`].
     ///
     /// This is the middleware injection point: wrap [`AutoPipelineService`] (or

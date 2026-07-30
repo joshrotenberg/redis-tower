@@ -244,25 +244,31 @@ Automatic master rediscovery on failover.
 let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
 ```
 
-For circuit breaking, retry, and rate limiting, compose with
-[tower-resilience](https://crates.io/crates/tower-resilience):
+The built-in Redis-aware circuit breaker is backed by
+[tower-resilience](https://crates.io/crates/tower-resilience). It counts
+connection and timeout failures, but ignores Redis command errors such as
+`WRONGTYPE`:
 
 ```rust,ignore
-use tower_resilience_circuitbreaker::circuit_breaker_builder;
+use redis_tower::{MultiplexedClient, RedisCircuitBreakerConfig};
 
-let cb = circuit_breaker_builder()
-    .failure_rate_threshold(50.0)
-    .wait_duration_in_open(Duration::from_secs(30))
-    .build();
+let client = MultiplexedClient::connect("127.0.0.1:6379")
+    .await?
+    .with_circuit_breaker(RedisCircuitBreakerConfig::default());
 
-let svc = CommandAdapter::new(
-    ServiceBuilder::new()
-        .layer(cb)
-        .service(FrameService::connect("127.0.0.1:6379").await?)
-);
+let handle = client.circuit_breaker_handle();
+println!("circuit health: {}", handle.health_status());
 ```
 
-`RedisError::is_retryable()` classifies which errors are worth retrying.
+The same `with_circuit_breaker` option is available on
+`ResilientRedisClient`. The returned client retains typed execution, health
+checks, and idempotent-aware retry composition. `CircuitBreakerLayer` and its
+config/service names remain as deprecated aliases for one compatibility
+release.
+
+`RedisError::is_retryable()` classifies which errors are worth retrying. Rate
+limiting and bulkhead isolation remain available from the tower-resilience
+crate family.
 
 Other resilience building blocks:
 
@@ -370,6 +376,21 @@ cargo bench -p redis-tower --bench commands
 
 Set `REDIS_URL` to benchmark against an existing server instead.
 
+Pull requests compare the RESP codec Criterion benchmarks against the target
+branch. A check fails when mean time regresses by more than 10% and the two
+confidence intervals do not overlap; the full `critcmp` report is attached to
+the workflow run.
+
+The `Weekly Benchmarks` workflow runs both comparison binaries with five-second
+measurement windows and retains their JSON output for 90 days. These
+GitHub-hosted results are useful for trends. Run headline measurements on
+dedicated, otherwise-idle hardware:
+
+```bash
+BENCH_SECS=5 cargo run -p standalone-bench --release -- --json
+BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
+```
+
 ## Workspace
 
 ```
@@ -383,7 +404,12 @@ redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSerie
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: MockConnection and the command_tests! macro
+redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 ```
+
+Typed command conformance against the pinned Redis 8.8 documentation metadata
+is tracked in [`COMMAND_COVERAGE.md`](COMMAND_COVERAGE.md). The report is
+generated from the command implementations and checked in CI.
 
 ## Testing
 
@@ -434,13 +460,14 @@ redis-tower speaks RESP2 and RESP3 over the standard Redis protocol, so it works
 with any RESP-compatible server.
 
 - **Redis.** Every PR runs the full integration suite against **Redis 7.4 and
-  8.0**. Redis 7.x and 8.x are the supported targets; 6.x works for the core
-  commands but is not tested. Commands introduced in a specific server version
-  (for example the hash-field TTL commands `HGETEX`/`HSETEX` in Redis 8.0)
-  return a clear error on older servers rather than misbehaving.
-- **Valkey.** Fully supported -- Valkey speaks the same protocol, and the
-  `valkey://` / `valkeys://` URL schemes are accepted as aliases for `redis://`
-  / `rediss://`.
+  8.0**. A nightly Docker matrix reruns the standalone suite against Redis 7.2,
+  7.4, 8.0, 8.2, 8.4, 8.6, and 8.8. Redis 7.x and 8.x are the supported
+  targets; 6.x works for the core commands but is not tested. Commands
+  introduced in a specific server version return a clear error on older
+  servers rather than misbehaving.
+- **Valkey.** The nightly matrix also runs against Valkey 8.1. Valkey speaks the
+  same protocol, and the `valkey://` / `valkeys://` URL schemes are accepted as
+  aliases for `redis://` / `rediss://`.
 - **Redis Stack modules.** The JSON, Search, TimeSeries, probabilistic, and
   Vector-set command groups target the Redis Stack modules, which ship built in
   with Redis 8.x. They are feature-gated (on by default) and degrade to a clear

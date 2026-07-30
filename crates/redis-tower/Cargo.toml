@@ -45,6 +45,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tower-layer = { workspace = true }
+tower-resilience-circuitbreaker = { workspace = true }
 rand = "0.9"
 
 [dev-dependencies]

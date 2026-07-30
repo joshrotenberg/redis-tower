@@ -19,6 +19,12 @@ Thumbs.db
 flamegraph.svg
 perf.data*
 tmp/
+/fuzz/artifacts/
+/fuzz/corpus/
+/fuzz/coverage/
+/fuzz/target/
+__pycache__/
+*.py[cod]
 
 # Redis dump files
 dump.rdb

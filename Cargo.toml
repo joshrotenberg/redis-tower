@@ -11,6 +11,7 @@ members = [
     "crates/redis-tower-modules",
     "crates/redis-tower-client",
     "crates/redis-test-harness",
+    "crates/redis-chaos-tests",
     "crates/cluster-bench",
     "crates/standalone-bench",
     "crates/sentinel-bench",
@@ -53,6 +54,7 @@ bytes = "1.9"
 tower = { version = "0.5", features = ["util", "buffer", "timeout"] }
 tower-layer = "0.3"
 tower-service = "0.3"
+tower-resilience-circuitbreaker = { version = "0.10.0", features = ["tracing"] }
 
 # Error handling
 thiserror = "2.0"
@@ -63,6 +65,7 @@ tracing-subscriber = "0.3"
 
 # Testing
 redis-server-wrapper = { version = "0.4.1", features = ["test-tls"] }
+docker-wrapper = { version = "=0.11.2", default-features = false, features = ["testing", "template-redis", "template-redis-cluster"] }
 
 # Hashing
 sha1 = "0.10"

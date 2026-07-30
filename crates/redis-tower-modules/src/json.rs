@@ -718,7 +718,10 @@ mod tests {
 
     #[tokio::test]
     async fn path_exists_true_when_type_returned() {
-        let mut mock = MockRedis::new(vec![Frame::BulkString(Some(Bytes::from("string")))]);
+        // RedisJSON wraps JSONPath JSON.TYPE results in match arrays.
+        let mut mock = MockRedis::new(vec![Frame::Array(Some(vec![Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("string"))),
+        ]))]))]);
         let mut json = JsonClient::new(&mut mock);
         let exists = json.path_exists("user:1", "$.name").await.unwrap();
         assert!(exists);
@@ -727,6 +730,14 @@ mod tests {
     #[tokio::test]
     async fn path_exists_false_for_null() {
         let mut mock = MockRedis::new(vec![Frame::Null]);
+        let mut json = JsonClient::new(&mut mock);
+        let exists = json.path_exists("user:1", "$.missing").await.unwrap();
+        assert!(!exists);
+    }
+
+    #[tokio::test]
+    async fn path_exists_false_for_empty_jsonpath_match_array() {
+        let mut mock = MockRedis::new(vec![Frame::Array(Some(Vec::new()))]);
         let mut json = JsonClient::new(&mut mock);
         let exists = json.path_exists("user:1", "$.missing").await.unwrap();
         assert!(!exists);

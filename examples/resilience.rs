@@ -5,14 +5,16 @@
 //! frame-level service with the `tower-resilience` crate family and hand the
 //! result to `MultiplexedClient::from_layered`.
 
-use redis_tower::ResilientRedisClient;
 use redis_tower::commands::*;
+use redis_tower::{RedisCircuitBreakerConfig, ResilientRedisClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `ResilientRedisClient` auto-reconnects with exponential backoff + jitter,
     // single-flighting reconnects across clones. It is `Clone + Send + Sync`.
-    let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+    let client = ResilientRedisClient::connect("127.0.0.1:6379")
+        .await?
+        .with_circuit_breaker(RedisCircuitBreakerConfig::default());
 
     client.execute(Set::new("res:key", "ok")).await?;
     let val: Option<bytes::Bytes> = client.execute(Get::new("res:key")).await?;
@@ -24,6 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(()) => println!("healthy"),
         Err(e) => println!("unhealthy: {e}"),
     }
+
+    println!(
+        "circuit health: {}",
+        client.circuit_breaker_handle().health_status()
+    );
 
     // Error taxonomy: classify a failure to decide how to react. INCR on a
     // non-integer value is a command error -- `is_retryable()` is false, so a
