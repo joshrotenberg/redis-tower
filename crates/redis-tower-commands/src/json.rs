@@ -256,6 +256,10 @@ impl Command for JsonMGet {
 /// JSON.TYPE key \[path\]
 ///
 /// Returns the type of the JSON value at `path`.
+///
+/// Legacy paths return a single type directly. JSONPath expressions return a
+/// match array; this command returns the first matched type, or `None` when the
+/// key or path has no matches.
 #[derive(Clone)]
 pub struct JsonType {
     key: String,
@@ -289,13 +293,23 @@ impl Command for JsonType {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::BulkString(data) => Ok(data),
-            Frame::Null => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or null",
-                actual: format!("{other:?}"),
-            }),
+        let mut current = frame;
+        loop {
+            match current {
+                Frame::BulkString(data) => return Ok(data),
+                Frame::SimpleString(data) => return Ok(Some(data)),
+                Frame::Null | Frame::Array(None) => return Ok(None),
+                Frame::Array(Some(frames)) => match frames.into_iter().next() {
+                    Some(first) => current = first,
+                    None => return Ok(None),
+                },
+                other => {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "string, null, or JSONPath match array",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            }
         }
     }
 
@@ -1420,5 +1434,38 @@ mod tests {
         let cmd = JsonDebugMemory::new("doc");
         assert_eq!(cmd.parse_response(Frame::Integer(64)).unwrap(), 64);
         assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn json_type_parses_legacy_and_jsonpath_responses() {
+        let cmd = JsonType::new("doc").path("$.name");
+
+        assert_eq!(
+            cmd.parse_response(Frame::BulkString(Some(Bytes::from("string"))))
+                .unwrap(),
+            Some(Bytes::from("string"))
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::Array(Some(vec![Frame::Array(Some(vec![
+                Frame::BulkString(Some(Bytes::from("string"))),
+            ]))])))
+            .unwrap(),
+            Some(Bytes::from("string"))
+        );
+    }
+
+    #[test]
+    fn json_type_returns_none_for_missing_jsonpath() {
+        let cmd = JsonType::new("doc").path("$.missing");
+
+        assert_eq!(
+            cmd.parse_response(Frame::Array(Some(Vec::new()))).unwrap(),
+            None
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::Array(Some(vec![Frame::Array(Some(Vec::new()))])))
+                .unwrap(),
+            None
+        );
     }
 }
