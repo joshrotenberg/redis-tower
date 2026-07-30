@@ -1,0 +1,94 @@
+name: Nightly Compatibility
+
+# Docker is intentionally isolated from normal `cargo test`. This workflow
+# covers server images and implementations that cannot be supplied by the
+# process-based per-PR integration tier.
+
+on:
+  schedule:
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-compatibility-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  docker-scaffold:
+    name: Docker Fixture Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-docker-fixture
+
+      - name: Run ignored Docker fixture test
+        env:
+          REDIS_TEST_IMAGE: redis:8.8-alpine
+        run: cargo test -p redis-chaos-tests --test docker_smoke -- --ignored
+
+  version-matrix:
+    name: Standalone (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: redis-7.2
+            image: redis:7.2-alpine
+          - name: redis-7.4
+            image: redis:7.4-alpine
+          - name: redis-8.0
+            image: redis:8.0-alpine
+          - name: redis-8.2
+            image: redis:8.2-alpine
+          - name: redis-8.4
+            image: redis:8.4-alpine
+          - name: redis-8.6
+            image: redis:8.6-alpine
+          - name: redis-8.8
+            image: redis:8.8-alpine
+          - name: valkey-8.1
+            image: valkey/valkey:8.1-alpine
+    services:
+      redis:
+        image: ${{ matrix.image }}
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: nightly-version-matrix-${{ matrix.name }}
+
+      - name: Run existing standalone integration suite
+        env:
+          REDIS_URL: redis://127.0.0.1:6399
+        run: >-
+          cargo test -p redis-tower --test integration --all-features --
+          --test-threads=1

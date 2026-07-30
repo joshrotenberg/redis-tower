@@ -404,6 +404,7 @@ redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSerie
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: MockConnection and the command_tests! macro
+redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
@@ -459,13 +460,14 @@ redis-tower speaks RESP2 and RESP3 over the standard Redis protocol, so it works
 with any RESP-compatible server.
 
 - **Redis.** Every PR runs the full integration suite against **Redis 7.4 and
-  8.0**. Redis 7.x and 8.x are the supported targets; 6.x works for the core
-  commands but is not tested. Commands introduced in a specific server version
-  (for example the hash-field TTL commands `HGETEX`/`HSETEX` in Redis 8.0)
-  return a clear error on older servers rather than misbehaving.
-- **Valkey.** Fully supported -- Valkey speaks the same protocol, and the
-  `valkey://` / `valkeys://` URL schemes are accepted as aliases for `redis://`
-  / `rediss://`.
+  8.0**. A nightly Docker matrix reruns the standalone suite against Redis 7.2,
+  7.4, 8.0, 8.2, 8.4, 8.6, and 8.8. Redis 7.x and 8.x are the supported
+  targets; 6.x works for the core commands but is not tested. Commands
+  introduced in a specific server version return a clear error on older
+  servers rather than misbehaving.
+- **Valkey.** The nightly matrix also runs against Valkey 8.1. Valkey speaks the
+  same protocol, and the `valkey://` / `valkeys://` URL schemes are accepted as
+  aliases for `redis://` / `rediss://`.
 - **Redis Stack modules.** The JSON, Search, TimeSeries, probabilistic, and
   Vector-set command groups target the Redis Stack modules, which ship built in
   with Redis 8.x. They are feature-gated (on by default) and degrade to a clear

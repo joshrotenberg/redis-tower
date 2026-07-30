@@ -1,0 +1,16 @@
+[package]
+name = "redis-chaos-tests"
+version = "0.0.0"
+description = "Docker-backed compatibility and fault-injection tests for redis-tower"
+publish = false
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+docker-wrapper = { workspace = true }
+redis-tower = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
