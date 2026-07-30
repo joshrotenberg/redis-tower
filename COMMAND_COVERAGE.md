@@ -2,7 +2,7 @@
 
 # Redis command coverage
 
-`redis-tower` provides typed builders for **452/506 (89.3%)** of the scoped Redis 8.8 command surface. **18/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
+`redis-tower` provides typed builders for **457/506 (90.3%)** of the scoped Redis 8.8 command surface. **20/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
 
 The issue that introduced this report recorded a June 2026 baseline of **393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. The headline above is regenerated from the current source tree.
 
@@ -19,7 +19,7 @@ The issue that introduced this report recorded a June 2026 baseline of **393/506
 | T1 | hash | 27 | 27 | 100.0% | — |
 | T1 | hyperloglog | 3 | 3 | 100.0% | — |
 | T1 | list | 20 | 20 | 100.0% | — |
-| T1 | module | 11 | 13 | 84.6% | `VISMEMBER`<br>`VRANGE` |
+| T1 | module | 13 | 13 | 100.0% | — |
 | T1 | pubsub | 8 | 14 | 57.1% | `PSUBSCRIBE`<br>`PUNSUBSCRIBE`<br>`SSUBSCRIBE`<br>`SUBSCRIBE`<br>`SUNSUBSCRIBE`<br>`UNSUBSCRIBE` |
 | T1 | scripting | 20 | 21 | 95.2% | `FUNCTION KILL` |
 | T1 | server | 58 | 72 | 80.6% | `ACL USERS`<br>`COMMAND`<br>`COMMAND GETKEYSANDFLAGS`<br>`LATENCY DOCTOR`<br>`LATENCY HISTOGRAM`<br>`MEMORY MALLOC-STATS`<br>`MEMORY PURGE`<br>`MODULE LOAD`<br>`MODULE LOADEX`<br>`MODULE UNLOAD`<br>`MONITOR`<br>`PSYNC`<br>`SYNC`<br>`TRIMSLOTS` |
@@ -33,7 +33,7 @@ The issue that introduced this report recorded a June 2026 baseline of **393/506
 | T2 | cms | 6 | 6 | 100.0% | — |
 | T2 | tdigest | 14 | 14 | 100.0% | — |
 | T2 | topk | 6 | 6 | 100.0% | — |
-| T3 | search | 20 | 23 | 87.0% | `FT.EXPLAIN`<br>`FT.EXPLAINCLI`<br>`FT.HYBRID` |
+| T3 | search | 23 | 23 | 100.0% | — |
 | T3 | suggestion | 4 | 4 | 100.0% | — |
 | T4 | json | 22 | 23 | 95.7% | `JSON.DEBUG HELP` |
 | T5 | timeseries | 17 | 17 | 100.0% | — |

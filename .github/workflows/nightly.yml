@@ -55,17 +55,19 @@ jobs:
             image: redis:7.4-alpine
           - name: redis-8.0
             image: redis:8.0-alpine
+            redis_8x_version: "8.0.0"
           - name: redis-8.2
             image: redis:8.2-alpine
+            redis_8x_version: "8.2.0"
           - name: redis-8.4
             image: redis:8.4-alpine
-            stage1_version: "8.4.0"
+            redis_8x_version: "8.4.4"
           - name: redis-8.6
             image: redis:8.6-alpine
-            stage1_version: "8.6.1"
+            redis_8x_version: "8.6.1"
           - name: redis-8.8
             image: redis:8.8-alpine
-            stage1_version: "8.8.0"
+            redis_8x_version: "8.8.0"
           - name: valkey-8.1
             image: valkey/valkey:8.1-alpine
     services:
@@ -98,10 +100,10 @@ jobs:
           --test-threads=1
 
       - name: Run Redis 8.x command tests
-        if: matrix.stage1_version != ''
+        if: matrix.redis_8x_version != ''
         env:
           REDIS_URL: redis://127.0.0.1:6399
-          REDIS_STAGE1_VERSION: ${{ matrix.stage1_version }}
+          REDIS_8X_VERSION: ${{ matrix.redis_8x_version }}
         run: >-
           cargo test -p redis-tower --test redis_8x_commands --all-features --
           --test-threads=1

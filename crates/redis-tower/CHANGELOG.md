@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Redis-aware `tower-resilience` circuit breaker adapter, operational handle, and high-level client options
-- version-gated live command coverage across the Redis 8.4, 8.6, and 8.8 nightly matrix
+- version-gated live command coverage across Redis 8.0, 8.2, 8.4, 8.6, and 8.8
 
 ### Changed
 
