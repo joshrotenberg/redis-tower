@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Redis-aware `tower-resilience` circuit breaker adapter, operational handle, and high-level client options
+- version-gated live command coverage across the Redis 8.4, 8.6, and 8.8 nightly matrix
 
 ### Changed
 
@@ -18,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Deprecated
 
 - `CircuitBreakerLayer`, `CircuitBreakerConfig`, and `CircuitBreakerService` are compatibility aliases for the new `RedisCircuitBreaker*` names
+
+### Fixed
+
+- skip the process-owned restart test when the integration suite targets an externally managed Redis server
 
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-v0.1.0) - 2026-06-05
 

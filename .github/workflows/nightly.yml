@@ -59,10 +59,13 @@ jobs:
             image: redis:8.2-alpine
           - name: redis-8.4
             image: redis:8.4-alpine
+            stage1_version: "8.4.0"
           - name: redis-8.6
             image: redis:8.6-alpine
+            stage1_version: "8.6.1"
           - name: redis-8.8
             image: redis:8.8-alpine
+            stage1_version: "8.8.0"
           - name: valkey-8.1
             image: valkey/valkey:8.1-alpine
     services:
@@ -89,6 +92,16 @@ jobs:
       - name: Run existing standalone integration suite
         env:
           REDIS_URL: redis://127.0.0.1:6399
+          REDIS_EXTERNAL_SERVICE: "1"
         run: >-
           cargo test -p redis-tower --test integration --all-features --
+          --test-threads=1
+
+      - name: Run Redis 8.x command tests
+        if: matrix.stage1_version != ''
+        env:
+          REDIS_URL: redis://127.0.0.1:6399
+          REDIS_STAGE1_VERSION: ${{ matrix.stage1_version }}
+        run: >-
+          cargo test -p redis-tower --test redis_8x_commands --all-features --
           --test-threads=1

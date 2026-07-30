@@ -2796,6 +2796,629 @@ impl Command for ClientGetRedir {
     }
 }
 
+/// Metrics collected by [`HotkeysStart`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HotkeysMetrics {
+    /// Track hotkeys by CPU time.
+    Cpu,
+    /// Track hotkeys by network bytes.
+    Net,
+    /// Track hotkeys by both CPU time and network bytes.
+    CpuAndNet,
+}
+
+/// HOTKEYS START METRICS count \[CPU\] \[NET\] \[COUNT k\]
+/// \[DURATION seconds\] \[SAMPLE ratio\] \[SLOTS count slot \[slot ...\]\]
+///
+/// Starts a Redis 8.6+ hotkey tracking session. The metrics count and optional
+/// slots count are calculated automatically from the typed options.
+#[derive(Clone)]
+pub struct HotkeysStart {
+    metrics: HotkeysMetrics,
+    count: Option<u8>,
+    duration: Option<u32>,
+    sample: Option<u32>,
+    slots: Option<Vec<u16>>,
+}
+
+impl HotkeysStart {
+    /// Create a hotkey tracking command for the selected metrics.
+    pub fn new(metrics: HotkeysMetrics) -> Self {
+        Self {
+            metrics,
+            count: None,
+            duration: None,
+            sample: None,
+            slots: None,
+        }
+    }
+
+    /// Set the maximum number of hotkeys returned for each metric.
+    ///
+    /// Redis accepts values from 1 through 64 and defaults to 10.
+    pub fn count(mut self, count: u8) -> Self {
+        self.count = Some(count);
+        self
+    }
+
+    /// Stop tracking automatically after this many seconds.
+    ///
+    /// Redis accepts values from 1 through 1,000,000. When omitted, tracking
+    /// continues until [`HotkeysStop`] is executed.
+    pub fn duration(mut self, seconds: u32) -> Self {
+        self.duration = Some(seconds);
+        self
+    }
+
+    /// Sample each key with probability `1 / ratio`.
+    ///
+    /// Redis requires a positive ratio and defaults to 1 (every key).
+    pub fn sample(mut self, ratio: u32) -> Self {
+        self.sample = Some(ratio);
+        self
+    }
+
+    /// Restrict tracking to the supplied cluster hash slots.
+    ///
+    /// Redis only accepts this option in cluster mode. The slot count is
+    /// calculated automatically.
+    pub fn slots(mut self, slots: impl IntoIterator<Item = u16>) -> Self {
+        self.slots = Some(slots.into_iter().collect());
+        self
+    }
+}
+
+impl Command for HotkeysStart {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("HOTKEYS"), bulk("START"), bulk("METRICS")];
+        match self.metrics {
+            HotkeysMetrics::Cpu => {
+                args.push(bulk("1"));
+                args.push(bulk("CPU"));
+            }
+            HotkeysMetrics::Net => {
+                args.push(bulk("1"));
+                args.push(bulk("NET"));
+            }
+            HotkeysMetrics::CpuAndNet => {
+                args.push(bulk("2"));
+                args.push(bulk("CPU"));
+                args.push(bulk("NET"));
+            }
+        }
+        if let Some(count) = self.count {
+            args.push(bulk("COUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        if let Some(seconds) = self.duration {
+            args.push(bulk("DURATION"));
+            args.push(bulk(seconds.to_string()));
+        }
+        if let Some(ratio) = self.sample {
+            args.push(bulk("SAMPLE"));
+            args.push(bulk(ratio.to_string()));
+        }
+        if let Some(ref slots) = self.slots {
+            args.push(bulk("SLOTS"));
+            args.push(bulk(slots.len().to_string()));
+            args.extend(slots.iter().map(|slot| bulk(slot.to_string())));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HOTKEYS START"
+    }
+}
+
+/// HOTKEYS STOP
+///
+/// Stops hotkey tracking while preserving the collected data. Returns `true`
+/// when an active session was stopped and `false` when no session was active.
+#[derive(Clone)]
+pub struct HotkeysStop;
+
+impl HotkeysStop {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for HotkeysStop {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for HotkeysStop {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("HOTKEYS"), bulk("STOP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(true),
+            Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(false),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HOTKEYS STOP"
+    }
+}
+
+/// Inclusive Redis Cluster hash-slot range reported by [`HotkeysGet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotkeysSlotRange {
+    pub start: u16,
+    pub end: u16,
+}
+
+/// A key and its measured CPU time in microseconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyCpuTime {
+    pub key: Bytes,
+    pub microseconds: i64,
+}
+
+/// A key and its measured network traffic in bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeyNetBytes {
+    pub key: Bytes,
+    pub bytes: i64,
+}
+
+/// Statistics for one node in a [`HotkeysGet`] response.
+///
+/// Metric-specific and cluster-selection fields are `None` when the
+/// corresponding START option was not enabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HotkeysStats {
+    pub tracking_active: bool,
+    pub sample_ratio: i64,
+    pub selected_slots: Vec<HotkeysSlotRange>,
+    pub sampled_commands_selected_slots_us: Option<i64>,
+    pub all_commands_selected_slots_us: Option<i64>,
+    pub all_commands_all_slots_us: i64,
+    pub net_bytes_sampled_commands_selected_slots: Option<i64>,
+    pub net_bytes_all_commands_selected_slots: Option<i64>,
+    pub net_bytes_all_commands_all_slots: i64,
+    pub collection_start_time_unix_ms: i64,
+    pub collection_duration_ms: i64,
+    pub total_cpu_time_user_ms: Option<i64>,
+    pub total_cpu_time_sys_ms: Option<i64>,
+    pub total_net_bytes: Option<i64>,
+    pub by_cpu_time_us: Option<Vec<HotkeyCpuTime>>,
+    pub by_net_bytes: Option<Vec<HotkeyNetBytes>>,
+}
+
+/// HOTKEYS GET
+///
+/// Returns the current or most recent Redis 8.6+ hotkey tracking results.
+/// Redis wraps each node's statistics in an outer array so aggregated servers
+/// can return multiple entries. A null reply means no session has been started
+/// or the previous data was reset.
+#[derive(Clone)]
+pub struct HotkeysGet;
+
+impl HotkeysGet {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for HotkeysGet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for HotkeysGet {
+    type Response = Option<Vec<HotkeysStats>>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("HOTKEYS"), bulk("GET")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_hotkeys_results(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HOTKEYS GET"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// HOTKEYS RESET
+///
+/// Releases the resources used for hotkey tracking. Redis requires an active
+/// session to be stopped first.
+#[derive(Clone)]
+pub struct HotkeysReset;
+
+impl HotkeysReset {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for HotkeysReset {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for HotkeysReset {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("HOTKEYS"), bulk("RESET")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "HOTKEYS RESET"
+    }
+}
+
+/// HOTKEYS HELP
+///
+/// Returns helpful text describing the Redis 8.6.1+ HOTKEYS subcommands.
+#[derive(Clone)]
+pub struct HotkeysHelp;
+
+impl HotkeysHelp {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for HotkeysHelp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for HotkeysHelp {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("HOTKEYS"), bulk("HELP")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        crate::help::parse_help_lines(frame)
+    }
+
+    fn name(&self) -> &str {
+        "HOTKEYS HELP"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+fn parse_hotkeys_results(frame: Frame) -> Result<Option<Vec<HotkeysStats>>, RedisError> {
+    let results = match frame {
+        Frame::Null | Frame::BulkString(None) | Frame::Array(None) => return Ok(None),
+        Frame::Array(Some(results)) => results,
+        other => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "array of HOTKEYS results or null",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+
+    results
+        .iter()
+        .map(parse_hotkeys_stats)
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
+}
+
+fn parse_hotkeys_stats(frame: &Frame) -> Result<HotkeysStats, RedisError> {
+    let fields = hotkeys_field_pairs(frame)?;
+
+    let mut tracking_active = None;
+    let mut sample_ratio = None;
+    let mut selected_slots = None;
+    let mut sampled_commands_selected_slots_us = None;
+    let mut all_commands_selected_slots_us = None;
+    let mut all_commands_all_slots_us = None;
+    let mut net_bytes_sampled_commands_selected_slots = None;
+    let mut net_bytes_all_commands_selected_slots = None;
+    let mut net_bytes_all_commands_all_slots = None;
+    let mut collection_start_time_unix_ms = None;
+    let mut collection_duration_ms = None;
+    let mut total_cpu_time_user_ms = None;
+    let mut total_cpu_time_sys_ms = None;
+    let mut total_net_bytes = None;
+    let mut by_cpu_time_us = None;
+    let mut by_net_bytes = None;
+
+    for (field, value) in fields {
+        let name = hotkeys_bytes(field, "HOTKEYS field name")?;
+        match &name[..] {
+            b"tracking-active" => {
+                tracking_active = Some(match hotkeys_integer(value, "tracking-active integer")? {
+                    0 => false,
+                    1 => true,
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "tracking-active integer 0 or 1",
+                            actual: other.to_string(),
+                        });
+                    }
+                });
+            }
+            b"sample-ratio" => sample_ratio = Some(hotkeys_integer(value, "sample-ratio integer")?),
+            b"selected-slots" => selected_slots = Some(parse_hotkeys_slots(value)?),
+            // Redis 8.6.0 used the singular "command"; later patches fixed
+            // the response field to match the documented plural spelling.
+            b"sampled-command-selected-slots-us" | b"sampled-commands-selected-slots-us" => {
+                sampled_commands_selected_slots_us = Some(hotkeys_integer(
+                    value,
+                    "sampled-commands-selected-slots-us integer",
+                )?)
+            }
+            b"all-commands-selected-slots-us" => {
+                all_commands_selected_slots_us = Some(hotkeys_integer(
+                    value,
+                    "all-commands-selected-slots-us integer",
+                )?)
+            }
+            b"all-commands-all-slots-us" => {
+                all_commands_all_slots_us =
+                    Some(hotkeys_integer(value, "all-commands-all-slots-us integer")?)
+            }
+            b"net-bytes-sampled-commands-selected-slots" => {
+                net_bytes_sampled_commands_selected_slots = Some(hotkeys_integer(
+                    value,
+                    "net-bytes-sampled-commands-selected-slots integer",
+                )?)
+            }
+            b"net-bytes-all-commands-selected-slots" => {
+                net_bytes_all_commands_selected_slots = Some(hotkeys_integer(
+                    value,
+                    "net-bytes-all-commands-selected-slots integer",
+                )?)
+            }
+            b"net-bytes-all-commands-all-slots" => {
+                net_bytes_all_commands_all_slots = Some(hotkeys_integer(
+                    value,
+                    "net-bytes-all-commands-all-slots integer",
+                )?)
+            }
+            b"collection-start-time-unix-ms" => {
+                collection_start_time_unix_ms = Some(hotkeys_integer(
+                    value,
+                    "collection-start-time-unix-ms integer",
+                )?)
+            }
+            b"collection-duration-ms" => {
+                collection_duration_ms =
+                    Some(hotkeys_integer(value, "collection-duration-ms integer")?)
+            }
+            b"total-cpu-time-user-ms" => {
+                total_cpu_time_user_ms =
+                    Some(hotkeys_integer(value, "total-cpu-time-user-ms integer")?)
+            }
+            b"total-cpu-time-sys-ms" => {
+                total_cpu_time_sys_ms =
+                    Some(hotkeys_integer(value, "total-cpu-time-sys-ms integer")?)
+            }
+            b"total-net-bytes" => {
+                total_net_bytes = Some(hotkeys_integer(value, "total-net-bytes integer")?)
+            }
+            b"by-cpu-time-us" => {
+                by_cpu_time_us = Some(
+                    parse_hotkey_measurements(value, "by-cpu-time-us array")?
+                        .into_iter()
+                        .map(|(key, microseconds)| HotkeyCpuTime { key, microseconds })
+                        .collect(),
+                )
+            }
+            b"by-net-bytes" => {
+                by_net_bytes = Some(
+                    parse_hotkey_measurements(value, "by-net-bytes array")?
+                        .into_iter()
+                        .map(|(key, bytes)| HotkeyNetBytes { key, bytes })
+                        .collect(),
+                )
+            }
+            _ => {}
+        }
+    }
+
+    Ok(HotkeysStats {
+        tracking_active: required_hotkeys_field(tracking_active, "tracking-active")?,
+        sample_ratio: required_hotkeys_field(sample_ratio, "sample-ratio")?,
+        selected_slots: required_hotkeys_field(selected_slots, "selected-slots")?,
+        sampled_commands_selected_slots_us,
+        all_commands_selected_slots_us,
+        all_commands_all_slots_us: required_hotkeys_field(
+            all_commands_all_slots_us,
+            "all-commands-all-slots-us",
+        )?,
+        net_bytes_sampled_commands_selected_slots,
+        net_bytes_all_commands_selected_slots,
+        net_bytes_all_commands_all_slots: required_hotkeys_field(
+            net_bytes_all_commands_all_slots,
+            "net-bytes-all-commands-all-slots",
+        )?,
+        collection_start_time_unix_ms: required_hotkeys_field(
+            collection_start_time_unix_ms,
+            "collection-start-time-unix-ms",
+        )?,
+        collection_duration_ms: required_hotkeys_field(
+            collection_duration_ms,
+            "collection-duration-ms",
+        )?,
+        total_cpu_time_user_ms,
+        total_cpu_time_sys_ms,
+        total_net_bytes,
+        by_cpu_time_us,
+        by_net_bytes,
+    })
+}
+
+fn hotkeys_field_pairs(frame: &Frame) -> Result<Vec<(&Frame, &Frame)>, RedisError> {
+    match frame {
+        Frame::Map(pairs) => Ok(pairs.iter().map(|(key, value)| (key, value)).collect()),
+        Frame::Array(Some(items)) => {
+            if items.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even number of HOTKEYS field-value elements",
+                    actual: format!("{} elements", items.len()),
+                });
+            }
+            Ok(items
+                .chunks_exact(2)
+                .map(|pair| (&pair[0], &pair[1]))
+                .collect())
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "HOTKEYS field-value array or map",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_hotkeys_slots(frame: &Frame) -> Result<Vec<HotkeysSlotRange>, RedisError> {
+    let ranges = match frame {
+        Frame::Array(Some(ranges)) => ranges,
+        other => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "array of HOTKEYS slot ranges",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+
+    ranges
+        .iter()
+        .map(|range| {
+            let values = match range {
+                Frame::Array(Some(values)) if matches!(values.len(), 1 | 2) => values,
+                other => {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "one- or two-integer HOTKEYS slot range",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            };
+            let start = hotkeys_slot(&values[0])?;
+            let end = if values.len() == 2 {
+                hotkeys_slot(&values[1])?
+            } else {
+                start
+            };
+            Ok(HotkeysSlotRange { start, end })
+        })
+        .collect()
+}
+
+fn hotkeys_slot(frame: &Frame) -> Result<u16, RedisError> {
+    match frame {
+        Frame::Integer(slot) if (0..=16_383).contains(slot) => Ok(*slot as u16),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "Redis Cluster slot integer from 0 through 16383",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_hotkey_measurements(
+    frame: &Frame,
+    expected: &'static str,
+) -> Result<Vec<(Bytes, i64)>, RedisError> {
+    let items = match frame {
+        Frame::Array(Some(items)) => items,
+        other => {
+            return Err(RedisError::UnexpectedResponse {
+                expected,
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+    if items.len() % 2 != 0 {
+        return Err(RedisError::UnexpectedResponse {
+            expected: "even number of HOTKEYS key-measurement elements",
+            actual: format!("{} elements", items.len()),
+        });
+    }
+
+    items
+        .chunks_exact(2)
+        .map(|pair| {
+            Ok((
+                hotkeys_bytes(&pair[0], "HOTKEYS key")?,
+                hotkeys_integer(&pair[1], "HOTKEYS measurement integer")?,
+            ))
+        })
+        .collect()
+}
+
+fn hotkeys_bytes(frame: &Frame, expected: &'static str) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(bytes)) | Frame::SimpleString(bytes) => Ok(bytes.clone()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn hotkeys_integer(frame: &Frame, expected: &'static str) -> Result<i64, RedisError> {
+    match frame {
+        Frame::Integer(value) => Ok(*value),
+        other => Err(RedisError::UnexpectedResponse {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn required_hotkeys_field<T>(value: Option<T>, field: &'static str) -> Result<T, RedisError> {
+    value.ok_or_else(|| RedisError::UnexpectedResponse {
+        expected: field,
+        actual: "missing HOTKEYS field".to_string(),
+    })
+}
+
 /// CLIENT HELP
 ///
 /// Returns helpful text describing the CLIENT subcommands.
@@ -3659,6 +4282,319 @@ mod tests {
         let cmd = ModuleList::new();
         let reply = array(vec![array(vec![bulk("name"), bulk("ReJSON")])]);
         assert_eq!(cmd.parse_response(reply.clone()).unwrap(), reply);
+    }
+
+    // -- HOTKEYS --
+
+    #[test]
+    fn hotkeys_start_cpu_to_frame() {
+        let cmd = HotkeysStart::new(HotkeysMetrics::Cpu);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HOTKEYS"),
+                bulk("START"),
+                bulk("METRICS"),
+                bulk("1"),
+                bulk("CPU"),
+            ])
+        );
+        assert_eq!(cmd.name(), "HOTKEYS START");
+    }
+
+    #[test]
+    fn hotkeys_start_net_to_frame() {
+        let cmd = HotkeysStart::new(HotkeysMetrics::Net);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HOTKEYS"),
+                bulk("START"),
+                bulk("METRICS"),
+                bulk("1"),
+                bulk("NET"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hotkeys_start_all_options_to_frame() {
+        let cmd = HotkeysStart::new(HotkeysMetrics::CpuAndNet)
+            .count(25)
+            .duration(60)
+            .sample(10)
+            .slots([3, 7, 8]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("HOTKEYS"),
+                bulk("START"),
+                bulk("METRICS"),
+                bulk("2"),
+                bulk("CPU"),
+                bulk("NET"),
+                bulk("COUNT"),
+                bulk("25"),
+                bulk("DURATION"),
+                bulk("60"),
+                bulk("SAMPLE"),
+                bulk("10"),
+                bulk("SLOTS"),
+                bulk("3"),
+                bulk("3"),
+                bulk("7"),
+                bulk("8"),
+            ])
+        );
+    }
+
+    #[test]
+    fn hotkeys_start_parse_ok_and_rejects_other_frames() {
+        let cmd = HotkeysStart::new(HotkeysMetrics::Cpu);
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn hotkeys_stop_to_frame_and_parse_status() {
+        let cmd = HotkeysStop::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HOTKEYS"), bulk("STOP")]));
+        assert_eq!(cmd.name(), "HOTKEYS STOP");
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .unwrap()
+        );
+        assert!(!cmd.parse_response(Frame::Null).unwrap());
+        assert!(!cmd.parse_response(Frame::BulkString(None)).unwrap());
+        assert!(cmd.parse_response(Frame::Integer(0)).is_err());
+    }
+
+    #[test]
+    fn hotkeys_reset_to_frame_and_parse_ok() {
+        let cmd = HotkeysReset::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HOTKEYS"), bulk("RESET")]));
+        assert_eq!(cmd.name(), "HOTKEYS RESET");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Null).is_err());
+    }
+
+    #[test]
+    fn hotkeys_get_to_frame_and_parse_null() {
+        let cmd = HotkeysGet::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HOTKEYS"), bulk("GET")]));
+        assert_eq!(cmd.name(), "HOTKEYS GET");
+        assert!(cmd.idempotent());
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+        assert_eq!(cmd.parse_response(Frame::BulkString(None)).unwrap(), None);
+    }
+
+    #[test]
+    fn hotkeys_get_parse_resp2_full_result() {
+        let cmd = HotkeysGet::new();
+        let reply = array(vec![array(vec![
+            bulk("tracking-active"),
+            Frame::Integer(0),
+            bulk("sample-ratio"),
+            Frame::Integer(10),
+            bulk("selected-slots"),
+            array(vec![
+                array(vec![Frame::Integer(0), Frame::Integer(3)]),
+                array(vec![Frame::Integer(7)]),
+            ]),
+            // Compatibility spelling emitted by Redis 8.6.0.
+            bulk("sampled-command-selected-slots-us"),
+            Frame::Integer(11),
+            bulk("all-commands-selected-slots-us"),
+            Frame::Integer(22),
+            bulk("all-commands-all-slots-us"),
+            Frame::Integer(33),
+            bulk("net-bytes-sampled-commands-selected-slots"),
+            Frame::Integer(44),
+            bulk("net-bytes-all-commands-selected-slots"),
+            Frame::Integer(55),
+            bulk("net-bytes-all-commands-all-slots"),
+            Frame::Integer(66),
+            bulk("collection-start-time-unix-ms"),
+            Frame::Integer(1_700_000_000_000),
+            bulk("collection-duration-ms"),
+            Frame::Integer(5_000),
+            bulk("total-cpu-time-user-ms"),
+            Frame::Integer(77),
+            bulk("total-cpu-time-sys-ms"),
+            Frame::Integer(88),
+            bulk("total-net-bytes"),
+            Frame::Integer(99),
+            bulk("by-cpu-time-us"),
+            array(vec![
+                bulk("hot:key:1"),
+                Frame::Integer(101),
+                bulk("hot:key:2"),
+                Frame::Integer(51),
+            ]),
+            bulk("by-net-bytes"),
+            array(vec![bulk("hot:key:1"), Frame::Integer(2_048)]),
+        ])]);
+
+        assert_eq!(
+            cmd.parse_response(reply).unwrap(),
+            Some(vec![HotkeysStats {
+                tracking_active: false,
+                sample_ratio: 10,
+                selected_slots: vec![
+                    HotkeysSlotRange { start: 0, end: 3 },
+                    HotkeysSlotRange { start: 7, end: 7 },
+                ],
+                sampled_commands_selected_slots_us: Some(11),
+                all_commands_selected_slots_us: Some(22),
+                all_commands_all_slots_us: 33,
+                net_bytes_sampled_commands_selected_slots: Some(44),
+                net_bytes_all_commands_selected_slots: Some(55),
+                net_bytes_all_commands_all_slots: 66,
+                collection_start_time_unix_ms: 1_700_000_000_000,
+                collection_duration_ms: 5_000,
+                total_cpu_time_user_ms: Some(77),
+                total_cpu_time_sys_ms: Some(88),
+                total_net_bytes: Some(99),
+                by_cpu_time_us: Some(vec![
+                    HotkeyCpuTime {
+                        key: Bytes::from("hot:key:1"),
+                        microseconds: 101,
+                    },
+                    HotkeyCpuTime {
+                        key: Bytes::from("hot:key:2"),
+                        microseconds: 51,
+                    },
+                ]),
+                by_net_bytes: Some(vec![HotkeyNetBytes {
+                    key: Bytes::from("hot:key:1"),
+                    bytes: 2_048,
+                }]),
+            }])
+        );
+    }
+
+    #[test]
+    fn hotkeys_get_parse_resp3_map() {
+        let cmd = HotkeysGet::new();
+        let reply = array(vec![Frame::Map(vec![
+            (bulk("tracking-active"), Frame::Integer(1)),
+            (bulk("sample-ratio"), Frame::Integer(1)),
+            (
+                bulk("selected-slots"),
+                array(vec![array(vec![Frame::Integer(0), Frame::Integer(16_383)])]),
+            ),
+            (bulk("all-commands-all-slots-us"), Frame::Integer(103)),
+            (
+                bulk("net-bytes-all-commands-all-slots"),
+                Frame::Integer(2_042),
+            ),
+            (
+                bulk("collection-start-time-unix-ms"),
+                Frame::Integer(1_770_824_933_147),
+            ),
+            (bulk("collection-duration-ms"), Frame::Integer(250)),
+            (bulk("total-cpu-time-user-ms"), Frame::Integer(23)),
+            (bulk("total-cpu-time-sys-ms"), Frame::Integer(7)),
+            (
+                bulk("by-cpu-time-us"),
+                array(vec![bulk("counter"), Frame::Integer(29)]),
+            ),
+            // Unknown fields are ignored for compatibility with future Redis
+            // additions.
+            (bulk("future-field"), Frame::Integer(1)),
+        ])]);
+
+        let stats = cmd.parse_response(reply).unwrap().unwrap().remove(0);
+        assert!(stats.tracking_active);
+        assert_eq!(stats.sample_ratio, 1);
+        assert_eq!(
+            stats.selected_slots,
+            vec![HotkeysSlotRange {
+                start: 0,
+                end: 16_383,
+            }]
+        );
+        assert_eq!(stats.all_commands_all_slots_us, 103);
+        assert_eq!(stats.net_bytes_all_commands_all_slots, 2_042);
+        assert_eq!(stats.total_cpu_time_user_ms, Some(23));
+        assert_eq!(
+            stats.by_cpu_time_us,
+            Some(vec![HotkeyCpuTime {
+                key: Bytes::from("counter"),
+                microseconds: 29,
+            }])
+        );
+        assert_eq!(stats.total_net_bytes, None);
+        assert_eq!(stats.by_net_bytes, None);
+    }
+
+    #[test]
+    fn hotkeys_get_parse_multiple_node_results() {
+        fn node(active: i64, start: i64) -> Frame {
+            Frame::Map(vec![
+                (bulk("tracking-active"), Frame::Integer(active)),
+                (bulk("sample-ratio"), Frame::Integer(1)),
+                (bulk("selected-slots"), array(vec![])),
+                (bulk("all-commands-all-slots-us"), Frame::Integer(0)),
+                (bulk("net-bytes-all-commands-all-slots"), Frame::Integer(0)),
+                (bulk("collection-start-time-unix-ms"), Frame::Integer(start)),
+                (bulk("collection-duration-ms"), Frame::Integer(0)),
+            ])
+        }
+
+        let results = HotkeysGet::new()
+            .parse_response(array(vec![node(1, 100), node(0, 200)]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(results[0].tracking_active);
+        assert!(!results[1].tracking_active);
+    }
+
+    #[test]
+    fn hotkeys_get_rejects_malformed_responses() {
+        let cmd = HotkeysGet::new();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+        assert!(
+            cmd.parse_response(array(vec![array(vec![
+                bulk("tracking-active"),
+                Frame::Integer(1),
+                bulk("sample-ratio"),
+            ])]))
+            .is_err()
+        );
+        assert!(
+            cmd.parse_response(array(vec![Frame::Map(vec![
+                (bulk("tracking-active"), Frame::Integer(2)),
+                (bulk("sample-ratio"), Frame::Integer(1)),
+            ])]))
+            .is_err()
+        );
+        assert!(
+            cmd.parse_response(array(vec![Frame::Map(vec![
+                (bulk("tracking-active"), Frame::Integer(1)),
+                (bulk("sample-ratio"), Frame::Integer(1)),
+                (
+                    bulk("selected-slots"),
+                    array(vec![array(vec![Frame::Integer(16_384)])]),
+                ),
+            ])]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn hotkeys_help_to_frame_and_parse_lines() {
+        let cmd = HotkeysHelp::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("HOTKEYS"), bulk("HELP")]));
+        assert_eq!(cmd.name(), "HOTKEYS HELP");
+        assert!(cmd.idempotent());
+        let lines = cmd
+            .parse_response(array(vec![bulk("START"), bulk("STOP")]))
+            .unwrap();
+        assert_eq!(lines, vec![Bytes::from("START"), Bytes::from("STOP")]);
     }
 
     // -- CLIENT GETREDIR --

@@ -12,7 +12,7 @@
 //! | Family | Commands | First key |
 //! |---|---|---|
 //! | script / function | `EVAL[_RO]`, `EVALSHA[_RO]`, `FCALL[_RO]` | after `numkeys` at `argv[2]` |
-//! | numkeys-first | `LMPOP`, `ZMPOP`, `SINTERCARD`, `ZUNION`, `ZINTER`, `ZDIFF` | after `numkeys` at `argv[1]` |
+//! | numkeys-first | `LMPOP`, `ZMPOP`, `SINTERCARD`, `ZUNION`, `ZINTER`, `ZDIFF`, `MSETEX` | after `numkeys` at `argv[1]` |
 //! | blocking numkeys | `BLMPOP`, `BZMPOP` | after `numkeys` at `argv[2]` |
 //! | streams | `XREAD`, `XREADGROUP` | first token after `STREAMS` |
 //! | subcommand + key | `OBJECT <sub> key`, `MEMORY USAGE key` | `argv[2]` |
@@ -64,7 +64,7 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         // client for the owning slot, not the cluster client.
         b"PING" | b"ECHO" | b"AUTH" | b"SELECT" | b"FLUSHDB" | b"FLUSHALL" | b"DBSIZE"
         | b"INFO" | b"CONFIG" | b"CLUSTER" | b"CLIENT" | b"COMMAND" | b"TIME" | b"MULTI"
-        | b"EXEC" | b"DISCARD" => None,
+        | b"EXEC" | b"DISCARD" | b"HOTKEYS" => None,
 
         // Script / function: `CMD body numkeys key...` -- key follows numkeys
         // at argv[2]. argv[1] is the script text / SHA / function name.
@@ -73,7 +73,7 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         }
 
         // numkeys-first: `CMD numkeys key...` -- key follows numkeys at argv[1].
-        b"LMPOP" | b"ZMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZUNION" => {
+        b"LMPOP" | b"ZMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZUNION" | b"MSETEX" => {
             key_after_numkeys(items, 1)
         }
 
@@ -180,7 +180,7 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
     matches!(
         &buf[..cmd_name.len()],
         // strings / bitmaps
-        b"GET" | b"GETRANGE" | b"SUBSTR" | b"MGET" | b"STRLEN" | b"LCS"
+        b"GET" | b"GETRANGE" | b"SUBSTR" | b"MGET" | b"STRLEN" | b"LCS" | b"DIGEST"
         | b"GETBIT" | b"BITCOUNT" | b"BITPOS" | b"BITFIELD_RO"
         // generic keyspace
         | b"EXISTS" | b"TYPE" | b"TTL" | b"PTTL" | b"EXPIRETIME" | b"PEXPIRETIME"
@@ -342,6 +342,7 @@ mod tests {
             "LPOS",
             "DUMP",
             "EXPIRETIME",
+            "DIGEST",
         ] {
             assert!(
                 is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),
@@ -455,6 +456,24 @@ mod tests {
         );
         assert_eq!(
             extract_key(&array(vec![bulk("CLUSTER"), bulk("INFO")])),
+            None
+        );
+    }
+
+    #[test]
+    fn no_key_for_hotkeys_subcommands() {
+        assert_eq!(
+            extract_key(&array(vec![bulk("HOTKEYS"), bulk("GET")])),
+            None
+        );
+        assert_eq!(
+            extract_key(&array(vec![
+                bulk("HOTKEYS"),
+                bulk("START"),
+                bulk("METRICS"),
+                bulk("1"),
+                bulk("CPU"),
+            ])),
             None
         );
     }
@@ -587,6 +606,21 @@ mod tests {
                 "{cmd} should route by its first key"
             );
         }
+    }
+
+    #[test]
+    fn msetex_routes_by_first_key_after_numkeys() {
+        let frame = array(vec![
+            bulk("MSETEX"),
+            bulk("2"),
+            bulk("first"),
+            bulk("one"),
+            bulk("second"),
+            bulk("two"),
+            bulk("EX"),
+            bulk("60"),
+        ]);
+        assert_eq!(extract_key(&frame), Some(b"first".as_slice()));
     }
 
     #[test]

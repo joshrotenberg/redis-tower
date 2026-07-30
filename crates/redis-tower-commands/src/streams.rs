@@ -115,6 +115,152 @@ impl Command for XAdd {
     }
 }
 
+/// The required initial configuration option for [`XCfgSet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XCfgSetOption {
+    /// Set how long idempotency IDs are retained, in seconds.
+    IdmpDuration(u64),
+    /// Set the maximum number of idempotency IDs retained per producer.
+    IdmpMaxSize(u64),
+}
+
+/// XCFGSET key \[IDMP-DURATION idmp-duration\] \[IDMP-MAXSIZE idmp-maxsize\]
+///
+/// Sets the idempotent message processing (IDMP) configuration for an
+/// existing stream (Redis 8.6+). Changing the configuration clears the
+/// stream's producer IDMP maps. The command is therefore not retry-safe: a
+/// repeated execution could erase IDs recorded after the first execution.
+#[derive(Clone)]
+pub struct XCfgSet {
+    key: String,
+    idmp_duration: Option<u64>,
+    idmp_maxsize: Option<u64>,
+}
+
+impl XCfgSet {
+    /// Create an XCFGSET command with its required initial option.
+    pub fn new(key: impl Into<String>, option: XCfgSetOption) -> Self {
+        let (idmp_duration, idmp_maxsize) = match option {
+            XCfgSetOption::IdmpDuration(seconds) => (Some(seconds), None),
+            XCfgSetOption::IdmpMaxSize(entries) => (None, Some(entries)),
+        };
+        Self {
+            key: key.into(),
+            idmp_duration,
+            idmp_maxsize,
+        }
+    }
+
+    /// Set how long idempotency IDs are retained, in seconds.
+    ///
+    /// Redis accepts values from 1 through 86,400.
+    pub fn idmp_duration(mut self, seconds: u64) -> Self {
+        self.idmp_duration = Some(seconds);
+        self
+    }
+
+    /// Set the maximum number of idempotency IDs retained per producer.
+    ///
+    /// Redis accepts values from 1 through 10,000.
+    pub fn idmp_maxsize(mut self, entries: u64) -> Self {
+        self.idmp_maxsize = Some(entries);
+        self
+    }
+}
+
+impl Command for XCfgSet {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("XCFGSET"), bulk(self.key.as_str())];
+        if let Some(seconds) = self.idmp_duration {
+            args.push(bulk("IDMP-DURATION"));
+            args.push(bulk(seconds.to_string()));
+        }
+        if let Some(entries) = self.idmp_maxsize {
+            args.push(bulk("IDMP-MAXSIZE"));
+            args.push(bulk(entries.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "XCFGSET"
+    }
+}
+
+/// XIDMPRECORD key pid iid stream-id
+///
+/// Sets IDMP metadata on an existing stream entry. This is an internal Redis
+/// command used when replaying append-only files; applications should normally
+/// use the IDMP options on `XADD` instead.
+#[derive(Clone)]
+pub struct XIdmpRecord {
+    key: String,
+    producer_id: String,
+    idempotency_id: String,
+    stream_id: String,
+}
+
+impl XIdmpRecord {
+    /// Create an XIDMPRECORD command.
+    pub fn new(
+        key: impl Into<String>,
+        producer_id: impl Into<String>,
+        idempotency_id: impl Into<String>,
+        stream_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            producer_id: producer_id.into(),
+            idempotency_id: idempotency_id.into(),
+            stream_id: stream_id.into(),
+        }
+    }
+}
+
+impl Command for XIdmpRecord {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("XIDMPRECORD"),
+            bulk(self.key.as_str()),
+            bulk(self.producer_id.as_str()),
+            bulk(self.idempotency_id.as_str()),
+            bulk(self.stream_id.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "XIDMPRECORD"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// XLEN key
 ///
 /// Returns the number of entries in a stream.
@@ -461,6 +607,115 @@ impl Command for XAck {
 
     fn name(&self) -> &str {
         "XACK"
+    }
+}
+
+/// Delivery-counter behavior for `XNACK` (Redis 8.8+).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XNackMode {
+    /// Decrement the delivery counter, undoing the current delivery.
+    Silent,
+    /// Leave the delivery counter unchanged.
+    Fail,
+    /// Set the delivery counter to Redis's maximum value.
+    Fatal,
+}
+
+impl XNackMode {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Silent => "SILENT",
+            Self::Fail => "FAIL",
+            Self::Fatal => "FATAL",
+        }
+    }
+}
+
+/// XNACK key group SILENT|FAIL|FATAL IDS numids id \[id ...\]
+/// \[RETRYCOUNT count\] \[FORCE\]
+///
+/// Releases pending messages back to a consumer group's PEL without
+/// acknowledging them (Redis 8.8+). Returns the number of messages released.
+#[derive(Clone)]
+pub struct XNack {
+    key: String,
+    group: String,
+    mode: XNackMode,
+    ids: Vec<String>,
+    retrycount: Option<u64>,
+    force: bool,
+}
+
+impl XNack {
+    /// Create an XNACK command for one or more stream entry IDs.
+    pub fn new(
+        key: impl Into<String>,
+        group: impl Into<String>,
+        mode: XNackMode,
+        ids: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            group: group.into(),
+            mode,
+            ids: ids.into_iter().map(Into::into).collect(),
+            retrycount: None,
+            force: false,
+        }
+    }
+
+    /// Set the delivery counter explicitly instead of applying the mode's
+    /// adjustment.
+    pub fn retrycount(mut self, count: u64) -> Self {
+        self.retrycount = Some(count);
+        self
+    }
+
+    /// Create unowned PEL entries for IDs that exist in the stream but are not
+    /// currently pending.
+    pub fn force(mut self) -> Self {
+        self.force = true;
+        self
+    }
+}
+
+impl Command for XNack {
+    type Response = i64;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("XNACK"),
+            bulk(self.key.as_str()),
+            bulk(self.group.as_str()),
+            bulk(self.mode.as_str()),
+            bulk("IDS"),
+            bulk(self.ids.len().to_string()),
+        ];
+        for id in &self.ids {
+            args.push(bulk(id.as_str()));
+        }
+        if let Some(count) = self.retrycount {
+            args.push(bulk("RETRYCOUNT"));
+            args.push(bulk(count.to_string()));
+        }
+        if self.force {
+            args.push(bulk("FORCE"));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(n) => Ok(n),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "XNACK"
     }
 }
 
@@ -2421,6 +2676,99 @@ mod tests {
         assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
+    // -- XCfgSet --
+
+    #[test]
+    fn xcfgset_with_duration_to_frame() {
+        let cmd = XCfgSet::new("mystream", XCfgSetOption::IdmpDuration(300));
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XCFGSET"),
+                bulk("mystream"),
+                bulk("IDMP-DURATION"),
+                bulk("300"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xcfgset_with_maxsize_to_frame() {
+        let cmd = XCfgSet::new("mystream", XCfgSetOption::IdmpMaxSize(1000));
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XCFGSET"),
+                bulk("mystream"),
+                bulk("IDMP-MAXSIZE"),
+                bulk("1000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xcfgset_with_all_options_to_frame() {
+        let cmd = XCfgSet::new("mystream", XCfgSetOption::IdmpDuration(600)).idmp_maxsize(500);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XCFGSET"),
+                bulk("mystream"),
+                bulk("IDMP-DURATION"),
+                bulk("600"),
+                bulk("IDMP-MAXSIZE"),
+                bulk("500"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xcfgset_parses_ok_and_is_not_idempotent() {
+        let cmd = XCfgSet::new("mystream", XCfgSetOption::IdmpDuration(300));
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(!cmd.idempotent());
+        assert_eq!(cmd.name(), "XCFGSET");
+    }
+
+    #[test]
+    fn xcfgset_rejects_unexpected_response() {
+        let cmd = XCfgSet::new("mystream", XCfgSetOption::IdmpDuration(300));
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- XIdmpRecord --
+
+    #[test]
+    fn xidmprecord_to_frame() {
+        let cmd = XIdmpRecord::new("mystream", "producer-1", "request-42", "1-0");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XIDMPRECORD"),
+                bulk("mystream"),
+                bulk("producer-1"),
+                bulk("request-42"),
+                bulk("1-0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xidmprecord_parses_ok_and_is_idempotent() {
+        let cmd = XIdmpRecord::new("mystream", "producer-1", "request-42", "1-0");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.idempotent());
+        assert_eq!(cmd.name(), "XIDMPRECORD");
+    }
+
+    #[test]
+    fn xidmprecord_rejects_unexpected_response() {
+        let cmd = XIdmpRecord::new("mystream", "producer-1", "request-42", "1-0");
+        assert!(cmd.parse_response(bulk("OK")).is_err());
+    }
+
     // -- XLen --
 
     #[test]
@@ -2572,6 +2920,85 @@ mod tests {
     fn xack_parse_integer() {
         let cmd = XAck::new("mystream", "mygroup", "1-0");
         assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+    }
+
+    // -- XNack --
+
+    #[test]
+    fn xnack_modes_to_frame() {
+        for (mode, token) in [
+            (XNackMode::Silent, "SILENT"),
+            (XNackMode::Fail, "FAIL"),
+            (XNackMode::Fatal, "FATAL"),
+        ] {
+            let cmd = XNack::new("mystream", "mygroup", mode, ["1-0"]);
+            assert_eq!(
+                cmd.to_frame(),
+                array(vec![
+                    bulk("XNACK"),
+                    bulk("mystream"),
+                    bulk("mygroup"),
+                    bulk(token),
+                    bulk("IDS"),
+                    bulk("1"),
+                    bulk("1-0"),
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn xnack_multiple_ids_to_frame() {
+        let cmd = XNack::new("mystream", "mygroup", XNackMode::Fail, ["1-0", "2-0"]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XNACK"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("FAIL"),
+                bulk("IDS"),
+                bulk("2"),
+                bulk("1-0"),
+                bulk("2-0"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xnack_with_retrycount_and_force_to_frame() {
+        let cmd = XNack::new("mystream", "mygroup", XNackMode::Fatal, ["1-0"])
+            .retrycount(7)
+            .force();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("XNACK"),
+                bulk("mystream"),
+                bulk("mygroup"),
+                bulk("FATAL"),
+                bulk("IDS"),
+                bulk("1"),
+                bulk("1-0"),
+                bulk("RETRYCOUNT"),
+                bulk("7"),
+                bulk("FORCE"),
+            ])
+        );
+    }
+
+    #[test]
+    fn xnack_parses_integer_response() {
+        let cmd = XNack::new("mystream", "mygroup", XNackMode::Fail, ["1-0"]);
+        assert_eq!(cmd.parse_response(Frame::Integer(1)).unwrap(), 1);
+        assert_eq!(cmd.parse_response(Frame::Integer(0)).unwrap(), 0);
+        assert_eq!(cmd.name(), "XNACK");
+    }
+
+    #[test]
+    fn xnack_rejects_unexpected_response() {
+        let cmd = XNack::new("mystream", "mygroup", XNackMode::Fail, ["1-0"]);
+        assert!(cmd.parse_response(bulk("1")).is_err());
     }
 
     // -- XGroupCreate --
