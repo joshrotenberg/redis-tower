@@ -8,10 +8,12 @@
 //!   a 50ms `CommandTimeoutLayer` and issues `DEBUG SLEEP 1`, which blocks far
 //!   longer than the deadline, so the call must surface `CommandTimeout`.
 //! - [`circuit_breaker_opens_on_repeated_failures`] drives a
-//!   `CircuitBreakerLayer` to its failure threshold by connecting to a dead TCP
+//!   `RedisCircuitBreakerLayer` to its failure threshold by connecting to a dead TCP
 //!   port (genuine `RedisError::Connection` failures), asserts the circuit then
 //!   rejects immediately with `CircuitOpen`, and finally verifies half-open
 //!   recovery once the inner service is pointed back at the live server.
+//! - [`circuit_breaker_ignores_redis_command_errors`] proves a `WRONGTYPE`
+//!   response does not degrade circuit health.
 
 mod common;
 
@@ -23,8 +25,11 @@ use std::time::Duration;
 
 use common::redis_addr;
 use redis_server_wrapper::RedisServer;
-use redis_tower::circuit_breaker::{CircuitBreakerConfig, CircuitBreakerLayer};
-use redis_tower::{CommandTimeoutLayer, Frame, FrameService, RedisConnection, RedisError};
+use redis_tower::commands::{Del, Incr, Set};
+use redis_tower::{
+    CommandTimeoutLayer, Frame, FrameService, MultiplexedClient, RedisCircuitBreakerConfig,
+    RedisCircuitBreakerLayer, RedisCircuitState, RedisConnection, RedisError,
+};
 use redis_tower_protocol::helpers::{array, bulk};
 use tower::{Layer, Service, ServiceExt};
 
@@ -112,7 +117,7 @@ impl Service<Frame> for ConnectAndPing {
     }
 }
 
-/// `CircuitBreakerLayer` must open after repeated failures, reject immediately
+/// `RedisCircuitBreakerLayer` must open after repeated failures, reject immediately
 /// while open, then recover via a successful half-open probe.
 #[tokio::test]
 async fn circuit_breaker_opens_on_repeated_failures() {
@@ -120,7 +125,7 @@ async fn circuit_breaker_opens_on_repeated_failures() {
     let dead = format!("127.0.0.1:{}", free_port());
     let target = Arc::new(Mutex::new(dead));
 
-    let layer = CircuitBreakerLayer::new(CircuitBreakerConfig {
+    let layer = RedisCircuitBreakerLayer::new(RedisCircuitBreakerConfig {
         failure_threshold: 3,
         // Short probe interval so the test can reach half-open quickly.
         recovery_probe_interval: Duration::from_millis(150),
@@ -141,13 +146,14 @@ async fn circuit_breaker_opens_on_repeated_failures() {
         );
     }
 
-    // The circuit is now open: poll_ready rejects immediately with CircuitOpen
-    // (the inner service is never touched) before the probe interval elapses.
-    let poll = svc.ready().await;
+    // The circuit is now open: the next call rejects immediately with
+    // CircuitOpen (the inner service is never touched) before the probe
+    // interval elapses.
+    let poll = svc.ready().await.unwrap().call(ping()).await;
     assert!(
         matches!(poll, Err(RedisError::CircuitOpen)),
         "expected CircuitOpen while the circuit is open, got {:?}",
-        poll.err()
+        poll
     );
 
     // Heal the backend: point the inner service at the live server so the
@@ -175,4 +181,37 @@ async fn circuit_breaker_opens_on_repeated_failures() {
         after.is_ok(),
         "expected the circuit to stay closed after recovery, got {after:?}"
     );
+}
+
+/// Redis command errors are caller/application failures, not backend outages.
+#[tokio::test]
+async fn circuit_breaker_ignores_redis_command_errors() {
+    let key = "redis-tower:resilience:wrongtype";
+    let client = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .expect("failed to connect multiplexed client")
+        .with_circuit_breaker(RedisCircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_probe_interval: Duration::from_secs(5),
+        });
+    let handle = client.circuit_breaker_handle();
+
+    client
+        .execute(Set::new(key, "not-an-integer"))
+        .await
+        .expect("failed to create WRONGTYPE fixture");
+
+    for _ in 0..3 {
+        let result = client.execute(Incr::new(key)).await;
+        assert!(
+            matches!(result, Err(RedisError::Redis(ref message)) if message.starts_with("ERR")),
+            "expected Redis integer error, got {result:?}"
+        );
+        assert_eq!(handle.state(), RedisCircuitState::Closed);
+    }
+
+    client
+        .execute(Del::new(key))
+        .await
+        .expect("failed to clean up WRONGTYPE fixture");
 }

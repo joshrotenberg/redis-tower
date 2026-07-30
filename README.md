@@ -244,25 +244,31 @@ Automatic master rediscovery on failover.
 let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
 ```
 
-For circuit breaking, retry, and rate limiting, compose with
-[tower-resilience](https://crates.io/crates/tower-resilience):
+The built-in Redis-aware circuit breaker is backed by
+[tower-resilience](https://crates.io/crates/tower-resilience). It counts
+connection and timeout failures, but ignores Redis command errors such as
+`WRONGTYPE`:
 
 ```rust,ignore
-use tower_resilience_circuitbreaker::circuit_breaker_builder;
+use redis_tower::{MultiplexedClient, RedisCircuitBreakerConfig};
 
-let cb = circuit_breaker_builder()
-    .failure_rate_threshold(50.0)
-    .wait_duration_in_open(Duration::from_secs(30))
-    .build();
+let client = MultiplexedClient::connect("127.0.0.1:6379")
+    .await?
+    .with_circuit_breaker(RedisCircuitBreakerConfig::default());
 
-let svc = CommandAdapter::new(
-    ServiceBuilder::new()
-        .layer(cb)
-        .service(FrameService::connect("127.0.0.1:6379").await?)
-);
+let handle = client.circuit_breaker_handle();
+println!("circuit health: {}", handle.health_status());
 ```
 
-`RedisError::is_retryable()` classifies which errors are worth retrying.
+The same `with_circuit_breaker` option is available on
+`ResilientRedisClient`. The returned client retains typed execution, health
+checks, and idempotent-aware retry composition. `CircuitBreakerLayer` and its
+config/service names remain as deprecated aliases for one compatibility
+release.
+
+`RedisError::is_retryable()` classifies which errors are worth retrying. Rate
+limiting and bulkhead isolation remain available from the tower-resilience
+crate family.
 
 Other resilience building blocks:
 

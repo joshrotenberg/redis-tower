@@ -10,9 +10,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use redis_tower_commands::Ping;
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use tokio::sync::Mutex;
+use tower_service::Service;
 
+use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::reconnect::{
     AddrConnectionFactory, ConnectionFactory, ReconnectConfig, UrlConnectionFactory,
 };
@@ -147,6 +149,19 @@ impl ResilientRedisClient {
         RetryClient::new(self.clone(), policy)
     }
 
+    /// Protect this reconnecting client with a Redis-aware circuit breaker.
+    ///
+    /// The breaker sits outside reconnection: connection and timeout failures
+    /// affect circuit health, while Redis command errors such as `WRONGTYPE`
+    /// do not. The returned client retains typed `execute`, `health_check`, and
+    /// idempotent-aware `retry` helpers.
+    pub fn with_circuit_breaker(
+        self,
+        config: RedisCircuitBreakerConfig,
+    ) -> RedisCircuitBreakerClient<Self> {
+        RedisCircuitBreakerClient::new(self, config)
+    }
+
     /// Attempt to reconnect, single-flighting across clones.
     async fn reconnect(&self) {
         // Snapshot the generation before taking the gate. If another clone
@@ -162,6 +177,43 @@ impl ResilientRedisClient {
             *self.conn.lock().await = conn;
             self.gate.mark_reconnected();
         }
+    }
+}
+
+impl Service<Frame> for ResilientRedisClient {
+    type Response = Frame;
+    type Error = RedisError;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Frame, RedisError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: Frame) -> Self::Future {
+        let client = self.clone();
+        Box::pin(async move {
+            let mut connection = client.conn.lock().await;
+            let result =
+                connection
+                    .execute_pipeline(vec![request])
+                    .await
+                    .and_then(|mut responses| {
+                        responses.pop().ok_or(RedisError::UnexpectedResponse {
+                            expected: "one pipeline response",
+                            actual: "empty response".to_string(),
+                        })
+                    });
+
+            if matches!(&result, Err(error) if error.is_connection_error()) {
+                drop(connection);
+                client.reconnect().await;
+            }
+            result
+        })
     }
 }
 

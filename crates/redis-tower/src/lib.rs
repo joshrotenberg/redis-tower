@@ -112,38 +112,35 @@
 //!
 //! # Resilience
 //!
-//! Circuit breaking ships in this crate as [`CircuitBreakerLayer`], and
-//! automatic reconnection with exponential backoff is built in via
-//! [`ResilientRedisClient`]. Both are ordinary Tower layers, so they stack
-//! under a `ServiceBuilder` at the frame altitude, with [`CommandAdapter`]
-//! wrapping the result to accept typed commands:
+//! Redis-aware circuit breaking is backed by `tower-resilience`, and automatic
+//! reconnection with exponential backoff is built in via
+//! [`ResilientRedisClient`]. The high-level clients expose a consuming
+//! `with_circuit_breaker` option:
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::time::Duration;
 //!
-//! use tower::ServiceBuilder;
 //! use redis_tower::{
-//!     CircuitBreakerConfig, CircuitBreakerLayer, CommandAdapter, FrameService, TracingLayer,
+//!     MultiplexedClient, RedisCircuitBreakerConfig,
 //! };
 //!
-//! let cb = CircuitBreakerLayer::new(CircuitBreakerConfig {
+//! let client = MultiplexedClient::connect("127.0.0.1:6379")
+//!     .await?
+//!     .with_circuit_breaker(RedisCircuitBreakerConfig {
 //!     failure_threshold: 5,
 //!     recovery_probe_interval: Duration::from_secs(30),
 //! });
 //!
-//! let svc = CommandAdapter::new(
-//!     ServiceBuilder::new()
-//!         .layer(cb)
-//!         .layer(TracingLayer::new())
-//!         .service(FrameService::connect("127.0.0.1:6379").await?),
-//! );
-//! # let _ = svc;
+//! let handle = client.circuit_breaker_handle();
+//! assert_eq!(handle.health_status(), "healthy");
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! For fault-tolerance primitives this crate does not ship -- rate limiting and
+//! The breaker counts connection, connect-timeout, and command-timeout errors,
+//! while ignoring Redis command errors such as `WRONGTYPE`. For
+//! fault-tolerance primitives this crate does not ship -- rate limiting and
 //! bulkhead isolation -- the
 //! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
 //! provides layers that compose into the same builder.
@@ -379,7 +376,13 @@ pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
 pub use cache_layer::CacheService;
 pub use cache_state::CacheState;
 pub use caching::CachedClient;
+#[allow(deprecated)]
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerLayer, CircuitBreakerService};
+pub use circuit_breaker::{
+    RedisCircuitBreakerClient, RedisCircuitBreakerConfig, RedisCircuitBreakerHandle,
+    RedisCircuitBreakerLayer, RedisCircuitBreakerService, RedisCircuitMetrics, RedisCircuitState,
+    redis_error_is_circuit_failure,
+};
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
 pub use command_timeout::CommandTimeoutLayer;

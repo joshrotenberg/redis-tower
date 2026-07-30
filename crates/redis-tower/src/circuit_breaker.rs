@@ -1,55 +1,81 @@
-//! Tower layer implementing a three-state circuit breaker for Redis commands.
+//! Redis-aware adapter for `tower-resilience` circuit breaking.
 //!
-//! The circuit breaker has three states:
-//! - **Closed** (normal): requests pass through; consecutive failures counted.
-//! - **Open** (tripped): requests immediately return `RedisError::CircuitOpen`
-//!   without touching the inner service; entered when failures exceed
-//!   `failure_threshold`.
-//! - **Half-open** (recovery probe): after `recovery_probe_interval` elapses,
-//!   one probe request is allowed through; success → Closed, failure → Open.
+//! The adapter delegates state management, half-open admission, metrics, and
+//! event handling to `tower-resilience-circuitbreaker`. It preserves
+//! `redis-tower`'s public `RedisError` surface by mapping an upstream open
+//! rejection to [`RedisError::CircuitOpen`] and passing inner errors through.
 //!
-//! State is `Arc`-shared so all clones of a client trip together.
+//! By default only infrastructure failures count toward opening the circuit:
+//! connection failures, connect timeouts, and command timeouts. Redis command
+//! errors such as `WRONGTYPE`, `NOSCRIPT`, `MOVED`, and `ASK` are returned to
+//! the caller without degrading circuit health.
 //!
 //! # Example
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! use std::time::Duration;
-//! use tower::ServiceBuilder;
-//! use redis_tower::FrameService;
-//! use redis_tower::circuit_breaker::{CircuitBreakerLayer, CircuitBreakerConfig};
+//! use redis_tower::{
+//!     MultiplexedClient, RedisCircuitBreakerConfig,
+//! };
 //!
-//! let svc = ServiceBuilder::new()
-//!     .layer(CircuitBreakerLayer::new(CircuitBreakerConfig {
+//! let client = MultiplexedClient::connect("127.0.0.1:6379")
+//!     .await?
+//!     .with_circuit_breaker(RedisCircuitBreakerConfig {
 //!         failure_threshold: 5,
 //!         recovery_probe_interval: Duration::from_secs(5),
-//!     }))
-//!     .service(FrameService::connect("127.0.0.1:6379").await?);
-//! # let _ = svc;
+//!     });
+//!
+//! let health = client.circuit_breaker_handle().health_status();
+//! assert_eq!(health, "healthy");
 //! # Ok(())
 //! # }
 //! ```
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use redis_tower_core::{Frame, RedisError};
+use redis_tower_commands::Ping;
+use redis_tower_core::{Command, Frame, RedisError};
 use tower_layer::Layer;
+use tower_resilience_circuitbreaker::{
+    CircuitBreaker as UpstreamCircuitBreaker, CircuitBreakerError,
+    CircuitBreakerHandle as UpstreamCircuitBreakerHandle,
+    CircuitBreakerLayer as UpstreamCircuitBreakerLayer, FnClassifier,
+};
 use tower_service::Service;
 
-/// Configuration for the circuit breaker.
+use crate::command_adapter::CommandAdapter;
+use crate::executor::RedisExecutor;
+use crate::retry::{RetryClient, RetryPolicy};
+
+/// Metrics snapshot maintained by the upstream circuit breaker.
+pub use tower_resilience_circuitbreaker::CircuitMetrics as RedisCircuitMetrics;
+/// Observable state of a Redis circuit breaker.
+pub use tower_resilience_circuitbreaker::CircuitState as RedisCircuitState;
+
+type ClassifierFn = fn(&Result<Frame, RedisError>) -> bool;
+type RedisClassifier = FnClassifier<ClassifierFn>;
+type InnerLayer = UpstreamCircuitBreakerLayer<RedisClassifier>;
+type InnerHandle = UpstreamCircuitBreakerHandle<RedisClassifier>;
+
+/// Configuration for the Redis-aware circuit breaker.
+///
+/// The settings retain the semantics of the original redis-tower breaker:
+/// `failure_threshold` is a consecutive-failure count and a successful call
+/// resets it. One call is admitted while half-open.
 #[derive(Clone, Debug)]
-pub struct CircuitBreakerConfig {
-    /// Consecutive failures before the circuit opens (default: 5).
+pub struct RedisCircuitBreakerConfig {
+    /// Consecutive classified failures before the circuit opens (default: 5).
     pub failure_threshold: u32,
-    /// How long to wait in open state before allowing a probe (default: 5s).
+    /// How long to remain open before allowing a recovery probe (default: 5s).
     pub recovery_probe_interval: Duration,
 }
 
-impl Default for CircuitBreakerConfig {
+impl Default for RedisCircuitBreakerConfig {
     fn default() -> Self {
         Self {
             failure_threshold: 5,
@@ -58,61 +84,172 @@ impl Default for CircuitBreakerConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum CircuitState {
-    Closed { consecutive_failures: u32 },
-    Open { opened_at: Instant },
-    HalfOpen,
-}
-
-/// Tower `Layer` that wraps a service with circuit breaker semantics.
+/// Return whether a Redis error represents an infrastructure failure.
 ///
-/// All clones of the resulting [`CircuitBreakerService`] share the same
-/// circuit state via an `Arc<Mutex<CircuitState>>`, so a single trip from
-/// any clone opens the circuit for all.
-#[derive(Clone, Debug)]
-pub struct CircuitBreakerLayer {
-    config: CircuitBreakerConfig,
-    state: Arc<Mutex<CircuitState>>,
+/// Connection failures, connect timeouts, and command timeouts count toward
+/// opening the circuit. Server responses and caller errors do not.
+pub fn redis_error_is_circuit_failure(error: &RedisError) -> bool {
+    error.is_connection_error()
+        || matches!(
+            error,
+            RedisError::ConnectTimeout | RedisError::CommandTimeout
+        )
+        || matches!(
+            error,
+            RedisError::ReconnectFailed { last_error, .. }
+                if redis_error_is_circuit_failure(last_error)
+        )
 }
 
-impl CircuitBreakerLayer {
-    /// Create a new circuit breaker layer with the given configuration.
-    pub fn new(config: CircuitBreakerConfig) -> Self {
+fn classify_redis_result(result: &Result<Frame, RedisError>) -> bool {
+    matches!(result, Err(error) if redis_error_is_circuit_failure(error))
+}
+
+/// Read-only handle for circuit state and metrics.
+#[derive(Clone)]
+pub struct RedisCircuitBreakerHandle {
+    inner: InnerHandle,
+}
+
+impl RedisCircuitBreakerHandle {
+    /// Return the current circuit state without waiting for a lock.
+    pub fn state(&self) -> RedisCircuitState {
+        self.inner.state()
+    }
+
+    /// Return whether the circuit is open.
+    pub fn is_open(&self) -> bool {
+        self.inner.is_open()
+    }
+
+    /// Return `healthy`, `degraded`, or `unhealthy` for health endpoints.
+    pub fn health_status(&self) -> &'static str {
+        self.inner.health_status()
+    }
+
+    /// Return an HTTP-compatible health status (`200` or `503`).
+    pub fn http_status(&self) -> u16 {
+        self.inner.http_status()
+    }
+
+    /// Snapshot the circuit's call and failure metrics.
+    pub async fn metrics(&self) -> RedisCircuitMetrics {
+        self.inner.metrics().await
+    }
+}
+
+impl fmt::Debug for RedisCircuitBreakerHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisCircuitBreakerHandle")
+            .field("state", &self.state())
+            .finish()
+    }
+}
+
+/// Tower layer backed by `tower-resilience-circuitbreaker`.
+///
+/// All services produced by a layer share one circuit state. The inner service
+/// must be cloneable because upstream moves a clone into each call future.
+#[derive(Clone)]
+pub struct RedisCircuitBreakerLayer {
+    inner: InnerLayer,
+    handle: RedisCircuitBreakerHandle,
+    config: RedisCircuitBreakerConfig,
+}
+
+impl RedisCircuitBreakerLayer {
+    /// Build a Redis-aware breaker using consecutive-failure semantics.
+    pub fn new(config: RedisCircuitBreakerConfig) -> Self {
+        let threshold = config.failure_threshold.max(1) as usize;
+        let (inner, handle) = UpstreamCircuitBreakerLayer::builder()
+            .consecutive_failures(threshold)
+            .wait_duration_in_open(config.recovery_probe_interval)
+            .permitted_calls_in_half_open(1)
+            .name("redis")
+            .failure_classifier(classify_redis_result as ClassifierFn)
+            .on_state_transition(|from, to| match to {
+                RedisCircuitState::Open => {
+                    tracing::warn!(?from, ?to, "redis circuit breaker state transition")
+                }
+                _ => tracing::info!(?from, ?to, "redis circuit breaker state transition"),
+            })
+            .build_with_handle();
         Self {
-            config,
-            state: Arc::new(Mutex::new(CircuitState::Closed {
-                consecutive_failures: 0,
-            })),
-        }
-    }
-}
-
-impl<S> Layer<S> for CircuitBreakerLayer {
-    type Service = CircuitBreakerService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        CircuitBreakerService {
             inner,
-            config: self.config.clone(),
-            state: Arc::clone(&self.state),
+            handle: RedisCircuitBreakerHandle { inner: handle },
+            config,
+        }
+    }
+
+    /// Clone a read-only handle for health checks and operational metrics.
+    pub fn handle(&self) -> RedisCircuitBreakerHandle {
+        self.handle.clone()
+    }
+}
+
+impl fmt::Debug for RedisCircuitBreakerLayer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisCircuitBreakerLayer")
+            .field("config", &self.config)
+            .field("state", &self.handle.state())
+            .finish()
+    }
+}
+
+impl<S> Layer<S> for RedisCircuitBreakerLayer {
+    type Service = RedisCircuitBreakerService<S>;
+
+    fn layer(&self, service: S) -> Self::Service {
+        RedisCircuitBreakerService {
+            inner: self.inner.layer(service),
+            handle: self.handle.clone(),
         }
     }
 }
 
-/// Tower `Service` that applies circuit breaker logic to every request.
-///
-/// Created by [`CircuitBreakerLayer`]. All clones share circuit state.
-#[derive(Clone, Debug)]
-pub struct CircuitBreakerService<S> {
-    inner: S,
-    config: CircuitBreakerConfig,
-    state: Arc<Mutex<CircuitState>>,
+/// RedisError-preserving service produced by [`RedisCircuitBreakerLayer`].
+pub struct RedisCircuitBreakerService<S> {
+    inner: UpstreamCircuitBreaker<S, RedisClassifier>,
+    handle: RedisCircuitBreakerHandle,
 }
 
-impl<S> Service<Frame> for CircuitBreakerService<S>
+impl<S: Clone> Clone for RedisCircuitBreakerService<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl<S> RedisCircuitBreakerService<S> {
+    /// Clone a read-only handle for health checks and operational metrics.
+    pub fn handle(&self) -> RedisCircuitBreakerHandle {
+        self.handle.clone()
+    }
+}
+
+impl<S> fmt::Debug for RedisCircuitBreakerService<S> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RedisCircuitBreakerService")
+            .field("state", &self.handle.state())
+            .finish_non_exhaustive()
+    }
+}
+
+fn map_circuit_error(error: CircuitBreakerError<RedisError>) -> RedisError {
+    match error {
+        CircuitBreakerError::OpenCircuit => RedisError::CircuitOpen,
+        CircuitBreakerError::Inner(error) => error,
+    }
+}
+
+impl<S> Service<Frame> for RedisCircuitBreakerService<S>
 where
-    S: Service<Frame, Response = Frame, Error = RedisError> + Send + 'static,
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone + Send + 'static,
     S::Future: Send + 'static,
 {
     type Response = Frame;
@@ -120,235 +257,236 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        let mut state = self.state.lock().unwrap();
-        match *state {
-            CircuitState::Closed { .. } => {
-                drop(state);
-                self.inner.poll_ready(cx)
-            }
-            CircuitState::Open { opened_at } => {
-                if opened_at.elapsed() >= self.config.recovery_probe_interval {
-                    *state = CircuitState::HalfOpen;
-                    Poll::Ready(Ok(()))
-                } else {
-                    Poll::Ready(Err(RedisError::CircuitOpen))
-                }
-            }
-            CircuitState::HalfOpen => {
-                drop(state);
-                self.inner.poll_ready(cx)
-            }
-        }
+        self.inner.poll_ready(cx).map_err(map_circuit_error)
     }
 
     fn call(&mut self, request: Frame) -> Self::Future {
-        let snapshot = self.state.lock().unwrap().clone();
-
-        match snapshot {
-            CircuitState::Open { .. } => Box::pin(async { Err(RedisError::CircuitOpen) }),
-            CircuitState::Closed { .. } | CircuitState::HalfOpen => {
-                let was_half_open = matches!(snapshot, CircuitState::HalfOpen);
-                let state = Arc::clone(&self.state);
-                let threshold = self.config.failure_threshold;
-                let future = self.inner.call(request);
-
-                Box::pin(async move {
-                    match future.await {
-                        Ok(frame) => {
-                            *state.lock().unwrap() = CircuitState::Closed {
-                                consecutive_failures: 0,
-                            };
-                            Ok(frame)
-                        }
-                        Err(e) => {
-                            let mut s = state.lock().unwrap();
-                            if was_half_open {
-                                *s = CircuitState::Open {
-                                    opened_at: Instant::now(),
-                                };
-                            } else {
-                                let failures = match *s {
-                                    CircuitState::Closed {
-                                        consecutive_failures,
-                                    } => consecutive_failures + 1,
-                                    _ => 1,
-                                };
-                                if failures >= threshold {
-                                    *s = CircuitState::Open {
-                                        opened_at: Instant::now(),
-                                    };
-                                } else {
-                                    *s = CircuitState::Closed {
-                                        consecutive_failures: failures,
-                                    };
-                                }
-                            }
-                            Err(e)
-                        }
-                    }
-                })
-            }
-        }
+        let future = self.inner.call(request);
+        Box::pin(async move { future.await.map_err(map_circuit_error) })
     }
 }
+
+/// Typed high-level client protected by a Redis circuit breaker.
+///
+/// Created by `MultiplexedClient::with_circuit_breaker` or
+/// `ResilientRedisClient::with_circuit_breaker`.
+#[derive(Clone)]
+pub struct RedisCircuitBreakerClient<S> {
+    inner: CommandAdapter<RedisCircuitBreakerService<S>>,
+    handle: RedisCircuitBreakerHandle,
+}
+
+impl<S> RedisCircuitBreakerClient<S> {
+    /// Wrap a cloneable frame service in the Redis-aware circuit breaker.
+    pub fn new(service: S, config: RedisCircuitBreakerConfig) -> Self {
+        let layer = RedisCircuitBreakerLayer::new(config);
+        let handle = layer.handle();
+        Self {
+            inner: CommandAdapter::new(layer.layer(service)),
+            handle,
+        }
+    }
+
+    /// Clone the operational handle for this client's shared circuit.
+    pub fn circuit_breaker_handle(&self) -> RedisCircuitBreakerHandle {
+        self.handle.clone()
+    }
+}
+
+impl<S> RedisCircuitBreakerClient<S>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    /// Execute a typed command through the circuit breaker.
+    pub fn execute<Cmd: Command + 'static>(
+        &self,
+        command: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        let mut service = self.inner.clone();
+        async move {
+            std::future::poll_fn(|cx| {
+                <CommandAdapter<RedisCircuitBreakerService<S>> as Service<Cmd>>::poll_ready(
+                    &mut service,
+                    cx,
+                )
+            })
+            .await?;
+            Service::call(&mut service, command).await
+        }
+    }
+
+    /// Send a PING through the breaker for a dependency health check.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        self.execute(Ping::new()).await?;
+        Ok(())
+    }
+
+    /// Add idempotent-aware retries outside the circuit breaker.
+    pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
+        RetryClient::new(self.clone(), policy)
+    }
+}
+
+impl<S> RedisExecutor for RedisCircuitBreakerClient<S>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    fn execute<Cmd: Command>(
+        &mut self,
+        command: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        RedisCircuitBreakerClient::execute(self, command)
+    }
+}
+
+/// Deprecated name for [`RedisCircuitBreakerConfig`].
+#[deprecated(
+    since = "0.1.0",
+    note = "use RedisCircuitBreakerConfig; this alias will be removed in a future release"
+)]
+pub type CircuitBreakerConfig = RedisCircuitBreakerConfig;
+
+/// Deprecated name for [`RedisCircuitBreakerLayer`].
+#[deprecated(
+    since = "0.1.0",
+    note = "use RedisCircuitBreakerLayer; this alias will be removed in a future release"
+)]
+pub type CircuitBreakerLayer = RedisCircuitBreakerLayer;
+
+/// Deprecated name for [`RedisCircuitBreakerService`].
+#[deprecated(
+    since = "0.1.0",
+    note = "use RedisCircuitBreakerService; this alias will be removed in a future release"
+)]
+pub type CircuitBreakerService<S> = RedisCircuitBreakerService<S>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::task::Context;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    struct OkService;
+    #[derive(Clone)]
+    struct ToggleService {
+        fail: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+        user_error: bool,
+    }
 
-    impl Service<Frame> for OkService {
+    impl Service<Frame> for ToggleService {
         type Response = Frame;
         type Error = RedisError;
-        type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
 
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
 
         fn call(&mut self, _request: Frame) -> Self::Future {
-            Box::pin(async { Ok(Frame::SimpleString("OK".into())) })
-        }
-    }
-
-    struct ErrService;
-
-    impl Service<Frame> for ErrService {
-        type Response = Frame;
-        type Error = RedisError;
-        type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
-
-        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-            Poll::Ready(Ok(()))
-        }
-
-        fn call(&mut self, _request: Frame) -> Self::Future {
-            Box::pin(async { Err(RedisError::ConnectionClosed) })
-        }
-    }
-
-    fn dummy_frame() -> Frame {
-        Frame::SimpleString("PING".into())
-    }
-
-    #[tokio::test]
-    async fn passes_through_when_closed() {
-        let mut svc = CircuitBreakerService {
-            inner: OkService,
-            config: CircuitBreakerConfig::default(),
-            state: Arc::new(Mutex::new(CircuitState::Closed {
-                consecutive_failures: 0,
-            })),
-        };
-        let result = svc.call(dummy_frame()).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn trips_after_threshold() {
-        let mut svc = CircuitBreakerService {
-            inner: ErrService,
-            config: CircuitBreakerConfig {
-                failure_threshold: 3,
-                recovery_probe_interval: Duration::from_secs(5),
-            },
-            state: Arc::new(Mutex::new(CircuitState::Closed {
-                consecutive_failures: 0,
-            })),
-        };
-
-        // Three failures should trip the circuit.
-        for _ in 0..3 {
-            let _ = svc.call(dummy_frame()).await;
-        }
-
-        // poll_ready on an open circuit returns CircuitOpen.
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let poll = svc.poll_ready(&mut cx);
-        match poll {
-            Poll::Ready(Err(RedisError::CircuitOpen)) => {}
-            other => panic!("expected CircuitOpen, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn open_rejects_immediately() {
-        let mut svc = CircuitBreakerService {
-            inner: OkService,
-            config: CircuitBreakerConfig {
-                failure_threshold: 5,
-                recovery_probe_interval: Duration::from_secs(5),
-            },
-            state: Arc::new(Mutex::new(CircuitState::Open {
-                opened_at: Instant::now(),
-            })),
-        };
-
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let poll = svc.poll_ready(&mut cx);
-        match poll {
-            Poll::Ready(Err(RedisError::CircuitOpen)) => {}
-            other => panic!("expected CircuitOpen, got {:?}", other),
-        }
-    }
-
-    #[tokio::test]
-    async fn half_open_probe_success_closes() {
-        let state = Arc::new(Mutex::new(CircuitState::Open {
-            opened_at: Instant::now() - Duration::from_secs(10),
-        }));
-        let mut svc = CircuitBreakerService {
-            inner: OkService,
-            config: CircuitBreakerConfig {
-                failure_threshold: 5,
-                recovery_probe_interval: Duration::from_secs(5),
-            },
-            state: Arc::clone(&state),
-        };
-
-        // poll_ready should transition to HalfOpen.
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let poll = svc.poll_ready(&mut cx);
-        assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(*state.lock().unwrap(), CircuitState::HalfOpen);
-
-        // Successful probe call should close the circuit.
-        let _ = svc.call(dummy_frame()).await;
-        assert!(matches!(
-            *state.lock().unwrap(),
-            CircuitState::Closed {
-                consecutive_failures: 0
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if self.user_error {
+                std::future::ready(Err(RedisError::Redis(
+                    "WRONGTYPE Operation against a key".into(),
+                )))
+            } else if self.fail.load(Ordering::SeqCst) {
+                std::future::ready(Err(RedisError::ConnectionClosed))
+            } else {
+                std::future::ready(Ok(Frame::SimpleString("PONG".into())))
             }
-        ));
+        }
+    }
+
+    fn ping() -> Frame {
+        Frame::Array(Some(vec![Frame::BulkString(Some("PING".into()))]))
     }
 
     #[tokio::test]
-    async fn half_open_probe_failure_reopens() {
-        let state = Arc::new(Mutex::new(CircuitState::Open {
-            opened_at: Instant::now() - Duration::from_secs(10),
-        }));
-        let mut svc = CircuitBreakerService {
-            inner: ErrService,
-            config: CircuitBreakerConfig {
-                failure_threshold: 5,
-                recovery_probe_interval: Duration::from_secs(5),
-            },
-            state: Arc::clone(&state),
-        };
+    async fn infrastructure_failure_opens_and_maps_rejection() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let layer = RedisCircuitBreakerLayer::new(RedisCircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_probe_interval: Duration::from_secs(5),
+        });
+        let handle = layer.handle();
+        let mut service = layer.layer(ToggleService {
+            fail: Arc::new(AtomicBool::new(true)),
+            calls: Arc::clone(&calls),
+            user_error: false,
+        });
 
-        // poll_ready transitions to HalfOpen.
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        let _ = svc.poll_ready(&mut cx);
-        assert_eq!(*state.lock().unwrap(), CircuitState::HalfOpen);
+        assert!(matches!(
+            service.call(ping()).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert_eq!(handle.state(), RedisCircuitState::Open);
+        assert!(matches!(
+            service.call(ping()).await,
+            Err(RedisError::CircuitOpen)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
 
-        // Failed probe should reopen the circuit.
-        let _ = svc.call(dummy_frame()).await;
-        assert!(matches!(*state.lock().unwrap(), CircuitState::Open { .. }));
+    #[tokio::test]
+    async fn user_error_does_not_degrade_circuit_health() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let layer = RedisCircuitBreakerLayer::new(RedisCircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_probe_interval: Duration::from_secs(5),
+        });
+        let handle = layer.handle();
+        let mut service = layer.layer(ToggleService {
+            fail: Arc::new(AtomicBool::new(false)),
+            calls: Arc::clone(&calls),
+            user_error: true,
+        });
+
+        for _ in 0..3 {
+            assert!(matches!(
+                service.call(ping()).await,
+                Err(RedisError::Redis(message)) if message.starts_with("WRONGTYPE")
+            ));
+        }
+        assert_eq!(handle.state(), RedisCircuitState::Closed);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn successful_half_open_probe_closes_circuit() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let layer = RedisCircuitBreakerLayer::new(RedisCircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_probe_interval: Duration::from_millis(20),
+        });
+        let handle = layer.handle();
+        let mut service = layer.layer(ToggleService {
+            fail: Arc::clone(&fail),
+            calls: Arc::new(AtomicUsize::new(0)),
+            user_error: false,
+        });
+
+        let _ = service.call(ping()).await;
+        assert_eq!(handle.state(), RedisCircuitState::Open);
+
+        fail.store(false, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(service.call(ping()).await.is_ok());
+        assert_eq!(handle.state(), RedisCircuitState::Closed);
+    }
+
+    #[test]
+    fn classifier_counts_only_infrastructure_failures() {
+        assert!(redis_error_is_circuit_failure(
+            &RedisError::ConnectionClosed
+        ));
+        assert!(redis_error_is_circuit_failure(&RedisError::ConnectTimeout));
+        assert!(redis_error_is_circuit_failure(&RedisError::CommandTimeout));
+        assert!(!redis_error_is_circuit_failure(&RedisError::Redis(
+            "WRONGTYPE bad value".into()
+        )));
+        assert!(!redis_error_is_circuit_failure(&RedisError::Redis(
+            "MOVED 1 127.0.0.1:6379".into()
+        )));
     }
 }
