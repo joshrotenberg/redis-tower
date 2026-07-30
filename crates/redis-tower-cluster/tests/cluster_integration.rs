@@ -7,7 +7,7 @@ use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
 use redis_tower::pool::ConnectionPool;
 use redis_tower_cluster::{
-    ClusterConnection, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
+    ClusterConnection, ClusterScan, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
 };
 use redis_tower_commands::*;
 use std::collections::HashSet;
@@ -237,6 +237,81 @@ async fn mux_cluster_scan_stream_covers_the_whole_keyspace() {
     assert!(
         single.results.len() < keys.len(),
         "a plain SCAN should not have covered the cluster"
+    );
+
+    for key in &keys {
+        cluster.execute(Del::new(key)).await.unwrap();
+    }
+}
+
+/// Paging several masters at once finds the same keys as the sequential
+/// traversal. Coverage is what the fan-out must not change; the ordering it does
+/// change is asserted in the unit tests, which can pin the visit order exactly.
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_scan_stream_covers_the_keyspace_concurrently() {
+    let cluster = mux_cluster_conn().await;
+
+    let keys: Vec<String> = (0..60).map(|i| format!("scan456c:{{{i}}}:k")).collect();
+    for key in &keys {
+        cluster.execute(Set::new(key, "v")).await.unwrap();
+    }
+
+    let collect = |concurrency: usize| {
+        let cluster = cluster.clone();
+        async move {
+            let items: Vec<ClusterScanItem> = std::pin::pin!(
+                ClusterScan::new("scan456c:*")
+                    .count(10)
+                    .concurrency(concurrency)
+                    .run(&cluster)
+            )
+            .map(|r| r.expect("cluster scan should succeed"))
+            .collect()
+            .await;
+            items
+        }
+    };
+
+    let concurrent = collect(4).await;
+    let sequential = collect(1).await;
+
+    let found: HashSet<String> = concurrent
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.key).into_owned())
+        .collect();
+    for key in &keys {
+        assert!(found.contains(key), "concurrent cluster scan missed {key}");
+    }
+
+    let sequential_keys: HashSet<String> = sequential
+        .iter()
+        .map(|i| String::from_utf8_lossy(&i.key).into_owned())
+        .collect();
+    assert_eq!(
+        found, sequential_keys,
+        "concurrency must not change which keys a scan finds"
+    );
+
+    // Each key's node tag must still be the master that actually holds it, which
+    // is what the sequential traversal reported for the same key.
+    let sequential_nodes: std::collections::HashMap<String, String> = sequential
+        .iter()
+        .map(|i| (String::from_utf8_lossy(&i.key).into_owned(), i.node.clone()))
+        .collect();
+    for item in &concurrent {
+        let key = String::from_utf8_lossy(&item.key).into_owned();
+        assert_eq!(
+            sequential_nodes.get(&key),
+            Some(&item.node),
+            "{key} was tagged with a different master than the sequential scan saw"
+        );
+    }
+
+    let nodes: HashSet<&str> = concurrent.iter().map(|i| i.node.as_str()).collect();
+    assert!(
+        nodes.len() > 1,
+        "60 keys across 60 slots should span more than one master, saw {nodes:?}"
     );
 
     for key in &keys {

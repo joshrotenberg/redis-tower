@@ -47,7 +47,9 @@ multiplexed clients (the only crate that sees all of them).
 
 ### Cluster-wide SCAN (`redis-tower-cluster/scan_stream.rs`)
 
-`SCAN` is keyless, so `MultiplexedClusterClient::execute` routes it to the default node and returns one node's keys. `ScanClusterStream::scan(&client, pattern)` (and `scan_with_count`) runs the cursor loop against every master in turn and yields `ClusterScanItem { node, key }`. Nodes are visited sequentially in sorted address order; the node set is snapshotted on first poll, so a slot migrating mid-scan can be missed or double-counted. Concurrent per-node scanning and mid-scan membership re-checking are follow-up slices of #456.
+`SCAN` is keyless, so `MultiplexedClusterClient::execute` routes it to the default node and returns one node's keys. `ScanClusterStream::scan(&client, pattern)` (and `scan_with_count`) runs the cursor loop against every master and yields `ClusterScanItem { node, key }`. `ClusterScan::new(pattern).count(n).concurrency(w).run(&client)` is the configurable form behind them.
+
+`concurrency` defaults to 1 (sequential, sorted address order, each node's keys contiguous) and is clamped to `MAX_SCAN_CONCURRENCY` (16). Above 1, `flatten_unordered` pages `w` masters at once and keys interleave in completion order; the sequential path stays an explicit loop so its documented visit order does not depend on a combinator's polling order. Within a node there is nothing to parallelize -- the next cursor is only known once the previous page returns. Redis's per-node `SCAN` guarantee is unaffected by width. The node set is still snapshotted on first poll, so a slot migrating mid-scan can be missed or double-counted; mid-scan membership re-checking is the remaining follow-up slice of #456.
 
 ## Middleware Layers (Tower)
 
