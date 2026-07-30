@@ -215,7 +215,8 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
         | b"JSON.ARRLEN" | b"JSON.ARRINDEX" | b"JSON.OBJLEN" | b"JSON.OBJKEYS"
         | b"JSON.RESP"
         // Redis Stack: Search
-        | b"FT.SEARCH" | b"FT.AGGREGATE" | b"FT.INFO" | b"FT.EXPLAIN"
+        | b"FT.SEARCH" | b"FT.AGGREGATE" | b"FT.INFO" | b"FT.PROFILE"
+        | b"FT.EXPLAIN" | b"FT.EXPLAINCLI" | b"FT.HYBRID" | b"FT.TAGVALS"
         // Redis Stack: TimeSeries
         | b"TS.GET" | b"TS.MGET" | b"TS.RANGE" | b"TS.REVRANGE" | b"TS.MRANGE"
         | b"TS.MREVRANGE" | b"TS.INFO" | b"TS.QUERYINDEX"
@@ -228,7 +229,7 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
         | b"TDIGEST.CDF" | b"TDIGEST.RANK" | b"TDIGEST.INFO"
         // Redis Stack: vector sets
         | b"VSIM" | b"VCARD" | b"VDIM" | b"VEMB" | b"VGETATTR" | b"VLINKS"
-        | b"VINFO"
+        | b"VINFO" | b"VISMEMBER" | b"VRANGE"
     )
 }
 
@@ -391,6 +392,11 @@ mod tests {
             "JSON.TYPE",
             "FT.SEARCH",
             "FT.AGGREGATE",
+            "FT.PROFILE",
+            "FT.EXPLAIN",
+            "FT.EXPLAINCLI",
+            "FT.HYBRID",
+            "FT.TAGVALS",
             "TS.RANGE",
             "TS.GET",
             "BF.EXISTS",
@@ -398,6 +404,8 @@ mod tests {
             "CMS.QUERY",
             "TOPK.LIST",
             "VSIM",
+            "VISMEMBER",
+            "VRANGE",
         ] {
             assert!(
                 is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),

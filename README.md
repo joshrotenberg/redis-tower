@@ -409,7 +409,10 @@ redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
 is tracked in [`COMMAND_COVERAGE.md`](COMMAND_COVERAGE.md). The report is
-generated from the command implementations and checked in CI.
+generated from the command implementations and checked in CI. Search and Vector
+Set have typed builders for every scoped command name. `FtHybrid` builds
+text/vector fusion queries, `FtExplain` and `FtExplainCli` expose search plans,
+and `VIsMember` and `VRange` provide membership and lexicographical range reads.
 
 ## Testing
 
@@ -462,9 +465,10 @@ with any RESP-compatible server.
 - **Redis.** Every PR runs the full integration suite against **Redis 7.4 and
   8.0**. A nightly Docker matrix reruns the standalone suite against Redis 7.2,
   7.4, 8.0, 8.2, 8.4, 8.6, and 8.8. Redis 7.x and 8.x are the supported
-  targets; 6.x works for the core commands but is not tested. Commands
-  introduced in a specific server version return a clear error on older
-  servers rather than misbehaving.
+  targets; the version-gated Redis 8.x command suite runs on every Redis 8 minor
+  in that matrix. Redis 6.x works for the core commands but is not tested.
+  Commands introduced in a specific server version return a clear error on
+  older servers rather than misbehaving.
 - **Valkey.** The nightly matrix also runs against Valkey 8.1. Valkey speaks the
   same protocol, and the `valkey://` / `valkeys://` URL schemes are accepted as
   aliases for `redis://` / `rediss://`.

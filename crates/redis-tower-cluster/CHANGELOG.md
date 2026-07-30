@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - route MSETEX by its numkeys-prefixed key list, classify HOTKEYS as keyless, and allow DIGEST replica reads
+- route FT.HYBRID, FT.EXPLAIN, FT.EXPLAINCLI, FT.PROFILE, FT.TAGVALS, VISMEMBER, and VRANGE through read-only cluster paths
 
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-cluster-v0.1.0) - 2026-06-05
 

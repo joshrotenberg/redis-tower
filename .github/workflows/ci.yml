@@ -329,6 +329,7 @@ jobs:
           cargo check -p redis-tower-commands --no-default-features --features json
           cargo check -p redis-tower-commands --no-default-features --features search
           cargo check -p redis-tower-commands --no-default-features --features bloom
+          cargo check -p redis-tower-commands --no-default-features --features vector-sets
           cargo check -p redis-tower --no-default-features --features serde
 
   msrv:

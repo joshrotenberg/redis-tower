@@ -267,6 +267,61 @@ impl Command for VDim {
     }
 }
 
+/// VISMEMBER key element
+///
+/// Checks whether `element` exists in the vector set at `key`. Returns `true`
+/// when it exists and `false` when either the element or key does not exist.
+///
+/// Redis returns an integer under RESP2 and a boolean under RESP3; both response
+/// shapes are normalized to [`bool`].
+#[derive(Clone)]
+pub struct VIsMember {
+    key: String,
+    element: String,
+}
+
+impl VIsMember {
+    /// Creates a membership check for `element` in the vector set at `key`.
+    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            element: element.into(),
+        }
+    }
+}
+
+impl Command for VIsMember {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![
+            bulk("VISMEMBER"),
+            bulk(self.key.as_str()),
+            bulk(self.element.as_str()),
+        ])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Integer(1) => Ok(true),
+            Frame::Integer(0) => Ok(false),
+            Frame::Boolean(value) => Ok(value),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "integer 0 or 1, or boolean",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "VISMEMBER"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// VEMB key element \[RAW\]
 ///
 /// Returns the vector embedding for `element` in the vector set at `key`.
@@ -624,6 +679,92 @@ impl Command for VRandMember {
     }
 }
 
+/// VRANGE key start end \[count\]
+///
+/// Returns elements from the vector set at `key` in byte-wise lexicographical
+/// order. The `start` and `end` arguments use Redis range syntax:
+///
+/// - `[element` includes the boundary.
+/// - `(element` excludes the boundary.
+/// - `-` selects the minimum start.
+/// - `+` selects the maximum end.
+///
+/// Use [`VRange::count`] to bound the number of returned elements. Unlike range
+/// commands whose limit is introduced by a `COUNT` token, `VRANGE` takes its
+/// optional count as a bare positional argument.
+#[derive(Clone)]
+pub struct VRange {
+    key: String,
+    start: String,
+    end: String,
+    count: Option<i64>,
+}
+
+impl VRange {
+    /// Creates a lexicographical range query for the vector set at `key`.
+    pub fn new(key: impl Into<String>, start: impl Into<String>, end: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            start: start.into(),
+            end: end.into(),
+            count: None,
+        }
+    }
+
+    /// Limits the number of returned elements.
+    ///
+    /// A negative count returns every matching element and zero returns an empty
+    /// array.
+    pub fn count(mut self, count: i64) -> Self {
+        self.count = Some(count);
+        self
+    }
+}
+
+impl Command for VRange {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("VRANGE"),
+            bulk(self.key.as_str()),
+            bulk(self.start.as_str()),
+            bulk(self.end.as_str()),
+        ];
+        if let Some(count) = self.count {
+            args.push(bulk(count.to_string()));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(frames)) => frames
+                .into_iter()
+                .map(|frame| match frame {
+                    Frame::BulkString(Some(element)) => Ok(element),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string element",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "VRANGE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// VGETATTR key element
 ///
 /// Returns the JSON attribute string for `element` in the vector set at `key`,
@@ -940,5 +1081,142 @@ impl Command for VLinks {
 
     fn name(&self) -> &str {
         "VLINKS"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vismember_serializes_key_and_element() {
+        let command = VIsMember::new("vectors", "member");
+
+        assert_eq!(
+            command.to_frame(),
+            array(vec![bulk("VISMEMBER"), bulk("vectors"), bulk("member")])
+        );
+        assert_eq!(command.name(), "VISMEMBER");
+        assert!(command.idempotent());
+    }
+
+    #[test]
+    fn vismember_parses_resp2_integer_reply() {
+        let command = VIsMember::new("vectors", "member");
+
+        assert!(command.parse_response(Frame::Integer(1)).unwrap());
+        assert!(!command.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    #[test]
+    fn vismember_parses_resp3_boolean_reply() {
+        let command = VIsMember::new("vectors", "member");
+
+        assert!(command.parse_response(Frame::Boolean(true)).unwrap());
+        assert!(!command.parse_response(Frame::Boolean(false)).unwrap());
+    }
+
+    #[test]
+    fn vismember_rejects_invalid_reply() {
+        let command = VIsMember::new("vectors", "member");
+
+        assert!(command.parse_response(Frame::Integer(2)).is_err());
+        assert!(
+            command
+                .parse_response(Frame::BulkString(Some(Bytes::from_static(b"1"))))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn vrange_serializes_without_count() {
+        let command = VRange::new("vectors", "[apple", "(pear");
+
+        assert_eq!(
+            command.to_frame(),
+            array(vec![
+                bulk("VRANGE"),
+                bulk("vectors"),
+                bulk("[apple"),
+                bulk("(pear")
+            ])
+        );
+        assert_eq!(command.name(), "VRANGE");
+        assert!(command.idempotent());
+    }
+
+    #[test]
+    fn vrange_serializes_positional_count() {
+        for count in [10, 0, -1] {
+            let command = VRange::new("vectors", "-", "+").count(count);
+
+            assert_eq!(
+                command.to_frame(),
+                array(vec![
+                    bulk("VRANGE"),
+                    bulk("vectors"),
+                    bulk("-"),
+                    bulk("+"),
+                    bulk(count.to_string())
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn vrange_parses_ordered_binary_safe_elements() {
+        let command = VRange::new("vectors", "-", "+");
+        let binary = Bytes::from_static(b"\0binary\xff");
+
+        let result = command
+            .parse_response(Frame::Array(Some(vec![
+                Frame::BulkString(Some(Bytes::from_static(b"apple"))),
+                Frame::BulkString(Some(binary.clone())),
+                Frame::BulkString(Some(Bytes::from_static(b"pear"))),
+            ])))
+            .unwrap();
+
+        assert_eq!(
+            result,
+            vec![
+                Bytes::from_static(b"apple"),
+                binary,
+                Bytes::from_static(b"pear")
+            ]
+        );
+    }
+
+    #[test]
+    fn vrange_parses_empty_array() {
+        let command = VRange::new("vectors", "-", "+");
+
+        assert_eq!(
+            command
+                .parse_response(Frame::Array(Some(Vec::new())))
+                .unwrap(),
+            Vec::<Bytes>::new()
+        );
+    }
+
+    #[test]
+    fn vrange_rejects_invalid_reply_shapes() {
+        let command = VRange::new("vectors", "-", "+");
+
+        assert!(
+            command
+                .parse_response(Frame::BulkString(Some(Bytes::from_static(b"member"))))
+                .is_err()
+        );
+        assert!(command.parse_response(Frame::Array(None)).is_err());
+        assert!(
+            command
+                .parse_response(Frame::Array(Some(vec![Frame::BulkString(None)])))
+                .is_err()
+        );
+        assert!(
+            command
+                .parse_response(Frame::Array(Some(vec![Frame::Integer(1)])))
+                .is_err()
+        );
     }
 }

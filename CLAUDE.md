@@ -70,7 +70,7 @@ All live in `redis-tower/src/`:
 
 Redis Stack commands (`json`, `search`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`) are behind feature flags, all enabled by default via `commands-stack`.
 
-Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, Redis 8.x DELEX/DIGEST/MSETEX/INCREX/XCFGSET/XIDMPRECORD/XNACK/HOTKEYS builders, and the cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG). Generated coverage lives in `COMMAND_COVERAGE.md`.
+Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, Redis 8.x DELEX/DIGEST/MSETEX/INCREX/XCFGSET/XIDMPRECORD/XNACK/HOTKEYS/FT.HYBRID/FT.EXPLAIN/FT.EXPLAINCLI/VISMEMBER/VRANGE builders, and the cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG). Search and Vector Set now have typed builders for every scoped command name; generated coverage lives in `COMMAND_COVERAGE.md`.
 
 ## Module Clients (`redis-tower-modules`)
 
@@ -158,6 +158,9 @@ cargo test --test '*' --all-features
 ## CI
 
 10 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6), Coverage. All must be green before merge. Coverage uses cargo-llvm-cov with --no-report accumulation across the unit/doc/standalone/cluster/sentinel runs, then uploads an lcov report to Codecov (informational, not a hard gate).
+
+The version-gated Redis 8.x live-command suite runs nightly against every Redis
+minor in the 8.0, 8.2, 8.4, 8.6, and 8.8 matrix.
 
 Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` is rejected for this repo). Merge with `gh pr merge --squash`; merged head branches are auto-deleted.
 
