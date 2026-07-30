@@ -194,6 +194,357 @@ impl Command for Incr {
     }
 }
 
+/// A numeric bound for [`IncrEx`].
+///
+/// The bound type must match the command's increment mode: use an integer
+/// bound with the default or `BYINT` mode, and a floating-point bound with
+/// `BYFLOAT`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IncrExBound {
+    /// A signed 64-bit integer bound.
+    Integer(i64),
+    /// A floating-point bound.
+    Float(f64),
+}
+
+impl From<i32> for IncrExBound {
+    fn from(value: i32) -> Self {
+        Self::Integer(i64::from(value))
+    }
+}
+
+impl From<i64> for IncrExBound {
+    fn from(value: i64) -> Self {
+        Self::Integer(value)
+    }
+}
+
+impl From<f32> for IncrExBound {
+    fn from(value: f32) -> Self {
+        Self::Float(f64::from(value))
+    }
+}
+
+impl From<f64> for IncrExBound {
+    fn from(value: f64) -> Self {
+        Self::Float(value)
+    }
+}
+
+impl IncrExBound {
+    fn as_string(self) -> String {
+        match self {
+            Self::Integer(value) => value.to_string(),
+            Self::Float(value) => value.to_string(),
+        }
+    }
+}
+
+/// The result of an [`IncrEx`] operation.
+///
+/// Redis returns integer elements for the default and `BYINT` modes. In
+/// `BYFLOAT` mode, RESP2 returns bulk strings and RESP3 returns doubles; both
+/// protocol forms are normalized into [`Self::Float`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum IncrExResult {
+    /// Result from the default or `BYINT` mode.
+    Integer {
+        /// The value stored at the key after the operation.
+        value: i64,
+        /// The increment that Redis actually applied.
+        actual_increment: i64,
+    },
+    /// Result from `BYFLOAT` mode.
+    Float {
+        /// The value stored at the key after the operation.
+        value: f64,
+        /// The increment that Redis actually applied.
+        actual_increment: f64,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum IncrExIncrement {
+    Default,
+    Integer(i64),
+    Float(f64),
+}
+
+/// INCREX key \[BYFLOAT increment | BYINT increment\]
+/// \[LBOUND lowerbound\] \[UBOUND upperbound\] \[SATURATE\]
+/// \[EX seconds | PX milliseconds | EXAT timestamp | PXAT timestamp | PERSIST\]
+/// \[ENX\]
+///
+/// Atomically increments the numeric value stored at `key`, optionally
+/// constraining the result and changing its expiration (Redis 8.8+). The
+/// response contains both the resulting value and the increment Redis actually
+/// applied. If a bound would be exceeded without `SATURATE`, Redis leaves the
+/// value unchanged and reports an actual increment of zero.
+///
+/// If no increment is configured, Redis uses integer mode with an increment of
+/// one. `ENX` requires `EX`, `PX`, `EXAT`, or `PXAT`; Redis rejects it without
+/// one of those expiration options.
+#[derive(Clone)]
+pub struct IncrEx {
+    key: String,
+    increment: IncrExIncrement,
+    lower_bound: Option<IncrExBound>,
+    upper_bound: Option<IncrExBound>,
+    saturate: bool,
+    ex: Option<u64>,
+    px: Option<u64>,
+    exat: Option<u64>,
+    pxat: Option<u64>,
+    persist: bool,
+    enx: bool,
+}
+
+impl IncrEx {
+    /// Create an `INCREX` command in the default integer-by-one mode.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            increment: IncrExIncrement::Default,
+            lower_bound: None,
+            upper_bound: None,
+            saturate: false,
+            ex: None,
+            px: None,
+            exat: None,
+            pxat: None,
+            persist: false,
+            enx: false,
+        }
+    }
+
+    /// Increment by a signed 64-bit integer.
+    pub fn by_int(mut self, increment: i64) -> Self {
+        self.increment = IncrExIncrement::Integer(increment);
+        self
+    }
+
+    /// Increment by a floating-point value.
+    pub fn by_float(mut self, increment: f64) -> Self {
+        self.increment = IncrExIncrement::Float(increment);
+        self
+    }
+
+    /// Set the inclusive lower bound.
+    ///
+    /// The bound's numeric type must match the selected increment mode.
+    pub fn lower_bound(mut self, bound: impl Into<IncrExBound>) -> Self {
+        self.lower_bound = Some(bound.into());
+        self
+    }
+
+    /// Set the inclusive upper bound.
+    ///
+    /// The bound's numeric type must match the selected increment mode.
+    pub fn upper_bound(mut self, bound: impl Into<IncrExBound>) -> Self {
+        self.upper_bound = Some(bound.into());
+        self
+    }
+
+    /// Cap or floor an out-of-bounds result instead of skipping the operation.
+    pub fn saturate(mut self) -> Self {
+        self.saturate = true;
+        self
+    }
+
+    /// Set expiration in seconds.
+    pub fn ex(mut self, seconds: u64) -> Self {
+        self.ex = Some(seconds);
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set expiration in milliseconds.
+    pub fn px(mut self, milliseconds: u64) -> Self {
+        self.px = Some(milliseconds);
+        self.ex = None;
+        self.exat = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set expiration as a Unix timestamp in seconds.
+    pub fn exat(mut self, timestamp: u64) -> Self {
+        self.exat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.pxat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Set expiration as a Unix timestamp in milliseconds.
+    pub fn pxat(mut self, timestamp: u64) -> Self {
+        self.pxat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.persist = false;
+        self
+    }
+
+    /// Remove the key's existing expiration.
+    ///
+    /// `PERSIST` is incompatible with `ENX`, so this also clears an `ENX`
+    /// option configured earlier in the builder chain.
+    pub fn persist(mut self) -> Self {
+        self.persist = true;
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self.enx = false;
+        self
+    }
+
+    /// Only set the configured expiration when the key has no existing TTL.
+    ///
+    /// This must be combined with `EX`, `PX`, `EXAT`, or `PXAT`.
+    pub fn enx(mut self) -> Self {
+        self.enx = true;
+        self
+    }
+}
+
+impl Command for IncrEx {
+    type Response = IncrExResult;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("INCREX"), bulk(self.key.as_str())];
+
+        match self.increment {
+            IncrExIncrement::Default => {}
+            IncrExIncrement::Integer(increment) => {
+                args.push(bulk("BYINT"));
+                args.push(bulk(increment.to_string()));
+            }
+            IncrExIncrement::Float(increment) => {
+                args.push(bulk("BYFLOAT"));
+                args.push(bulk(increment.to_string()));
+            }
+        }
+        if let Some(bound) = self.lower_bound {
+            args.push(bulk("LBOUND"));
+            args.push(bulk(bound.as_string()));
+        }
+        if let Some(bound) = self.upper_bound {
+            args.push(bulk("UBOUND"));
+            args.push(bulk(bound.as_string()));
+        }
+        if self.saturate {
+            args.push(bulk("SATURATE"));
+        }
+        if let Some(ex) = self.ex {
+            args.push(bulk("EX"));
+            args.push(bulk(ex.to_string()));
+        }
+        if let Some(px) = self.px {
+            args.push(bulk("PX"));
+            args.push(bulk(px.to_string()));
+        }
+        if let Some(exat) = self.exat {
+            args.push(bulk("EXAT"));
+            args.push(bulk(exat.to_string()));
+        }
+        if let Some(pxat) = self.pxat {
+            args.push(bulk("PXAT"));
+            args.push(bulk(pxat.to_string()));
+        }
+        if self.persist {
+            args.push(bulk("PERSIST"));
+        }
+        if self.enx {
+            args.push(bulk("ENX"));
+        }
+
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        let frames = match frame {
+            Frame::Array(Some(frames)) if frames.len() == 2 => frames,
+            Frame::Array(Some(frames)) => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "two-element array",
+                    actual: format!("array with {} elements", frames.len()),
+                });
+            }
+            other => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "two-element array",
+                    actual: format!("{other:?}"),
+                });
+            }
+        };
+
+        match self.increment {
+            IncrExIncrement::Default | IncrExIncrement::Integer(_) => {
+                let mut values = frames.into_iter();
+                let value = parse_increx_integer(values.next().expect("length checked"))?;
+                let actual_increment =
+                    parse_increx_integer(values.next().expect("length checked"))?;
+                Ok(IncrExResult::Integer {
+                    value,
+                    actual_increment,
+                })
+            }
+            IncrExIncrement::Float(_) => {
+                let mut values = frames.into_iter();
+                let value = parse_increx_float(values.next().expect("length checked"))?;
+                let actual_increment = parse_increx_float(values.next().expect("length checked"))?;
+                Ok(IncrExResult::Float {
+                    value,
+                    actual_increment,
+                })
+            }
+        }
+    }
+
+    fn name(&self) -> &str {
+        "INCREX"
+    }
+}
+
+fn parse_increx_integer(frame: Frame) -> Result<i64, RedisError> {
+    match frame {
+        Frame::Integer(value) => Ok(value),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "integer",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_increx_float(frame: Frame) -> Result<f64, RedisError> {
+    match frame {
+        Frame::Double(value) => Ok(value),
+        Frame::BulkString(Some(data)) => {
+            let value = std::str::from_utf8(&data).map_err(|_| RedisError::UnexpectedResponse {
+                expected: "valid UTF-8 float bulk string",
+                actual: format!("{data:?}"),
+            })?;
+            value
+                .parse::<f64>()
+                .map_err(|_| RedisError::UnexpectedResponse {
+                    expected: "float bulk string",
+                    actual: value.to_string(),
+                })
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "double or float bulk string",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// MGET key [key ...]
 ///
 /// Returns the values of all specified keys.
@@ -338,6 +689,154 @@ impl Command for MSet {
 
     fn name(&self) -> &str {
         "MSET"
+    }
+}
+
+#[derive(Clone, Copy)]
+enum MSetExCondition {
+    Nx,
+    Xx,
+}
+
+/// MSETEX numkeys key value \[key value ...\] \[NX | XX\]
+/// \[EX seconds | PX milliseconds | EXAT timestamp | PXAT timestamp | KEEPTTL\]
+///
+/// Atomically sets multiple string keys with an optional shared expiration
+/// (Redis 8.4+). Returns `true` when all keys were set and `false` when a
+/// configured `NX` or `XX` condition prevented the operation.
+#[derive(Clone)]
+pub struct MSetEx {
+    pairs: Vec<(String, String)>,
+    condition: Option<MSetExCondition>,
+    ex: Option<u64>,
+    px: Option<u64>,
+    exat: Option<u64>,
+    pxat: Option<u64>,
+    keep_ttl: bool,
+}
+
+impl MSetEx {
+    /// Create an `MSETEX` command from key/value pairs.
+    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+        Self {
+            pairs: pairs
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into()))
+                .collect(),
+            condition: None,
+            ex: None,
+            px: None,
+            exat: None,
+            pxat: None,
+            keep_ttl: false,
+        }
+    }
+
+    /// Set only if none of the specified keys exist.
+    pub fn nx(mut self) -> Self {
+        self.condition = Some(MSetExCondition::Nx);
+        self
+    }
+
+    /// Set only if all of the specified keys already exist.
+    pub fn xx(mut self) -> Self {
+        self.condition = Some(MSetExCondition::Xx);
+        self
+    }
+
+    /// Set expiration in seconds.
+    pub fn ex(mut self, seconds: u64) -> Self {
+        self.ex = Some(seconds);
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set expiration in milliseconds.
+    pub fn px(mut self, milliseconds: u64) -> Self {
+        self.px = Some(milliseconds);
+        self.ex = None;
+        self.exat = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set expiration as a Unix timestamp in seconds.
+    pub fn exat(mut self, timestamp: u64) -> Self {
+        self.exat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.pxat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Set expiration as a Unix timestamp in milliseconds.
+    pub fn pxat(mut self, timestamp: u64) -> Self {
+        self.pxat = Some(timestamp);
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.keep_ttl = false;
+        self
+    }
+
+    /// Preserve the existing expiration of each key.
+    pub fn keep_ttl(mut self) -> Self {
+        self.keep_ttl = true;
+        self.ex = None;
+        self.px = None;
+        self.exat = None;
+        self.pxat = None;
+        self
+    }
+}
+
+impl Command for MSetEx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("MSETEX"), bulk(self.pairs.len().to_string())];
+        for (key, value) in &self.pairs {
+            args.push(bulk(key.as_str()));
+            args.push(bulk(value.as_str()));
+        }
+        match self.condition {
+            Some(MSetExCondition::Nx) => args.push(bulk("NX")),
+            Some(MSetExCondition::Xx) => args.push(bulk("XX")),
+            None => {}
+        }
+        if let Some(ex) = self.ex {
+            args.push(bulk("EX"));
+            args.push(bulk(ex.to_string()));
+        }
+        if let Some(px) = self.px {
+            args.push(bulk("PX"));
+            args.push(bulk(px.to_string()));
+        }
+        if let Some(exat) = self.exat {
+            args.push(bulk("EXAT"));
+            args.push(bulk(exat.to_string()));
+        }
+        if let Some(pxat) = self.pxat {
+            args.push(bulk("PXAT"));
+            args.push(bulk(pxat.to_string()));
+        }
+        if self.keep_ttl {
+            args.push(bulk("KEEPTTL"));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_zero_or_one(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MSETEX"
     }
 }
 
@@ -498,6 +997,149 @@ impl Command for GetDel {
 
     fn name(&self) -> &str {
         "GETDEL"
+    }
+}
+
+#[derive(Clone)]
+enum DelExCondition {
+    Eq(String),
+    Ne(String),
+    DigestEq(String),
+    DigestNe(String),
+}
+
+/// DELEX key \[IFEQ value | IFNE value | IFDEQ digest | IFDNE digest\]
+///
+/// Conditionally deletes `key` by comparing either its value or its
+/// hexadecimal [`Digest`] result (Redis 8.4+). With no condition, this deletes
+/// the key regardless of its type. Returns `true` when the key was deleted.
+#[derive(Clone)]
+pub struct DelEx {
+    key: String,
+    condition: Option<DelExCondition>,
+}
+
+impl DelEx {
+    /// Create an unconditional `DELEX` command.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            condition: None,
+        }
+    }
+
+    /// Delete only when the current string value equals `value`.
+    pub fn if_eq(mut self, value: impl Into<String>) -> Self {
+        self.condition = Some(DelExCondition::Eq(value.into()));
+        self
+    }
+
+    /// Delete only when the current string value does not equal `value`.
+    pub fn if_ne(mut self, value: impl Into<String>) -> Self {
+        self.condition = Some(DelExCondition::Ne(value.into()));
+        self
+    }
+
+    /// Delete only when the current string digest equals `digest`.
+    pub fn if_digest_eq(mut self, digest: impl Into<String>) -> Self {
+        self.condition = Some(DelExCondition::DigestEq(digest.into()));
+        self
+    }
+
+    /// Delete only when the current string digest does not equal `digest`.
+    pub fn if_digest_ne(mut self, digest: impl Into<String>) -> Self {
+        self.condition = Some(DelExCondition::DigestNe(digest.into()));
+        self
+    }
+}
+
+impl Command for DelEx {
+    type Response = bool;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("DELEX"), bulk(self.key.as_str())];
+        match &self.condition {
+            Some(DelExCondition::Eq(value)) => {
+                args.push(bulk("IFEQ"));
+                args.push(bulk(value.as_str()));
+            }
+            Some(DelExCondition::Ne(value)) => {
+                args.push(bulk("IFNE"));
+                args.push(bulk(value.as_str()));
+            }
+            Some(DelExCondition::DigestEq(digest)) => {
+                args.push(bulk("IFDEQ"));
+                args.push(bulk(digest.as_str()));
+            }
+            Some(DelExCondition::DigestNe(digest)) => {
+                args.push(bulk("IFDNE"));
+                args.push(bulk(digest.as_str()));
+            }
+            None => {}
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_zero_or_one(frame)
+    }
+
+    fn name(&self) -> &str {
+        "DELEX"
+    }
+}
+
+/// DIGEST key
+///
+/// Returns the XXH3 hash digest of a string value as hexadecimal bytes (Redis
+/// 8.4+), or `None` when `key` does not exist.
+#[derive(Clone)]
+pub struct Digest {
+    key: String,
+}
+
+impl Digest {
+    /// Create a `DIGEST` command.
+    pub fn new(key: impl Into<String>) -> Self {
+        Self { key: key.into() }
+    }
+}
+
+impl Command for Digest {
+    type Response = Option<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("DIGEST"), bulk(self.key.as_str())])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(data) => Ok(data),
+            Frame::Null => Ok(None),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk string or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "DIGEST"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+fn parse_zero_or_one(frame: Frame) -> Result<bool, RedisError> {
+    match frame {
+        Frame::Integer(0) => Ok(false),
+        Frame::Integer(1) => Ok(true),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "integer 0 or 1",
+            actual: format!("{other:?}"),
+        }),
     }
 }
 
@@ -1489,5 +2131,465 @@ mod tests {
             cmd.to_frame(),
             array(vec![bulk("LCS"), bulk("k1"), bulk("k2"), bulk("LEN")])
         );
+    }
+
+    // -- DelEx --
+
+    #[test]
+    fn delex_unconditional_to_frame() {
+        let cmd = DelEx::new("key");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("DELEX"), bulk("key")]));
+    }
+
+    #[test]
+    fn delex_value_conditions_to_frame() {
+        assert_eq!(
+            DelEx::new("key").if_eq("value").to_frame(),
+            array(vec![
+                bulk("DELEX"),
+                bulk("key"),
+                bulk("IFEQ"),
+                bulk("value"),
+            ])
+        );
+        assert_eq!(
+            DelEx::new("key").if_ne("value").to_frame(),
+            array(vec![
+                bulk("DELEX"),
+                bulk("key"),
+                bulk("IFNE"),
+                bulk("value"),
+            ])
+        );
+    }
+
+    #[test]
+    fn delex_digest_conditions_to_frame() {
+        assert_eq!(
+            DelEx::new("key").if_digest_eq("abc123").to_frame(),
+            array(vec![
+                bulk("DELEX"),
+                bulk("key"),
+                bulk("IFDEQ"),
+                bulk("abc123"),
+            ])
+        );
+        assert_eq!(
+            DelEx::new("key").if_digest_ne("abc123").to_frame(),
+            array(vec![
+                bulk("DELEX"),
+                bulk("key"),
+                bulk("IFDNE"),
+                bulk("abc123"),
+            ])
+        );
+    }
+
+    #[test]
+    fn delex_last_condition_wins() {
+        let cmd = DelEx::new("key")
+            .if_eq("old")
+            .if_ne("new")
+            .if_digest_eq("first")
+            .if_digest_ne("last");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("DELEX"),
+                bulk("key"),
+                bulk("IFDNE"),
+                bulk("last"),
+            ])
+        );
+    }
+
+    #[test]
+    fn delex_parse_zero_or_one() {
+        let cmd = DelEx::new("key");
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    #[test]
+    fn delex_rejects_invalid_response() {
+        let cmd = DelEx::new("key");
+        assert!(cmd.parse_response(Frame::Integer(2)).is_err());
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- Digest --
+
+    #[test]
+    fn digest_to_frame() {
+        let cmd = Digest::new("key");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("DIGEST"), bulk("key")]));
+    }
+
+    #[test]
+    fn digest_parse_value_and_nulls() {
+        let cmd = Digest::new("key");
+        let digest = Bytes::from("b6acb9d84a38ff74");
+        assert_eq!(
+            cmd.parse_response(Frame::BulkString(Some(digest.clone())))
+                .unwrap(),
+            Some(digest)
+        );
+        assert_eq!(cmd.parse_response(Frame::BulkString(None)).unwrap(), None);
+        assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+    }
+
+    #[test]
+    fn digest_rejects_non_bulk_response() {
+        let cmd = Digest::new("key");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    // -- MSetEx --
+
+    #[test]
+    fn msetex_to_frame_and_key_positions() {
+        let cmd = MSetEx::new(vec![("key1", "value1"), ("key2", "value2")]);
+        let expected = array(vec![
+            bulk("MSETEX"),
+            bulk("2"),
+            bulk("key1"),
+            bulk("value1"),
+            bulk("key2"),
+            bulk("value2"),
+        ]);
+        let frame = cmd.to_frame();
+        assert_eq!(frame, expected);
+
+        let Frame::Array(Some(args)) = frame else {
+            panic!("MSETEX request must be an array");
+        };
+        assert_eq!(args[1], bulk("2"), "argv[1] is the key count");
+        assert_eq!(args[2], bulk("key1"), "the first key is at argv[2]");
+        assert_eq!(args[4], bulk("key2"), "keys repeat every two arguments");
+    }
+
+    #[test]
+    fn msetex_nx_ex_to_frame() {
+        let cmd = MSetEx::new(vec![("key", "value")]).nx().ex(60);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MSETEX"),
+                bulk("1"),
+                bulk("key"),
+                bulk("value"),
+                bulk("NX"),
+                bulk("EX"),
+                bulk("60"),
+            ])
+        );
+    }
+
+    #[test]
+    fn msetex_xx_px_to_frame() {
+        let cmd = MSetEx::new(vec![("key", "value")]).xx().px(1500);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MSETEX"),
+                bulk("1"),
+                bulk("key"),
+                bulk("value"),
+                bulk("XX"),
+                bulk("PX"),
+                bulk("1500"),
+            ])
+        );
+    }
+
+    #[test]
+    fn msetex_absolute_expirations_to_frame() {
+        let base = || MSetEx::new(vec![("key", "value")]);
+        assert_eq!(
+            base().exat(1_700_000_000).to_frame(),
+            array(vec![
+                bulk("MSETEX"),
+                bulk("1"),
+                bulk("key"),
+                bulk("value"),
+                bulk("EXAT"),
+                bulk("1700000000"),
+            ])
+        );
+        assert_eq!(
+            base().pxat(1_700_000_000_000).to_frame(),
+            array(vec![
+                bulk("MSETEX"),
+                bulk("1"),
+                bulk("key"),
+                bulk("value"),
+                bulk("PXAT"),
+                bulk("1700000000000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn msetex_latest_condition_and_expiration_win() {
+        let cmd = MSetEx::new(vec![("key", "value")])
+            .nx()
+            .xx()
+            .ex(1)
+            .px(2)
+            .exat(3)
+            .pxat(4)
+            .keep_ttl();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MSETEX"),
+                bulk("1"),
+                bulk("key"),
+                bulk("value"),
+                bulk("XX"),
+                bulk("KEEPTTL"),
+            ])
+        );
+    }
+
+    #[test]
+    fn msetex_parse_zero_or_one() {
+        let cmd = MSetEx::new(vec![("key", "value")]);
+        assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+        assert!(!cmd.parse_response(Frame::Integer(0)).unwrap());
+    }
+
+    #[test]
+    fn msetex_rejects_invalid_response() {
+        let cmd = MSetEx::new(vec![("key", "value")]);
+        assert!(cmd.parse_response(Frame::Integer(2)).is_err());
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .is_err()
+        );
+    }
+
+    // -- IncrEx --
+
+    #[test]
+    fn increx_default_to_frame() {
+        let cmd = IncrEx::new("counter");
+        assert_eq!(cmd.to_frame(), array(vec![bulk("INCREX"), bulk("counter")]));
+    }
+
+    #[test]
+    fn increx_integer_and_float_increments_to_frame() {
+        assert_eq!(
+            IncrEx::new("counter").by_int(-5).to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("BYINT"),
+                bulk("-5"),
+            ])
+        );
+        assert_eq!(
+            IncrEx::new("counter").by_float(0.25).to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("BYFLOAT"),
+                bulk("0.25"),
+            ])
+        );
+    }
+
+    #[test]
+    fn increx_bounds_saturate_and_enx_to_frame() {
+        let cmd = IncrEx::new("counter")
+            .by_int(5)
+            .lower_bound(-10)
+            .upper_bound(100_i64)
+            .saturate()
+            .ex(60)
+            .enx();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("BYINT"),
+                bulk("5"),
+                bulk("LBOUND"),
+                bulk("-10"),
+                bulk("UBOUND"),
+                bulk("100"),
+                bulk("SATURATE"),
+                bulk("EX"),
+                bulk("60"),
+                bulk("ENX"),
+            ])
+        );
+    }
+
+    #[test]
+    fn increx_float_bounds_to_frame() {
+        let cmd = IncrEx::new("counter")
+            .by_float(0.5)
+            .lower_bound(-1.25_f32)
+            .upper_bound(9.75);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("BYFLOAT"),
+                bulk("0.5"),
+                bulk("LBOUND"),
+                bulk("-1.25"),
+                bulk("UBOUND"),
+                bulk("9.75"),
+            ])
+        );
+    }
+
+    #[test]
+    fn increx_expiration_variants_to_frame() {
+        let base = || IncrEx::new("counter");
+        assert_eq!(
+            base().px(1500).to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("PX"),
+                bulk("1500"),
+            ])
+        );
+        assert_eq!(
+            base().exat(1_700_000_000).to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("EXAT"),
+                bulk("1700000000"),
+            ])
+        );
+        assert_eq!(
+            base().pxat(1_700_000_000_000).to_frame(),
+            array(vec![
+                bulk("INCREX"),
+                bulk("counter"),
+                bulk("PXAT"),
+                bulk("1700000000000"),
+            ])
+        );
+    }
+
+    #[test]
+    fn increx_persist_clears_expiration_and_enx() {
+        let cmd = IncrEx::new("counter").ex(60).enx().px(100).persist();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("INCREX"), bulk("counter"), bulk("PERSIST")])
+        );
+    }
+
+    #[test]
+    fn increx_parse_integer_result() {
+        let cmd = IncrEx::new("counter").by_int(5);
+        let result = cmd
+            .parse_response(array(vec![Frame::Integer(15), Frame::Integer(5)]))
+            .unwrap();
+        assert_eq!(
+            result,
+            IncrExResult::Integer {
+                value: 15,
+                actual_increment: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn increx_parse_resp2_float_result() {
+        let cmd = IncrEx::new("counter").by_float(0.25);
+        let result = cmd
+            .parse_response(array(vec![
+                Frame::BulkString(Some(Bytes::from("1.75"))),
+                Frame::BulkString(Some(Bytes::from("0.25"))),
+            ]))
+            .unwrap();
+        assert_eq!(
+            result,
+            IncrExResult::Float {
+                value: 1.75,
+                actual_increment: 0.25,
+            }
+        );
+    }
+
+    #[test]
+    fn increx_parse_resp3_float_result() {
+        let cmd = IncrEx::new("counter").by_float(0.25);
+        let result = cmd
+            .parse_response(array(vec![Frame::Double(1.75), Frame::Double(0.25)]))
+            .unwrap();
+        assert_eq!(
+            result,
+            IncrExResult::Float {
+                value: 1.75,
+                actual_increment: 0.25,
+            }
+        );
+    }
+
+    #[test]
+    fn increx_rejects_malformed_results() {
+        let integer = IncrEx::new("counter");
+        assert!(
+            integer
+                .parse_response(array(vec![Frame::Integer(1)]))
+                .is_err()
+        );
+        assert!(
+            integer
+                .parse_response(array(vec![Frame::Integer(1), Frame::Double(1.0)]))
+                .is_err()
+        );
+        assert!(integer.parse_response(Frame::Array(None)).is_err());
+
+        let float = IncrEx::new("counter").by_float(0.5);
+        assert!(
+            float
+                .parse_response(array(vec![
+                    Frame::BulkString(Some(Bytes::from("not-a-float"))),
+                    Frame::BulkString(Some(Bytes::from("0.5"))),
+                ]))
+                .is_err()
+        );
+        assert!(
+            float
+                .parse_response(array(vec![
+                    Frame::BulkString(Some(Bytes::from_static(&[0xff]))),
+                    Frame::Double(0.5),
+                ]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn new_string_command_metadata() {
+        let delex = DelEx::new("delex-key");
+        assert_eq!(delex.name(), "DELEX");
+        assert!(!delex.idempotent());
+
+        let msetex = MSetEx::new(vec![("msetex-key", "value")]);
+        assert_eq!(msetex.name(), "MSETEX");
+        assert!(!msetex.idempotent());
+
+        let digest = Digest::new("digest-key");
+        assert_eq!(digest.name(), "DIGEST");
+        assert!(digest.idempotent());
+
+        let increx = IncrEx::new("increx-key");
+        assert_eq!(increx.name(), "INCREX");
+        assert!(!increx.idempotent());
     }
 }

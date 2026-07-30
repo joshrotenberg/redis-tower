@@ -2,7 +2,7 @@
 
 # Redis command coverage
 
-`redis-tower` provides typed builders for **440/506 (87.0%)** of the scoped Redis 8.8 command surface. **16/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
+`redis-tower` provides typed builders for **452/506 (89.3%)** of the scoped Redis 8.8 command surface. **18/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
 
 The issue that introduced this report recorded a June 2026 baseline of **393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. The headline above is regenerated from the current source tree.
 
@@ -22,11 +22,11 @@ The issue that introduced this report recorded a June 2026 baseline of **393/506
 | T1 | module | 11 | 13 | 84.6% | `VISMEMBER`<br>`VRANGE` |
 | T1 | pubsub | 8 | 14 | 57.1% | `PSUBSCRIBE`<br>`PUNSUBSCRIBE`<br>`SSUBSCRIBE`<br>`SUBSCRIBE`<br>`SUNSUBSCRIBE`<br>`UNSUBSCRIBE` |
 | T1 | scripting | 20 | 21 | 95.2% | `FUNCTION KILL` |
-| T1 | server | 53 | 72 | 73.6% | `ACL USERS`<br>`COMMAND`<br>`COMMAND GETKEYSANDFLAGS`<br>`HOTKEYS GET`<br>`HOTKEYS HELP`<br>`HOTKEYS RESET`<br>`HOTKEYS START`<br>`HOTKEYS STOP`<br>`LATENCY DOCTOR`<br>`LATENCY HISTOGRAM`<br>`MEMORY MALLOC-STATS`<br>`MEMORY PURGE`<br>`MODULE LOAD`<br>`MODULE LOADEX`<br>`MODULE UNLOAD`<br>`MONITOR`<br>`PSYNC`<br>`SYNC`<br>`TRIMSLOTS` |
+| T1 | server | 58 | 72 | 80.6% | `ACL USERS`<br>`COMMAND`<br>`COMMAND GETKEYSANDFLAGS`<br>`LATENCY DOCTOR`<br>`LATENCY HISTOGRAM`<br>`MEMORY MALLOC-STATS`<br>`MEMORY PURGE`<br>`MODULE LOAD`<br>`MODULE LOADEX`<br>`MODULE UNLOAD`<br>`MONITOR`<br>`PSYNC`<br>`SYNC`<br>`TRIMSLOTS` |
 | T1 | set | 17 | 17 | 100.0% | — |
 | T1 | sorted-set | 30 | 30 | 100.0% | — |
-| T1 | stream | 25 | 28 | 89.3% | `XCFGSET`<br>`XIDMPRECORD`<br>`XNACK` |
-| T1 | string | 17 | 21 | 81.0% | `DELEX`<br>`DIGEST`<br>`INCREX`<br>`MSETEX` |
+| T1 | stream | 28 | 28 | 100.0% | — |
+| T1 | string | 21 | 21 | 100.0% | — |
 | T1 | transactions | 5 | 5 | 100.0% | — |
 | T2 | bf | 10 | 10 | 100.0% | — |
 | T2 | cf | 12 | 12 | 100.0% | — |

@@ -56,7 +56,7 @@ cargo test --all-features
 - [ ] Updated command documentation
 - [ ] Updated README if needed
 - [ ] Updated CHANGELOG.md
-- [ ] Updated COMMANDS_TRACKING.md (if adding commands)
+- [ ] Regenerated COMMAND_COVERAGE.md (if adding commands)
 - [ ] Added examples if appropriate
 - [ ] Added inline code documentation
 

@@ -10,7 +10,7 @@ A Redis client for Rust where every connection is a `tower::Service`.
 
 Commands are typed structs with compile-time response types. Middleware
 (timeouts, retries, circuit breaking, caching, metrics) composes via
-standard Tower layers. 360+ commands, including Redis Stack modules
+standard Tower layers. 450+ commands, including Redis Stack modules
 behind feature flags.
 
 **Coming from redis-rs?** See the [migration guide](docs/MIGRATING-FROM-REDIS-RS.md)
@@ -397,7 +397,7 @@ BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
 redis-tower              Facade crate
 redis-tower-core         Command trait, RedisConnection, FrameService
 redis-tower-protocol     RESP3 codec
-redis-tower-commands     360+ typed command structs
+redis-tower-commands     450+ typed command structs
 redis-tower-cluster      Cluster routing and topology
 redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)

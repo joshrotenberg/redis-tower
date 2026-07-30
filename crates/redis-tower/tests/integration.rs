@@ -3039,6 +3039,16 @@ async fn multiplexed_client_connect_resp3() {
 
 #[tokio::test]
 async fn multiplexed_client_reconnects_after_server_restart() {
+    // This scenario owns the server process so it can stop and restart it on
+    // the same port. Compatibility-matrix jobs mark their REDIS_URL as an
+    // externally managed service, where spawning redis-server is neither
+    // available nor part of the image-under-test contract. The normal per-PR
+    // integration job has redis-server on PATH and still exercises the full
+    // restart path.
+    if std::env::var_os("REDIS_EXTERNAL_SERVICE").is_some() {
+        return;
+    }
+
     // Dedicated standalone on a non-default port so we don't interfere
     // with the shared REDIS instance used by the rest of the suite.
     let server = RedisServer::new()

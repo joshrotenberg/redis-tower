@@ -1,6 +1,6 @@
 # redis-tower
 
-A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. Private GitHub repo. All published crates were yanked on 2026-06-11; the Release workflow is manual-dispatch only and 51 commits sit unreleased since the v0.1.0 tags. See Release State below.
+A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. The GitHub repo is public, but no current release is available: all published crates were yanked on 2026-06-11 and the Release workflow is manual-dispatch only. See Release State below.
 
 ## Architecture
 
@@ -70,7 +70,7 @@ All live in `redis-tower/src/`:
 
 Redis Stack commands (`json`, `search`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`) are behind feature flags, all enabled by default via `commands-stack`.
 
-Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG).
+Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, Redis 8.x DELEX/DIGEST/MSETEX/INCREX/XCFGSET/XIDMPRECORD/XNACK/HOTKEYS builders, and the cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG). Generated coverage lives in `COMMAND_COVERAGE.md`.
 
 ## Module Clients (`redis-tower-modules`)
 
@@ -197,16 +197,16 @@ All three audit passes are complete and merged: the initial audit, the second (#
 
 ## Release State
 
-- **0.1.x published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day. All 0.1.x versions of `redis-tower-protocol`, `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, and `redis-tower-sentinel` are yanked. The GitHub repo is still private, so the crates.io repository links 404. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (`cargo yank --undo` or a fresh publish when ready).
-- **51 commits are unreleased** since the v0.1.0 tags (measured `redis-tower-v0.1.0..HEAD`). A re-launch publishes from current `main`, not from the yanked 0.1.0 tree.
+- **0.1.x published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day. All 0.1.x versions of `redis-tower-protocol`, `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, and `redis-tower-sentinel` are yanked. The GitHub repo is now public, but there is still no current crate release. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (`cargo yank --undo` or a fresh publish when ready).
+- **Substantial work is unreleased** since the v0.1.0 tags. A re-launch publishes from current `main`, not from the yanked 0.1.0 tree.
 - **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger was removed so merges no longer auto-publish. The workflow (`.github/workflows/release-plz.yml`) runs `release-plz` and is triggered with `gh workflow run Release --ref main`.
 
 ### Re-launch runbook
 
 Coordinated republish. Run in order; each step is a gate for the next.
 
-1. **Decide the version line.** The yanked 0.1.0 is burned for the affected crates (a yanked version cannot be re-published at the same number). Bump to 0.1.1+ (or 0.2.0) as `release-plz` proposes from the 51 unreleased commits. `redis-tower-protocol` is already at 0.1.1, so it bumps from there.
-2. **Make the repo public.** Until then the crates.io repository/homepage links 404 and docs.rs cannot build from a private source. `gh repo edit joshrotenberg/redis-tower --visibility public`.
+1. **Decide the version line.** The yanked 0.1.0 is burned for the affected crates (a yanked version cannot be re-published at the same number). Bump to 0.1.1+ (or 0.2.0) as `release-plz` proposes from the unreleased changes. `redis-tower-protocol` is already at 0.1.1, so it bumps from there.
+2. **Confirm public metadata.** The repo is public; verify each crate's repository/homepage links and package include set before publishing.
 3. **Confirm secrets.** `CARGO_REGISTRY_TOKEN` must be set in repo secrets for the Release workflow; `GITHUB_TOKEN` is provided by Actions.
 4. **Dry-run locally.** `cargo publish -p <crate> --dry-run` in dependency order (protocol, core, commands, redis-tower, then cluster/sentinel/sync/modules/client) to catch packaging or metadata errors before dispatch.
 5. **Publish.** Re-enable releases by dispatching the workflow: `gh workflow run Release --ref main`. `release-plz` opens or pushes the version-bump PR, tags, and publishes. Do not restore the `push: main` trigger unless the team decides to resume auto-publish.

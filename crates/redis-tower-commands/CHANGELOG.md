@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - generated Redis 8.8 typed-command conformance report with CI drift detection
+- Redis 8.x builders for DELEX, DIGEST, MSETEX, INCREX, XCFGSET, XIDMPRECORD, XNACK, and the HOTKEYS command family
 
 ### Fixed
 

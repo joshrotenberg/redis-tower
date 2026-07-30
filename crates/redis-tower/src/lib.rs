@@ -41,7 +41,7 @@
 //!
 //! # Commands
 //!
-//! The [`commands`] module contains 360+ typed command structs spanning core
+//! The [`commands`] module contains 450+ typed command structs spanning core
 //! Redis and feature-gated Redis Stack modules. Each command implements the
 //! [`Command`] trait, which defines serialization to a RESP [`Frame`] via
 //! `to_frame()` and response parsing via `parse_response()`.
@@ -330,7 +330,7 @@
 //! - `redis-tower-protocol` -- RESP3 frame types and codec
 //! - `redis-tower-core` -- [`Command`] trait, [`RedisConnection`],
 //!   [`FrameService`], transport, URL parsing, and value conversion
-//! - `redis-tower-commands` -- 360+ typed command implementations
+//! - `redis-tower-commands` -- 450+ typed command implementations
 //!   (re-exported via [`commands`])
 //! - `redis-tower-cluster` -- cluster routing, MOVED/ASK, read preference
 //! - `redis-tower-sentinel` -- Sentinel discovery and failover
