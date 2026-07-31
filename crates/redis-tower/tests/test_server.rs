@@ -253,11 +253,13 @@ async fn cover_replicaof_and_failover() {
     let (first_port, second_port) = free_replication_ports();
     let first_server = RedisServer::new()
         .port(first_port)
+        .repl_diskless_sync_delay(0)
         .start()
         .await
         .expect("failed to start first replication server");
     let second_server = RedisServer::new()
         .port(second_port)
+        .repl_diskless_sync_delay(0)
         .start()
         .await
         .expect("failed to start second replication server");
