@@ -207,6 +207,17 @@ impl MultiplexedClient<AutoPipelineService> {
         })
     }
 
+    /// Returns the current number of requests pending in the auto-pipeline
+    /// queue.
+    ///
+    /// This is an instantaneous snapshot intended for observability and load
+    /// shedding decisions. The value may change immediately after it is read.
+    /// Layered clients built with [`Self::from_layered`] expose this method only
+    /// when their concrete inner service remains [`AutoPipelineService`].
+    pub fn queue_depth(&self) -> usize {
+        self.inner.inner().queue_depth()
+    }
+
     /// Gracefully shut down the multiplexed client.
     ///
     /// Signals the background worker to stop accepting new requests, then

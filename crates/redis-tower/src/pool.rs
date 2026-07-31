@@ -39,14 +39,15 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::{Mutex, MutexGuard};
 
 use crate::executor::RedisExecutor;
+use crate::metrics_layer::MetricsRecorder;
 
 /// A type-erased factory for creating pooled connections.
 ///
@@ -94,8 +95,14 @@ pub enum DispatchStrategy {
 }
 
 /// Configuration for a connection pool.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PoolConfig {
+    /// Stable name used to identify this pool in metrics.
+    ///
+    /// Applications with multiple pools should give each one a distinct name
+    /// so their utilization and acquisition metrics remain distinguishable.
+    /// Defaults to `"redis-tower"`.
+    pub name: String,
     /// Number of connections in the pool.
     pub size: usize,
     /// How to select which connection handles each command.
@@ -119,15 +126,38 @@ pub struct PoolConfig {
     /// Set it to `None` -- via [`PoolConfig::disable_acquisition_timeout`] --
     /// to wait forever, restoring the previous unbounded behavior.
     pub acquisition_timeout: Option<Duration>,
+    /// Optional recorder for pool lifecycle metrics.
+    ///
+    /// When set, the pool reports connection acquisition latency and timeouts,
+    /// lazy health-check failures, and successful connection replacements.
+    pub metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+}
+
+impl std::fmt::Debug for PoolConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PoolConfig")
+            .field("name", &self.name)
+            .field("size", &self.size)
+            .field("dispatch", &self.dispatch)
+            .field("health_check_interval", &self.health_check_interval)
+            .field("acquisition_timeout", &self.acquisition_timeout)
+            .field(
+                "metrics_recorder",
+                &self.metrics_recorder.as_ref().map(|_| "<recorder>"),
+            )
+            .finish()
+    }
 }
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
+            name: "redis-tower".to_owned(),
             size: 4,
             dispatch: DispatchStrategy::RoundRobin,
             health_check_interval: None,
             acquisition_timeout: Some(Self::DEFAULT_ACQUISITION_TIMEOUT),
+            metrics_recorder: None,
         }
     }
 }
@@ -140,6 +170,12 @@ impl PoolConfig {
     /// surfaces as a [`RedisError::PoolAcquisitionTimeout`] rather than an
     /// unbounded stall that masquerades as a hang.
     pub const DEFAULT_ACQUISITION_TIMEOUT: Duration = Duration::from_secs(5);
+
+    /// Set the stable name used to identify this pool in metrics.
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
+        self
+    }
 
     /// Set the pool size.
     pub fn size(mut self, size: usize) -> Self {
@@ -184,6 +220,12 @@ impl PoolConfig {
         self.acquisition_timeout = None;
         self
     }
+
+    /// Set the recorder that receives pool lifecycle metric events.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.metrics_recorder = Some(recorder);
+        self
+    }
 }
 
 /// Return the current epoch time in milliseconds.
@@ -194,8 +236,16 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// The high bit of `admission_state` permanently marks the pool closed; the
+/// remaining bits count accepted operations. Combining both values in one
+/// atomic makes admission linearizable with [`ConnectionPool::close`].
+const POOL_CLOSED_BIT: usize = 1usize << (usize::BITS - 1);
+const POOL_ACTIVE_MASK: usize = !POOL_CLOSED_BIT;
+
 /// Shared state behind the pool's Arc.
 struct PoolInner<S> {
+    /// Stable pool name attached to metric events.
+    name: String,
     connections: Vec<Mutex<S>>,
     /// Per-connection in-flight command count for LeastConnections dispatch.
     inflight: Vec<AtomicUsize>,
@@ -209,9 +259,93 @@ struct PoolInner<S> {
     acquisition_timeout_ns: u64,
     /// Optional factory used to replace dead connections after a failed PING.
     factory: Option<Arc<dyn ErasedPoolFactory<Connection = S>>>,
-    /// Set once [`ConnectionPool::close`] is called. Shared across clones, so a
-    /// close on any clone makes every clone reject new commands.
-    closed: AtomicBool,
+    /// Optional recorder for pool lifecycle events.
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    /// Closed flag and pool-wide accepted-operation count in one atomic word.
+    /// The high bit is the closed flag; the remaining bits are the count.
+    admission_state: AtomicUsize,
+}
+
+/// Owns one pool-wide admission until an accepted operation finishes.
+struct PoolAdmission<'a> {
+    state: &'a AtomicUsize,
+}
+
+impl<'a> PoolAdmission<'a> {
+    fn try_new(state: &'a AtomicUsize) -> Result<Self, RedisError> {
+        let mut current = state.load(Ordering::Acquire);
+        loop {
+            if current & POOL_CLOSED_BIT != 0 {
+                return Err(RedisError::ConnectionClosed);
+            }
+            assert!(
+                current & POOL_ACTIVE_MASK != POOL_ACTIVE_MASK,
+                "pool active-operation counter overflow"
+            );
+
+            match state.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(Self { state }),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+impl Drop for PoolAdmission<'_> {
+    fn drop(&mut self) {
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous & POOL_ACTIVE_MASK > 0);
+    }
+}
+
+/// Owns one in-flight reservation until a command finishes or is cancelled.
+///
+/// Keeping the decrement in `Drop` makes every await in the execution path
+/// cancellation-safe: dropping the command future releases its reservation
+/// whether it is waiting for a connection, checking health, replacing a dead
+/// connection, or awaiting the command response.
+struct InflightReservation<'a> {
+    counters: &'a [AtomicUsize],
+    index: usize,
+    _admission: PoolAdmission<'a>,
+}
+
+impl<'a> InflightReservation<'a> {
+    fn new(counters: &'a [AtomicUsize], index: usize, admission: PoolAdmission<'a>) -> Self {
+        counters[index].fetch_add(1, Ordering::Release);
+        Self {
+            counters,
+            index,
+            _admission: admission,
+        }
+    }
+
+    fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Move this reservation to an alternate slot selected by `acquire`.
+    fn transfer_to(&mut self, index: usize) {
+        if index == self.index {
+            return;
+        }
+
+        self.counters[index].fetch_add(1, Ordering::Release);
+        self.counters[self.index].fetch_sub(1, Ordering::Release);
+        self.index = index;
+    }
+}
+
+impl Drop for InflightReservation<'_> {
+    fn drop(&mut self) {
+        let previous = self.counters[self.index].fetch_sub(1, Ordering::Release);
+        debug_assert!(previous > 0);
+    }
 }
 
 /// Object-safe wrapper around [`PoolFactory`] that erases the concrete type.
@@ -232,21 +366,61 @@ impl<F: PoolFactory> ErasedPoolFactory for F {
 }
 
 impl<S> PoolInner<S> {
+    /// Select a connection according to the dispatch strategy and reserve it.
+    fn reserve_next(&self) -> Result<InflightReservation<'_>, RedisError> {
+        let admission = PoolAdmission::try_new(&self.admission_state)?;
+        let len = self.connections.len();
+        let index = match self.dispatch {
+            DispatchStrategy::RoundRobin => self.index.fetch_add(1, Ordering::Relaxed) % len,
+            DispatchStrategy::Random => {
+                // Simple xorshift-based pseudo-random from the atomic counter.
+                // Not cryptographic, but good enough for load distribution.
+                let mut x = self.index.fetch_add(7, Ordering::Relaxed);
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x % len
+            }
+            DispatchStrategy::LeastConnections => {
+                // Find the connection with the fewest in-flight commands.
+                // On ties, pick the first (effectively round-robin among tied).
+                let mut min_idx = 0;
+                let mut min_val = self.inflight[0].load(Ordering::Acquire);
+                for i in 1..len {
+                    let value = self.inflight[i].load(Ordering::Acquire);
+                    if value < min_val {
+                        min_val = value;
+                        min_idx = i;
+                    }
+                }
+                min_idx
+            }
+        };
+
+        Ok(InflightReservation::new(&self.inflight, index, admission))
+    }
+
     /// Acquire a connection guard, avoiding head-of-line blocking.
     ///
-    /// `preferred` is the strategy-selected slot whose in-flight counter has
-    /// already been incremented by [`ConnectionPool::next_index`]. If that slot
-    /// is immediately lockable it is used directly. Otherwise a `try_lock` scan
-    /// looks for any idle connection so the request is not forced to queue
+    /// `reservation` owns the strategy-selected slot's in-flight count. If that
+    /// slot is immediately lockable it is used directly. Otherwise a `try_lock`
+    /// scan looks for any idle connection so the request is not forced to queue
     /// behind a long-running command on the preferred slot while another
-    /// connection sits free; when a free slot is found the in-flight accounting
-    /// is moved from `preferred` to it. If every slot is busy, the call awaits
-    /// the preferred slot, honoring the acquisition timeout.
+    /// connection sits free; when a free slot is found the reservation is moved
+    /// to it. If every slot is busy, the call awaits the preferred slot,
+    /// honoring the acquisition timeout.
     ///
     /// Returns the slot index actually acquired together with its guard.
-    async fn acquire(&self, preferred: usize) -> Result<(usize, MutexGuard<'_, S>), RedisError> {
+    async fn acquire(
+        &self,
+        reservation: &mut InflightReservation<'_>,
+    ) -> Result<(usize, MutexGuard<'_, S>), RedisError> {
+        let started = Instant::now();
+        let preferred = reservation.index();
+
         // Fast path: the preferred slot is free.
         if let Ok(guard) = self.connections[preferred].try_lock() {
+            self.record_acquisition(started.elapsed(), false);
             return Ok((preferred, guard));
         }
 
@@ -257,10 +431,8 @@ impl<S> PoolInner<S> {
         for offset in 1..len {
             let i = (preferred + offset) % len;
             if let Ok(guard) = self.connections[i].try_lock() {
-                // Move the in-flight accounting from the preferred slot to the
-                // one we actually acquired.
-                self.inflight[i].fetch_add(1, Ordering::Release);
-                self.inflight[preferred].fetch_sub(1, Ordering::Release);
+                reservation.transfer_to(i);
+                self.record_acquisition(started.elapsed(), false);
                 return Ok((i, guard));
             }
         }
@@ -272,7 +444,7 @@ impl<S> PoolInner<S> {
             match tokio::time::timeout(timeout_dur, self.connections[preferred].lock()).await {
                 Ok(guard) => guard,
                 Err(_elapsed) => {
-                    self.inflight[preferred].fetch_sub(1, Ordering::Release);
+                    self.record_acquisition(started.elapsed(), true);
                     return Err(RedisError::PoolAcquisitionTimeout {
                         waited: timeout_dur,
                         pool_size: len,
@@ -282,7 +454,26 @@ impl<S> PoolInner<S> {
         } else {
             self.connections[preferred].lock().await
         };
+        self.record_acquisition(started.elapsed(), false);
         Ok((preferred, guard))
+    }
+
+    fn record_acquisition(&self, duration: Duration, timed_out: bool) {
+        if let Some(recorder) = &self.metrics_recorder {
+            recorder.pool_acquisition_completed(&self.name, duration, timed_out);
+        }
+    }
+
+    fn record_health_check_failed(&self) {
+        if let Some(recorder) = &self.metrics_recorder {
+            recorder.pool_health_check_failed(&self.name);
+        }
+    }
+
+    fn record_connection_replaced(&self) {
+        if let Some(recorder) = &self.metrics_recorder {
+            recorder.pool_connection_replaced(&self.name);
+        }
     }
 }
 
@@ -368,6 +559,7 @@ where
 
         Ok(Self {
             inner: Arc::new(PoolInner {
+                name: config.name,
                 connections,
                 inflight,
                 last_used,
@@ -376,7 +568,8 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: None,
-                closed: AtomicBool::new(false),
+                metrics_recorder: config.metrics_recorder,
+                admission_state: AtomicUsize::new(0),
             }),
         })
     }
@@ -421,6 +614,7 @@ where
 
         Ok(Self {
             inner: Arc::new(PoolInner {
+                name: config.name,
                 connections,
                 inflight,
                 last_used,
@@ -429,7 +623,8 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: Some(Arc::new(factory)),
-                closed: AtomicBool::new(false),
+                metrics_recorder: config.metrics_recorder,
+                admission_state: AtomicUsize::new(0),
             }),
         })
     }
@@ -438,7 +633,7 @@ where
     ///
     /// The `config.size` field is ignored here because the pool size is
     /// determined by the number of connections supplied. All other config
-    /// fields (`dispatch`, `health_check_interval`) are applied normally.
+    /// fields are applied normally.
     ///
     /// # Errors
     ///
@@ -469,6 +664,7 @@ where
 
         Ok(Self {
             inner: Arc::new(PoolInner {
+                name: config.name,
                 connections: mutexed,
                 inflight,
                 last_used,
@@ -477,7 +673,8 @@ where
                 health_check_interval_ms,
                 acquisition_timeout_ns,
                 factory: None,
-                closed: AtomicBool::new(false),
+                metrics_recorder: config.metrics_recorder,
+                admission_state: AtomicUsize::new(0),
             }),
         })
     }
@@ -485,6 +682,11 @@ where
     /// Returns the number of connections in the pool.
     pub fn size(&self) -> usize {
         self.inner.connections.len()
+    }
+
+    /// Returns the stable name used to identify this pool in metrics.
+    pub fn name(&self) -> &str {
+        &self.inner.name
     }
 
     /// Returns the dispatch strategy.
@@ -526,16 +728,16 @@ where
     /// Returns `true` once [`close`](Self::close) has been called on this pool
     /// or any of its clones.
     pub fn is_closed(&self) -> bool {
-        self.inner.closed.load(Ordering::Acquire)
+        self.inner.admission_state.load(Ordering::Acquire) & POOL_CLOSED_BIT != 0
     }
 
     /// Gracefully close the pool, draining in-flight commands.
     ///
-    /// Flips a shared "closed" flag so that every clone of this pool rejects
-    /// new commands with [`RedisError::ConnectionClosed`], then waits for all
+    /// Flips a shared "closed" bit so that every clone of this pool rejects new
+    /// commands with [`RedisError::ConnectionClosed`], then waits for all
     /// in-flight commands to finish before returning. Each accepted command
-    /// increments a per-slot in-flight counter for its whole duration, so the
-    /// pool is drained once every counter reaches zero.
+    /// atomically increments a pool-wide operation count while confirming the
+    /// pool is open, so closing and admission have one unambiguous order.
     ///
     /// This is the SIGTERM drain path: stop accepting work, let outstanding
     /// commands complete, then exit. It does not itself close the underlying
@@ -543,11 +745,10 @@ where
     /// but it guarantees no command is mid-flight when the connections are
     /// dropped.
     ///
-    /// Because the flag is shared through the pool's `Arc`, calling `close` on
-    /// one clone drains and closes the pool seen by every clone. The draining
-    /// wait is best-effort with respect to a command submitted at the exact
-    /// instant the flag flips; such a command may still slip through and run to
-    /// completion.
+    /// Because the state is shared through the pool's `Arc`, calling `close` on
+    /// one clone drains and closes the pool seen by every clone. Commands
+    /// admitted before the close transition finish normally; commands racing
+    /// after it are rejected.
     ///
     /// # Example
     ///
@@ -565,62 +766,29 @@ where
     /// # }
     /// ```
     pub async fn close(self) {
-        // Signal all clones to stop accepting new commands.
-        self.inner.closed.store(true, Ordering::Release);
-        // Wait for in-flight commands to drain. A closed pool accepts no new
-        // work, so this sum is monotonically non-increasing and reaches zero.
+        // Atomically close admission while preserving the accepted-operation
+        // count. A racing reservation is therefore either included in the
+        // count or observes the closed bit and is rejected.
+        self.inner
+            .admission_state
+            .fetch_or(POOL_CLOSED_BIT, Ordering::AcqRel);
+
+        // A closed pool accepts no new work, so the active portion of the
+        // state is monotonically non-increasing and eventually reaches zero.
         loop {
-            let inflight: usize = self
-                .inner
-                .inflight
-                .iter()
-                .map(|c| c.load(Ordering::Acquire))
-                .sum();
-            if inflight == 0 {
+            if self.inner.admission_state.load(Ordering::Acquire) & POOL_ACTIVE_MASK == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 
-    /// Select the next connection index based on dispatch strategy.
+    /// Select and reserve the next connection based on dispatch strategy.
     ///
-    /// This also increments the inflight counter for the chosen connection.
-    /// The caller is responsible for decrementing after the command completes.
-    fn next_index(&self) -> usize {
-        let len = self.inner.connections.len();
-        let idx = match self.inner.dispatch {
-            DispatchStrategy::RoundRobin => self.inner.index.fetch_add(1, Ordering::Relaxed) % len,
-            DispatchStrategy::Random => {
-                // Simple xorshift-based pseudo-random from the atomic counter.
-                // Not cryptographic, but good enough for load distribution.
-                let mut x = self.inner.index.fetch_add(7, Ordering::Relaxed);
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                x % len
-            }
-            DispatchStrategy::LeastConnections => {
-                // Find the connection with the fewest in-flight commands.
-                // On ties, pick the first (effectively round-robin among tied).
-                let mut min_idx = 0;
-                let mut min_val = self.inner.inflight[0].load(Ordering::Acquire);
-                for i in 1..len {
-                    let val = self.inner.inflight[i].load(Ordering::Acquire);
-                    if val < min_val {
-                        min_val = val;
-                        min_idx = i;
-                    }
-                }
-                min_idx
-            }
-        };
-        // Increment atomically with selection so concurrent callers
-        // see each other's choices for LeastConnections dispatch.
-        // For other strategies the counter is maintained for consistency
-        // and potential observability.
-        self.inner.inflight[idx].fetch_add(1, Ordering::Release);
-        idx
+    /// The returned RAII guard releases the in-flight count on drop, including
+    /// when an execution future is cancelled at an await point.
+    fn next_index(&self) -> Result<InflightReservation<'_>, RedisError> {
+        self.inner.reserve_next()
     }
 }
 
@@ -633,19 +801,15 @@ where
         cmd: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
         let inner = Arc::clone(&self.inner);
-        // Reject new commands on a closed pool before reserving a slot, so
-        // close() can drain the in-flight counters to zero.
-        let closed = inner.closed.load(Ordering::Acquire);
-        let preferred = if closed { 0 } else { self.next_index() };
         async move {
-            if closed {
-                return Err(RedisError::ConnectionClosed);
-            }
-            // inflight already incremented by next_index().
+            // Keep reservation creation inside the async body. Constructing a
+            // trait-method future must not reserve a slot before that future is
+            // first polled. Admission and the closed check are one atomic step.
+            let mut reservation = inner.reserve_next()?;
             // Acquire a connection, scanning for a free slot first to avoid
             // head-of-line blocking on a busy one, then falling back to an
             // awaited (optionally timed) lock on the preferred slot.
-            let (idx, mut conn) = inner.acquire(preferred).await?;
+            let (idx, mut conn) = inner.acquire(&mut reservation).await?;
 
             // Lazy health check: PING if idle beyond the threshold.
             // Gate the syscall behind the interval check to avoid calling
@@ -656,22 +820,22 @@ where
                 if now.saturating_sub(last) >= inner.health_check_interval_ms
                     && let Err(ping_err) = conn.execute(Ping::new()).await
                 {
+                    inner.record_health_check_failed();
                     // PING failed. Attempt to replace the dead slot via the factory.
                     if let Some(ref factory) = inner.factory {
                         match factory.create().await {
                             Ok(fresh) => {
                                 *conn = fresh;
                                 inner.last_used[idx].store(now_millis(), Ordering::Release);
+                                inner.record_connection_replaced();
                             }
                             Err(replace_err) => {
                                 drop(conn);
-                                inner.inflight[idx].fetch_sub(1, Ordering::Release);
                                 return Err(replace_err);
                             }
                         }
                     } else {
                         drop(conn);
-                        inner.inflight[idx].fetch_sub(1, Ordering::Release);
                         return Err(ping_err);
                     }
                 }
@@ -684,7 +848,6 @@ where
                 inner.last_used[idx].store(now_millis(), Ordering::Release);
             }
             drop(conn);
-            inner.inflight[idx].fetch_sub(1, Ordering::Release);
             result
         }
     }
@@ -713,17 +876,11 @@ where
     /// command is executed. If no factory is available, the PING error is
     /// returned to the caller.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        // Reject new commands on a closed pool before reserving a slot, so
-        // close() can drain the in-flight counters to zero.
-        if self.inner.closed.load(Ordering::Acquire) {
-            return Err(RedisError::ConnectionClosed);
-        }
-        let preferred = self.next_index();
-        // inflight already incremented by next_index().
+        let mut reservation = self.next_index()?;
         // Acquire a connection, scanning for a free slot first to avoid
         // head-of-line blocking on a busy one, then falling back to an awaited
         // (optionally timed) lock on the preferred slot.
-        let (idx, mut conn) = self.inner.acquire(preferred).await?;
+        let (idx, mut conn) = self.inner.acquire(&mut reservation).await?;
 
         // Lazy health check: PING if idle beyond the threshold.
         // Gate the syscall behind the interval check to avoid calling
@@ -734,22 +891,22 @@ where
             if now.saturating_sub(last) >= self.inner.health_check_interval_ms
                 && let Err(ping_err) = conn.execute(Ping::new()).await
             {
+                self.inner.record_health_check_failed();
                 // PING failed. Attempt to replace the dead slot via the factory.
                 if let Some(ref factory) = self.inner.factory {
                     match factory.create().await {
                         Ok(fresh) => {
                             *conn = fresh;
                             self.inner.last_used[idx].store(now_millis(), Ordering::Release);
+                            self.inner.record_connection_replaced();
                         }
                         Err(replace_err) => {
                             drop(conn);
-                            self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
                             return Err(replace_err);
                         }
                     }
                 } else {
                     drop(conn);
-                    self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
                     return Err(ping_err);
                 }
             }
@@ -762,7 +919,6 @@ where
             self.inner.last_used[idx].store(now_millis(), Ordering::Release);
         }
         drop(conn);
-        self.inner.inflight[idx].fetch_sub(1, Ordering::Release);
         result
     }
 
@@ -777,9 +933,13 @@ where
     /// [`execute`](ConnectionPool::execute) with [`Ping`]
     /// directly.
     pub async fn health_check(&self) -> Result<(), RedisError> {
+        let _admission = PoolAdmission::try_new(&self.inner.admission_state)?;
         for i in 0..self.inner.connections.len() {
             let mut conn = self.inner.connections[i].lock().await;
-            conn.execute(Ping::new()).await?;
+            if let Err(error) = conn.execute(Ping::new()).await {
+                self.inner.record_health_check_failed();
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -788,10 +948,50 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics_layer::ErrorKind;
     use bytes::Bytes;
     use redis_tower_core::Frame;
     use std::collections::VecDeque;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
+
+    #[derive(Default)]
+    struct CountingRecorder {
+        acquisitions: StdMutex<Vec<(String, Duration, bool)>>,
+        health_check_failures: AtomicUsize,
+        connection_replacements: AtomicUsize,
+    }
+
+    impl CountingRecorder {
+        fn acquisitions(&self) -> Vec<(String, Duration, bool)> {
+            self.acquisitions.lock().unwrap().clone()
+        }
+    }
+
+    impl MetricsRecorder for CountingRecorder {
+        fn command_completed(
+            &self,
+            _command: &str,
+            _duration: Duration,
+            _error: Option<ErrorKind>,
+        ) {
+        }
+
+        fn pool_acquisition_completed(&self, pool_name: &str, duration: Duration, timed_out: bool) {
+            self.acquisitions
+                .lock()
+                .unwrap()
+                .push((pool_name.to_owned(), duration, timed_out));
+        }
+
+        fn pool_health_check_failed(&self, _pool_name: &str) {
+            self.health_check_failures.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn pool_connection_replaced(&self, _pool_name: &str) {
+            self.connection_replacements.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     /// Mock connection for testing pool dispatch without Redis.
     struct MockConn {
@@ -863,24 +1063,38 @@ mod tests {
     #[tokio::test]
     async fn pool_default_config() {
         let config = PoolConfig::default();
+        assert_eq!(config.name, "redis-tower");
         assert_eq!(config.size, 4);
         assert!(matches!(config.dispatch, DispatchStrategy::RoundRobin));
+        assert!(config.metrics_recorder.is_none());
     }
 
     #[tokio::test]
     async fn pool_config_builder() {
+        let recorder = Arc::new(CountingRecorder::default());
         let config = PoolConfig::default()
+            .name("primary-cache")
             .size(8)
-            .dispatch(DispatchStrategy::Random);
+            .dispatch(DispatchStrategy::Random)
+            .metrics_recorder(recorder);
+        let debug = format!("{config:?}");
+
+        assert_eq!(config.name, "primary-cache");
         assert_eq!(config.size, 8);
         assert!(matches!(config.dispatch, DispatchStrategy::Random));
+        assert!(config.metrics_recorder.is_some());
+        assert!(debug.contains("primary-cache"));
+        assert!(debug.contains("<recorder>"));
     }
 
     #[tokio::test]
     async fn pool_from_connections() {
         let conns = vec![MockConn::new(0, vec![]), MockConn::new(1, vec![])];
-        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        let pool =
+            ConnectionPool::from_connections(conns, PoolConfig::default().name("read-replicas"))
+                .unwrap();
         assert_eq!(pool.size(), 2);
+        assert_eq!(pool.name(), "read-replicas");
     }
 
     #[tokio::test]
@@ -1110,19 +1324,18 @@ mod tests {
         .unwrap();
 
         // Both start at 0. First next_index() picks 0 and increments it.
-        let idx0 = pool.next_index();
-        assert_eq!(idx0, 0);
+        let reservation0 = pool.next_index().unwrap();
+        assert_eq!(reservation0.index(), 0);
         assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 1);
         assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 0);
 
         // Second call should now pick connection 1 (inflight 0 < 1).
-        let idx1 = pool.next_index();
-        assert_eq!(idx1, 1);
+        let reservation1 = pool.next_index().unwrap();
+        assert_eq!(reservation1.index(), 1);
         assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 1);
 
-        // Clean up the counters so other assertions don't break.
-        pool.inner.inflight[0].fetch_sub(1, Ordering::Release);
-        pool.inner.inflight[1].fetch_sub(1, Ordering::Release);
+        drop((reservation0, reservation1));
+        assert_eq!(pool.stats().total_inflight, 0);
     }
 
     #[tokio::test]
@@ -1247,6 +1460,7 @@ mod tests {
     async fn pool_health_check_dead_connection_replaced() {
         use redis_tower_commands::Ping;
 
+        let recorder = Arc::new(CountingRecorder::default());
         // The factory serves two connections in order:
         //   slot 0 (initial): dead — first call returns an error (simulates a
         //     stale/closed connection whose health-check PING will fail).
@@ -1256,10 +1470,12 @@ mod tests {
             MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
         ]);
 
-        let pool = ConnectionPool::connect_with_factory(
+        let mut pool = ConnectionPool::connect_with_factory(
             PoolConfig::default()
+                .name("write-pool")
                 .size(1)
-                .health_check_interval(Duration::from_millis(1)),
+                .health_check_interval(Duration::from_millis(1))
+                .metrics_recorder(recorder.clone()),
             factory,
         )
         .await
@@ -1273,8 +1489,12 @@ mod tests {
         //  2. The PING on the dead connection returns an error.
         //  3. The factory creates the fresh connection and replaces the slot.
         //  4. The actual Ping command is sent on the fresh connection and succeeds.
-        let result: String = pool.execute(Ping::new()).await.unwrap();
+        let result: String = RedisExecutor::execute(&mut pool, Ping::new())
+            .await
+            .unwrap();
         assert_eq!(result, "PONG");
+        assert_eq!(recorder.health_check_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.connection_replacements.load(Ordering::Relaxed), 1);
     }
 
     /// Verify that when a health check PING fails and no factory is available,
@@ -1283,6 +1503,7 @@ mod tests {
     async fn pool_health_check_dead_no_factory_returns_error() {
         use redis_tower_commands::Ping;
 
+        let recorder = Arc::new(CountingRecorder::default());
         let dead_conn = MockConn::new(0, vec![Frame::Error(Bytes::from("ERR connection closed"))]);
 
         // No factory — use from_connections.
@@ -1290,7 +1511,8 @@ mod tests {
             vec![dead_conn],
             PoolConfig::default()
                 .dispatch(DispatchStrategy::RoundRobin)
-                .health_check_interval(Duration::from_millis(1)),
+                .health_check_interval(Duration::from_millis(1))
+                .metrics_recorder(recorder.clone()),
         )
         .unwrap();
 
@@ -1298,6 +1520,37 @@ mod tests {
 
         let result = pool.execute(Ping::new()).await;
         assert!(result.is_err(), "expected error when no factory present");
+        assert_eq!(recorder.health_check_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.connection_replacements.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn pool_failed_replacement_is_not_recorded() {
+        use redis_tower_commands::Ping;
+
+        let recorder = Arc::new(CountingRecorder::default());
+        // The sole factory connection is installed initially, leaving no fresh
+        // connection available when its lazy health check subsequently fails.
+        let factory = MockFactory::new(vec![MockConn::new(
+            0,
+            vec![Frame::Error(Bytes::from("ERR connection closed"))],
+        )]);
+        let pool = ConnectionPool::connect_with_factory(
+            PoolConfig::default()
+                .size(1)
+                .health_check_interval(Duration::from_millis(1))
+                .metrics_recorder(recorder.clone()),
+            factory,
+        )
+        .await
+        .unwrap();
+        pool.inner.last_used[0].store(0, Ordering::Release);
+
+        let result: Result<String, _> = pool.execute(Ping::new()).await;
+
+        assert!(result.is_err(), "replacement factory should be exhausted");
+        assert_eq!(recorder.health_check_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.connection_replacements.load(Ordering::Relaxed), 0);
     }
 
     /// When acquisition_timeout is set and all slots are busy,
@@ -1332,6 +1585,43 @@ mod tests {
         );
         // Should return well under 1 second (timeout is 50 ms).
         assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn pool_records_successful_and_timed_out_acquisitions() {
+        use redis_tower_commands::Ping;
+
+        let recorder = Arc::new(CountingRecorder::default());
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default()
+                .name("acquisition-test")
+                .acquisition_timeout(Duration::from_millis(10))
+                .metrics_recorder(recorder.clone()),
+        )
+        .unwrap();
+
+        let pong: String = pool.execute(Ping::new()).await.unwrap();
+        assert_eq!(pong, "PONG");
+
+        let _guard = pool.inner.connections[0].lock().await;
+        let result: Result<String, _> = pool.execute(Ping::new()).await;
+        assert!(matches!(
+            result,
+            Err(RedisError::PoolAcquisitionTimeout { .. })
+        ));
+
+        let acquisitions = recorder.acquisitions();
+        assert_eq!(acquisitions.len(), 2);
+        assert_eq!(acquisitions[0].0, "acquisition-test");
+        assert!(!acquisitions[0].2);
+        assert_eq!(acquisitions[1].0, "acquisition-test");
+        assert!(acquisitions[1].1 >= Duration::from_millis(10));
+        assert!(acquisitions[1].2);
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 0);
     }
 
     /// The default config now bounds the acquisition wait, so callers fail
@@ -1487,15 +1777,22 @@ mod tests {
 
     #[tokio::test]
     async fn pool_health_check_returns_first_error() {
+        let recorder = Arc::new(CountingRecorder::default());
         // Connection 0 returns an error frame (no healthy response).
         let conns = vec![
             MockConn::new(0, vec![Frame::Error(Bytes::from("ERR connection dead"))]),
             MockConn::new(1, vec![Frame::SimpleString(Bytes::from("PONG"))]),
         ];
 
-        let pool = ConnectionPool::from_connections(conns, PoolConfig::default()).unwrap();
+        let pool = ConnectionPool::from_connections(
+            conns,
+            PoolConfig::default().metrics_recorder(recorder.clone()),
+        )
+        .unwrap();
         let result = pool.health_check().await;
         assert!(result.is_err());
+        assert_eq!(recorder.health_check_failures.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.connection_replacements.load(Ordering::Relaxed), 0);
     }
 
     /// A connection whose `execute` blocks until the test releases it, used to
@@ -1518,6 +1815,138 @@ mod tests {
                 cmd.parse_response(Frame::SimpleString(Bytes::from("PONG")))
             }
         }
+    }
+
+    #[tokio::test]
+    async fn pool_unpolled_trait_future_never_reserves_connection() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default(),
+        )
+        .unwrap();
+        let mut executor_view = pool.clone();
+
+        let future = RedisExecutor::execute(&mut executor_view, Ping::new());
+
+        assert_eq!(pool.stats().total_inflight, 0);
+        drop(future);
+        assert_eq!(pool.stats().total_inflight, 0);
+        tokio::time::timeout(Duration::from_secs(1), pool.close())
+            .await
+            .expect("an unpolled command future must not prevent pool close");
+    }
+
+    #[tokio::test]
+    async fn pool_abort_while_waiting_releases_reservation() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().disable_acquisition_timeout(),
+        )
+        .unwrap();
+        let connection_guard = pool.inner.connections[0].lock().await;
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move { task_pool.execute(Ping::new()).await });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while pool.stats().total_inflight == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("command should reserve a slot before waiting for its lock");
+        assert_eq!(pool.stats().total_inflight, 1);
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(pool.stats().total_inflight, 0);
+        drop(connection_guard);
+
+        tokio::time::timeout(Duration::from_secs(1), pool.close())
+            .await
+            .expect("an aborted acquisition must not prevent pool close");
+    }
+
+    #[tokio::test]
+    async fn pool_abort_during_command_releases_reservation() {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let pool = ConnectionPool::from_connections(
+            vec![BlockingConn {
+                started: Arc::clone(&started),
+                release,
+            }],
+            PoolConfig::default(),
+        )
+        .unwrap();
+        let mut task_pool = pool.clone();
+        let task =
+            tokio::spawn(async move { RedisExecutor::execute(&mut task_pool, Ping::new()).await });
+
+        started.notified().await;
+        assert_eq!(pool.stats().total_inflight, 1);
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(pool.stats().total_inflight, 0);
+
+        tokio::time::timeout(Duration::from_secs(1), pool.close())
+            .await
+            .expect("an aborted in-command await must not prevent pool close");
+    }
+
+    #[tokio::test]
+    async fn pool_abort_after_alternate_slot_transfer_releases_reservation() {
+        let alternate_started = Arc::new(tokio::sync::Notify::new());
+        let pool = ConnectionPool::from_connections(
+            vec![
+                BlockingConn {
+                    started: Arc::new(tokio::sync::Notify::new()),
+                    release: Arc::new(tokio::sync::Notify::new()),
+                },
+                BlockingConn {
+                    started: Arc::clone(&alternate_started),
+                    release: Arc::new(tokio::sync::Notify::new()),
+                },
+            ],
+            PoolConfig::default().dispatch(DispatchStrategy::RoundRobin),
+        )
+        .unwrap();
+
+        // The first round-robin reservation prefers slot 0. Holding its mutex
+        // forces acquisition to transfer that reservation to idle slot 1.
+        let preferred_guard = pool.inner.connections[0].lock().await;
+        let task_pool = pool.clone();
+        let task = tokio::spawn(async move { task_pool.execute(Ping::new()).await });
+
+        tokio::time::timeout(Duration::from_secs(1), alternate_started.notified())
+            .await
+            .expect("command should start on the alternate slot");
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 0);
+        assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 1);
+        assert_eq!(
+            pool.inner.admission_state.load(Ordering::Acquire) & POOL_ACTIVE_MASK,
+            1
+        );
+
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(pool.inner.inflight[0].load(Ordering::Acquire), 0);
+        assert_eq!(pool.inner.inflight[1].load(Ordering::Acquire), 0);
+        assert_eq!(
+            pool.inner.admission_state.load(Ordering::Acquire) & POOL_ACTIVE_MASK,
+            0
+        );
+        drop(preferred_guard);
+
+        tokio::time::timeout(Duration::from_secs(1), pool.close())
+            .await
+            .expect("an aborted alternate-slot command must not prevent pool close");
     }
 
     #[tokio::test]

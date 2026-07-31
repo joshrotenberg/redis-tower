@@ -9,6 +9,13 @@ publish = false
 # `--no-default-features` to skip the TLS example and its rustls dependency.
 default = ["tls"]
 tls = ["redis-tower/tls-rustls"]
+prometheus = ["redis-tower/metrics", "dep:metrics-exporter-prometheus"]
+otel = [
+    "redis-tower/metrics",
+    "dep:metrics-opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-stdout",
+]
 
 [dependencies]
 redis-tower = { workspace = true, features = ["serde"] }
@@ -22,6 +29,10 @@ tower = { workspace = true }
 tower-service = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false, features = ["http-listener"], optional = true }
+metrics-opentelemetry = { version = "0.24032.8", optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["metrics"], optional = true }
+opentelemetry-stdout = { version = "0.32", default-features = false, features = ["metrics"], optional = true }
 
 [[example]]
 name = "basic"
@@ -87,3 +98,13 @@ path = "json_api.rs"
 name = "tls"
 path = "tls.rs"
 required-features = ["tls"]
+
+[[example]]
+name = "prometheus"
+path = "prometheus.rs"
+required-features = ["prometheus"]
+
+[[example]]
+name = "otel"
+path = "otel.rs"
+required-features = ["otel"]

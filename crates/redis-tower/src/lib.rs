@@ -319,6 +319,8 @@
 //! - `commands-tdigest` -- t-digest commands
 //! - `commands-timeseries` -- TimeSeries commands
 //! - `commands-vector-sets` -- Vector Set commands
+//! - `metrics` -- [`metrics`](https://docs.rs/metrics)-facade recorder plus
+//!   connection-pool and auto-pipeline stats exporters
 //! - `serde` -- `Json` and `Search` high-level APIs
 //! - `tls-native-tls` -- TLS via native-tls backend
 //! - `tls-rustls` -- TLS via rustls backend
@@ -391,6 +393,12 @@ pub use credentials::{
     AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
 };
 pub use executor::{ExecutorService, RedisExecutor};
+#[cfg(feature = "metrics")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
+pub use metrics_layer::{
+    MetricsExporterHandle, MetricsFacadeRecorder, spawn_pool_stats_exporter,
+    spawn_queue_depth_exporter,
+};
 pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
