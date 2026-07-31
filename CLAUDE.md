@@ -105,6 +105,12 @@ cargo test --test '*' --all-features   # all standalone integration tests
 
 Test files: `integration.rs`, `test_acl.rs`, `test_bitmap.rs`, `test_errors.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_lists.rs`, `test_object.rs`, `test_pool.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
 
+The admin-command fixtures stay in this tier rather than requiring Docker.
+`test_acl.rs` provisions an `aclfile`-backed Redis process and verifies the
+`ACL SAVE`/`ACL LOAD` persistence round trip. `test_server.rs` uses dedicated
+primary and replica processes to exercise `REPLICAOF` and coordinated
+`FAILOVER`. Both run in the normal per-PR standalone integration job.
+
 ### Cluster tests (`crates/redis-tower-cluster/tests/`)
 
 Starts a 3-master cluster. **Ports 17200-17202** (plain), **17300-17302** (auth), **17400-17402** (TLS). Avoids 7000 which conflicts with macOS Control Center.
@@ -242,4 +248,4 @@ The agreed working sequence is **architecture first, then bugs, then features**.
 
 **Cross-repo dogfooding** (filed on the user's own supporting crates, worked in parallel): `docker-wrapper` #243-#250 (chaos-test backbone; being remediated now), `redis-server-wrapper` #79-#80 (byte-level fault proxy, reshard orchestration), `tower-resilience` #346-#347 (Clone bound + `failure_classifier` for the #399 adapter).
 
-**Test architecture decision**: per-PR tests stay on `redis-server-wrapper` processes (it already has chaos kill/freeze/failover, ACL files, `replicaof`, full TLS). A nightly Docker tier (`redis-chaos-tests`, #411) covers only what processes cannot: image-based version/Stack/Valkey matrices and true network partitions. `ACL SAVE`/`LOAD` (#414) and `REPLICAOF`/`FAILOVER` (#415) moved to the process tier; module-client integration tests are still `#[ignore]` (run with `-- --ignored`).
+**Test architecture decision**: per-PR tests stay on `redis-server-wrapper` processes (it already has chaos kill/freeze/failover, ACL files, `replicaof`, full TLS). A nightly Docker tier (`redis-chaos-tests`, #411) covers only what processes cannot: image-based version/Stack/Valkey matrices and true network partitions. The tier-1 process suite covers `ACL SAVE`/`ACL LOAD` with an `aclfile`-backed restart fixture (#414), and `REPLICAOF`/`FAILOVER` with dedicated primary and replica processes (#415). Module-client integration tests are still `#[ignore]` (run with `-- --ignored`).
