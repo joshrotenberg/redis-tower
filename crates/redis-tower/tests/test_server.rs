@@ -1,8 +1,10 @@
 mod common;
 
 use common::conn;
-use redis_tower::Frame;
+use redis_server_wrapper::RedisServer;
 use redis_tower::commands::*;
+use redis_tower::{Frame, RedisConnection};
+use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn cover_info() {
@@ -185,10 +187,221 @@ async fn cover_wait_zero() {
 }
 
 // Skipped: CLIENT KILL -- killing the current connection or random connections
-// would disrupt other tests running in parallel.
-//
-// Skipped: REPLICAOF, FAILOVER -- require a primary+replica setup that the
-// standalone test harness does not provide.
+// would disrupt other tests running in parallel. REPLICAOF and FAILOVER use the
+// isolated two-process topology below instead of the shared standalone server.
+
+/// Reserve two distinct loopback ports and release them for Redis to bind.
+///
+/// Holding both listeners until both ports have been selected prevents the OS
+/// from handing the same ephemeral port back to the second allocation.
+fn free_replication_ports() -> (u16, u16) {
+    let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind first ephemeral port");
+    let second = std::net::TcpListener::bind("127.0.0.1:0").expect("bind second ephemeral port");
+    let first_port = first.local_addr().expect("first local_addr").port();
+    let second_port = second.local_addr().expect("second local_addr").port();
+    assert_ne!(first_port, second_port, "ephemeral ports must be distinct");
+    drop((first, second));
+    (first_port, second_port)
+}
+
+fn info_value<'a>(info: &'a str, field: &str) -> Option<&'a str> {
+    info.lines().find_map(|line| {
+        let (name, value) = line.trim_end_matches('\r').split_once(':')?;
+        (name == field).then_some(value)
+    })
+}
+
+/// Poll INFO replication through fresh connections until a topology state is
+/// observable. Replication setup and FAILOVER both complete asynchronously, so
+/// asserting immediately after their `OK` replies would be inherently racy.
+async fn wait_for_replication_info(
+    addr: &str,
+    description: &str,
+    condition: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + Duration::from_secs(15);
+
+    loop {
+        let last_observation = match RedisConnection::connect(addr).await {
+            Ok(mut connection) => {
+                match connection.execute(Info::new().section("replication")).await {
+                    Ok(info) if condition(&info) => return info,
+                    Ok(info) => info,
+                    Err(error) => format!("INFO replication failed: {error}"),
+                }
+            }
+            Err(error) => format!("connection failed: {error}"),
+        };
+
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {description} at {addr}; last observation:\n{last_observation}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// REPLICAOF can demote and promote a standalone server, and FAILOVER can then
+/// coordinate a role swap with a synchronized replica.
+///
+/// All destructive topology changes are kept in one ordered test with two
+/// dedicated server handles. The handles stop their processes on drop, even if
+/// an assertion unwinds the test, so the shared integration server is never
+/// affected and the selected ports are released for subsequent tests.
+#[tokio::test]
+async fn cover_replicaof_and_failover() {
+    let (first_port, second_port) = free_replication_ports();
+    let first_server = RedisServer::new()
+        .port(first_port)
+        .start()
+        .await
+        .expect("failed to start first replication server");
+    let second_server = RedisServer::new()
+        .port(second_port)
+        .start()
+        .await
+        .expect("failed to start second replication server");
+    let first_addr = first_server.addr();
+    let second_addr = second_server.addr();
+
+    let mut first = RedisConnection::connect(&first_addr)
+        .await
+        .expect("failed to connect to first replication server");
+    let mut second = RedisConnection::connect(&second_addr)
+        .await
+        .expect("failed to connect to second replication server");
+
+    let initial_key = "test:server:replicaof:initial";
+    first
+        .execute(Set::new(initial_key, "copied-by-replicaof"))
+        .await
+        .expect("failed to seed the initial master");
+
+    // Demote the second standalone server and wait for its initial full sync.
+    second
+        .execute(ReplicaOf::new("127.0.0.1", first_port))
+        .await
+        .expect("REPLICAOF should accept the first server as master");
+    wait_for_replication_info(
+        &second_addr,
+        "second server to become a synced replica",
+        |info| {
+            info_value(info, "role") == Some("slave")
+                && info_value(info, "master_port") == Some(first_port.to_string().as_str())
+                && info_value(info, "master_link_status") == Some("up")
+        },
+    )
+    .await;
+
+    let copied = second
+        .execute(Get::new(initial_key))
+        .await
+        .expect("replica should serve the synchronized key");
+    assert_eq!(
+        copied,
+        Some(bytes::Bytes::from("copied-by-replicaof")),
+        "REPLICAOF should synchronize the master's existing data"
+    );
+
+    // Promote the replica without discarding its synchronized dataset.
+    second
+        .execute(ReplicaOf::no_one())
+        .await
+        .expect("REPLICAOF NO ONE should promote the second server");
+    wait_for_replication_info(&second_addr, "second server promotion", |info| {
+        info_value(info, "role") == Some("master")
+    })
+    .await;
+    second
+        .execute(Set::new("test:server:replicaof:promoted", "writable"))
+        .await
+        .expect("promoted server should accept writes");
+
+    // Demote it again, wait for a healthy link, and put a marker into the
+    // replication stream before asking the original master to fail over.
+    second
+        .execute(ReplicaOf::new("127.0.0.1", first_port))
+        .await
+        .expect("second server should reattach as a replica");
+    wait_for_replication_info(&second_addr, "second server to reattach", |info| {
+        info_value(info, "role") == Some("slave")
+            && info_value(info, "master_port") == Some(first_port.to_string().as_str())
+            && info_value(info, "master_link_status") == Some("up")
+    })
+    .await;
+
+    let failover_key = "test:server:failover:before";
+    first
+        .execute(Set::new(failover_key, "survives-role-swap"))
+        .await
+        .expect("failed to seed failover marker");
+    let acknowledgements = first
+        .execute(Wait::new(1, 5_000))
+        .await
+        .expect("WAIT should observe the attached replica");
+    assert_eq!(acknowledgements, 1, "replica should acknowledge the marker");
+
+    // FAILOVER returns when the operation is accepted; the role transition is
+    // completed by a background task and is therefore polled below.
+    first
+        .execute(Failover::new().to("127.0.0.1", second_port).timeout(5_000))
+        .await
+        .expect("FAILOVER should be accepted by the original master");
+
+    wait_for_replication_info(
+        &second_addr,
+        "second server to become failover master",
+        |info| info_value(info, "role") == Some("master"),
+    )
+    .await;
+    wait_for_replication_info(
+        &first_addr,
+        "first server to become a synced replica",
+        |info| {
+            info_value(info, "role") == Some("slave")
+                && info_value(info, "master_port") == Some(second_port.to_string().as_str())
+                && info_value(info, "master_link_status") == Some("up")
+        },
+    )
+    .await;
+
+    let mut new_master = RedisConnection::connect(&second_addr)
+        .await
+        .expect("failed to connect to the failover master");
+    let preserved = new_master
+        .execute(Get::new(failover_key))
+        .await
+        .expect("new master should serve data written before failover");
+    assert_eq!(
+        preserved,
+        Some(bytes::Bytes::from("survives-role-swap")),
+        "coordinated failover should preserve replicated data"
+    );
+
+    let after_key = "test:server:failover:after";
+    new_master
+        .execute(Set::new(after_key, "written-on-new-master"))
+        .await
+        .expect("new master should accept writes");
+    let acknowledgements = new_master
+        .execute(Wait::new(1, 5_000))
+        .await
+        .expect("old master should acknowledge replication after the role swap");
+    assert_eq!(
+        acknowledgements, 1,
+        "demoted old master should replicate from the new master"
+    );
+
+    let replicated_back = first
+        .execute(Get::new(after_key))
+        .await
+        .expect("demoted old master should serve replicated data");
+    assert_eq!(
+        replicated_back,
+        Some(bytes::Bytes::from("written-on-new-master")),
+        "writes to the new master should replicate back to the old master"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // CLIENT command coverage (issue #353)

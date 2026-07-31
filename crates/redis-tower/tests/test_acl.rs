@@ -1,18 +1,58 @@
 //! Integration tests for ACL commands against a real Redis server.
 //!
-//! The test server is started without auth and without an ACL file on disk,
-//! which constrains what can be exercised here:
-//!
-//! - `AclSave` and `AclLoad` require Redis to be started with an ACL file
-//!   (the `aclfile` directive). Without one they return an error, so they are
-//!   not tested here.
-//! - `AclDryRun` does not require an ACL file and is exercised below: a user is
-//!   created with a narrow permission set, then `ACL DRYRUN` confirms that an
-//!   allowed command is permitted and a disallowed command is rejected.
+//! Most tests use the shared unauthenticated server. The `ACL SAVE` / `ACL
+//! LOAD` test owns a dedicated process configured with an ACL file so it can
+//! verify both runtime reloads and persistence across a server restart.
 
 mod common;
+
+use std::path::{Path, PathBuf};
+
 use common::conn;
+use redis_server_wrapper::RedisServer;
 use redis_tower::commands::*;
+use redis_tower::{Frame, RedisConnection};
+
+/// Reserve and immediately release an ephemeral port for a dedicated Redis
+/// process. The wrapper binds it immediately afterward.
+fn free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+    let port = listener.local_addr().expect("read ephemeral port").port();
+    drop(listener);
+    port
+}
+
+/// Per-test directory removed after both Redis processes have stopped.
+struct AclTestDir(PathBuf);
+
+impl AclTestDir {
+    fn new(port: u16) -> Self {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "redis-tower-acl-{}-{port}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).expect("create ACL test directory");
+        Self(path)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for AclTestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn acl_user_exists(frame: &Frame) -> bool {
+    !matches!(frame, Frame::Null | Frame::BulkString(None))
+}
 
 #[tokio::test]
 async fn acl_whoami() {
@@ -140,6 +180,124 @@ async fn acl_dryrun_allows_and_denies() {
     // Clean up.
     let deleted = c.execute(AclDelUser::new(user)).await.unwrap();
     assert_eq!(deleted, 1);
+}
+
+#[tokio::test]
+async fn acl_save_load_and_restart_persist_acl_file() {
+    // Compatibility jobs point at an externally managed Redis image. This
+    // scenario must own and restart its process, so it runs in the normal
+    // integration job where redis-server is available on PATH.
+    if std::env::var_os("REDIS_EXTERNAL_SERVICE").is_some() {
+        return;
+    }
+
+    let port = free_port();
+    let test_dir = AclTestDir::new(port);
+    let acl_file = test_dir.path().join("users.acl");
+
+    // Redis requires the configured ACL file to exist at startup. Seed an
+    // unrestricted default user so the test can administer the dedicated
+    // server without authentication.
+    std::fs::write(&acl_file, "user default on nopass ~* +@all\n").expect("seed ACL file");
+
+    let server = RedisServer::new()
+        .port(port)
+        .dir(test_dir.path())
+        .acl_file(&acl_file)
+        .save(false)
+        .start()
+        .await
+        .expect("start Redis with an ACL file");
+    let addr = server.addr();
+    let mut c = RedisConnection::connect(&addr)
+        .await
+        .expect("connect to ACL test server");
+
+    let persisted_user = "redis_tower_persisted_user";
+    let runtime_only_user = "redis_tower_runtime_only_user";
+
+    c.execute(
+        AclSetUser::new(persisted_user)
+            .rule("on")
+            .rule(">persisted-secret")
+            .rule("~persisted:*")
+            .rule("+get"),
+    )
+    .await
+    .expect("create user to persist");
+    c.execute(AclSave::new()).await.expect("save ACL file");
+
+    let saved = std::fs::read_to_string(&acl_file).expect("read saved ACL file");
+    assert!(
+        saved.contains(&format!("user {persisted_user} ")),
+        "ACL SAVE did not write {persisted_user}: {saved}"
+    );
+
+    // Diverge runtime state from disk, then prove ACL LOAD replaces it with
+    // the last saved definitions.
+    assert_eq!(c.execute(AclDelUser::new(persisted_user)).await.unwrap(), 1);
+    c.execute(
+        AclSetUser::new(runtime_only_user)
+            .rule("on")
+            .rule("nopass")
+            .rule("~runtime:*")
+            .rule("+get"),
+    )
+    .await
+    .expect("create runtime-only user");
+
+    c.execute(AclLoad::new()).await.expect("reload ACL file");
+
+    let persisted = c
+        .execute(AclGetUser::new(persisted_user))
+        .await
+        .expect("query reloaded user");
+    assert!(
+        acl_user_exists(&persisted),
+        "ACL LOAD did not restore {persisted_user}: {persisted:?}"
+    );
+    let runtime_only = c
+        .execute(AclGetUser::new(runtime_only_user))
+        .await
+        .expect("query runtime-only user after load");
+    assert!(
+        !acl_user_exists(&runtime_only),
+        "ACL LOAD retained unsaved user {runtime_only_user}: {runtime_only:?}"
+    );
+
+    // Stop cleanly without saving any database state, then start a fresh
+    // process against the same ACL file and verify the saved user survives.
+    drop(c);
+    drop(server);
+
+    let restarted = RedisServer::new()
+        .port(port)
+        .dir(test_dir.path())
+        .acl_file(&acl_file)
+        .save(false)
+        .start()
+        .await
+        .expect("restart Redis with the saved ACL file");
+    let mut c = RedisConnection::connect(&restarted.addr())
+        .await
+        .expect("connect after ACL server restart");
+
+    let persisted = c
+        .execute(AclGetUser::new(persisted_user))
+        .await
+        .expect("query persisted user after restart");
+    assert!(
+        acl_user_exists(&persisted),
+        "saved user did not survive restart: {persisted:?}"
+    );
+    let runtime_only = c
+        .execute(AclGetUser::new(runtime_only_user))
+        .await
+        .expect("query runtime-only user after restart");
+    assert!(
+        !acl_user_exists(&runtime_only),
+        "unsaved user survived restart: {runtime_only:?}"
+    );
 }
 
 #[tokio::test]
