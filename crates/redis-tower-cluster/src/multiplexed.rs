@@ -844,6 +844,17 @@ impl MultiplexedClusterClient {
         addrs
     }
 
+    /// Whether this client currently holds a master service for `addr`.
+    ///
+    /// Lets the cluster-wide scan tell a node that has left this client's master
+    /// set -- pruned by a topology refresh, because `CLUSTER SLOTS` no longer
+    /// lists it as owning any -- from a node that is present and failing. The
+    /// first is a membership change to be skipped, the second a scan failure to
+    /// be surfaced.
+    pub(crate) async fn holds_master(&self, addr: &str) -> bool {
+        self.inner.read().await.masters.contains_key(addr)
+    }
+
     /// Execute a command against one specific master node, bypassing slot
     /// routing and the redirect loop.
     ///
