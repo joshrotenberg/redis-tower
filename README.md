@@ -83,6 +83,111 @@ Built-in layers: `TracingLayer`, `MetricsLayer`, `CacheService`, `ReconnectServi
 Composes with [tower-resilience](https://crates.io/crates/tower-resilience) for
 circuit breaking, retry with backoff, rate limiting, and bulkhead isolation.
 
+## Observability
+
+Enable the `metrics` feature to send redis-tower measurements through the
+lightweight [`metrics`](https://docs.rs/metrics) facade. The application installs
+one global exporter; redis-tower stays independent of the chosen backend.
+
+```toml
+[dependencies]
+redis-tower = { version = "0.1", features = ["metrics"] }
+```
+
+```rust,ignore
+use std::{sync::Arc, time::Duration};
+use redis_tower::{AutoPipelineConfig, MetricsFacadeRecorder,
+    MultiplexedClient, RedisConnection, spawn_pool_stats_exporter,
+    spawn_queue_depth_exporter};
+use redis_tower::pool::{ConnectionPool, PoolConfig};
+
+// Install a metrics-facade exporter before constructing this recorder.
+let recorder = Arc::new(MetricsFacadeRecorder::new());
+
+let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+let client = MultiplexedClient::from_connection_with_config(conn, AutoPipelineConfig {
+    metrics_recorder: Some(recorder.clone()),
+    ..AutoPipelineConfig::default()
+});
+
+let pool = ConnectionPool::connect_with_config(
+    PoolConfig::default()
+        .name("primary")
+        .metrics_recorder(recorder),
+    || async { RedisConnection::connect("127.0.0.1:6379").await },
+).await?;
+let pool_stats = spawn_pool_stats_exporter(pool.clone(), Duration::from_secs(5));
+let queue_stats = spawn_queue_depth_exporter(
+    client.clone(), "commands", Duration::from_secs(5));
+
+println!("pending pipeline requests: {}", client.queue_depth());
+# let _ = (pool_stats, queue_stats);
+```
+
+Use a stable, distinct `PoolConfig::name` for every pool; it becomes the
+`db.client.connection.pool.name` label. `AutoPipelineConfig` reports worker
+batch sizes. Wrap the frame service in `MetricsLayer` as well when command
+duration, count, outcome, and error metrics are needed. `queue_depth()` is an
+instantaneous in-process snapshot for an `AutoPipelineService`-backed
+`MultiplexedClient`; `spawn_queue_depth_exporter` publishes that snapshot as a
+named gauge. Keep each returned `MetricsExporterHandle` alive while gauges
+should be published; dropping it cancels the background task, and
+`shutdown().await` emits a final snapshot, cancels, and joins it explicitly.
+The queue exporter retains a client clone, so stop it before gracefully
+shutting down the client.
+
+The built-in recorder emits:
+
+- commands: `db.client.operation.duration` and `redis_tower.commands`;
+- auto-pipelines: `redis_tower.pipeline.batch_size` and
+  `redis_tower.pipeline.queue_depth`;
+- pool waits and lifecycle: `db.client.connection.wait_time`,
+  `db.client.connection.timeouts`, `redis_tower.pool.health_check_failures`,
+  and `redis_tower.pool.connection_replacements`;
+- pool snapshots: `db.client.connection.count`,
+  `db.client.connection.max`, `db.client.connection.pending_requests`,
+  `redis_tower.pool.inflight_commands`, and
+  `redis_tower.pool.max_inflight_per_connection`.
+
+The pool measurements use OpenTelemetry database client semantic-convention
+metric and attribute names. The `metrics` facade represents the connection and
+request snapshots as gauges with a generic count unit; exporters therefore do
+not preserve OpenTelemetry's specialized instrument kinds and `{connection}` /
+`{request}` units. These conventions are currently development status and may
+evolve before stabilization. The
+[`prometheus`](examples/prometheus.rs) and [`otel`](examples/otel.rs) examples
+show complete exporter setup against a local Redis server:
+
+```shell
+cargo run -p redis-tower-examples --example prometheus --features prometheus
+cargo run -p redis-tower-examples --example otel --features otel
+```
+
+Prometheus replaces dots in metric and label names with underscores. Useful
+Grafana PromQL starting points (the Prometheus example enables recommended
+counter naming) include:
+
+```promql
+# Commands per second by operation
+sum by (db_operation_name) (rate(redis_tower_commands_total[5m]))
+
+# Command errors per second by category
+sum by (error_type) (rate(redis_tower_commands_total{outcome="error"}[5m]))
+
+# Mean pool acquisition wait in seconds by pool
+sum by (db_client_connection_pool_name) (rate(db_client_connection_wait_time_seconds_sum[5m]))
+/
+sum by (db_client_connection_pool_name) (rate(db_client_connection_wait_time_seconds_count[5m]))
+
+# Pool utilization ratio
+sum by (db_client_connection_pool_name) (db_client_connection_count{db_client_connection_state="used"})
+/
+sum by (db_client_connection_pool_name) (db_client_connection_max)
+
+# Auto-pipeline queue depth
+max by (redis_tower_pipeline_name) (redis_tower_pipeline_queue_depth)
+```
+
 ## Auto-pipelining
 
 ```rust,ignore

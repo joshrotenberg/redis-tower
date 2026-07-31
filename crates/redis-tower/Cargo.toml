@@ -27,6 +27,7 @@ commands-tdigest = ["redis-tower-commands/tdigest"]
 commands-timeseries = ["redis-tower-commands/timeseries"]
 commands-vector-sets = ["redis-tower-commands/vector-sets"]
 serde = ["dep:serde", "dep:serde_json", "commands-json", "redis-tower-core/serde"]
+metrics = ["dep:metrics"]
 
 [dependencies]
 serde = { workspace = true, optional = true }
@@ -44,6 +45,7 @@ futures = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+metrics = { workspace = true, optional = true }
 tower-layer = { workspace = true }
 tower-resilience-circuitbreaker = { workspace = true }
 rand = "0.9"
