@@ -5,12 +5,15 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
+use redis_tower::metrics_layer::{ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder};
 use redis_tower::pool::ConnectionPool;
 use redis_tower_cluster::{
     ClusterConnection, ClusterScan, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
 };
 use redis_tower_commands::*;
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::OnceCell;
 
 static CLUSTER: OnceCell<RedisClusterHandle> = OnceCell::const_new();
@@ -43,6 +46,23 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
     MultiplexedClusterClient::connect(&cluster.addr())
         .await
         .expect("failed to connect to multiplexed cluster")
+}
+
+#[derive(Default)]
+struct RefreshMetrics {
+    outcomes: Mutex<Vec<ClusterTopologyRefreshOutcome>>,
+}
+
+impl MetricsRecorder for RefreshMetrics {
+    fn command_completed(&self, _: &str, _: Duration, _: Option<ErrorKind>) {}
+
+    fn cluster_topology_refresh_completed(
+        &self,
+        _: Duration,
+        outcome: ClusterTopologyRefreshOutcome,
+    ) {
+        self.outcomes.lock().unwrap().push(outcome);
+    }
 }
 
 // Generate the shared command tests for cluster.
@@ -185,13 +205,23 @@ async fn mux_cluster_concurrent_writes_from_many_tasks() {
 #[tokio::test]
 #[ignore]
 async fn mux_cluster_refresh_topology() {
-    let cluster = mux_cluster_conn().await;
+    let fixture = ensure_cluster().await;
+    let metrics = Arc::new(RefreshMetrics::default());
+    let cluster = MultiplexedClusterClient::builder(fixture.addr())
+        .metrics_recorder(metrics.clone())
+        .connect()
+        .await
+        .expect("failed to connect to multiplexed cluster");
     cluster
         .refresh_topology()
         .await
         .expect("refresh should succeed on a healthy cluster");
     let topo = cluster.topology().await;
     assert_eq!(topo.master_addrs().len(), 3);
+    assert_eq!(
+        *metrics.outcomes.lock().unwrap(),
+        vec![ClusterTopologyRefreshOutcome::Success]
+    );
 }
 
 /// A cluster-wide SCAN reaches every master, where a plain keyless `SCAN`

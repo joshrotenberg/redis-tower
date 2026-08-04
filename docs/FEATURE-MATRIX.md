@@ -14,7 +14,7 @@ should do (Lettuce, go-redis, StackExchange.Redis, ioredis).
   They are summaries of those projects' own docs, not measurements taken in this
   repository, and they are not linked. Check the upstream project before relying
   on a competitor cell.
-- "Standalone-only", "in progress", and "shipping next" cells say so on purpose.
+- "Standalone-only" and "in progress" cells say so on purpose.
   This page is meant to be honest about where redis-tower is today, not where it
   is headed.
 
@@ -34,7 +34,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Circuit breaker | yes -- [`circuit_breaker.rs`](../crates/redis-tower/src/circuit_breaker.rs) | no | partial (via reconnect policy) |
 | Per-command timeout | yes -- [`command_timeout.rs`](../crates/redis-tower/src/command_timeout.rs) | partial (connection-level) | yes |
 | Reconnect with backoff + jitter | yes -- [`reconnect.rs`](../crates/redis-tower/src/reconnect.rs) | partial | yes |
-| Tracing / observability | tracing with OTel DB semconv built in; metrics histograms/exporter shipping next -- [`tracing_layer.rs`](../crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](../crates/redis-tower/src/metrics_layer.rs) | no | partial (tracing feature) |
+| Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](../crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](../crates/redis-tower/src/metrics_layer.rs) | no | partial (tracing feature) |
 | RESP3 protocol | standalone (cluster/sentinel in progress) -- [`codec.rs`](../crates/redis-tower-protocol/src/codec.rs) | yes | yes |
 | TLS (rustls + native-tls, mTLS) | yes -- [`tls.rs`](../crates/redis-tower-core/src/tls.rs) | yes | yes |
 | Pub/sub | yes -- [`pubsub.rs`](../crates/redis-tower/src/pubsub.rs) | yes | yes |
@@ -62,7 +62,7 @@ comparison is about capability parity across languages, not API shape.
 | Client-side caching | yes -- [`caching.rs`](../crates/redis-tower/src/caching.rs) | yes | partial | no | no |
 | Circuit breaker | yes -- [`circuit_breaker.rs`](../crates/redis-tower/src/circuit_breaker.rs) | no (external) | no (external) | no (external) | no (external) |
 | Per-command timeout | yes -- [`command_timeout.rs`](../crates/redis-tower/src/command_timeout.rs) | yes | yes (context) | yes | yes |
-| Tracing / observability | tracing with OTel DB semconv built in; metrics histograms/exporter shipping next -- [`tracing_layer.rs`](../crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](../crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
+| Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](../crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](../crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
 | RESP3 protocol | standalone (cluster/sentinel in progress) -- [`codec.rs`](../crates/redis-tower-protocol/src/codec.rs) | yes | yes | partial | yes |
 | TLS (incl. mTLS) | yes -- [`tls.rs`](../crates/redis-tower-core/src/tls.rs) | yes | yes | yes | yes |
 | Pub/sub | yes -- [`pubsub.rs`](../crates/redis-tower/src/pubsub.rs) | yes | yes | yes | yes |
@@ -80,13 +80,14 @@ These are stated explicitly so the page does not drift back into overclaiming:
    ship on the standalone clients. The cluster and sentinel clients do not yet
    negotiate RESP3; that work is in progress. The matrix reads "standalone
    (cluster/sentinel in progress)" until it lands everywhere.
-2. **Observability is tracing-first, metrics-next.** redis-tower ships a
-   `TracingLayer` that emits spans with OpenTelemetry database semantic
-   conventions (`db.system`, `db.statement`, `server.address`). The
-   `MetricsLayer` exposes a `MetricsRecorder` hook you implement against your
-   own backend; first-class metrics histograms and an exporter are the next
-   increment. The honest line is "tracing with OTel DB semconv built in; metrics
-   histograms/exporter shipping next" -- not "built-in metrics".
+2. **Observability includes tracing and metrics.** redis-tower ships a
+   `TracingLayer` with OpenTelemetry database semantic conventions and a
+   `MetricsRecorder` integration backed by the `metrics` facade. The built-in
+   recorder covers commands, pipelines, pools, cluster redirects, and topology
+   refreshes; pool/queue snapshot exporters and Prometheus/OpenTelemetry
+   examples show complete backend wiring. Per-node cluster labels remain
+   opt-in and bounded to 64 concrete addresses per client plus `_OTHER`, with
+   overflow folded into `_OTHER`.
 
 ## Verifying a cell yourself
 
