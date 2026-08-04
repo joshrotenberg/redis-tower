@@ -81,7 +81,7 @@ use redis_tower::metrics_layer::{
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, Frame, RedisConnection, RedisError, RespLimits};
 use redis_tower_protocol::helpers::{array, bulk};
 use tokio::sync::RwLock;
 use tower_service::Service;
@@ -277,6 +277,7 @@ struct Inner {
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<TlsConfig>>,
 }
@@ -293,6 +294,7 @@ pub struct MultiplexedClusterClientBuilder {
     include_node_in_metrics: bool,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<TlsConfig>>,
 }
@@ -380,6 +382,16 @@ impl MultiplexedClusterClientBuilder {
         self
     }
 
+    /// Set RESP decode limits for every cluster connection.
+    ///
+    /// The limits apply before any handshake or authentication frames are
+    /// decoded and are retained for seed discovery, masters, replicas,
+    /// redirect-created connections, topology refreshes, and reconnects.
+    pub fn resp_limits(mut self, limits: RespLimits) -> Self {
+        self.resp_limits = limits;
+        self
+    }
+
     /// Enable TLS for every per-node connection, including the seed
     /// connection used for topology discovery.
     ///
@@ -427,6 +439,7 @@ impl MultiplexedClusterClientBuilder {
             self.include_node_in_metrics,
             self.reconnect_config,
             self.credentials,
+            self.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -448,6 +461,7 @@ impl MultiplexedClusterClient {
             false,
             default_node_reconnect(),
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -470,6 +484,7 @@ impl MultiplexedClusterClient {
             false,
             default_node_reconnect(),
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -516,6 +531,7 @@ impl MultiplexedClusterClient {
             include_node_in_metrics: false,
             reconnect_config: default_node_reconnect(),
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -533,6 +549,7 @@ impl MultiplexedClusterClient {
         include_node_in_metrics: bool,
         reconnect_config: AutoPipelineReconnectConfig,
         credentials: Option<Arc<dyn CredentialProvider>>,
+        resp_limits: RespLimits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
     ) -> Result<Self, RedisError> {
         let metrics_recorder = pipeline_config.metrics_recorder.clone();
@@ -541,6 +558,7 @@ impl MultiplexedClusterClient {
         // ACL-protected cluster.
         let mut seed_conn = connect_node(
             seed_addr,
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.as_deref(),
         )
@@ -573,6 +591,7 @@ impl MultiplexedClusterClient {
             pipeline_config.clone(),
             reconnect_config.clone(),
             credentials.clone(),
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.clone(),
         )
@@ -589,6 +608,7 @@ impl MultiplexedClusterClient {
                     pipeline_config.clone(),
                     reconnect_config.clone(),
                     credentials.clone(),
+                    resp_limits,
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     tls.clone(),
                 )
@@ -604,6 +624,7 @@ impl MultiplexedClusterClient {
                 pipeline_config.clone(),
                 reconnect_config.clone(),
                 credentials.clone(),
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls.clone(),
             )
@@ -628,6 +649,7 @@ impl MultiplexedClusterClient {
                 pipeline_config,
                 reconnect_config,
                 credentials,
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             })),
@@ -921,6 +943,7 @@ impl MultiplexedClusterClient {
             address_map,
             read_preference,
             credentials,
+            resp_limits,
         ) = {
             let inner = self.inner.read().await;
             (
@@ -930,6 +953,7 @@ impl MultiplexedClusterClient {
                 inner.address_map.clone(),
                 inner.read_preference,
                 inner.credentials.clone(),
+                inner.resp_limits,
             )
         };
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -953,6 +977,7 @@ impl MultiplexedClusterClient {
             match discover_from_seed(
                 seed,
                 credentials.as_ref(),
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls.as_deref(),
             )
@@ -1026,6 +1051,7 @@ impl MultiplexedClusterClient {
             pipeline_config.clone(),
             reconnect_config.clone(),
             credentials.clone(),
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.clone(),
         )
@@ -1036,6 +1062,7 @@ impl MultiplexedClusterClient {
             pipeline_config.clone(),
             reconnect_config.clone(),
             credentials.clone(),
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.clone(),
         )
@@ -1308,12 +1335,13 @@ impl MultiplexedClusterClient {
             }
         }
         // Build the new service without holding any lock across connect.
-        let (pipeline_config, reconnect_config, credentials) = {
+        let (pipeline_config, reconnect_config, credentials, resp_limits) = {
             let inner = self.inner.read().await;
             (
                 inner.pipeline_config.clone(),
                 inner.reconnect_config.clone(),
                 inner.credentials.clone(),
+                inner.resp_limits,
             )
         };
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -1324,6 +1352,7 @@ impl MultiplexedClusterClient {
             pipeline_config,
             reconnect_config,
             credentials,
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         )
@@ -1448,10 +1477,12 @@ fn diff_node_services(desired: &[String], current: &HashMap<String, bool>) -> Se
 async fn discover_from_seed(
     seed_addr: &str,
     credentials: Option<&Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<&TlsConfig>,
 ) -> Result<ClusterTopology, RedisError> {
     let mut conn = connect_node(
         seed_addr,
+        resp_limits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         tls,
     )
@@ -1493,6 +1524,7 @@ async fn build_node_services(
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
 ) -> Result<HashMap<String, AutoPipelineService>, RedisError> {
     futures::stream::iter(addrs.into_iter().map(|addr| {
@@ -1508,6 +1540,7 @@ async fn build_node_services(
                 pipeline_config,
                 reconnect_config,
                 credentials,
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             )
@@ -1538,6 +1571,7 @@ async fn build_node_services_best_effort(
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
 ) -> Vec<(String, AutoPipelineService)> {
     let role = if readonly { "replica" } else { "master" };
@@ -1554,6 +1588,7 @@ async fn build_node_services_best_effort(
                 pipeline_config,
                 reconnect_config,
                 credentials,
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             )
@@ -1584,12 +1619,14 @@ async fn build_node_service(
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
 ) -> Result<AutoPipelineService, RedisError> {
     let factory = NodeConnectionFactory {
         addr: addr.to_string(),
         readonly,
         credentials,
+        resp_limits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         tls,
     };
@@ -1604,8 +1641,10 @@ async fn build_node_service(
 /// hostname matches the certificate.
 async fn connect_node(
     addr: &str,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<&TlsConfig>,
 ) -> Result<RedisConnection, RedisError> {
+    let connection_config = ConnectionConfig::new().with_resp_limits(resp_limits);
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     if let Some(tls) = tls {
         let hostname = addr
@@ -1613,9 +1652,10 @@ async fn connect_node(
             .map(|(h, _)| h)
             .unwrap_or(addr)
             .to_string();
-        return RedisConnection::connect_tls(addr, &hostname, tls).await;
+        return RedisConnection::connect_tls_with_config(addr, &hostname, tls, &connection_config)
+            .await;
     }
-    RedisConnection::connect(addr).await
+    RedisConnection::connect_with_config(addr, &connection_config).await
 }
 
 /// A [`ConnectionFactory`] that connects to a single node and optionally
@@ -1632,6 +1672,7 @@ struct NodeConnectionFactory {
     addr: String,
     readonly: bool,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<TlsConfig>>,
 }
@@ -1641,11 +1682,13 @@ impl ConnectionFactory for NodeConnectionFactory {
         let addr = self.addr.clone();
         let readonly = self.readonly;
         let credentials = self.credentials.clone();
+        let resp_limits = self.resp_limits;
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         let tls = self.tls.clone();
         Box::pin(async move {
             let mut conn = connect_node(
                 &addr,
+                resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls.as_deref(),
             )
@@ -1904,12 +1947,34 @@ mod parallel_connect_tests {
             AutoPipelineConfig::default(),
             default_node_reconnect(),
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
         .await
         .expect("every fake node should connect");
         (services, probe.peak())
+    }
+
+    #[tokio::test]
+    async fn node_factory_applies_resp_limits_to_each_connection() {
+        let addr = spawn_fake_node(Arc::new(ConcurrencyProbe::default())).await;
+        let limits = RespLimits {
+            max_frame_size: 4096,
+            max_depth: 9,
+        };
+        let factory = NodeConnectionFactory {
+            addr,
+            readonly: false,
+            credentials: None,
+            resp_limits: limits,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        };
+
+        let conn = factory.connect().await.expect("fake node should connect");
+        let framed = conn.into_framed().expect("connection should be idle");
+        assert_eq!(framed.codec().limits(), limits);
     }
 
     /// The regression #458 guards: node connects must overlap. Serialized
@@ -1977,6 +2042,7 @@ mod parallel_connect_tests {
             AutoPipelineConfig::default(),
             default_node_reconnect(),
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -2036,6 +2102,7 @@ mod parallel_connect_tests {
             AutoPipelineConfig::default(),
             default_node_reconnect(),
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -2222,6 +2289,7 @@ mod observability_tests {
                 pipeline_config: AutoPipelineConfig::default(),
                 reconnect_config: default_node_reconnect(),
                 credentials: None,
+                resp_limits: RespLimits::default(),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls: None,
             })),
@@ -2278,6 +2346,19 @@ mod observability_tests {
 
         let disabled_again = enabled.include_node_in_metrics(false);
         assert!(!disabled_again.include_node_in_metrics);
+    }
+
+    #[test]
+    fn builder_defaults_and_sets_resp_limits() {
+        let default = MultiplexedClusterClient::builder("127.0.0.1:7000");
+        assert_eq!(default.resp_limits, RespLimits::default());
+
+        let limits = RespLimits {
+            max_frame_size: 2048,
+            max_depth: 12,
+        };
+        let configured = MultiplexedClusterClient::builder("127.0.0.1:7000").resp_limits(limits);
+        assert_eq!(configured.resp_limits, limits);
     }
 
     #[tokio::test]

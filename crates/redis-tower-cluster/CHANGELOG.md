@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
+- configurable RESP decode limits across cluster discovery, node connections, topology refreshes, and reconnects
 
 ### Fixed
 

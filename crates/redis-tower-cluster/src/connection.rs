@@ -9,7 +9,9 @@ use std::task::{Context, Poll};
 
 use redis_tower::credentials::{CredentialProvider, StaticCredentials};
 use redis_tower_commands::Auth;
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError, parse_redis_url};
+use redis_tower_core::{
+    Command, ConnectionConfig, Frame, RedisConnection, RedisError, RespLimits, parse_redis_url,
+};
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor;
@@ -190,6 +192,8 @@ pub struct ClusterConnection {
     max_redirects: usize,
     /// Credential provider for authenticating each node connection.
     credentials: Option<Arc<dyn CredentialProvider>>,
+    /// Decode limits applied to every cluster node connection.
+    resp_limits: RespLimits,
     /// TLS configuration for node connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -204,6 +208,7 @@ pub struct ClusterConnectionBuilder {
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     max_redirects: usize,
     credentials: Option<Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
@@ -268,6 +273,16 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Set RESP decode limits for every cluster connection.
+    ///
+    /// The limits apply before any handshake or authentication frames are
+    /// decoded and are retained for seed discovery, masters, replicas,
+    /// redirect-created connections, and topology refreshes.
+    pub fn resp_limits(mut self, limits: RespLimits) -> Self {
+        self.resp_limits = limits;
+        self
+    }
+
     /// Set the TLS configuration for cluster connections.
     ///
     /// When set, all connections to cluster nodes (seed, masters, and
@@ -291,6 +306,7 @@ impl ClusterConnectionBuilder {
             self.read_routing,
             self.max_redirects,
             self.credentials,
+            self.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -316,6 +332,7 @@ impl ClusterConnection {
             None,
             MAX_REDIRECTS,
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -335,6 +352,7 @@ impl ClusterConnection {
             None,
             MAX_REDIRECTS,
             None,
+            RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -392,6 +410,7 @@ impl ClusterConnection {
             read_routing: None,
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -406,6 +425,7 @@ impl ClusterConnection {
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
         max_redirects: usize,
         credentials: Option<Arc<dyn CredentialProvider>>,
+        resp_limits: RespLimits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
             Arc<redis_tower_core::tls::TlsConfig>,
         >,
@@ -413,6 +433,7 @@ impl ClusterConnection {
         let mut seed_conn = connect_node(
             seed_addr,
             credentials.as_ref(),
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls.as_deref(),
         )
@@ -436,6 +457,7 @@ impl ClusterConnection {
                 let conn = connect_node(
                     &addr_str,
                     credentials.as_ref(),
+                    resp_limits,
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     tls.as_deref(),
                 )
@@ -456,6 +478,7 @@ impl ClusterConnection {
                     let mut conn = connect_node(
                         &addr_str,
                         credentials.as_ref(),
+                        resp_limits,
                         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                         tls.as_deref(),
                     )
@@ -485,6 +508,7 @@ impl ClusterConnection {
             read_routing,
             max_redirects,
             credentials,
+            resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
@@ -640,6 +664,7 @@ impl ClusterConnection {
             let conn = connect_node(
                 addr,
                 self.credentials.as_ref(),
+                self.resp_limits,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 self.tls.as_deref(),
             )
@@ -702,6 +727,7 @@ impl ClusterConnection {
                 let conn = connect_node(
                     &addr_str,
                     self.credentials.as_ref(),
+                    self.resp_limits,
                     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                     self.tls.as_deref(),
                 )
@@ -719,6 +745,7 @@ impl ClusterConnection {
                     let mut conn = connect_node(
                         &addr_str,
                         self.credentials.as_ref(),
+                        self.resp_limits,
                         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                         self.tls.as_deref(),
                     )
@@ -838,10 +865,12 @@ impl TransientError {
 async fn connect_node(
     addr: &str,
     credentials: Option<&Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
         &redis_tower_core::tls::TlsConfig,
     >,
 ) -> Result<RedisConnection, RedisError> {
+    let connection_config = ConnectionConfig::new().with_resp_limits(resp_limits);
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     let mut conn = match tls {
         Some(tls) => {
@@ -850,12 +879,13 @@ async fn connect_node(
                 .map(|(h, _)| h)
                 .unwrap_or(addr)
                 .to_string();
-            RedisConnection::connect_tls(addr, &hostname, tls).await?
+            RedisConnection::connect_tls_with_config(addr, &hostname, tls, &connection_config)
+                .await?
         }
-        None => RedisConnection::connect(addr).await?,
+        None => RedisConnection::connect_with_config(addr, &connection_config).await?,
     };
     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
-    let mut conn = RedisConnection::connect(addr).await?;
+    let mut conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
 
     if let Some(provider) = credentials {
         authenticate(&mut conn, provider.as_ref()).await?;
@@ -1152,6 +1182,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1170,6 +1201,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1198,6 +1230,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1227,6 +1260,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1316,6 +1350,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1341,6 +1376,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
+            resp_limits: RespLimits::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1365,6 +1401,22 @@ mod tests {
     fn builder_sets_max_redirects() {
         let builder = ClusterConnection::builder("127.0.0.1:7000").max_redirects(10);
         assert_eq!(builder.max_redirects, 10);
+    }
+
+    #[test]
+    fn builder_defaults_resp_limits() {
+        let builder = ClusterConnection::builder("127.0.0.1:7000");
+        assert_eq!(builder.resp_limits, RespLimits::default());
+    }
+
+    #[test]
+    fn builder_sets_resp_limits() {
+        let limits = RespLimits {
+            max_frame_size: 1024,
+            max_depth: 8,
+        };
+        let builder = ClusterConnection::builder("127.0.0.1:7000").resp_limits(limits);
+        assert_eq!(builder.resp_limits, limits);
     }
 
     // -- connect_url parsing --

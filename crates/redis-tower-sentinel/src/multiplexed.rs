@@ -48,6 +48,7 @@ use redis_tower::auto_pipeline::{
 use redis_tower::command_adapter::CommandAdapter;
 use redis_tower::credentials::CredentialProvider;
 use redis_tower_core::{Command, Frame, RedisError};
+use redis_tower_protocol::RespLimits;
 use tower_service::Service;
 
 use crate::discovery::{self, SentinelConfig};
@@ -101,6 +102,16 @@ impl MultiplexedSentinelClientBuilder {
         self
     }
 
+    /// Set RESP decode limits for every sentinel and Redis data-node connection.
+    ///
+    /// The limits are retained by the reconnect factory, so discovery and data
+    /// connections opened after failover enforce the same bounds. Defaults to
+    /// [`RespLimits::default`].
+    pub fn resp_limits(mut self, limits: RespLimits) -> Self {
+        self.config.resp_limits = limits;
+        self
+    }
+
     /// Set the TLS configuration for sentinel connections.
     ///
     /// Requires the `tls-rustls` or `tls-native-tls` feature.
@@ -148,6 +159,7 @@ impl MultiplexedSentinelClientBuilder {
         let conn = discovery::connect_hop(
             &master_addr,
             self.config.node_credentials.as_ref(),
+            self.config.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.config.node_tls.as_ref(),
         )
@@ -164,7 +176,8 @@ impl MultiplexedSentinelClientBuilder {
     ///
     /// On connection failure (or READONLY from a demoted master), the factory
     /// re-queries sentinel to find the current master. The reconnected master
-    /// connection respects the configured node credentials and TLS.
+    /// connection respects the configured node credentials, TLS, and RESP
+    /// decode limits.
     pub async fn connect_with_reconnect(
         self,
     ) -> Result<MultiplexedSentinelClient<AutoPipelineService>, RedisError> {
@@ -247,10 +260,9 @@ pub struct MultiplexedSentinelClient<S = AutoPipelineService> {
 impl MultiplexedSentinelClient<AutoPipelineService> {
     /// Create a builder for configuring the client.
     ///
-    /// Use the builder to set sentinel credentials, node credentials, and TLS
-    /// independently for each hop. Credentials set via the builder are also
-    /// used on every reconnect, so failover and re-auth are handled
-    /// automatically.
+    /// Use the builder to set sentinel credentials, node credentials, TLS, and
+    /// RESP decode limits for each hop. Connection settings configured through
+    /// the builder are retained across reconnects and failover.
     pub fn builder(
         sentinel_addrs: &[impl AsRef<str>],
         master_name: &str,
@@ -279,12 +291,13 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
             .iter()
             .map(|a| a.as_ref().to_string())
             .collect();
+        let config = SentinelConfig::default();
         let master_addr =
-            discovery::discover_master_with_config(&addrs, master_name, &SentinelConfig::default())
-                .await?;
+            discovery::discover_master_with_config(&addrs, master_name, &config).await?;
         let conn = discovery::connect_hop(
             &master_addr,
             None,
+            config.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -395,6 +408,23 @@ mod tests {
     use redis_tower::credentials::StaticCredentials;
     use redis_tower_commands::Get;
     use std::task::{Context, Poll};
+
+    #[test]
+    fn builder_defaults_to_standard_resp_limits() {
+        let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster");
+        assert_eq!(builder.config.resp_limits, RespLimits::default());
+    }
+
+    #[test]
+    fn builder_retains_custom_resp_limits_for_reconnects() {
+        let limits = RespLimits {
+            max_frame_size: 4096,
+            max_depth: 16,
+        };
+        let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
+            .resp_limits(limits);
+        assert_eq!(builder.config.resp_limits, limits);
+    }
 
     #[derive(Clone)]
     struct MockFrameService {

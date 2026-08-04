@@ -12,7 +12,7 @@ use tokio_stream::StreamExt;
 use tokio_util::codec::Framed;
 
 use redis_tower_protocol::helpers::{array, bulk};
-use redis_tower_protocol::{Frame, RespCodec};
+use redis_tower_protocol::{Frame, RespCodec, RespLimits};
 
 use crate::command::Command;
 use crate::error::RedisError;
@@ -211,6 +211,105 @@ pub enum ProtocolVersion {
     Resp3,
 }
 
+/// Configuration shared by Redis connection constructors.
+///
+/// The default matches [`RedisConnection::connect`]: standard TCP keepalive,
+/// no connect timeout, automatic RESP3 negotiation with RESP2 fallback, and
+/// [`RespLimits::default`] decode limits. Builder methods can be combined
+/// without adding a constructor for every possible option matrix.
+///
+/// ```
+/// use redis_tower_core::{ConnectionConfig, ProtocolVersion, RespLimits};
+/// use std::time::Duration;
+///
+/// let config = ConnectionConfig::new()
+///     .with_connect_timeout(Some(Duration::from_secs(3)))
+///     .with_protocol(ProtocolVersion::Resp3)
+///     .with_resp_limits(RespLimits {
+///         max_frame_size: 8 * 1024 * 1024,
+///         max_depth: 32,
+///     });
+/// assert_eq!(config.protocol(), ProtocolVersion::Resp3);
+/// ```
+#[derive(Debug, Clone)]
+pub struct ConnectionConfig {
+    keepalive: KeepaliveConfig,
+    connect_timeout: Option<Duration>,
+    protocol: ProtocolVersion,
+    resp_limits: RespLimits,
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            keepalive: KeepaliveConfig::default(),
+            connect_timeout: None,
+            protocol: ProtocolVersion::Auto,
+            resp_limits: RespLimits::default(),
+        }
+    }
+}
+
+impl ConnectionConfig {
+    /// Create a connection configuration with the default settings.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the TCP keepalive configuration.
+    #[must_use]
+    pub fn with_keepalive(mut self, keepalive: KeepaliveConfig) -> Self {
+        self.keepalive = keepalive;
+        self
+    }
+
+    /// Set or clear the connection-establishment timeout.
+    ///
+    /// `None` uses the operating system's connection timeout. `Some` applies
+    /// to the TCP or Unix-socket connect operation; a TLS handshake is not
+    /// included in this timeout.
+    #[must_use]
+    pub fn with_connect_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    /// Set the RESP protocol negotiation policy.
+    #[must_use]
+    pub fn with_protocol(mut self, protocol: ProtocolVersion) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
+    /// Set the resource limits enforced while decoding RESP frames.
+    #[must_use]
+    pub fn with_resp_limits(mut self, limits: RespLimits) -> Self {
+        self.resp_limits = limits;
+        self
+    }
+
+    /// Return the configured TCP keepalive settings.
+    pub fn keepalive(&self) -> &KeepaliveConfig {
+        &self.keepalive
+    }
+
+    /// Return the connection-establishment timeout.
+    pub fn connect_timeout(&self) -> Option<Duration> {
+        self.connect_timeout
+    }
+
+    /// Return the RESP protocol negotiation policy.
+    pub fn protocol(&self) -> ProtocolVersion {
+        self.protocol
+    }
+
+    /// Return the configured RESP decode limits.
+    pub fn resp_limits(&self) -> RespLimits {
+        self.resp_limits
+    }
+}
+
 impl RedisConnection {
     /// Create a connection from a framed stream.
     fn from_framed_inner(framed: Framed<RedisStream, RespCodec>) -> Self {
@@ -222,13 +321,52 @@ impl RedisConnection {
         }
     }
 
+    /// Wrap a transport with the codec configured for this connection.
+    fn from_stream_inner(stream: RedisStream, config: &ConnectionConfig) -> Self {
+        Self::from_framed_inner(Framed::new(
+            stream,
+            RespCodec::with_limits(config.resp_limits),
+        ))
+    }
+
+    /// Open a TCP stream and apply the configured timeout and keepalive.
+    async fn open_tcp(addr: &str, config: &ConnectionConfig) -> Result<TcpStream, RedisError> {
+        let stream = if let Some(timeout) = config.connect_timeout {
+            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
+                Ok(Ok(stream)) => stream,
+                Ok(Err(error)) => return Err(RedisError::connection(addr, error)),
+                Err(_elapsed) => return Err(RedisError::ConnectTimeout),
+            }
+        } else {
+            TcpStream::connect(addr)
+                .await
+                .map_err(|error| RedisError::connection(addr, error))?
+        };
+        let stream = apply_keepalive(stream, &config.keepalive)?;
+        stream.set_nodelay(true)?;
+        Ok(stream)
+    }
+
     /// Connect to a Redis server over TCP.
     ///
     /// TCP keepalive is enabled with sensible defaults: 60 s idle, 10 s
     /// interval, 3 probes. Use [`connect_with_keepalive`](Self::connect_with_keepalive)
     /// to supply custom keepalive parameters.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
-        Self::connect_with_keepalive(addr, &KeepaliveConfig::default()).await
+        Self::connect_with_config(addr, &ConnectionConfig::default()).await
+    }
+
+    /// Connect to a Redis server over TCP with explicit connection settings.
+    ///
+    /// The configured RESP decode limits are installed before any server data
+    /// is read, including `CLIENT SETINFO` and protocol-negotiation replies.
+    pub async fn connect_with_config(
+        addr: &str,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let mut conn = Self::connect_raw(addr, config).await?;
+        conn.negotiate_protocol(config.protocol).await?;
+        Ok(conn)
     }
 
     /// Connect to a Redis server over TCP with a custom keepalive configuration.
@@ -241,9 +379,8 @@ impl RedisConnection {
         addr: &str,
         keepalive: &KeepaliveConfig,
     ) -> Result<Self, RedisError> {
-        let mut conn = Self::connect_raw(addr, keepalive).await?;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
-        Ok(conn)
+        let config = ConnectionConfig::default().with_keepalive(keepalive.clone());
+        Self::connect_with_config(addr, &config).await
     }
 
     /// TCP connect + CLIENT SETINFO, WITHOUT protocol negotiation. The building
@@ -260,15 +397,10 @@ impl RedisConnection {
         fields(server.address = %addr, tls = false),
         err
     )]
-    async fn connect_raw(addr: &str, keepalive: &KeepaliveConfig) -> Result<Self, RedisError> {
-        let stream = TcpStream::connect(addr)
-            .await
-            .map_err(|e| RedisError::connection(addr, e))?;
-        let stream = apply_keepalive(stream, keepalive)?;
-        stream.set_nodelay(true)?;
-        let mut conn =
-            Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec::new()));
-        conn.identify_client().await;
+    async fn connect_raw(addr: &str, config: &ConnectionConfig) -> Result<Self, RedisError> {
+        let stream = Self::open_tcp(addr, config).await?;
+        let mut conn = Self::from_stream_inner(RedisStream::Tcp(stream), config);
+        conn.identify_client().await?;
         Ok(conn)
     }
 
@@ -279,9 +411,8 @@ impl RedisConnection {
     /// timeout (which can be several minutes on unreachable hosts).
     ///
     /// TCP keepalive is enabled with sensible defaults after the connection is
-    /// established. Use [`connect_with_keepalive`](Self::connect_with_keepalive)
-    /// and wrap the call yourself with [`tokio::time::timeout`] if you need
-    /// custom keepalive parameters alongside a connect timeout.
+    /// established. Use [`connect_with_config`](Self::connect_with_config) to
+    /// combine a timeout with custom keepalive or RESP decode limits.
     ///
     /// # Example
     ///
@@ -293,25 +424,9 @@ impl RedisConnection {
     /// let conn = RedisConnection::connect_with_timeout("127.0.0.1:6379", Duration::from_secs(3)).await;
     /// # });
     /// ```
-    #[tracing::instrument(
-        name = "redis.connect",
-        skip_all,
-        fields(server.address = %addr, tls = false),
-        err
-    )]
     pub async fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<Self, RedisError> {
-        let stream = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(RedisError::connection(addr, e)),
-            Err(_elapsed) => return Err(RedisError::ConnectTimeout),
-        };
-        let stream = apply_keepalive(stream, &KeepaliveConfig::default())?;
-        stream.set_nodelay(true)?;
-        let mut conn =
-            Self::from_framed_inner(Framed::new(RedisStream::Tcp(stream), RespCodec::new()));
-        conn.identify_client().await;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
-        Ok(conn)
+        let config = ConnectionConfig::default().with_connect_timeout(Some(timeout));
+        Self::connect_with_config(addr, &config).await
     }
 
     /// Connect over TLS using the provided configuration.
@@ -331,8 +446,29 @@ impl RedisConnection {
         hostname: &str,
         tls_config: &crate::tls::TlsConfig,
     ) -> Result<Self, RedisError> {
-        Self::connect_tls_with_keepalive(addr, hostname, tls_config, &KeepaliveConfig::default())
+        Self::connect_tls_with_config(addr, hostname, tls_config, &ConnectionConfig::default())
             .await
+    }
+
+    /// Connect over TLS with explicit connection settings.
+    ///
+    /// The TCP connect timeout, keepalive policy, protocol negotiation, and
+    /// RESP decode limits all come from `config`. The connect timeout covers
+    /// the TCP handshake only, matching [`connect_tls_with_timeout`](Self::connect_tls_with_timeout).
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
+    pub async fn connect_tls_with_config(
+        addr: &str,
+        hostname: &str,
+        tls_config: &crate::tls::TlsConfig,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let mut conn = Self::connect_tls_raw(addr, hostname, tls_config, config).await?;
+        conn.negotiate_protocol(config.protocol).await?;
+        Ok(conn)
     }
 
     /// Connect over TLS with a custom keepalive configuration.
@@ -348,28 +484,14 @@ impl RedisConnection {
         docsrs,
         doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
     )]
-    #[tracing::instrument(
-        name = "redis.connect",
-        skip_all,
-        fields(server.address = %addr, server.tls.hostname = %hostname, tls = true),
-        err
-    )]
     pub async fn connect_tls_with_keepalive(
         addr: &str,
         hostname: &str,
         tls_config: &crate::tls::TlsConfig,
         keepalive: &KeepaliveConfig,
     ) -> Result<Self, RedisError> {
-        let tcp = TcpStream::connect(addr)
-            .await
-            .map_err(|e| RedisError::connection(addr, e))?;
-        let tcp = apply_keepalive(tcp, keepalive)?;
-        tcp.set_nodelay(true)?;
-        let stream = tls_config.connect(tcp, hostname).await?;
-        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec::new()));
-        conn.identify_client().await;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
-        Ok(conn)
+        let config = ConnectionConfig::default().with_keepalive(keepalive.clone());
+        Self::connect_tls_with_config(addr, hostname, tls_config, &config).await
     }
 
     /// Connect over TLS with a connect timeout.
@@ -391,29 +513,34 @@ impl RedisConnection {
         docsrs,
         doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
     )]
-    #[tracing::instrument(
-        name = "redis.connect",
-        skip_all,
-        fields(server.address = %addr, server.tls.hostname = %hostname, tls = true),
-        err
-    )]
     pub async fn connect_tls_with_timeout(
         addr: &str,
         hostname: &str,
         tls_config: &crate::tls::TlsConfig,
         timeout: Duration,
     ) -> Result<Self, RedisError> {
-        let tcp = match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => return Err(RedisError::connection(addr, e)),
-            Err(_elapsed) => return Err(RedisError::ConnectTimeout),
-        };
-        let tcp = apply_keepalive(tcp, &KeepaliveConfig::default())?;
-        tcp.set_nodelay(true)?;
+        let config = ConnectionConfig::default().with_connect_timeout(Some(timeout));
+        Self::connect_tls_with_config(addr, hostname, tls_config, &config).await
+    }
+
+    /// Open a TLS transport and install its codec without negotiating RESP.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[tracing::instrument(
+        name = "redis.connect",
+        skip_all,
+        fields(server.address = %addr, server.tls.hostname = %hostname, tls = true),
+        err
+    )]
+    async fn connect_tls_raw(
+        addr: &str,
+        hostname: &str,
+        tls_config: &crate::tls::TlsConfig,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let tcp = Self::open_tcp(addr, config).await?;
         let stream = tls_config.connect(tcp, hostname).await?;
-        let mut conn = Self::from_framed_inner(Framed::new(stream, RespCodec::new()));
-        conn.identify_client().await;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
+        let mut conn = Self::from_stream_inner(stream, config);
+        conn.identify_client().await?;
         Ok(conn)
     }
 
@@ -424,6 +551,18 @@ impl RedisConnection {
     /// For `rediss://` URLs, a TLS backend feature must be enabled.
     /// The `tls-rustls` backend is preferred if both are enabled.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        Self::connect_url_with_config(url, &ConnectionConfig::default()).await
+    }
+
+    /// Connect using a Redis URL with explicit connection settings.
+    ///
+    /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes. URL
+    /// authentication and database selection run before the configured RESP
+    /// negotiation. Decode limits are active for every setup response.
+    pub async fn connect_url_with_config(
+        url: &str,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
         let parsed = parse_redis_url(url)?;
 
         let mut conn = if parsed.unix {
@@ -433,10 +572,19 @@ impl RedisConnection {
                     .path
                     .as_deref()
                     .ok_or_else(|| RedisError::InvalidUrl("unix URL missing path".into()))?;
-                let stream = tokio::net::UnixStream::connect(path)
-                    .await
-                    .map_err(|e| RedisError::connection(path, e))?;
-                Self::from_framed_inner(Framed::new(RedisStream::Unix(stream), RespCodec::new()))
+                let stream = if let Some(timeout) = config.connect_timeout {
+                    match tokio::time::timeout(timeout, tokio::net::UnixStream::connect(path)).await
+                    {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(error)) => return Err(RedisError::connection(path, error)),
+                        Err(_elapsed) => return Err(RedisError::ConnectTimeout),
+                    }
+                } else {
+                    tokio::net::UnixStream::connect(path)
+                        .await
+                        .map_err(|error| RedisError::connection(path, error))?
+                };
+                Self::from_stream_inner(RedisStream::Unix(stream), config)
             }
             #[cfg(not(unix))]
             {
@@ -449,13 +597,13 @@ impl RedisConnection {
             {
                 let tls_config = crate::tls::TlsConfig::default_rustls();
                 let addr = format!("{}:{}", parsed.host, parsed.port);
-                Self::connect_tls(&addr, &parsed.host, &tls_config).await?
+                Self::connect_tls_raw(&addr, &parsed.host, &tls_config, config).await?
             }
             #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
             {
                 let tls_config = crate::tls::TlsConfig::default_native_tls();
                 let addr = format!("{}:{}", parsed.host, parsed.port);
-                Self::connect_tls(&addr, &parsed.host, &tls_config).await?
+                Self::connect_tls_raw(&addr, &parsed.host, &tls_config, config).await?
             }
             #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
             {
@@ -464,11 +612,11 @@ impl RedisConnection {
                 ));
             }
         } else {
-            Self::connect(&format!("{}:{}", parsed.host, parsed.port)).await?
+            Self::connect_raw(&format!("{}:{}", parsed.host, parsed.port), config).await?
         };
 
         conn.post_connect_setup(&parsed).await?;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
+        conn.negotiate_protocol(config.protocol).await?;
         Ok(conn)
     }
 
@@ -510,6 +658,24 @@ impl RedisConnection {
         url: &str,
         tls_config: &crate::tls::TlsConfig,
     ) -> Result<Self, RedisError> {
+        Self::connect_url_with_tls_and_config(url, tls_config, &ConnectionConfig::default()).await
+    }
+
+    /// Connect from a Redis URL with explicit TLS and connection settings.
+    ///
+    /// This combines a custom CA or mTLS configuration with keepalive,
+    /// connection timeout, protocol, and RESP decode-limit settings. Unix
+    /// socket URLs are rejected because this connector always uses TLS.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
+    pub async fn connect_url_with_tls_and_config(
+        url: &str,
+        tls_config: &crate::tls::TlsConfig,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
         let parsed = parse_redis_url(url)?;
         if parsed.unix {
             return Err(RedisError::InvalidUrl(
@@ -517,9 +683,9 @@ impl RedisConnection {
             ));
         }
         let addr = format!("{}:{}", parsed.host, parsed.port);
-        let mut conn = Self::connect_tls(&addr, &parsed.host, tls_config).await?;
+        let mut conn = Self::connect_tls_raw(&addr, &parsed.host, tls_config, config).await?;
         conn.post_connect_setup(&parsed).await?;
-        conn.negotiate_protocol(ProtocolVersion::Auto).await?;
+        conn.negotiate_protocol(config.protocol).await?;
         Ok(conn)
     }
 
@@ -564,9 +730,8 @@ impl RedisConnection {
         addr: &str,
         version: ProtocolVersion,
     ) -> Result<Self, RedisError> {
-        let mut conn = Self::connect_raw(addr, &KeepaliveConfig::default()).await?;
-        conn.negotiate_protocol(version).await?;
-        Ok(conn)
+        let config = ConnectionConfig::default().with_protocol(version);
+        Self::connect_with_config(addr, &config).await
     }
 
     /// Negotiate `version` on an already-connected connection.
@@ -583,8 +748,13 @@ impl RedisConnection {
             ProtocolVersion::Auto => {
                 // An older server that does not understand HELLO leaves us on
                 // RESP2 (`resp3` stays false) -- exactly the desired fallback.
-                let _ = self.hello(3).await;
-                Ok(())
+                // Transport and protocol failures are not a compatibility
+                // signal and must still surface, especially configured decode
+                // limit violations.
+                match self.hello(3).await {
+                    Ok(_) | Err(RedisError::Redis(_)) => Ok(()),
+                    Err(error) => Err(error),
+                }
             }
         }
     }
@@ -610,7 +780,16 @@ impl RedisConnection {
 
     /// Wrap an existing stream in a `RedisConnection`.
     pub fn from_stream(stream: RedisStream) -> Self {
-        Self::from_framed_inner(Framed::new(stream, RespCodec::new()))
+        Self::from_stream_with_config(stream, &ConnectionConfig::default())
+    }
+
+    /// Wrap an existing stream using explicit connection settings.
+    ///
+    /// Only the RESP decode limits apply to an already-open stream. Keepalive,
+    /// connect timeout, and protocol negotiation are connection-establishment
+    /// settings and are not replayed by this synchronous constructor.
+    pub fn from_stream_with_config(stream: RedisStream, config: &ConnectionConfig) -> Self {
+        Self::from_stream_inner(stream, config)
     }
 
     /// Subscribe to RESP3 push messages.
@@ -809,30 +988,35 @@ impl RedisConnection {
 
     /// Send CLIENT SETINFO to identify the client library.
     ///
-    /// This is best-effort: errors are silently ignored because older
-    /// Redis versions do not support the command.
-    async fn identify_client(&mut self) {
+    /// Redis command-error replies are ignored because older versions do not
+    /// support `CLIENT SETINFO`. Transport and decode errors still propagate:
+    /// they mean the connection is unusable or its configured limits were
+    /// violated, rather than that the optional command was rejected.
+    async fn identify_client(&mut self) -> Result<(), RedisError> {
         let framed = self.framed.as_mut().unwrap();
         // CLIENT SETINFO LIB-NAME redis-tower
-        let _ = framed
+        framed
             .send(array(vec![
                 bulk("CLIENT"),
                 bulk("SETINFO"),
                 bulk("LIB-NAME"),
                 bulk("redis-tower"),
             ]))
-            .await;
-        let _ = read_response_from(framed, &self.push_tx).await;
+            .await
+            .map_err(RedisError::from)?;
+        let _response = read_response_from(framed, &self.push_tx).await?;
         // CLIENT SETINFO LIB-VER <version>
-        let _ = framed
+        framed
             .send(array(vec![
                 bulk("CLIENT"),
                 bulk("SETINFO"),
                 bulk("LIB-VER"),
                 bulk(env!("CARGO_PKG_VERSION")),
             ]))
-            .await;
-        let _ = read_response_from(framed, &self.push_tx).await;
+            .await
+            .map_err(RedisError::from)?;
+        let _response = read_response_from(framed, &self.push_tx).await?;
+        Ok(())
     }
 
     /// Run post-connection setup (AUTH, SELECT) based on URL parameters.
@@ -978,6 +1162,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
 mod tests {
     use super::*;
     use crate::command::Command;
+    use redis_tower_protocol::ProtocolError;
 
     /// Minimal command type used only in unit tests.
     struct DummyCmd;
@@ -992,6 +1177,248 @@ mod tests {
         fn name(&self) -> &str {
             "DUMMY"
         }
+    }
+
+    async fn stream_pair() -> (RedisStream, RedisStream) {
+        #[cfg(unix)]
+        {
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            (RedisStream::Unix(client), RedisStream::Unix(server))
+        }
+        #[cfg(not(unix))]
+        {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let client = TcpStream::connect(addr).await.unwrap();
+            let (server, _) = listener.accept().await.unwrap();
+            (RedisStream::Tcp(client), RedisStream::Tcp(server))
+        }
+    }
+
+    async fn write_all(stream: &mut RedisStream, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let written = futures::future::poll_fn(|cx| {
+                tokio::io::AsyncWrite::poll_write(Pin::new(&mut *stream), cx, bytes)
+            })
+            .await
+            .unwrap();
+            assert!(written > 0, "server socket closed while writing response");
+            bytes = &bytes[written..];
+        }
+    }
+
+    async fn execute_against_response(
+        config: &ConnectionConfig,
+        response: &'static [u8],
+    ) -> Result<(), RedisError> {
+        let (client, server) = stream_pair().await;
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(server, RespCodec::new());
+            framed
+                .next()
+                .await
+                .expect("client closed before sending its command")
+                .expect("client sent an invalid command frame");
+            let mut server = framed.into_inner();
+            write_all(&mut server, response).await;
+        });
+
+        let mut conn = RedisConnection::from_stream_with_config(client, config);
+        let result = conn.execute(DummyCmd).await;
+        server_task.await.unwrap();
+        result
+    }
+
+    async fn connect_against_hello_response(
+        config: &ConnectionConfig,
+        response: &'static [u8],
+    ) -> Result<RedisConnection, RedisError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (server, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(RedisStream::Tcp(server), RespCodec::new());
+
+            for _ in 0..2 {
+                framed
+                    .next()
+                    .await
+                    .expect("client closed during CLIENT SETINFO")
+                    .expect("client sent an invalid CLIENT SETINFO frame");
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .unwrap();
+            }
+
+            framed
+                .next()
+                .await
+                .expect("client closed before HELLO")
+                .expect("client sent an invalid HELLO frame");
+            let mut server = framed.into_inner();
+            write_all(&mut server, response).await;
+        });
+
+        let result = RedisConnection::connect_with_config(&addr.to_string(), config).await;
+        server_task.await.unwrap();
+        result
+    }
+
+    async fn connect_against_setinfo_response(
+        config: &ConnectionConfig,
+        response: &'static [u8],
+    ) -> Result<RedisConnection, RedisError> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            let (server, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(RedisStream::Tcp(server), RespCodec::new());
+            framed
+                .next()
+                .await
+                .expect("client closed before CLIENT SETINFO")
+                .expect("client sent an invalid CLIENT SETINFO frame");
+
+            let mut server = framed.into_inner();
+            write_all(&mut server, response).await;
+
+            // A default connection accepts the first response and sends the
+            // LIB-VER command. A tight connection closes as soon as decoding
+            // the first response violates its configured limit.
+            let mut framed = Framed::new(server, RespCodec::new());
+            if let Some(Ok(_command)) = framed.next().await {
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let result = RedisConnection::connect_with_config(&addr.to_string(), config).await;
+        server_task.await.unwrap();
+        result
+    }
+
+    #[test]
+    fn connection_config_defaults_and_builders() {
+        let defaults = ConnectionConfig::new();
+        let default_keepalive = KeepaliveConfig::default();
+        assert_eq!(defaults.keepalive().idle, default_keepalive.idle);
+        assert_eq!(defaults.keepalive().interval, default_keepalive.interval);
+        assert_eq!(defaults.keepalive().probes, default_keepalive.probes);
+        assert_eq!(defaults.connect_timeout(), None);
+        assert_eq!(defaults.protocol(), ProtocolVersion::Auto);
+        assert_eq!(defaults.resp_limits(), RespLimits::default());
+
+        let keepalive = KeepaliveConfig::new()
+            .with_idle(Duration::from_secs(20))
+            .with_interval(Duration::from_secs(4))
+            .with_probes(7);
+        let limits = RespLimits {
+            max_frame_size: 4096,
+            max_depth: 12,
+        };
+        let config = ConnectionConfig::new()
+            .with_keepalive(keepalive)
+            .with_connect_timeout(Some(Duration::from_secs(2)))
+            .with_protocol(ProtocolVersion::Resp2)
+            .with_resp_limits(limits);
+
+        assert_eq!(config.keepalive().idle, Duration::from_secs(20));
+        assert_eq!(config.keepalive().interval, Duration::from_secs(4));
+        assert_eq!(config.keepalive().probes, 7);
+        assert_eq!(config.connect_timeout(), Some(Duration::from_secs(2)));
+        assert_eq!(config.protocol(), ProtocolVersion::Resp2);
+        assert_eq!(config.resp_limits(), limits);
+        assert_eq!(
+            config.clone().with_connect_timeout(None).connect_timeout(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn from_stream_with_config_installs_decode_limits() {
+        let (client, _server) = stream_pair().await;
+        let limits = RespLimits {
+            max_frame_size: 2048,
+            max_depth: 9,
+        };
+        let config = ConnectionConfig::new().with_resp_limits(limits);
+        let conn = RedisConnection::from_stream_with_config(client, &config);
+
+        let framed = conn.into_framed().unwrap();
+        assert_eq!(framed.codec().limits(), limits);
+    }
+
+    #[tokio::test]
+    async fn configured_depth_limit_rejects_response_accepted_by_default() {
+        const DEPTH_THREE: &[u8] = b"*1\r\n*1\r\n*1\r\n+OK\r\n";
+
+        execute_against_response(&ConnectionConfig::default(), DEPTH_THREE)
+            .await
+            .expect("the default nesting limit should accept this response");
+
+        let tight = ConnectionConfig::new().with_resp_limits(RespLimits {
+            max_depth: 2,
+            ..RespLimits::default()
+        });
+        let error = execute_against_response(&tight, DEPTH_THREE)
+            .await
+            .expect_err("the configured nesting limit should reject this response");
+        assert!(matches!(
+            error,
+            RedisError::Protocol(ProtocolError::NestingTooDeep { max: 2 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_with_config_applies_limits_before_hello_response() {
+        const DEPTH_THREE: &[u8] = b"*1\r\n*1\r\n*1\r\n+OK\r\n";
+
+        let default_conn =
+            connect_against_hello_response(&ConnectionConfig::default(), DEPTH_THREE)
+                .await
+                .expect("the default nesting limit should accept the HELLO response");
+        assert!(default_conn.is_resp3());
+
+        let tight = ConnectionConfig::new().with_resp_limits(RespLimits {
+            max_depth: 2,
+            ..RespLimits::default()
+        });
+        let error = match connect_against_hello_response(&tight, DEPTH_THREE).await {
+            Err(error) => error,
+            Ok(_) => panic!("the configured nesting limit should reject the HELLO response"),
+        };
+        assert!(matches!(
+            error,
+            RedisError::Protocol(ProtocolError::NestingTooDeep { max: 2 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn connect_with_config_surfaces_limits_during_setinfo() {
+        const DEPTH_THREE: &[u8] = b"*1\r\n*1\r\n*1\r\n+OK\r\n";
+
+        let defaults = ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2);
+        connect_against_setinfo_response(&defaults, DEPTH_THREE)
+            .await
+            .expect("the default nesting limit should accept the SETINFO response");
+
+        let tight = ConnectionConfig::new()
+            .with_protocol(ProtocolVersion::Resp2)
+            .with_resp_limits(RespLimits {
+                max_depth: 2,
+                ..RespLimits::default()
+            });
+        let error = match connect_against_setinfo_response(&tight, DEPTH_THREE).await {
+            Err(error) => error,
+            Ok(_) => panic!("the configured nesting limit should reject the SETINFO response"),
+        };
+        assert!(matches!(
+            error,
+            RedisError::Protocol(ProtocolError::NestingTooDeep { max: 2 })
+        ));
     }
 
     #[test]

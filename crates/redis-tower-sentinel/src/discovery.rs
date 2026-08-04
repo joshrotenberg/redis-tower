@@ -5,21 +5,24 @@ use std::time::Duration;
 
 use redis_tower::credentials::{CredentialProvider, Credentials};
 use redis_tower_commands::Auth;
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, Frame, RedisConnection, RedisError};
+use redis_tower_protocol::RespLimits;
 use redis_tower_protocol::helpers::{array, bulk};
 
 /// Configuration for sentinel and node connections.
 ///
 /// Holds independent credentials and (when a TLS feature is enabled) TLS
-/// configs for the two hops a sentinel client makes:
+/// configs for the two hops a sentinel client makes, plus RESP decode limits
+/// shared by every connection:
 ///
 /// - **Sentinel hop** -- connects to the sentinel nodes for discovery.
 /// - **Node hop** -- connects to the discovered master.
 ///
 /// Sentinels and the master commonly use different passwords in production, so
-/// both hops are configured independently. Use [`SentinelConnectionBuilder`],
-/// [`SentinelClientBuilder`], or [`MultiplexedSentinelClientBuilder`] instead
-/// of constructing this directly.
+/// credentials and TLS are configured independently. RESP limits apply to both
+/// hops, including connections created during failover. Use
+/// [`SentinelConnectionBuilder`], [`SentinelClientBuilder`], or
+/// [`MultiplexedSentinelClientBuilder`] instead of constructing this directly.
 ///
 /// [`SentinelConnectionBuilder`]: crate::connection::SentinelConnectionBuilder
 /// [`SentinelClientBuilder`]: crate::client::SentinelClientBuilder
@@ -30,6 +33,8 @@ pub struct SentinelConfig {
     pub(crate) sentinel_credentials: Option<Arc<dyn CredentialProvider>>,
     /// Credentials for authenticating to the Redis data node (master).
     pub(crate) node_credentials: Option<Arc<dyn CredentialProvider>>,
+    /// RESP decode limits applied to every sentinel and data-node connection.
+    pub(crate) resp_limits: RespLimits,
     /// TLS configuration for sentinel connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     pub(crate) sentinel_tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -66,16 +71,19 @@ pub(crate) async fn authenticate(
 /// Open a connection to `addr`, optionally using TLS and/or authenticating.
 ///
 /// When a TLS feature is enabled and `tls` is `Some`, the connection is
-/// upgraded via `RedisConnection::connect_tls`. Otherwise a plain TCP
-/// connection is made. If `credentials` is `Some`, `AUTH` is sent
-/// immediately after the connection is established.
+/// upgraded via `RedisConnection::connect_tls_with_config`. Otherwise a plain
+/// TCP connection is made. The configured RESP limits apply before any
+/// connection setup response is decoded. If `credentials` is `Some`, `AUTH`
+/// is sent immediately after the connection is established.
 pub(crate) async fn connect_hop(
     addr: &str,
     credentials: Option<&Arc<dyn CredentialProvider>>,
+    resp_limits: RespLimits,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
         &Arc<redis_tower_core::tls::TlsConfig>,
     >,
 ) -> Result<RedisConnection, RedisError> {
+    let connection_config = ConnectionConfig::new().with_resp_limits(resp_limits);
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     let mut conn = match tls {
         Some(tls_cfg) => {
@@ -84,12 +92,13 @@ pub(crate) async fn connect_hop(
                 .map(|(h, _)| h)
                 .unwrap_or(addr)
                 .to_string();
-            RedisConnection::connect_tls(addr, &hostname, tls_cfg).await?
+            RedisConnection::connect_tls_with_config(addr, &hostname, tls_cfg, &connection_config)
+                .await?
         }
-        None => RedisConnection::connect(addr).await?,
+        None => RedisConnection::connect_with_config(addr, &connection_config).await?,
     };
     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
-    let mut conn = RedisConnection::connect(addr).await?;
+    let mut conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
 
     if let Some(provider) = credentials {
         authenticate(&mut conn, provider.as_ref()).await?;
@@ -230,6 +239,7 @@ async fn query_master_addr(
     let mut conn = connect_hop(
         sentinel_addr,
         config.sentinel_credentials.as_ref(),
+        config.resp_limits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         config.sentinel_tls.as_ref(),
     )
@@ -259,6 +269,7 @@ async fn query_replicas(
     let mut conn = connect_hop(
         sentinel_addr,
         config.sentinel_credentials.as_ref(),
+        config.resp_limits,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         config.sentinel_tls.as_ref(),
     )
@@ -277,6 +288,7 @@ async fn query_replicas(
         let mut conn2 = connect_hop(
             sentinel_addr,
             config.sentinel_credentials.as_ref(),
+            config.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             config.sentinel_tls.as_ref(),
         )
@@ -429,6 +441,7 @@ pub(crate) async fn connect_verified_master(
 ///
 /// The sentinel hop uses `config.sentinel_credentials` and `config.sentinel_tls`.
 /// The node (master) hop uses `config.node_credentials` and `config.node_tls`.
+/// Both hops use `config.resp_limits`.
 /// Returns the verified connection and the master's `"host:port"` address.
 pub(crate) async fn connect_verified_master_with_config(
     sentinel_addrs: &[String],
@@ -455,6 +468,7 @@ pub(crate) async fn connect_verified_master_with_config(
         let mut conn = match connect_hop(
             &master_addr,
             config.node_credentials.as_ref(),
+            config.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             config.node_tls.as_ref(),
         )
@@ -582,10 +596,11 @@ mod tests {
     // -- SentinelConfig unit tests --
 
     #[test]
-    fn sentinel_config_default_has_no_credentials_or_tls() {
+    fn sentinel_config_default_preserves_connection_defaults() {
         let config = SentinelConfig::default();
         assert!(config.sentinel_credentials.is_none());
         assert!(config.node_credentials.is_none());
+        assert_eq!(config.resp_limits, RespLimits::default());
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         {
             assert!(config.sentinel_tls.is_none());

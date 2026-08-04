@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - tier-1 process integration coverage for `ACL SAVE`/`ACL LOAD` persistence and `REPLICAOF`/`FAILOVER` transitions (#414, #415)
 - metrics-facade recorder, named pool lifecycle and stats metrics, multiplexed queue-depth access/export, and Prometheus/OpenTelemetry examples
 - backward-compatible cluster observability hooks on `MetricsRecorder`, with metrics-facade redirect, topology-refresh, and node-latency metrics
+- connection-configurable RESP frame-size and nesting limits, retained by shared/multiplexed clients and built-in reconnect factories
 
 ### Changed
 

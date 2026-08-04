@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- configurable TCP keepalive, connect timeout, protocol negotiation, and RESP
+  decode limits through `ConnectionConfig` across TCP, TLS, URL, and existing
+  stream connection paths
+
 ### Fixed
 
 - select rustls's `ring` crypto provider explicitly so feature unification with
