@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- configurable RESP frame-size and nesting limits across sentinel discovery,
+  data-node connections, failover rediscovery, and multiplexed reconnects
+
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-sentinel-v0.1.0) - 2026-06-05
 
 ### Added

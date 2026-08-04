@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 
 use redis_tower::credentials::CredentialProvider;
 use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_protocol::RespLimits;
 
 use crate::discovery::{self, SentinelConfig};
 
@@ -55,6 +56,16 @@ impl SentinelConnectionBuilder {
     /// data node commonly use different passwords in production.
     pub fn node_credentials(mut self, provider: impl CredentialProvider) -> Self {
         self.config.node_credentials = Some(Arc::new(provider));
+        self
+    }
+
+    /// Set RESP decode limits for every sentinel and Redis data-node connection.
+    ///
+    /// The limits apply to discovery, the initial master connection, replica
+    /// discovery, and every connection opened while rediscovering after a
+    /// failover. Defaults to [`RespLimits::default`].
+    pub fn resp_limits(mut self, limits: RespLimits) -> Self {
+        self.config.resp_limits = limits;
         self
     }
 
@@ -147,7 +158,7 @@ pub struct SentinelConnection {
     current_addr: String,
     /// Whether the connection needs rediscovery.
     needs_rediscovery: bool,
-    /// Sentinel and node configuration (credentials, TLS).
+    /// Sentinel and node configuration (credentials, TLS, RESP limits).
     config: SentinelConfig,
 }
 
@@ -212,6 +223,7 @@ impl SentinelConnection {
         let conn = discovery::connect_hop(
             &master_addr,
             config.node_credentials.as_ref(),
+            config.resp_limits,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             config.node_tls.as_ref(),
         )
@@ -353,6 +365,23 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
 mod tests {
     use super::*;
     use redis_tower::credentials::StaticCredentials;
+
+    #[test]
+    fn builder_defaults_to_standard_resp_limits() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster");
+        assert_eq!(builder.config.resp_limits, RespLimits::default());
+    }
+
+    #[test]
+    fn builder_sets_resp_limits_for_all_hops() {
+        let limits = RespLimits {
+            max_frame_size: 1024,
+            max_depth: 8,
+        };
+        let builder =
+            SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster").resp_limits(limits);
+        assert_eq!(builder.config.resp_limits, limits);
+    }
 
     #[test]
     fn builder_sets_sentinel_credentials() {

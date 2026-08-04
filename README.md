@@ -46,14 +46,51 @@ let val: String = client.execute(Get::new("key")).await?.parse_into()?;
 | `MultiplexedSentinelClient` | Sentinel-managed failover, high concurrency (`redis-tower-sentinel`). |
 | `SyncClient` | Blocking (non-`async`) contexts (`redis-tower-sync`). |
 
+## Connection configuration and decode limits
+
+Normal connection constructors use Redis-compatible defaults. For an
+untrusted/shared server or a memory-constrained process, tighten the maximum
+buffered frame size and nesting depth with `ConnectionConfig`; the codec is
+configured before SETINFO, AUTH, SELECT, or HELLO responses are decoded.
+
+```rust,ignore
+use redis_tower::{ConnectionConfig, MultiplexedClient, RespLimits};
+
+let connection = ConnectionConfig::new().with_resp_limits(RespLimits {
+    max_frame_size: 8 * 1024 * 1024,
+    max_depth: 32,
+});
+let client = MultiplexedClient::connect_with_connection_config(
+    "127.0.0.1:6379",
+    &connection,
+).await?;
+```
+
+`RedisConnection`, `RedisClient`, and `MultiplexedClient` expose configured
+connectors directly. The built-in address and URL reconnect factories retain
+the config for resilient clients and pool replacements. Cluster and Sentinel
+builders accept `.resp_limits(...)` and apply the limits to discovery, every
+data node, failover/topology changes, and reconnects. `PubSubConnection`
+inherits the codec from the connection or factory supplied to it.
+
 ## Connection pool
 
 ```rust,ignore
 use redis_tower::pool::{ConnectionPool, PoolConfig, DispatchStrategy};
 
-let pool = ConnectionPool::connect(4, || async {
-    redis_tower::RedisConnection::connect("127.0.0.1:6379").await
-}).await?;
+use redis_tower::{ConnectionConfig, RespLimits};
+use redis_tower::reconnect::AddrConnectionFactory;
+
+let connection = ConnectionConfig::new().with_resp_limits(RespLimits {
+    max_frame_size: 8 * 1024 * 1024,
+    max_depth: 32,
+});
+let factory = AddrConnectionFactory::new("127.0.0.1:6379")
+    .with_connection_config(connection);
+let pool = ConnectionPool::connect_with_factory(
+    PoolConfig::default().size(4),
+    factory,
+).await?;
 
 // Clone and share across tasks.
 let p = pool.clone();

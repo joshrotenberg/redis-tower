@@ -23,8 +23,9 @@
 //! exist so a malicious or compromised server cannot drive unbounded
 //! allocation or overflow the stack with a deeply nested reply. The defaults
 //! ([`DEFAULT_MAX_FRAME_SIZE`], [`DEFAULT_MAX_DEPTH`]) sit above anything a
-//! Redis server sends in normal operation; use [`RespCodec::with_limits`] to
-//! tighten them.
+//! Redis server sends in normal operation. Normal redis-tower clients tighten
+//! them through `redis_tower_core::ConnectionConfig`; callers constructing the
+//! codec directly use [`RespCodec::with_limits`].
 //!
 //! # Helpers
 //!

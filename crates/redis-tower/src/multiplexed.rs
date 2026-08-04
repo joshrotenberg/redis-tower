@@ -125,9 +125,31 @@ impl MultiplexedClient<AutoPipelineService> {
         Ok(Self::from_connection(conn))
     }
 
+    /// Connect with explicit transport, protocol, and RESP decode settings.
+    ///
+    /// This name distinguishes connection settings from
+    /// [`Self::from_connection_with_config`], whose config controls the
+    /// auto-pipeline worker after the connection has been established.
+    pub async fn connect_with_connection_config(
+        addr: &str,
+        config: &redis_tower_core::ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = RedisConnection::connect_with_config(addr, config).await?;
+        Ok(Self::from_connection(conn))
+    }
+
     /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
+        Ok(Self::from_connection(conn))
+    }
+
+    /// Connect from a Redis URL with explicit connection settings.
+    pub async fn connect_url_with_connection_config(
+        url: &str,
+        config: &redis_tower_core::ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = RedisConnection::connect_url_with_config(url, config).await?;
         Ok(Self::from_connection(conn))
     }
 
@@ -141,6 +163,19 @@ impl MultiplexedClient<AutoPipelineService> {
         tls_config: &redis_tower_core::tls::TlsConfig,
     ) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url_with_tls(url, tls_config).await?;
+        Ok(Self::from_connection(conn))
+    }
+
+    /// Connect from a Redis URL with explicit TLS and connection settings.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub async fn connect_url_with_tls_and_connection_config(
+        url: &str,
+        tls_config: &redis_tower_core::tls::TlsConfig,
+        connection_config: &redis_tower_core::ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let conn =
+            RedisConnection::connect_url_with_tls_and_config(url, tls_config, connection_config)
+                .await?;
         Ok(Self::from_connection(conn))
     }
 

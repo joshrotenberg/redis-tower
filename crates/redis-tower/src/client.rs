@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use redis_tower_commands::Ping;
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 
 /// Simple shared Redis client for basic use cases.
@@ -61,9 +61,31 @@ impl RedisClient {
         Ok(Self::from_connection(conn))
     }
 
+    /// Connect with explicit transport, protocol, and RESP decode settings.
+    ///
+    /// The configuration is applied before any connection setup response is
+    /// decoded, so tightened [`ConnectionConfig::resp_limits`] also protect
+    /// the initial handshake.
+    pub async fn connect_with_connection_config(
+        addr: &str,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = RedisConnection::connect_with_config(addr, config).await?;
+        Ok(Self::from_connection(conn))
+    }
+
     /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
+        Ok(Self::from_connection(conn))
+    }
+
+    /// Connect from a Redis URL with explicit connection settings.
+    pub async fn connect_url_with_connection_config(
+        url: &str,
+        config: &ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = RedisConnection::connect_url_with_config(url, config).await?;
         Ok(Self::from_connection(conn))
     }
 

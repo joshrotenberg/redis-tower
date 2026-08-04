@@ -55,7 +55,7 @@ mod url;
 pub mod value;
 
 pub use command::Command;
-pub use connection::{KeepaliveConfig, ProtocolVersion, RedisConnection};
+pub use connection::{ConnectionConfig, KeepaliveConfig, ProtocolVersion, RedisConnection};
 pub use error::RedisError;
 pub use frame_service::FrameService;
 pub use from_frame::FromFrame;
@@ -64,4 +64,6 @@ pub use url::{RedisUrl, parse_redis_url};
 
 pub use value::{FromRedisBytes, RedisConvert, RedisValueExt};
 
-pub use redis_tower_protocol::{Frame, RespCodec};
+pub use redis_tower_protocol::{
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, Frame, RespCodec, RespLimits,
+};

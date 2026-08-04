@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use redis_tower_commands::Ping;
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, Frame, RedisConnection, RedisError};
 use tokio::sync::Mutex;
 use tower_service::Service;
 
@@ -68,9 +68,33 @@ impl ResilientRedisClient {
         Self::with_config(AddrConnectionFactory::new(addr), ReconnectConfig::default()).await
     }
 
+    /// Connect with settings that are retained across every reconnect.
+    pub async fn connect_with_connection_config(
+        addr: &str,
+        connection_config: ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        Self::with_config(
+            AddrConnectionFactory::new(addr).with_connection_config(connection_config),
+            ReconnectConfig::default(),
+        )
+        .await
+    }
+
     /// Connect via a Redis URL with default reconnection settings.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         Self::with_config(UrlConnectionFactory::new(url), ReconnectConfig::default()).await
+    }
+
+    /// Connect from a Redis URL with settings retained across every reconnect.
+    pub async fn connect_url_with_connection_config(
+        url: &str,
+        connection_config: ConnectionConfig,
+    ) -> Result<Self, RedisError> {
+        Self::with_config(
+            UrlConnectionFactory::new(url).with_connection_config(connection_config),
+            ReconnectConfig::default(),
+        )
+        .await
     }
 
     /// Connect with a custom factory and reconnection config.

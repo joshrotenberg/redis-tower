@@ -9,11 +9,13 @@
 //!
 //! Different factories determine what negotiation happens on each reconnect:
 //!
-//! - [`AddrConnectionFactory`] -- plain TCP, RESP2, no auth
-//! - [`UrlConnectionFactory`] -- AUTH + SELECT from URL parameters, RESP2
+//! - [`AddrConnectionFactory`] -- plain TCP, automatic RESP3 negotiation, no auth
+//! - [`UrlConnectionFactory`] -- AUTH + SELECT from URL parameters, automatic
+//!   RESP3 negotiation
 //! - [`Resp3AddrConnectionFactory`] -- plain TCP, RESP3 via `HELLO 3`, no auth
 //!
-//! For RESP3 with authentication, implement [`ConnectionFactory`] yourself.
+//! To require RESP3 with authentication, configure [`UrlConnectionFactory`]
+//! with a [`ConnectionConfig`] whose protocol is [`ProtocolVersion::Resp3`].
 //!
 //! # Example
 //!
@@ -41,7 +43,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, ProtocolVersion, RedisConnection, RedisError};
 
 /// Factory for creating new Redis connections.
 ///
@@ -75,13 +77,14 @@ where
 ///
 /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
 ///
-/// This factory calls [`RedisConnection::connect_url`], which runs
-/// `post_connect_setup` internally. This means AUTH and SELECT are
-/// replayed on every reconnection based on the URL parameters. Use
-/// this factory (not [`AddrConnectionFactory`]) when your Redis server
-/// requires authentication or a non-default database.
+/// This factory uses the [`RedisConnection`] URL connection path, including
+/// its configured variant. AUTH and SELECT are therefore replayed on every
+/// reconnection based on the URL parameters. Use this factory (not
+/// [`AddrConnectionFactory`]) when your Redis server requires authentication
+/// or a non-default database.
 pub struct UrlConnectionFactory {
     url: String,
+    connection_config: ConnectionConfig,
     /// Explicit TLS config applied on every (re)connect, so reconnect-with-auth
     /// works with a custom CA / mTLS instead of the URL's default TLS.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -93,9 +96,19 @@ impl UrlConnectionFactory {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
+    }
+
+    /// Apply connection settings to every initial connection and reconnect.
+    ///
+    /// This is the built-in factory path for retaining tightened RESP decode
+    /// limits across resilient clients and connection pools.
+    pub fn with_connection_config(mut self, config: ConnectionConfig) -> Self {
+        self.connection_config = config;
+        self
     }
 
     /// Use an explicit TLS config (custom root CA or mTLS client certificate)
@@ -104,7 +117,7 @@ impl UrlConnectionFactory {
     /// Without this, a `rediss://` URL uses the default rustls config -- so URL
     /// connect and custom TLS were previously mutually exclusive, which made
     /// reconnect-with-auth plus a private CA impossible. With it, the factory
-    /// connects via [`RedisConnection::connect_url_with_tls`] on every attempt.
+    /// connects via the config-aware custom-TLS URL path on every attempt.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     pub fn with_tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
         self.tls = Some(std::sync::Arc::new(tls));
@@ -115,62 +128,118 @@ impl UrlConnectionFactory {
 impl ConnectionFactory for UrlConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let url = self.url.clone();
+        let connection_config = self.connection_config.clone();
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         if let Some(tls) = self.tls.clone() {
-            return Box::pin(
-                async move { RedisConnection::connect_url_with_tls(&url, &tls).await },
-            );
+            return Box::pin(async move {
+                RedisConnection::connect_url_with_tls_and_config(&url, &tls, &connection_config)
+                    .await
+            });
         }
-        Box::pin(async move { RedisConnection::connect_url(&url).await })
+        Box::pin(
+            async move { RedisConnection::connect_url_with_config(&url, &connection_config).await },
+        )
+    }
+}
+
+impl crate::pool::PoolFactory for UrlConnectionFactory {
+    type Connection = RedisConnection;
+
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+        ConnectionFactory::connect(self)
     }
 }
 
 /// A [`ConnectionFactory`] that connects via a `host:port` address string.
 ///
-/// This factory creates plain TCP connections using RESP2 with no
-/// authentication or database selection. If you need AUTH, SELECT, or
-/// RESP3 negotiation on reconnect, use [`UrlConnectionFactory`] or
-/// [`Resp3AddrConnectionFactory`] instead.
+/// This factory creates plain TCP connections with no authentication or
+/// database selection. Its default connection config auto-negotiates RESP3
+/// with RESP2 fallback. If you need AUTH or SELECT on reconnect, use
+/// [`UrlConnectionFactory`] instead.
 pub struct AddrConnectionFactory {
     addr: String,
+    connection_config: ConnectionConfig,
 }
 
 impl AddrConnectionFactory {
     /// Create a new factory from the given `host:port` address.
     pub fn new(addr: impl Into<String>) -> Self {
-        Self { addr: addr.into() }
+        Self {
+            addr: addr.into(),
+            connection_config: ConnectionConfig::default(),
+        }
+    }
+
+    /// Apply connection settings to every initial connection and reconnect.
+    pub fn with_connection_config(mut self, config: ConnectionConfig) -> Self {
+        self.connection_config = config;
+        self
     }
 }
 
 impl ConnectionFactory for AddrConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let addr = self.addr.clone();
-        Box::pin(async move { RedisConnection::connect(&addr).await })
+        let connection_config = self.connection_config.clone();
+        Box::pin(
+            async move { RedisConnection::connect_with_config(&addr, &connection_config).await },
+        )
+    }
+}
+
+impl crate::pool::PoolFactory for AddrConnectionFactory {
+    type Connection = RedisConnection;
+
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+        ConnectionFactory::connect(self)
     }
 }
 
 /// A [`ConnectionFactory`] that connects via a `host:port` address and
 /// negotiates RESP3 using `HELLO 3`.
 ///
-/// Use this when you need RESP3 protocol without URL-based AUTH/SELECT.
-/// For RESP3 with authentication, use [`UrlConnectionFactory`] with a
-/// `redis://` URL (which handles AUTH and SELECT) and then upgrade the
-/// protocol yourself, or implement [`ConnectionFactory`] directly.
+/// Use this when you need forced RESP3 without URL-based AUTH/SELECT. For
+/// forced RESP3 with authentication, use [`UrlConnectionFactory`] with a
+/// `redis://` URL and a [`ConnectionConfig`] set to [`ProtocolVersion::Resp3`].
 pub struct Resp3AddrConnectionFactory {
     addr: String,
+    connection_config: ConnectionConfig,
 }
 
 impl Resp3AddrConnectionFactory {
     /// Create a new factory from the given `host:port` address.
     pub fn new(addr: impl Into<String>) -> Self {
-        Self { addr: addr.into() }
+        Self {
+            addr: addr.into(),
+            connection_config: ConnectionConfig::default().with_protocol(ProtocolVersion::Resp3),
+        }
+    }
+
+    /// Apply connection settings to every initial connection and reconnect.
+    ///
+    /// The factory always forces [`ProtocolVersion::Resp3`], while retaining
+    /// the supplied keepalive, timeout, and RESP decode limits.
+    pub fn with_connection_config(mut self, config: ConnectionConfig) -> Self {
+        self.connection_config = config.with_protocol(ProtocolVersion::Resp3);
+        self
     }
 }
 
 impl ConnectionFactory for Resp3AddrConnectionFactory {
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
         let addr = self.addr.clone();
-        Box::pin(async move { RedisConnection::connect_resp3(&addr).await })
+        let connection_config = self.connection_config.clone();
+        Box::pin(
+            async move { RedisConnection::connect_with_config(&addr, &connection_config).await },
+        )
+    }
+}
+
+impl crate::pool::PoolFactory for Resp3AddrConnectionFactory {
+    type Connection = RedisConnection;
+
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+        ConnectionFactory::connect(self)
     }
 }
 
@@ -341,14 +410,14 @@ pub(crate) enum ConnState {
 ///
 /// The factory you choose determines what happens on reconnect:
 ///
-/// | Factory | AUTH | SELECT | RESP3 |
-/// |---------|------|--------|-------|
-/// | [`AddrConnectionFactory`] | No | No | No |
-/// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | No |
-/// | [`Resp3AddrConnectionFactory`] | No | No | Yes |
+/// | Factory | AUTH | SELECT | Protocol |
+/// |---------|------|--------|----------|
+/// | [`AddrConnectionFactory`] | No | No | Auto (RESP3 with RESP2 fallback) |
+/// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | Auto (RESP3 with RESP2 fallback) |
+/// | [`Resp3AddrConnectionFactory`] | No | No | Forced RESP3 |
 ///
-/// For RESP3 with authentication, implement [`ConnectionFactory`] yourself
-/// or use a closure factory.
+/// All three named factories can retain a [`ConnectionConfig`] across every
+/// reconnect via their `with_connection_config` builders.
 ///
 /// # Custom Setup on Reconnect
 ///
@@ -645,6 +714,41 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_factories_retain_connection_config() {
+        let limits = redis_tower_core::RespLimits {
+            max_frame_size: 4096,
+            max_depth: 7,
+        };
+        let config = ConnectionConfig::new()
+            .with_protocol(ProtocolVersion::Resp2)
+            .with_resp_limits(limits);
+
+        let addr =
+            AddrConnectionFactory::new("127.0.0.1:6379").with_connection_config(config.clone());
+        assert_eq!(addr.connection_config.protocol(), ProtocolVersion::Resp2);
+        assert_eq!(addr.connection_config.resp_limits(), limits);
+
+        let url = UrlConnectionFactory::new("redis://127.0.0.1:6379")
+            .with_connection_config(config.clone());
+        assert_eq!(url.connection_config.protocol(), ProtocolVersion::Resp2);
+        assert_eq!(url.connection_config.resp_limits(), limits);
+
+        let resp3 =
+            Resp3AddrConnectionFactory::new("127.0.0.1:6379").with_connection_config(config);
+        assert_eq!(resp3.connection_config.protocol(), ProtocolVersion::Resp3);
+        assert_eq!(resp3.connection_config.resp_limits(), limits);
+    }
+
+    #[test]
+    fn named_factories_can_replace_pooled_connections() {
+        fn assert_pool_factory<F: crate::pool::PoolFactory<Connection = RedisConnection>>() {}
+
+        assert_pool_factory::<AddrConnectionFactory>();
+        assert_pool_factory::<UrlConnectionFactory>();
+        assert_pool_factory::<Resp3AddrConnectionFactory>();
+    }
 
     #[test]
     fn jitter_produces_different_delays() {

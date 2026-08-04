@@ -250,6 +250,7 @@ impl PubSubConnection {
     ///
     /// The connection must not be shared (no outstanding clones of the
     /// internal Arc). Use a fresh connection for pub/sub.
+    /// Any RESP decode limits configured on the connection are retained.
     pub fn from_connection(conn: RedisConnection) -> Result<Self, RedisError> {
         let framed = conn.into_framed()?;
         Ok(Self {
@@ -513,6 +514,8 @@ impl PubSubConnection {
     /// Use this when the pub/sub stream reports a connection error: instead of
     /// silently going quiet, the connection is re-established and every
     /// subscription is restored, so message delivery resumes.
+    /// Connection settings, including RESP decode limits, are determined by
+    /// the factory and therefore apply to every replacement connection.
     pub async fn reconnect_with(
         &mut self,
         factory: &dyn ConnectionFactory,
