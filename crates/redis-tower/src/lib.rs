@@ -393,13 +393,16 @@ pub use credentials::{
     AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
 };
 pub use executor::{ExecutorService, RedisExecutor};
+pub use metrics_layer::{
+    ClusterRedirectKind, ClusterTopologyRefreshOutcome, MetricsLayer, MetricsRecorder,
+    MetricsService,
+};
 #[cfg(feature = "metrics")]
 #[cfg_attr(docsrs, doc(cfg(feature = "metrics")))]
 pub use metrics_layer::{
     MetricsExporterHandle, MetricsFacadeRecorder, spawn_pool_stats_exporter,
     spawn_queue_depth_exporter,
 };
-pub use metrics_layer::{MetricsLayer, MetricsRecorder, MetricsService};
 pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};

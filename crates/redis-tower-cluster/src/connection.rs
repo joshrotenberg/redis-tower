@@ -302,7 +302,7 @@ impl ClusterConnectionBuilder {
 #[derive(Debug)]
 pub(crate) enum Redirect {
     Moved { slot: u16, addr: String },
-    Ask { addr: String },
+    Ask { slot: u16, addr: String },
 }
 
 impl ClusterConnection {
@@ -519,8 +519,8 @@ impl ClusterConnection {
                     target_node = addr;
                     continue;
                 }
-                Some(Redirect::Ask { addr }) => {
-                    tracing::debug!(to_addr = %addr, kind = "ASK", "cluster redirect");
+                Some(Redirect::Ask { slot, addr }) => {
+                    tracing::debug!(slot, to_addr = %addr, kind = "ASK", "cluster redirect");
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
                     let asking_conn = self.nodes.get_mut(&addr).ok_or_else(|| {
@@ -791,9 +791,13 @@ pub(crate) fn parse_redirect(frame: &Frame) -> Option<Redirect> {
                 addr: parts[2].to_string(),
             })
         }
-        "ASK" => Some(Redirect::Ask {
-            addr: parts[2].to_string(),
-        }),
+        "ASK" => {
+            let slot = parts[1].parse::<u16>().ok()?;
+            Some(Redirect::Ask {
+                slot,
+                addr: parts[2].to_string(),
+            })
+        }
         _ => None,
     }
 }
@@ -994,7 +998,8 @@ mod tests {
     fn parse_ask_redirect() {
         let frame = Frame::Error(Bytes::from("ASK 3999 127.0.0.1:7002"));
         match parse_redirect(&frame) {
-            Some(Redirect::Ask { addr }) => {
+            Some(Redirect::Ask { slot, addr }) => {
+                assert_eq!(slot, 3999);
                 assert_eq!(addr, "127.0.0.1:7002");
             }
             other => panic!("expected Ask, got {other:?}"),
@@ -1417,6 +1422,12 @@ mod tests {
     #[test]
     fn parse_moved_invalid_slot() {
         let frame = Frame::Error(Bytes::from("MOVED notanumber 127.0.0.1:7001"));
+        assert!(parse_redirect(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_ask_invalid_slot() {
+        let frame = Frame::Error(Bytes::from("ASK notanumber 127.0.0.1:7001"));
         assert!(parse_redirect(&frame).is_none());
     }
 

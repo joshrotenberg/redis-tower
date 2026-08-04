@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
+
 ### Fixed
 
 - route MSETEX by its numkeys-prefixed key list, classify HOTKEYS as keyless, and allow DIGEST replica reads

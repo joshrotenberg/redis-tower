@@ -44,6 +44,14 @@
 //! set by the first frame is always consumed by our migrated command and
 //! not by another in-flight request from a concurrent task.
 //!
+//! Redirects are emitted as structured warning events and topology refreshes
+//! emit lifecycle events. Configure
+//! [`MultiplexedClusterClientBuilder::metrics_recorder`] to record logical
+//! command, redirect, refresh, and pipeline measurements. Per-node command
+//! labels are opt-in through
+//! [`MultiplexedClusterClientBuilder::include_node_in_metrics`] and bounded to
+//! 64 concrete addresses plus `_OTHER`.
+//!
 //! # Transactions
 //!
 //! This client does **not** support MULTI/EXEC. Keyless transaction commands
@@ -58,9 +66,8 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use futures::stream::{StreamExt, TryStreamExt};
@@ -68,6 +75,9 @@ use redis_tower::AutoPipelineService;
 use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::credentials::CredentialProvider;
+use redis_tower::metrics_layer::{
+    ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
+};
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
@@ -91,6 +101,9 @@ use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
 /// an overview.
 pub struct MultiplexedClusterClient {
     inner: Arc<RwLock<Inner>>,
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    include_node_in_metrics: bool,
+    node_metric_labels: Arc<BoundedNodeMetricLabels>,
     /// Rate-limits and single-flights background self-healing refreshes shared
     /// across clones, so a node failure seen by many concurrent commands
     /// triggers one refresh, not a storm.
@@ -101,7 +114,63 @@ impl Clone for MultiplexedClusterClient {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            metrics_recorder: self.metrics_recorder.clone(),
+            include_node_in_metrics: self.include_node_in_metrics,
+            node_metric_labels: Arc::clone(&self.node_metric_labels),
             refresh_gate: Arc::clone(&self.refresh_gate),
+        }
+    }
+}
+
+/// Maximum number of distinct node-address labels emitted by one client.
+///
+/// Node labels are disabled by default. When enabled, addresses beyond this
+/// cap are folded into `_OTHER`, keeping long-running metrics cardinality
+/// bounded even while a cluster repeatedly changes membership.
+const MAX_NODE_METRIC_LABELS: usize = 64;
+
+#[derive(Default)]
+struct BoundedNodeMetricLabels {
+    seen: StdRwLock<HashSet<String>>,
+}
+
+impl BoundedNodeMetricLabels {
+    fn label<'a>(&self, node: &'a str) -> NodeMetricLabel<'a> {
+        {
+            let seen = self.seen.read().unwrap();
+            if seen.contains(node) {
+                return NodeMetricLabel::Node(node);
+            }
+            if seen.len() >= MAX_NODE_METRIC_LABELS {
+                return NodeMetricLabel::Other;
+            }
+        }
+
+        let mut seen = self.seen.write().unwrap();
+        // Another command may have registered this node between our read and
+        // write locks.
+        if seen.contains(node) {
+            return NodeMetricLabel::Node(node);
+        }
+        if seen.len() < MAX_NODE_METRIC_LABELS {
+            seen.insert(node.to_string());
+            NodeMetricLabel::Node(node)
+        } else {
+            NodeMetricLabel::Other
+        }
+    }
+}
+
+enum NodeMetricLabel<'a> {
+    Node(&'a str),
+    Other,
+}
+
+impl NodeMetricLabel<'_> {
+    fn as_str(&self) -> &str {
+        match self {
+            Self::Node(node) => node,
+            Self::Other => "_OTHER",
         }
     }
 }
@@ -114,6 +183,17 @@ struct RefreshGate {
     min_interval: Duration,
 }
 
+/// Releases a claimed refresh gate even if its task is cancelled or unwinds.
+struct RefreshPermit {
+    gate: Arc<RefreshGate>,
+}
+
+impl Drop for RefreshPermit {
+    fn drop(&mut self) {
+        self.gate.finish();
+    }
+}
+
 impl RefreshGate {
     fn new(min_interval: Duration) -> Self {
         Self {
@@ -123,13 +203,15 @@ impl RefreshGate {
         }
     }
 
-    /// Try to claim the right to start a refresh. Returns `true` if the caller
-    /// should proceed (and must call [`finish`](Self::finish) when done), or
-    /// `false` if a refresh is already in flight or one ran too recently.
-    fn try_begin(&self) -> bool {
+    /// Try to claim the right to start a refresh.
+    ///
+    /// The returned permit releases the single-flight gate on drop, including
+    /// task cancellation and panic unwinding. `None` means a refresh is already
+    /// in flight or one ran too recently.
+    fn try_begin(self: &Arc<Self>) -> Option<RefreshPermit> {
         // Single-flight: bail if another refresh is already running.
         if self.in_flight.swap(true, Ordering::AcqRel) {
-            return false;
+            return None;
         }
         // Rate-limit: bail if we refreshed within the last `min_interval`.
         let mut last = self.last_start.lock().unwrap();
@@ -137,10 +219,12 @@ impl RefreshGate {
             && t.elapsed() < self.min_interval
         {
             self.in_flight.store(false, Ordering::Release);
-            return false;
+            return None;
         }
         *last = Some(Instant::now());
-        true
+        Some(RefreshPermit {
+            gate: Arc::clone(self),
+        })
     }
 
     fn finish(&self) {
@@ -206,6 +290,7 @@ pub struct MultiplexedClusterClientBuilder {
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     max_redirects: usize,
     pipeline_config: AutoPipelineConfig,
+    include_node_in_metrics: bool,
     reconnect_config: AutoPipelineReconnectConfig,
     credentials: Option<Arc<dyn CredentialProvider>>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -252,6 +337,27 @@ impl MultiplexedClusterClientBuilder {
     /// Override the auto-pipeline batching config used for each per-node worker.
     pub fn pipeline_config(mut self, config: AutoPipelineConfig) -> Self {
         self.pipeline_config = config;
+        self
+    }
+
+    /// Record command, redirect, topology-refresh, and pipeline metrics.
+    ///
+    /// The recorder is shared by the cluster router and every per-node
+    /// auto-pipeline worker. Node-address labels remain disabled unless
+    /// [`Self::include_node_in_metrics`] is also enabled.
+    pub fn metrics_recorder(mut self, recorder: Arc<dyn MetricsRecorder>) -> Self {
+        self.pipeline_config.metrics_recorder = Some(recorder);
+        self
+    }
+
+    /// Include the final cluster node address in command metrics.
+    ///
+    /// Disabled by default because node addresses add metric series. When
+    /// enabled, one client emits up to 64 concrete node-address labels plus
+    /// `_OTHER`; later addresses are folded into `_OTHER` so cardinality stays
+    /// bounded across repeated topology changes.
+    pub fn include_node_in_metrics(mut self, include: bool) -> Self {
+        self.include_node_in_metrics = include;
         self
     }
 
@@ -318,6 +424,7 @@ impl MultiplexedClusterClientBuilder {
             self.read_routing,
             self.max_redirects,
             self.pipeline_config,
+            self.include_node_in_metrics,
             self.reconnect_config,
             self.credentials,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -338,6 +445,7 @@ impl MultiplexedClusterClient {
             None,
             MAX_REDIRECTS,
             AutoPipelineConfig::default(),
+            false,
             default_node_reconnect(),
             None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -359,6 +467,7 @@ impl MultiplexedClusterClient {
             None,
             MAX_REDIRECTS,
             AutoPipelineConfig::default(),
+            false,
             default_node_reconnect(),
             None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -404,6 +513,7 @@ impl MultiplexedClusterClient {
             read_routing: None,
             max_redirects: MAX_REDIRECTS,
             pipeline_config: AutoPipelineConfig::default(),
+            include_node_in_metrics: false,
             reconnect_config: default_node_reconnect(),
             credentials: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -420,10 +530,12 @@ impl MultiplexedClusterClient {
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
         max_redirects: usize,
         pipeline_config: AutoPipelineConfig,
+        include_node_in_metrics: bool,
         reconnect_config: AutoPipelineReconnectConfig,
         credentials: Option<Arc<dyn CredentialProvider>>,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
     ) -> Result<Self, RedisError> {
+        let metrics_recorder = pipeline_config.metrics_recorder.clone();
         // Discover topology via a short-lived raw connection. Authenticate
         // before CLUSTER SLOTS so the discovery itself works against an
         // ACL-protected cluster.
@@ -519,6 +631,9 @@ impl MultiplexedClusterClient {
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             })),
+            metrics_recorder,
+            include_node_in_metrics,
+            node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
             refresh_gate: Arc::new(RefreshGate::new(REFRESH_MIN_INTERVAL)),
         })
     }
@@ -530,13 +645,44 @@ impl MultiplexedClusterClient {
     /// the target node, preserving single-connection ordering during
     /// live resharding.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let observation = self
+            .metrics_recorder
+            .as_ref()
+            .map(|_| (cmd.name().to_ascii_uppercase(), Instant::now()));
+        let observe_metrics = observation.is_some();
         let cmd_frame = cmd.to_frame();
+        let mut last_node = None;
 
+        let result = self
+            .execute_routed(cmd, cmd_frame, observe_metrics, &mut last_node)
+            .await;
+        if let Some((command, started)) = observation {
+            let error = result.as_ref().err().map(ErrorKind::from_error);
+            self.record_command_completion(
+                &command,
+                started.elapsed(),
+                error,
+                last_node.as_deref(),
+            );
+        }
+        result
+    }
+
+    async fn execute_routed<Cmd: Command>(
+        &self,
+        cmd: Cmd,
+        cmd_frame: Frame,
+        observe_metrics: bool,
+        last_node: &mut Option<String>,
+    ) -> Result<Cmd::Response, RedisError> {
         // Initial routing.
         let mut target = self.route_command(&cmd_frame).await?;
         let max_redirects = self.inner.read().await.max_redirects;
 
-        for _ in 0..max_redirects {
+        for attempt in 1..=max_redirects {
+            if observe_metrics {
+                *last_node = Some(target.addr.clone());
+            }
             let response = match call_service(&mut target.svc, cmd_frame.clone()).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -555,6 +701,16 @@ impl MultiplexedClusterClient {
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
                     let addr = self.remap_addr(&addr).await;
+                    tracing::warn!(
+                        command = cmd.name(),
+                        kind = "MOVED",
+                        slot,
+                        attempt,
+                        from_addr = %target.addr,
+                        to_addr = %addr,
+                        "cluster: command redirected"
+                    );
+                    self.record_redirect(ClusterRedirectKind::Moved);
                     self.ensure_master(&addr).await?;
                     self.update_slot_owner(slot, &addr).await;
                     // Patch the single moved slot immediately, and schedule a
@@ -564,10 +720,23 @@ impl MultiplexedClusterClient {
                     target = self.master_service(&addr).await?;
                     continue;
                 }
-                Some(Redirect::Ask { addr }) => {
+                Some(Redirect::Ask { slot, addr }) => {
                     let addr = self.remap_addr(&addr).await;
+                    tracing::warn!(
+                        command = cmd.name(),
+                        kind = "ASK",
+                        slot,
+                        attempt,
+                        from_addr = %target.addr,
+                        to_addr = %addr,
+                        "cluster: command redirected"
+                    );
+                    self.record_redirect(ClusterRedirectKind::Ask);
                     self.ensure_master(&addr).await?;
                     let mut ask_target = self.master_service(&addr).await?;
+                    if observe_metrics {
+                        *last_node = Some(ask_target.addr.clone());
+                    }
                     // Atomic [ASKING, cmd] via call_pipeline. The worker
                     // guarantees contiguous emission on the wire, so the
                     // ASKING state set on the connection is consumed by
@@ -581,14 +750,44 @@ impl MultiplexedClusterClient {
                         .into_iter()
                         .nth(1)
                         .ok_or(RedisError::ConnectionClosed)?;
-                    // If ASKING + cmd returned MOVED, fall through the
-                    // redirect loop to handle it as a MOVED from this node.
-                    if let Some(Redirect::Moved { slot, addr }) = parse_redirect(&cmd_response) {
-                        let addr = self.remap_addr(&addr).await;
-                        self.ensure_master(&addr).await?;
-                        self.update_slot_owner(slot, &addr).await;
-                        target = self.master_service(&addr).await?;
-                        continue;
+                    match parse_redirect(&cmd_response) {
+                        // If ASKING + cmd returned MOVED, fall through the
+                        // redirect loop to handle it as a MOVED from this node.
+                        Some(Redirect::Moved { slot, addr }) => {
+                            let addr = self.remap_addr(&addr).await;
+                            tracing::warn!(
+                                command = cmd.name(),
+                                kind = "MOVED",
+                                slot,
+                                attempt,
+                                from_addr = %ask_target.addr,
+                                to_addr = %addr,
+                                "cluster: command redirected"
+                            );
+                            self.record_redirect(ClusterRedirectKind::Moved);
+                            self.ensure_master(&addr).await?;
+                            self.update_slot_owner(slot, &addr).await;
+                            self.trigger_refresh();
+                            target = self.master_service(&addr).await?;
+                            continue;
+                        }
+                        // A second ASK needs another atomic ASKING + command
+                        // exchange. Surface it under the existing retry policy,
+                        // but still count and trace the redirect we observed.
+                        Some(Redirect::Ask { slot, addr }) => {
+                            let addr = self.remap_addr(&addr).await;
+                            tracing::warn!(
+                                command = cmd.name(),
+                                kind = "ASK",
+                                slot,
+                                attempt,
+                                from_addr = %ask_target.addr,
+                                to_addr = %addr,
+                                "cluster: command redirected"
+                            );
+                            self.record_redirect(ClusterRedirectKind::Ask);
+                        }
+                        None => {}
                     }
                     if let Frame::Error(ref e) = cmd_response {
                         return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
@@ -625,6 +824,39 @@ impl MultiplexedClusterClient {
         )))
     }
 
+    fn record_command_completion(
+        &self,
+        command: &str,
+        duration: Duration,
+        error: Option<ErrorKind>,
+        node: Option<&str>,
+    ) {
+        let Some(recorder) = &self.metrics_recorder else {
+            return;
+        };
+
+        if self.include_node_in_metrics
+            && let Some(node) = node
+        {
+            let node = self.node_metric_labels.label(node);
+            recorder.command_completed_on_node(command, duration, error, Some(node.as_str()));
+        } else {
+            recorder.command_completed_on_node(command, duration, error, None);
+        }
+    }
+
+    fn record_redirect(&self, kind: ClusterRedirectKind) {
+        if let Some(recorder) = &self.metrics_recorder {
+            recorder.cluster_redirected(kind);
+        }
+    }
+
+    fn record_topology_refresh(&self, duration: Duration, outcome: ClusterTopologyRefreshOutcome) {
+        if let Some(recorder) = &self.metrics_recorder {
+            recorder.cluster_topology_refresh_completed(duration, outcome);
+        }
+    }
+
     /// Refresh the cluster topology from a connected master.
     ///
     /// Self-healing: re-runs `CLUSTER SLOTS` (against the first node that
@@ -634,6 +866,52 @@ impl MultiplexedClusterClient {
     /// rebuilt at the same address; a node absent from the new topology is
     /// pruned and drained. Live, still-present nodes are left untouched.
     pub async fn refresh_topology(&self) -> Result<(), RedisError> {
+        let started = Instant::now();
+        tracing::info!("cluster: topology refresh started");
+        let result = self.refresh_topology_inner().await;
+        let duration = started.elapsed();
+        let outcome = match &result {
+            Ok(stats) if stats.outcome() == ClusterTopologyRefreshOutcome::Partial => {
+                tracing::warn!(
+                    duration_ms = duration.as_secs_f64() * 1000.0,
+                    outcome = "partial",
+                    masters = stats.master_count,
+                    replicas = stats.replica_count,
+                    services_built = stats.services_built,
+                    services_skipped = stats.services_skipped,
+                    services_pruned = stats.services_pruned,
+                    "cluster: topology refresh partially completed"
+                );
+                ClusterTopologyRefreshOutcome::Partial
+            }
+            Ok(stats) => {
+                tracing::info!(
+                    duration_ms = duration.as_secs_f64() * 1000.0,
+                    outcome = "success",
+                    masters = stats.master_count,
+                    replicas = stats.replica_count,
+                    services_built = stats.services_built,
+                    services_skipped = stats.services_skipped,
+                    services_pruned = stats.services_pruned,
+                    "cluster: topology refresh completed"
+                );
+                ClusterTopologyRefreshOutcome::Success
+            }
+            Err(error) => {
+                tracing::warn!(
+                    duration_ms = duration.as_secs_f64() * 1000.0,
+                    outcome = "error",
+                    error = %error,
+                    "cluster: topology refresh failed"
+                );
+                ClusterTopologyRefreshOutcome::Error
+            }
+        };
+        self.record_topology_refresh(duration, outcome);
+        result.map(|_| ())
+    }
+
+    async fn refresh_topology_inner(&self) -> Result<TopologyRefreshStats, RedisError> {
         // Snapshot what we need from the inner state, then release the lock
         // before doing network I/O.
         let (
@@ -714,6 +992,8 @@ impl MultiplexedClusterClient {
         } else {
             Vec::new()
         };
+        let master_count = master_desired.len();
+        let replica_count = replica_desired.len();
 
         // Diff against current services and their liveness (read lock, no I/O).
         let (master_diff, replica_diff) = {
@@ -760,6 +1040,10 @@ impl MultiplexedClusterClient {
             tls.clone(),
         )
         .await;
+        let services_requested = master_diff.to_build.len() + replica_diff.to_build.len();
+        let services_built = built_masters.len() + built_replicas.len();
+        let services_skipped = services_requested.saturating_sub(services_built);
+        let services_pruned = master_diff.to_prune.len() + replica_diff.to_prune.len();
 
         // Commit under the write lock; collect replaced/pruned services to drain
         // after the lock is released.
@@ -794,7 +1078,13 @@ impl MultiplexedClusterClient {
         for svc in to_drain {
             svc.shutdown().await;
         }
-        Ok(())
+        Ok(TopologyRefreshStats {
+            master_count,
+            replica_count,
+            services_built,
+            services_skipped,
+            services_pruned,
+        })
     }
 
     /// Spawn a rate-limited, single-flight background topology refresh.
@@ -807,15 +1097,13 @@ impl MultiplexedClusterClient {
     /// dead address forever. The [`RefreshGate`] collapses concurrent triggers
     /// into a single refresh.
     fn trigger_refresh(&self) {
-        if !self.refresh_gate.try_begin() {
+        let Some(permit) = self.refresh_gate.try_begin() else {
             return;
-        }
+        };
         let client = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = client.refresh_topology().await {
-                tracing::warn!(error = %e, "cluster: background topology refresh failed");
-            }
-            client.refresh_gate.finish();
+            let _permit = permit;
+            let _ = client.refresh_topology().await;
         });
     }
 
@@ -868,6 +1156,23 @@ impl MultiplexedClusterClient {
     /// being followed, because following it would defeat the point of pinning
     /// the command to a node.
     pub(crate) async fn execute_on_node<Cmd: Command>(
+        &self,
+        addr: &str,
+        cmd: Cmd,
+    ) -> Result<Cmd::Response, RedisError> {
+        let observation = self
+            .metrics_recorder
+            .as_ref()
+            .map(|_| (cmd.name().to_ascii_uppercase(), Instant::now()));
+        let result = self.execute_on_node_inner(addr, cmd).await;
+        if let Some((command, started)) = observation {
+            let error = result.as_ref().err().map(ErrorKind::from_error);
+            self.record_command_completion(&command, started.elapsed(), error, Some(addr));
+        }
+        result
+    }
+
+    async fn execute_on_node_inner<Cmd: Command>(
         &self,
         addr: &str,
         cmd: Cmd,
@@ -957,7 +1262,7 @@ impl MultiplexedClusterClient {
             {
                 return Ok(Target {
                     svc: svc.clone(),
-                    _addr: addr,
+                    addr,
                 });
             }
 
@@ -966,7 +1271,7 @@ impl MultiplexedClusterClient {
                 if let Some(svc) = inner.masters.get(&addr_str) {
                     return Ok(Target {
                         svc: svc.clone(),
-                        _addr: addr_str,
+                        addr: addr_str,
                     });
                 }
             }
@@ -979,10 +1284,7 @@ impl MultiplexedClusterClient {
             .get(&default)
             .cloned()
             .ok_or(RedisError::ConnectionClosed)?;
-        Ok(Target {
-            svc,
-            _addr: default,
-        })
+        Ok(Target { svc, addr: default })
     }
 
     async fn master_service(&self, addr: &str) -> Result<Target, RedisError> {
@@ -994,7 +1296,7 @@ impl MultiplexedClusterClient {
             .ok_or_else(|| RedisError::Redis(format!("no service for node {addr}")))?;
         Ok(Target {
             svc,
-            _addr: addr.to_string(),
+            addr: addr.to_string(),
         })
     }
 
@@ -1067,7 +1369,7 @@ impl MultiplexedClusterClient {
 
 struct Target {
     svc: AutoPipelineService,
-    _addr: String,
+    addr: String,
 }
 
 fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
@@ -1079,7 +1381,26 @@ fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
     Some(selected.addr_string())
 }
 
-/// Build a per-node [`AutoPipelineService`] backed by a reconnecting factory.
+/// Counts reported when a topology refresh completes successfully.
+#[derive(Debug, PartialEq, Eq)]
+struct TopologyRefreshStats {
+    master_count: usize,
+    replica_count: usize,
+    services_built: usize,
+    services_skipped: usize,
+    services_pruned: usize,
+}
+
+impl TopologyRefreshStats {
+    fn outcome(&self) -> ClusterTopologyRefreshOutcome {
+        if self.services_skipped == 0 {
+            ClusterTopologyRefreshOutcome::Success
+        } else {
+            ClusterTopologyRefreshOutcome::Partial
+        }
+    }
+}
+
 /// How a per-node service map should change to match a freshly discovered
 /// topology.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1466,24 +1787,45 @@ mod diff_tests {
     }
 
     #[test]
+    fn skipped_node_builds_make_a_refresh_partial() {
+        let complete = TopologyRefreshStats {
+            master_count: 3,
+            replica_count: 0,
+            services_built: 1,
+            services_skipped: 0,
+            services_pruned: 0,
+        };
+        assert_eq!(complete.outcome(), ClusterTopologyRefreshOutcome::Success);
+
+        let partial = TopologyRefreshStats {
+            services_skipped: 1,
+            ..complete
+        };
+        assert_eq!(partial.outcome(), ClusterTopologyRefreshOutcome::Partial);
+    }
+
+    #[test]
     fn refresh_gate_single_flights() {
-        let gate = RefreshGate::new(Duration::from_millis(0));
-        assert!(gate.try_begin(), "first caller claims the refresh");
-        assert!(!gate.try_begin(), "second is denied while one is in flight");
-        gate.finish();
+        let gate = Arc::new(RefreshGate::new(Duration::from_millis(0)));
+        let permit = gate.try_begin().expect("first caller claims the refresh");
         assert!(
-            gate.try_begin(),
+            gate.try_begin().is_none(),
+            "second is denied while one is in flight"
+        );
+        drop(permit);
+        assert!(
+            gate.try_begin().is_some(),
             "after finish (no rate limit) a new one starts"
         );
     }
 
     #[test]
     fn refresh_gate_rate_limits() {
-        let gate = RefreshGate::new(Duration::from_secs(60));
-        assert!(gate.try_begin());
-        gate.finish();
+        let gate = Arc::new(RefreshGate::new(Duration::from_secs(60)));
+        let permit = gate.try_begin().unwrap();
+        drop(permit);
         // Not in flight, but within the min interval -> denied.
-        assert!(!gate.try_begin());
+        assert!(gate.try_begin().is_none());
     }
 }
 
@@ -1724,5 +2066,453 @@ mod parallel_connect_tests {
             "duplicates dropped, first-seen order preserved so the default \
              node stays deterministic"
         );
+    }
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+    use bytes::Bytes;
+    use redis_tower::metrics_layer::{ClusterRedirectKind, ErrorKind, MetricsRecorder};
+    use redis_tower_commands::Get;
+    use std::sync::Mutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CommandCompletion {
+        command: String,
+        error: Option<ErrorKind>,
+        node: Option<String>,
+    }
+
+    struct NameProbeCommand {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Command for NameProbeCommand {
+        type Response = Frame;
+
+        fn to_frame(&self) -> Frame {
+            array(vec![bulk("GET"), bulk("key")])
+        }
+
+        fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+            Ok(frame)
+        }
+
+        fn name(&self) -> &str {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            "GET"
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMetrics {
+        completions: Mutex<Vec<CommandCompletion>>,
+        redirects: Mutex<Vec<ClusterRedirectKind>>,
+        refreshes: Mutex<Vec<(Duration, ClusterTopologyRefreshOutcome)>>,
+    }
+
+    impl MetricsRecorder for RecordingMetrics {
+        fn command_completed(&self, command: &str, _duration: Duration, error: Option<ErrorKind>) {
+            self.completions.lock().unwrap().push(CommandCompletion {
+                command: command.to_string(),
+                error,
+                node: None,
+            });
+        }
+
+        fn command_completed_on_node(
+            &self,
+            command: &str,
+            _duration: Duration,
+            error: Option<ErrorKind>,
+            node: Option<&str>,
+        ) {
+            self.completions.lock().unwrap().push(CommandCompletion {
+                command: command.to_string(),
+                error,
+                node: node.map(str::to_owned),
+            });
+        }
+
+        fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+            self.redirects.lock().unwrap().push(kind);
+        }
+
+        fn cluster_topology_refresh_completed(
+            &self,
+            duration: Duration,
+            outcome: ClusterTopologyRefreshOutcome,
+        ) {
+            self.refreshes.lock().unwrap().push((duration, outcome));
+        }
+    }
+
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    /// Build an auto-pipeline service on one end of a loopback TCP connection
+    /// and script the server end to answer its first request.
+    ///
+    /// `expected_markers` lets the ASK test prove that both ASKING and the
+    /// logical command reached the same connection before the fake replies.
+    async fn scripted_service(
+        expected_markers: Vec<&'static [u8]>,
+        response: Vec<u8>,
+    ) -> (String, AutoPipelineService, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        drop(listener);
+
+        let server_task = tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = server.read(&mut buf).await.unwrap();
+                assert!(n > 0, "scripted node closed before receiving its request");
+                request.extend_from_slice(&buf[..n]);
+                if expected_markers
+                    .iter()
+                    .all(|marker| contains_bytes(&request, marker))
+                {
+                    break;
+                }
+            }
+            server.write_all(&response).await.unwrap();
+        });
+
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(client));
+        let service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        (addr.to_string(), service, server_task)
+    }
+
+    fn node_addr(addr: &str) -> NodeAddr {
+        let addr: std::net::SocketAddr = addr.parse().unwrap();
+        NodeAddr {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        }
+    }
+
+    fn test_client(
+        default_node: String,
+        topology: ClusterTopology,
+        masters: HashMap<String, AutoPipelineService>,
+        recorder: Arc<RecordingMetrics>,
+        include_node_in_metrics: bool,
+    ) -> MultiplexedClusterClient {
+        let recorder: Arc<dyn MetricsRecorder> = recorder;
+        MultiplexedClusterClient {
+            inner: Arc::new(RwLock::new(Inner {
+                topology,
+                masters,
+                replicas: HashMap::new(),
+                default_node,
+                host_override: None,
+                address_map: None,
+                read_preference: ReadPreference::Master,
+                read_routing: Arc::new(RoundRobinRouting::new()),
+                max_redirects: 3,
+                pipeline_config: AutoPipelineConfig::default(),
+                reconnect_config: default_node_reconnect(),
+                credentials: None,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                tls: None,
+            })),
+            metrics_recorder: Some(recorder),
+            include_node_in_metrics,
+            node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
+            refresh_gate: Arc::new(RefreshGate::new(REFRESH_MIN_INTERVAL)),
+        }
+    }
+
+    fn redirect_client(
+        initial_addr: String,
+        initial_service: AutoPipelineService,
+        target_addr: String,
+        target_service: AutoPipelineService,
+        recorder: Arc<RecordingMetrics>,
+    ) -> MultiplexedClusterClient {
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&initial_addr),
+            replicas: Vec::new(),
+        }]);
+        let masters = HashMap::from([
+            (initial_addr.clone(), initial_service),
+            (target_addr, target_service),
+        ]);
+        test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[test]
+    fn bounded_node_metric_labels_cap_at_64_and_preserve_seen_nodes() {
+        let labels = BoundedNodeMetricLabels::default();
+
+        for i in 0..MAX_NODE_METRIC_LABELS {
+            let node = format!("127.0.0.1:{}", 7000 + i);
+            assert_eq!(labels.label(&node).as_str(), node);
+        }
+
+        assert_eq!(labels.label("127.0.0.1:8000").as_str(), "_OTHER");
+        assert_eq!(labels.label("127.0.0.1:8001").as_str(), "_OTHER");
+        assert_eq!(labels.label("127.0.0.1:7000").as_str(), "127.0.0.1:7000");
+        assert_eq!(labels.seen.read().unwrap().len(), MAX_NODE_METRIC_LABELS);
+    }
+
+    #[test]
+    fn builder_disables_node_metrics_by_default_and_can_enable_them() {
+        let default = MultiplexedClusterClient::builder("127.0.0.1:7000");
+        assert!(!default.include_node_in_metrics);
+
+        let enabled =
+            MultiplexedClusterClient::builder("127.0.0.1:7000").include_node_in_metrics(true);
+        assert!(enabled.include_node_in_metrics);
+
+        let disabled_again = enabled.include_node_in_metrics(false);
+        assert!(!disabled_again.include_node_in_metrics);
+    }
+
+    #[tokio::test]
+    async fn no_recorder_keeps_command_observation_off_the_hot_path() {
+        let (addr, service, server) =
+            scripted_service(vec![b"GET"], b"$5\r\nvalue\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let mut client = test_client(
+            addr.clone(),
+            topology,
+            HashMap::from([(addr, service)]),
+            recorder,
+            false,
+        );
+        client.metrics_recorder = None;
+        let name_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let result = client
+            .execute(NameProbeCommand {
+                calls: Arc::clone(&name_calls),
+            })
+            .await;
+        client.shutdown().await;
+        server.await.unwrap();
+
+        assert!(matches!(result, Ok(Frame::BulkString(Some(_)))));
+        assert_eq!(name_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn no_recorder_keeps_pinned_node_observation_off_the_hot_path() {
+        let (addr, service, server) =
+            scripted_service(vec![b"GET"], b"$5\r\nvalue\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let mut client = test_client(
+            addr.clone(),
+            topology,
+            HashMap::from([(addr.clone(), service)]),
+            recorder,
+            false,
+        );
+        client.metrics_recorder = None;
+        let name_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let result = client
+            .execute_on_node(
+                &addr,
+                NameProbeCommand {
+                    calls: Arc::clone(&name_calls),
+                },
+            )
+            .await;
+        client.shutdown().await;
+        server.await.unwrap();
+
+        assert!(matches!(result, Ok(Frame::BulkString(Some(_)))));
+        assert_eq!(name_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn pinned_node_command_records_one_completion_on_that_node() {
+        let (addr, service, server) =
+            scripted_service(vec![b"GET"], b"$5\r\nvalue\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            addr.clone(),
+            topology,
+            HashMap::from([(addr.clone(), service)]),
+            Arc::clone(&recorder),
+            true,
+        );
+
+        let result = client.execute_on_node(&addr, Get::new("key")).await;
+        client.shutdown().await;
+        server.await.unwrap();
+
+        assert_eq!(result.unwrap(), Some(Bytes::from_static(b"value")));
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: None,
+                node: Some(addr),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn moved_redirect_records_one_hook_and_one_completion_on_the_final_node() {
+        let (target_addr, target_service, target_server) =
+            scripted_service(vec![b"GET"], b"$5\r\nvalue\r\n".to_vec()).await;
+        let moved = format!("-MOVED 42 {target_addr}\r\n").into_bytes();
+        let (initial_addr, initial_service, initial_server) =
+            scripted_service(vec![b"GET"], moved).await;
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = redirect_client(
+            initial_addr,
+            initial_service,
+            target_addr.clone(),
+            target_service,
+            Arc::clone(&recorder),
+        );
+
+        // MOVED normally schedules a background topology refresh. Hold the
+        // gate so this focused test has no unrelated network task racing it.
+        let refresh_permit = client.refresh_gate.try_begin().unwrap();
+        let result = client.execute(Get::new("key")).await;
+        drop(refresh_permit);
+        client.shutdown().await;
+        initial_server.await.unwrap();
+        target_server.await.unwrap();
+
+        assert_eq!(result.unwrap(), Some(Bytes::from_static(b"value")));
+        assert_eq!(
+            *recorder.redirects.lock().unwrap(),
+            vec![ClusterRedirectKind::Moved]
+        );
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: None,
+                node: Some(target_addr),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_redirect_records_one_hook_and_one_completion_on_the_final_node() {
+        let (target_addr, target_service, target_server) =
+            scripted_service(vec![b"ASKING", b"GET"], b"+OK\r\n$5\r\nvalue\r\n".to_vec()).await;
+        let ask = format!("-ASK 42 {target_addr}\r\n").into_bytes();
+        let (initial_addr, initial_service, initial_server) =
+            scripted_service(vec![b"GET"], ask).await;
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = redirect_client(
+            initial_addr,
+            initial_service,
+            target_addr.clone(),
+            target_service,
+            Arc::clone(&recorder),
+        );
+
+        let result = client.execute(Get::new("key")).await;
+        client.shutdown().await;
+        initial_server.await.unwrap();
+        target_server.await.unwrap();
+
+        assert_eq!(result.unwrap(), Some(Bytes::from_static(b"value")));
+        assert_eq!(
+            *recorder.redirects.lock().unwrap(),
+            vec![ClusterRedirectKind::Ask]
+        );
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: None,
+                node: Some(target_addr),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_ask_is_counted_before_it_is_surfaced() {
+        let repeated_ask = b"+OK\r\n-ASK 42 127.0.0.1:9999\r\n".to_vec();
+        let (target_addr, target_service, target_server) =
+            scripted_service(vec![b"ASKING", b"GET"], repeated_ask).await;
+        let ask = format!("-ASK 42 {target_addr}\r\n").into_bytes();
+        let (initial_addr, initial_service, initial_server) =
+            scripted_service(vec![b"GET"], ask).await;
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = redirect_client(
+            initial_addr,
+            initial_service,
+            target_addr.clone(),
+            target_service,
+            Arc::clone(&recorder),
+        );
+
+        let result = client.execute(Get::new("key")).await;
+        client.shutdown().await;
+        initial_server.await.unwrap();
+        target_server.await.unwrap();
+
+        assert!(matches!(result, Err(RedisError::Redis(_))));
+        assert_eq!(
+            *recorder.redirects.lock().unwrap(),
+            vec![ClusterRedirectKind::Ask, ClusterRedirectKind::Ask]
+        );
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: Some(ErrorKind::Other),
+                node: Some(target_addr),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_topology_refresh_records_one_failure_hook() {
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            String::new(),
+            ClusterTopology::new(Vec::new()),
+            HashMap::new(),
+            Arc::clone(&recorder),
+            false,
+        );
+
+        let result = client.refresh_topology().await;
+        client.shutdown().await;
+
+        assert!(matches!(result, Err(RedisError::ConnectionClosed)));
+        let refreshes = recorder.refreshes.lock().unwrap();
+        assert_eq!(refreshes.len(), 1);
+        assert_eq!(refreshes[0].1, ClusterTopologyRefreshOutcome::Error);
     }
 }

@@ -120,6 +120,57 @@ impl ErrorKind {
     }
 }
 
+/// The bounded set of redirect responses emitted by Redis Cluster.
+///
+/// Keeping redirect kinds as an enum rather than an arbitrary string prevents
+/// accidental high-cardinality metric labels. The target node and hash slot
+/// belong in tracing events; redirect counters need only distinguish the two
+/// protocol-defined redirect modes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterRedirectKind {
+    /// A permanent slot-owner redirect (`MOVED`).
+    Moved,
+    /// A temporary migrating-slot redirect (`ASK`).
+    Ask,
+}
+
+impl ClusterRedirectKind {
+    #[cfg(feature = "metrics")]
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Moved => "moved",
+            Self::Ask => "ask",
+        }
+    }
+}
+
+/// The bounded outcome of a Redis Cluster topology refresh attempt.
+///
+/// `Partial` distinguishes useful best-effort progress from a refresh that
+/// reconciled every desired node, without introducing an arbitrary string
+/// label into metrics backends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClusterTopologyRefreshOutcome {
+    /// Every desired node service was reconciled successfully.
+    Success,
+    /// The topology was updated, but one or more desired node services could
+    /// not be built during this attempt.
+    Partial,
+    /// Topology discovery or reconciliation failed.
+    Error,
+}
+
+impl ClusterTopologyRefreshOutcome {
+    #[cfg(feature = "metrics")]
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Partial => "partial",
+            Self::Error => "error",
+        }
+    }
+}
+
 /// Receives metric events for each Redis command. Users implement this
 /// trait to integrate with their metrics framework (prometheus, metrics
 /// crate, OpenTelemetry, etc.).
@@ -136,6 +187,53 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     /// Note: `Frame::Error` responses (Redis-level errors such as
     /// `WRONGTYPE`) are classified as failures, not successes.
     fn command_completed(&self, command: &str, duration: Duration, error: Option<ErrorKind>);
+
+    /// Called after a command completes with an optional cluster-node label.
+    ///
+    /// Cluster clients pass the node that ultimately handled the command when
+    /// node labeling is enabled. The label is optional because node addresses
+    /// create one metric series per cluster member and applications may prefer
+    /// the lower-cardinality aggregate.
+    ///
+    /// The default implementation discards `node` and delegates to
+    /// [`command_completed`](Self::command_completed), so existing recorder
+    /// implementations automatically receive cluster command metrics without
+    /// an API break.
+    fn command_completed_on_node(
+        &self,
+        command: &str,
+        duration: Duration,
+        error: Option<ErrorKind>,
+        node: Option<&str>,
+    ) {
+        let _ = node;
+        self.command_completed(command, duration, error);
+    }
+
+    /// Called when a Redis Cluster command receives a redirect response.
+    ///
+    /// [`ClusterRedirectKind`] bounds the possible metric label values. Node,
+    /// slot, and retry-attempt details are intentionally left to tracing so
+    /// this counter cannot grow with cluster size or workload keys.
+    ///
+    /// The default implementation is a no-op.
+    fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+        let _ = kind;
+    }
+
+    /// Called after a Redis Cluster topology refresh attempt completes.
+    ///
+    /// `duration` covers the complete refresh attempt and `outcome` supplies a
+    /// bounded result suitable for counters and histograms.
+    ///
+    /// The default implementation is a no-op.
+    fn cluster_topology_refresh_completed(
+        &self,
+        duration: Duration,
+        outcome: ClusterTopologyRefreshOutcome,
+    ) {
+        let _ = (duration, outcome);
+    }
 
     /// Called after each auto-pipeline flush.
     ///
@@ -186,6 +284,28 @@ where
         (**self).command_completed(command, duration, error);
     }
 
+    fn command_completed_on_node(
+        &self,
+        command: &str,
+        duration: Duration,
+        error: Option<ErrorKind>,
+        node: Option<&str>,
+    ) {
+        (**self).command_completed_on_node(command, duration, error, node);
+    }
+
+    fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+        (**self).cluster_redirected(kind);
+    }
+
+    fn cluster_topology_refresh_completed(
+        &self,
+        duration: Duration,
+        outcome: ClusterTopologyRefreshOutcome,
+    ) {
+        (**self).cluster_topology_refresh_completed(duration, outcome);
+    }
+
     fn pipeline_flushed(&self, batch_size: usize) {
         (**self).pipeline_flushed(batch_size);
     }
@@ -231,46 +351,99 @@ impl MetricsFacadeRecorder {
 }
 
 #[cfg(feature = "metrics")]
+fn record_command_metrics(
+    command: &str,
+    duration: Duration,
+    error: Option<ErrorKind>,
+    node: Option<&str>,
+) {
+    let error = error.map(ErrorKind::as_label);
+    let outcome = if error.is_some() { "error" } else { "success" };
+
+    let mut duration_labels = vec![
+        metrics::Label::new("db.system.name", "redis"),
+        metrics::Label::new("db.operation.name", command.to_owned()),
+    ];
+    let mut counter_labels = vec![
+        metrics::Label::new("db.operation.name", command.to_owned()),
+        metrics::Label::new("outcome", outcome),
+    ];
+
+    if let Some(error) = error {
+        duration_labels.push(metrics::Label::new("error.type", error));
+        counter_labels.push(metrics::Label::new("error.type", error));
+    }
+    if let Some(node) = node {
+        let node = node.to_owned();
+        duration_labels.push(metrics::Label::new(
+            "redis_tower.cluster.node",
+            node.clone(),
+        ));
+        counter_labels.push(metrics::Label::new("redis_tower.cluster.node", node));
+    }
+
+    metrics::histogram!(
+        description: "Duration of Redis client operations",
+        unit: metrics::Unit::Seconds,
+        "db.client.operation.duration",
+        duration_labels,
+    )
+    .record(duration.as_secs_f64());
+    metrics::counter!(
+        description: "Redis commands completed",
+        unit: metrics::Unit::Count,
+        "redis_tower.commands",
+        counter_labels,
+    )
+    .increment(1);
+}
+
+#[cfg(feature = "metrics")]
 impl MetricsRecorder for MetricsFacadeRecorder {
     fn command_completed(&self, command: &str, duration: Duration, error: Option<ErrorKind>) {
-        if let Some(error) = error {
-            let error = error.as_label();
-            metrics::histogram!(
-                description: "Duration of Redis client operations",
-                unit: metrics::Unit::Seconds,
-                "db.client.operation.duration",
-                "db.system.name" => "redis",
-                "db.operation.name" => command.to_owned(),
-                "error.type" => error,
-            )
-            .record(duration.as_secs_f64());
-            metrics::counter!(
-                description: "Redis commands completed",
-                unit: metrics::Unit::Count,
-                "redis_tower.commands",
-                "db.operation.name" => command.to_owned(),
-                "outcome" => "error",
-                "error.type" => error,
-            )
-            .increment(1);
-        } else {
-            metrics::histogram!(
-                description: "Duration of Redis client operations",
-                unit: metrics::Unit::Seconds,
-                "db.client.operation.duration",
-                "db.system.name" => "redis",
-                "db.operation.name" => command.to_owned(),
-            )
-            .record(duration.as_secs_f64());
-            metrics::counter!(
-                description: "Redis commands completed",
-                unit: metrics::Unit::Count,
-                "redis_tower.commands",
-                "db.operation.name" => command.to_owned(),
-                "outcome" => "success",
-            )
-            .increment(1);
-        }
+        record_command_metrics(command, duration, error, None);
+    }
+
+    fn command_completed_on_node(
+        &self,
+        command: &str,
+        duration: Duration,
+        error: Option<ErrorKind>,
+        node: Option<&str>,
+    ) {
+        record_command_metrics(command, duration, error, node);
+    }
+
+    fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+        metrics::counter!(
+            description: "Redis Cluster redirect responses",
+            unit: metrics::Unit::Count,
+            "redis_tower.cluster.redirects",
+            "kind" => kind.as_label(),
+        )
+        .increment(1);
+    }
+
+    fn cluster_topology_refresh_completed(
+        &self,
+        duration: Duration,
+        outcome: ClusterTopologyRefreshOutcome,
+    ) {
+        let outcome = outcome.as_label();
+        metrics::histogram!(
+            description: "Duration of Redis Cluster topology refresh attempts",
+            unit: metrics::Unit::Seconds,
+            "redis_tower.cluster.topology_refresh.duration",
+            "outcome" => outcome,
+        )
+        .record(duration.as_secs_f64());
+        metrics::counter!(
+            description: "Redis Cluster topology refresh attempts",
+            unit: metrics::Unit::Count,
+            "redis_tower.cluster.topology_refreshes",
+            "outcome" => outcome,
+        )
+        .increment(1);
     }
 
     fn pipeline_flushed(&self, batch_size: usize) {
@@ -957,6 +1130,99 @@ mod tests {
     }
 
     #[test]
+    fn existing_recorders_receive_node_completions_through_the_original_hook() {
+        let recorder = TestRecorder::new();
+        recorder.command_completed_on_node(
+            "GET",
+            Duration::from_millis(2),
+            Some(ErrorKind::Connection),
+            Some("127.0.0.1:7000"),
+        );
+        recorder.cluster_redirected(ClusterRedirectKind::Moved);
+        recorder.cluster_topology_refresh_completed(
+            Duration::from_millis(3),
+            ClusterTopologyRefreshOutcome::Success,
+        );
+
+        assert!(recorder.was_called());
+        assert_eq!(recorder.recorded_error(), Some(ErrorKind::Connection));
+    }
+
+    #[derive(Default)]
+    struct ClusterHookRecorder {
+        node: Mutex<Option<String>>,
+        redirect: Mutex<Option<ClusterRedirectKind>>,
+        refresh: Mutex<Option<(Duration, ClusterTopologyRefreshOutcome)>>,
+    }
+
+    impl MetricsRecorder for ClusterHookRecorder {
+        fn command_completed(
+            &self,
+            _command: &str,
+            _duration: Duration,
+            _error: Option<ErrorKind>,
+        ) {
+        }
+
+        fn command_completed_on_node(
+            &self,
+            _command: &str,
+            _duration: Duration,
+            _error: Option<ErrorKind>,
+            node: Option<&str>,
+        ) {
+            *self.node.lock().unwrap() = node.map(str::to_owned);
+        }
+
+        fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+            *self.redirect.lock().unwrap() = Some(kind);
+        }
+
+        fn cluster_topology_refresh_completed(
+            &self,
+            duration: Duration,
+            outcome: ClusterTopologyRefreshOutcome,
+        ) {
+            *self.refresh.lock().unwrap() = Some((duration, outcome));
+        }
+    }
+
+    #[test]
+    fn arc_delegates_cluster_hooks_to_its_metrics_recorder() {
+        let recorder = Arc::new(ClusterHookRecorder::default());
+
+        MetricsRecorder::command_completed_on_node(
+            &recorder,
+            "SET",
+            Duration::from_millis(1),
+            None,
+            Some("127.0.0.1:7001"),
+        );
+        MetricsRecorder::cluster_redirected(&recorder, ClusterRedirectKind::Ask);
+        MetricsRecorder::cluster_topology_refresh_completed(
+            &recorder,
+            Duration::from_millis(4),
+            ClusterTopologyRefreshOutcome::Partial,
+        );
+
+        assert_eq!(
+            recorder.node.lock().unwrap().as_deref(),
+            Some("127.0.0.1:7001")
+        );
+        assert_eq!(
+            *recorder.redirect.lock().unwrap(),
+            Some(ClusterRedirectKind::Ask)
+        );
+        assert_eq!(
+            *recorder.refresh.lock().unwrap(),
+            Some((
+                Duration::from_millis(4),
+                ClusterTopologyRefreshOutcome::Partial
+            ))
+        );
+    }
+
+    #[test]
     fn arc_delegates_to_its_metrics_recorder() {
         let recorder = Arc::new(TestRecorder::new());
         MetricsRecorder::command_completed(
@@ -1004,6 +1270,87 @@ mod tests {
         assert_eq!(counters[1].label("outcome"), Some("error"));
         assert_eq!(counters[1].label("error.type"), Some("connection"));
         assert_eq!(counters[2].label("error.type"), Some("_OTHER"));
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn facade_recorder_adds_the_optional_cluster_node_label() {
+        let capture = CapturingFacadeRecorder::default();
+        let recorder = MetricsFacadeRecorder::new();
+        metrics::with_local_recorder(&capture, || {
+            recorder.command_completed_on_node(
+                "GET",
+                Duration::from_millis(2),
+                None,
+                Some("127.0.0.1:7000"),
+            );
+            recorder.command_completed_on_node(
+                "SET",
+                Duration::from_millis(3),
+                Some(ErrorKind::Connection),
+                None,
+            );
+        });
+
+        let histograms = capture.histograms.lock().unwrap();
+        assert_eq!(
+            histograms[0].label("redis_tower.cluster.node"),
+            Some("127.0.0.1:7000")
+        );
+        assert_eq!(histograms[1].label("redis_tower.cluster.node"), None);
+
+        let counters = capture.counters.lock().unwrap();
+        assert_eq!(
+            counters[0].label("redis_tower.cluster.node"),
+            Some("127.0.0.1:7000")
+        );
+        assert_eq!(counters[1].label("redis_tower.cluster.node"), None);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn facade_recorder_emits_bounded_cluster_event_labels() {
+        let capture = CapturingFacadeRecorder::default();
+        let recorder = MetricsFacadeRecorder::new();
+        metrics::with_local_recorder(&capture, || {
+            recorder.cluster_redirected(ClusterRedirectKind::Moved);
+            recorder.cluster_redirected(ClusterRedirectKind::Ask);
+            recorder.cluster_topology_refresh_completed(
+                Duration::from_millis(3),
+                ClusterTopologyRefreshOutcome::Success,
+            );
+            recorder.cluster_topology_refresh_completed(
+                Duration::from_millis(4),
+                ClusterTopologyRefreshOutcome::Partial,
+            );
+            recorder.cluster_topology_refresh_completed(
+                Duration::from_millis(5),
+                ClusterTopologyRefreshOutcome::Error,
+            );
+        });
+
+        let counters = capture.counters.lock().unwrap();
+        let redirect_kinds: Vec<_> = counters
+            .iter()
+            .filter(|metric| metric.name == "redis_tower.cluster.redirects")
+            .map(|metric| metric.label("kind").unwrap())
+            .collect();
+        assert_eq!(redirect_kinds, ["moved", "ask"]);
+
+        let refresh_outcomes: Vec<_> = counters
+            .iter()
+            .filter(|metric| metric.name == "redis_tower.cluster.topology_refreshes")
+            .map(|metric| metric.label("outcome").unwrap())
+            .collect();
+        assert_eq!(refresh_outcomes, ["success", "partial", "error"]);
+
+        let histograms = capture.histograms.lock().unwrap();
+        let duration_outcomes: Vec<_> = histograms
+            .iter()
+            .filter(|metric| metric.name == "redis_tower.cluster.topology_refresh.duration")
+            .map(|metric| metric.label("outcome").unwrap())
+            .collect();
+        assert_eq!(duration_outcomes, ["success", "partial", "error"]);
     }
 
     #[cfg(feature = "metrics")]

@@ -100,6 +100,7 @@ use redis_tower::{AutoPipelineConfig, MetricsFacadeRecorder,
     MultiplexedClient, RedisConnection, spawn_pool_stats_exporter,
     spawn_queue_depth_exporter};
 use redis_tower::pool::{ConnectionPool, PoolConfig};
+use redis_tower_cluster::MultiplexedClusterClient;
 
 // Install a metrics-facade exporter before constructing this recorder.
 let recorder = Arc::new(MetricsFacadeRecorder::new());
@@ -109,6 +110,11 @@ let client = MultiplexedClient::from_connection_with_config(conn, AutoPipelineCo
     metrics_recorder: Some(recorder.clone()),
     ..AutoPipelineConfig::default()
 });
+
+let cluster_client = MultiplexedClusterClient::builder("127.0.0.1:7000")
+    .metrics_recorder(recorder.clone())
+    .include_node_in_metrics(true)
+    .connect().await?;
 
 let pool = ConnectionPool::connect_with_config(
     PoolConfig::default()
@@ -121,7 +127,7 @@ let queue_stats = spawn_queue_depth_exporter(
     client.clone(), "commands", Duration::from_secs(5));
 
 println!("pending pipeline requests: {}", client.queue_depth());
-# let _ = (pool_stats, queue_stats);
+# let _ = (cluster_client, pool_stats, queue_stats);
 ```
 
 Use a stable, distinct `PoolConfig::name` for every pool; it becomes the
@@ -147,7 +153,18 @@ The built-in recorder emits:
 - pool snapshots: `db.client.connection.count`,
   `db.client.connection.max`, `db.client.connection.pending_requests`,
   `redis_tower.pool.inflight_commands`, and
-  `redis_tower.pool.max_inflight_per_connection`.
+  `redis_tower.pool.max_inflight_per_connection`;
+- cluster routing: `redis_tower.cluster.redirects`,
+  `redis_tower.cluster.topology_refreshes`, and
+  `redis_tower.cluster.topology_refresh.duration`.
+
+Cluster redirect counters distinguish only `MOVED` and `ASK`, while topology
+refresh counters and histograms use bounded success/partial/error outcomes. Per-node
+command latency labels are disabled by default. Enabling
+`include_node_in_metrics(true)` adds `redis_tower.cluster.node` to command
+measurements, with up to 64 concrete node-address labels per client plus
+`_OTHER`; later addresses are folded into `_OTHER` so topology churn cannot
+grow cardinality without bound.
 
 The pool measurements use OpenTelemetry database client semantic-convention
 metric and attribute names. The `metrics` facade represents the connection and
@@ -312,11 +329,16 @@ cluster.execute(Set::new("{user:1}:name", "Alice")).await?;
 ```
 
 ```rust,ignore
-use redis_tower_cluster::MultiplexedClusterClient;
+use std::sync::Arc;
+use redis_tower::MetricsFacadeRecorder;
+use redis_tower_cluster::{MultiplexedClusterClient, ReadPreference};
 
 // High-concurrency shared client
+let recorder = Arc::new(MetricsFacadeRecorder::new());
 let client = MultiplexedClusterClient::builder("127.0.0.1:7000")
     .read_preference(ReadPreference::PreferReplica)
+    .metrics_recorder(recorder)
+    .include_node_in_metrics(true)
     .connect().await?;
 
 // Clone and share across tasks
@@ -326,7 +348,12 @@ tokio::spawn(async move {
 });
 ```
 
-MOVED/ASK redirects handled automatically.
+MOVED/ASK redirects are handled automatically. The multiplexed client traces
+redirects and topology-refresh lifecycle events; a configured recorder also
+emits redirect counters and refresh count/duration metrics. Per-node command
+latency labels are opt-in: they are disabled by default and, when enabled, are
+limited to 64 concrete addresses per client plus `_OTHER`; additional addresses
+use the `_OTHER` label.
 
 ## Sentinel
 
