@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- route Redis 8.8 Array reads to replicas while keeping all mutating `AR*` commands on masters
 - route MSETEX by its numkeys-prefixed key list, classify HOTKEYS as keyless, and allow DIGEST replica reads
 - route FT.HYBRID, FT.EXPLAIN, FT.EXPLAINCLI, FT.PROFILE, FT.TAGVALS, VISMEMBER, and VRANGE through read-only cluster paths
 

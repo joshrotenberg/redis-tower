@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- complete typed-builder coverage for the Redis 8.8 Array data type's 18 `AR*` commands, including typed scan, grep, metadata, and aggregate responses
 - generated Redis 8.8 typed-command conformance report with CI drift detection
 - Redis 8.x builders for DELEX, DIGEST, MSETEX, INCREX, XCFGSET, XIDMPRECORD, XNACK, and the HOTKEYS command family
 - `FtHybrid` text/vector fusion, `FtExplain`/`FtExplainCli` plan inspection, and `VIsMember`/`VRange` membership and lexicographical range builders, completing typed-builder coverage for the scoped Search and Vector Set command names

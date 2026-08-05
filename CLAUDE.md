@@ -72,11 +72,11 @@ All live in `redis-tower/src/`:
 
 `redis-tower-commands/src/` -- one file per group:
 
-`strings`, `keys`, `hashes`, `lists`, `sets`, `sorted_sets`, `bitmap`, `geo`, `hyperloglog`, `streams`, `pubsub`, `scan`, `scripting`, `blocking`, `server`, `diagnostics`, `acl`, `cluster`, `transaction`, `raw`, `search`, `search_util`, `json`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`
+`array`, `strings`, `keys`, `hashes`, `lists`, `sets`, `sorted_sets`, `bitmap`, `geo`, `hyperloglog`, `streams`, `pubsub`, `scan`, `scripting`, `blocking`, `server`, `diagnostics`, `acl`, `cluster`, `transaction`, `raw`, `search`, `search_util`, `json`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`
 
 Redis Stack commands (`json`, `search`, `bloom`, `sketch`, `tdigest`, `timeseries`, `vector_sets`) are behind feature flags, all enabled by default via `commands-stack`.
 
-Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, Redis 8.x DELEX/DIGEST/MSETEX/INCREX/XCFGSET/XIDMPRECORD/XNACK/HOTKEYS/FT.HYBRID/FT.EXPLAIN/FT.EXPLAINCLI/VISMEMBER/VRANGE builders, and the cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG). Search and Vector Set now have typed builders for every scoped command name; generated coverage lives in `COMMAND_COVERAGE.md`.
+Notable additions since initial audit: `transaction` module (MULTI/EXEC/DISCARD/WATCH/UNWATCH), HMGET, LPOP/RPOP count variants, ZDiff/ZUnion/ZInter, EXPIREAT/PTTL, HELLO, EVAL_RO/EVALSHA_RO, ZAdd flags (NX/XX/GT/LT/CH/INCR), Expire condition flags (Redis 7.0), CLIENT subcommands, Redis 8.x DELEX/DIGEST/MSETEX/INCREX/XCFGSET/XIDMPRECORD/XNACK/HOTKEYS/FT.HYBRID/FT.EXPLAIN/FT.EXPLAINCLI/VISMEMBER/VRANGE builders, the complete Redis 8.8 `AR*` Array command family, and the cluster admin sweep (SETSLOT, ADDSLOTS/DELSLOTS + RANGE variants, REPLICAS/SLAVES, LINKS, SET-CONFIG-EPOCH, BUMPEPOCH, FLUSHSLOTS, SAVECONFIG). Search, Vector Set, and Array now have typed builders for every scoped command name; generated coverage lives in `COMMAND_COVERAGE.md`.
 
 ## Module Clients (`redis-tower-modules`)
 

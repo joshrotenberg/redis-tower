@@ -469,3 +469,241 @@ async fn redis_8_8_increx_and_stream_delivery_commands() {
     .await
     .unwrap();
 }
+
+#[tokio::test]
+async fn redis_8_8_array_commands() {
+    let Some(version) = configured_version() else {
+        return;
+    };
+    if version < (8, 8, 0) {
+        return;
+    }
+
+    let mut conn = connection().await;
+    let array_key = key("array");
+    let ring_key = key("array-ring");
+    let array_arg = Bytes::from(array_key.clone());
+    let ring_arg = Bytes::from(ring_key.clone());
+    conn.execute(Del::keys([array_key.as_str(), ring_key.as_str()]))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        conn.execute(
+            ArSet::new(array_arg.clone(), 0, "zero")
+                .value("one")
+                .value("two"),
+        )
+        .await
+        .unwrap(),
+        3
+    );
+    assert_eq!(
+        conn.execute(ArGet::new(array_arg.clone(), 1))
+            .await
+            .unwrap(),
+        Some(Bytes::from_static(b"one"))
+    );
+    assert_eq!(
+        conn.execute(ArGetRange::new(array_arg.clone(), 0, 4))
+            .await
+            .unwrap(),
+        vec![
+            Some(Bytes::from_static(b"zero")),
+            Some(Bytes::from_static(b"one")),
+            Some(Bytes::from_static(b"two")),
+            None,
+            None,
+        ]
+    );
+
+    assert_eq!(
+        conn.execute(ArMSet::new(array_arg.clone(), 4, "four").pair(6, "six"))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        conn.execute(ArMGet::new(array_arg.clone(), 0).index(3).index(4).index(6),)
+            .await
+            .unwrap(),
+        vec![
+            Some(Bytes::from_static(b"zero")),
+            None,
+            Some(Bytes::from_static(b"four")),
+            Some(Bytes::from_static(b"six")),
+        ]
+    );
+    assert_eq!(
+        conn.execute(ArLen::new(array_arg.clone())).await.unwrap(),
+        7
+    );
+    assert_eq!(
+        conn.execute(ArCount::new(array_arg.clone())).await.unwrap(),
+        5
+    );
+    assert_eq!(
+        conn.execute(ArNext::new(array_arg.clone())).await.unwrap(),
+        Some(0)
+    );
+
+    assert!(
+        conn.execute(ArSeek::new(array_arg.clone(), 10))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        conn.execute(ArNext::new(array_arg.clone())).await.unwrap(),
+        Some(10)
+    );
+    assert_eq!(
+        conn.execute(ArInsert::new(array_arg.clone(), "ten").value("eleven"))
+            .await
+            .unwrap(),
+        11
+    );
+    assert_eq!(
+        conn.execute(ArNext::new(array_arg.clone())).await.unwrap(),
+        Some(12)
+    );
+    assert_eq!(
+        conn.execute(ArLastItems::new(array_arg.clone(), 3))
+            .await
+            .unwrap(),
+        vec![
+            None,
+            Some(Bytes::from_static(b"ten")),
+            Some(Bytes::from_static(b"eleven")),
+        ]
+    );
+
+    let scanned = conn
+        .execute(ArScan::new(array_arg.clone(), 0, 11).limit(20))
+        .await
+        .unwrap();
+    assert_eq!(
+        scanned,
+        vec![
+            ArrayEntry {
+                index: 0,
+                value: Bytes::from_static(b"zero"),
+            },
+            ArrayEntry {
+                index: 1,
+                value: Bytes::from_static(b"one"),
+            },
+            ArrayEntry {
+                index: 2,
+                value: Bytes::from_static(b"two"),
+            },
+            ArrayEntry {
+                index: 4,
+                value: Bytes::from_static(b"four"),
+            },
+            ArrayEntry {
+                index: 6,
+                value: Bytes::from_static(b"six"),
+            },
+            ArrayEntry {
+                index: 10,
+                value: Bytes::from_static(b"ten"),
+            },
+            ArrayEntry {
+                index: 11,
+                value: Bytes::from_static(b"eleven"),
+            },
+        ]
+    );
+    assert_eq!(
+        conn.execute(
+            ArGrep::new(
+                array_arg.clone(),
+                ArGrepBound::Index(0),
+                ArGrepBound::Index(11),
+                ArGrepPredicate::Match(Bytes::from_static(b"O")),
+            )
+            .nocase()
+            .with_values()
+            .limit(10),
+        )
+        .await
+        .unwrap(),
+        ArGrepResult::Entries(vec![
+            ArrayEntry {
+                index: 0,
+                value: Bytes::from_static(b"zero"),
+            },
+            ArrayEntry {
+                index: 1,
+                value: Bytes::from_static(b"one"),
+            },
+            ArrayEntry {
+                index: 2,
+                value: Bytes::from_static(b"two"),
+            },
+            ArrayEntry {
+                index: 4,
+                value: Bytes::from_static(b"four"),
+            },
+        ])
+    );
+    assert_eq!(
+        conn.execute(ArOp::new(array_arg.clone(), 0, 11, ArOpOperation::Used,))
+            .await
+            .unwrap(),
+        ArOpResult::Integer(Some(7))
+    );
+    let info = conn
+        .execute(ArInfo::new(array_arg.clone()).full())
+        .await
+        .unwrap();
+    assert_eq!(info.count, 7);
+    assert_eq!(info.len, 12);
+    assert_eq!(info.next_insert_index, 12);
+    let full = info.full.expect("ARINFO FULL should include slice details");
+    assert_eq!(full.dense_slices + full.sparse_slices, info.slices);
+
+    assert_eq!(
+        conn.execute(ArDel::new(array_arg.clone(), 1).index(4))
+            .await
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        conn.execute(ArDelRange::new(array_arg, 5, 10))
+            .await
+            .unwrap(),
+        2
+    );
+
+    assert_eq!(
+        conn.execute(
+            ArRing::new(ring_arg.clone(), 3, "a")
+                .value("b")
+                .value("c")
+                .value("d"),
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(conn.execute(ArLen::new(ring_arg.clone())).await.unwrap(), 3);
+    assert_eq!(
+        conn.execute(ArCount::new(ring_arg.clone())).await.unwrap(),
+        3
+    );
+    assert_eq!(
+        conn.execute(ArLastItems::new(ring_arg, 3).rev())
+            .await
+            .unwrap(),
+        vec![
+            Some(Bytes::from_static(b"d")),
+            Some(Bytes::from_static(b"c")),
+            Some(Bytes::from_static(b"b")),
+        ]
+    );
+
+    conn.execute(Del::keys([array_key, ring_key]))
+        .await
+        .unwrap();
+}

@@ -201,6 +201,9 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
         | b"ZINTERCARD"
         // streams (XREADGROUP mutates a consumer group -- excluded)
         | b"XLEN" | b"XRANGE" | b"XREVRANGE" | b"XREAD" | b"XINFO" | b"XPENDING"
+        // arrays (Redis 8.8; mutation commands are excluded)
+        | b"ARCOUNT" | b"ARGET" | b"ARGETRANGE" | b"ARGREP" | b"ARINFO"
+        | b"ARLASTITEMS" | b"ARLEN" | b"ARMGET" | b"ARNEXT" | b"AROP" | b"ARSCAN"
         // geo (read-only; STORE-capable GEORADIUS routes to master)
         | b"GEOPOS" | b"GEODIST" | b"GEOHASH" | b"GEOSEARCH"
         | b"GEORADIUS_RO" | b"GEORADIUSBYMEMBER_RO"
@@ -417,6 +420,56 @@ mod tests {
             assert!(
                 !is_readonly_command(&array(vec![bulk(cmd), bulk("k")])),
                 "{cmd} should route to the master"
+            );
+        }
+    }
+
+    #[test]
+    fn array_commands_extract_their_key_and_route_reads_to_replicas() {
+        let read_commands = [
+            "ARCOUNT",
+            "ARGET",
+            "ARGETRANGE",
+            "ARGREP",
+            "ARINFO",
+            "ARLASTITEMS",
+            "ARLEN",
+            "ARMGET",
+            "ARNEXT",
+            "AROP",
+            "ARSCAN",
+        ];
+        for cmd in read_commands {
+            let frame = array(vec![bulk(cmd), bulk("array-key")]);
+            assert_eq!(
+                extract_key(&frame),
+                Some(b"array-key".as_slice()),
+                "{cmd} should route by its array key"
+            );
+            assert!(
+                is_readonly_command(&frame),
+                "{cmd} should be safe to route to a replica"
+            );
+        }
+
+        for cmd in [
+            "ARDEL",
+            "ARDELRANGE",
+            "ARINSERT",
+            "ARMSET",
+            "ARRING",
+            "ARSEEK",
+            "ARSET",
+        ] {
+            let frame = array(vec![bulk(cmd), bulk("array-key")]);
+            assert_eq!(
+                extract_key(&frame),
+                Some(b"array-key".as_slice()),
+                "{cmd} should route by its array key"
+            );
+            assert!(
+                !is_readonly_command(&frame),
+                "{cmd} mutates the array and must route to the master"
             );
         }
     }
