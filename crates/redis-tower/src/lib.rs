@@ -41,7 +41,7 @@
 //!
 //! # Commands
 //!
-//! The [`commands`] module contains 450+ typed command structs spanning core
+//! The [`commands`] module contains 475+ typed command structs spanning core
 //! Redis and feature-gated Redis Stack modules. Each command implements the
 //! [`Command`] trait, which defines serialization to a RESP [`Frame`] via
 //! `to_frame()` and response parsing via `parse_response()`.

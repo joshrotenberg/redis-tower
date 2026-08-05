@@ -2,7 +2,7 @@
 
 # Redis command coverage
 
-`redis-tower` provides typed builders for **457/506 (90.3%)** of the scoped Redis 8.8 command surface. **20/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
+`redis-tower` provides typed builders for **475/506 (93.9%)** of the scoped Redis 8.8 command surface. **21/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
 
 The issue that introduced this report recorded a June 2026 baseline of **393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. The headline above is regenerated from the current source tree.
 
@@ -10,7 +10,7 @@ The issue that introduced this report recorded a June 2026 baseline of **393/506
 
 | Tier | Command group | Typed | Scoped | Coverage | Missing typed builders |
 |---|---|---:|---:|---:|---|
-| T1 | array | 0 | 18 | 0.0% | `ARCOUNT`<br>`ARDEL`<br>`ARDELRANGE`<br>`ARGET`<br>`ARGETRANGE`<br>`ARGREP`<br>`ARINFO`<br>`ARINSERT`<br>`ARLASTITEMS`<br>`ARLEN`<br>`ARMGET`<br>`ARMSET`<br>`ARNEXT`<br>`AROP`<br>`ARRING`<br>`ARSCAN`<br>`ARSEEK`<br>`ARSET` |
+| T1 | array | 18 | 18 | 100.0% | — |
 | T1 | bitmap | 7 | 7 | 100.0% | — |
 | T1 | cluster | 24 | 32 | 75.0% | `ASKING`<br>`CLUSTER COUNT-FAILURE-REPORTS`<br>`CLUSTER MIGRATION`<br>`CLUSTER MYSHARDID`<br>`CLUSTER SLOT-STATS`<br>`CLUSTER SYNCSLOTS`<br>`READONLY`<br>`READWRITE` |
 | T1 | connection | 24 | 24 | 100.0% | — |

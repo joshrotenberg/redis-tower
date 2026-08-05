@@ -21,6 +21,7 @@
 //! - **geo** -- `GeoAdd`, `GeoSearch`, `GeoDist`, etc.
 //! - **hyperloglog** -- `PfAdd`, `PfCount`, `PfMerge`
 //! - **bitmap** -- `SetBit`, `GetBit`, `BitCount`, `BitOp`, etc.
+//! - **array** -- `ArGet`, `ArSet`, `ArScan`, `ArGrep`, etc. (Redis 8.8+)
 //! - **blocking** -- `BLPop`, `BRPop`, `BLMove`, `BZPopMin`, etc.
 //! - **scan** -- `Scan`, `HScan`, `SScan`, `ZScan`
 //! - **acl** -- ACL management commands
@@ -58,6 +59,7 @@
 
 // -- Core Redis commands (always available) --
 mod acl;
+mod array;
 mod bitmap;
 mod blocking;
 mod cluster;
@@ -80,6 +82,7 @@ mod strings;
 mod transaction;
 
 pub use acl::*;
+pub use array::*;
 pub use bitmap::*;
 pub use blocking::*;
 pub use cluster::*;
@@ -154,7 +157,9 @@ mod clone_coverage {
     //! Tower `Retry`/`Hedge` layers, which require `Req: Clone`. This asserts a
     //! representative command from each core group; a missing derive on any of
     //! them fails to compile here.
-    use crate::{BitCount, ClusterInfo, Del, Get, HGet, LPush, Ping, SAdd, Scan, Set, XAdd, ZAdd};
+    use crate::{
+        ArGet, BitCount, ClusterInfo, Del, Get, HGet, LPush, Ping, SAdd, Scan, Set, XAdd, ZAdd,
+    };
 
     fn assert_clone<T: Clone>() {}
 
@@ -172,5 +177,6 @@ mod clone_coverage {
         assert_clone::<Scan>();
         assert_clone::<ClusterInfo>();
         assert_clone::<BitCount>();
+        assert_clone::<ArGet>();
     }
 }
