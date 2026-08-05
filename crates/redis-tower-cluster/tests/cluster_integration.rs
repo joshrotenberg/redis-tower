@@ -1,19 +1,22 @@
 //! Cluster integration tests.
 //!
-//! Run with: `cargo test -p redis-tower-cluster --test cluster_integration -- --ignored`
+//! Run with: `cargo test -p redis-tower-cluster --test cluster_integration -- --ignored --test-threads=1`
 
 use bytes::Bytes;
 use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
-use redis_tower::metrics_layer::{ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder};
+use redis_tower::metrics_layer::{
+    ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
+};
 use redis_tower::pool::ConnectionPool;
 use redis_tower_cluster::{
     ClusterConnection, ClusterScan, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
 };
 use redis_tower_commands::*;
+use redis_tower_test::cluster::{ClusterFixture, ClusterNodeRole, key_for_slot};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 
 static CLUSTER: OnceCell<RedisClusterHandle> = OnceCell::const_new();
@@ -51,10 +54,15 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
 #[derive(Default)]
 struct RefreshMetrics {
     outcomes: Mutex<Vec<ClusterTopologyRefreshOutcome>>,
+    redirects: Mutex<Vec<ClusterRedirectKind>>,
 }
 
 impl MetricsRecorder for RefreshMetrics {
     fn command_completed(&self, _: &str, _: Duration, _: Option<ErrorKind>) {}
+
+    fn cluster_redirected(&self, kind: ClusterRedirectKind) {
+        self.redirects.lock().unwrap().push(kind);
+    }
 
     fn cluster_topology_refresh_completed(
         &self,
@@ -437,78 +445,267 @@ async fn mux_cluster_shutdown_drains_and_last_clone_wins() {
     clone.shutdown().await;
 }
 
-/// The kill-a-master test a customer evaluation runs first: a master dies and
-/// the client must keep serving the rest of the cluster instead of wedging.
+/// A real held reshard exposes both redirect modes in their protocol order.
 ///
-/// Before this change a per-node worker reconnected to the dead address
-/// forever -- nothing triggered a topology refresh -- so the whole client could
-/// stall. Now the failure triggers a background self-healing refresh that
-/// reconciles the per-node services (replacing dead workers, pruning departed
-/// nodes), and commands to the surviving masters keep succeeding.
-///
-/// Uses a dedicated cluster with `cluster-require-full-coverage no`, so the
-/// surviving masters keep serving their own slots after one master dies. That
-/// makes the assertion deterministic: we verify the live part of the cluster
-/// stays usable through the client, without depending on a replica election
-/// (the prune/replace/promote reconciliation itself is unit-tested in
-/// `multiplexed::diff_tests`).
+/// Moving the key without handing off its slot makes the stale owner return
+/// ASK. Completing the handoff while the client still has the old slot map
+/// makes that owner return MOVED. Successful reads alone would not prove either
+/// path ran, so the test also checks the bounded redirect metric hook.
 #[tokio::test]
-#[ignore = "destructive: starts a dedicated cluster and kills a master"]
-async fn mux_cluster_survives_master_kill_without_wedging() {
-    use redis_server_wrapper::chaos;
-    use std::time::Duration;
-
-    let cluster = RedisCluster::builder()
-        .masters(3)
-        .replicas_per_master(1)
-        .base_port(17500)
-        .cluster_node_timeout(2000)
-        .cluster_require_full_coverage(false)
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster and reshards a slot"]
+async fn mux_cluster_handles_ask_then_moved_during_live_reshard() {
+    let fixture = ClusterFixture::builder()
+        .base_port(17700)
         .start()
         .await
-        .expect("failed to start cluster");
-
-    let client = MultiplexedClusterClient::connect(&cluster.addr())
+        .expect("failed to start reshard fixture");
+    let before = fixture
+        .topology()
         .await
-        .expect("failed to connect");
-
-    // Seed keys spread across all three masters; confirm they read back first.
-    let keys: Vec<String> = (0..24).map(|i| format!("heal:{i}")).collect();
-    for k in &keys {
-        client.execute(Set::new(k, "v")).await.expect("initial set");
-    }
-
-    // Kill one master. Its ~1/3 of slots become unservable (no election here),
-    // but the other two masters keep serving theirs.
-    chaos::kill_master_by_key(&cluster, &keys[0])
+        .expect("failed to inspect initial topology");
+    let slot = 42;
+    let source = before
+        .owner_of_slot(slot)
+        .expect("slot should have an owner")
+        .clone();
+    let target = before
+        .nodes()
+        .iter()
+        .find(|node| matches!(&node.role, ClusterNodeRole::Master) && node.id != source.id)
+        .expect("fixture should have another master")
+        .clone();
+    let key = key_for_slot(slot);
+    let metrics = Arc::new(RefreshMetrics::default());
+    let client = MultiplexedClusterClient::builder(fixture.seed_addr())
+        .metrics_recorder(metrics.clone())
+        .connect()
         .await
-        .expect("failed to kill master");
+        .expect("failed to connect to reshard fixture");
 
-    // A self-healing client keeps the surviving masters usable: after a brief
-    // settle, a healthy majority of keys keep reading back, poll after poll. A
-    // client that loops on the dead address would serve nothing.
-    let mut best = 0usize;
-    for _ in 0..20 {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        let mut ok = 0usize;
-        for k in &keys {
-            if let Ok(Ok(_)) =
-                tokio::time::timeout(Duration::from_secs(2), client.execute(Get::new(k))).await
-            {
-                ok += 1;
+    client
+        .execute(redis_tower::WithDeadline::after(
+            Set::new(&key, "before-reshard"),
+            Duration::from_secs(5),
+        ))
+        .await
+        .expect("failed to seed reshard key");
+
+    let guard = fixture
+        .begin_reshard(slot, target.index)
+        .await
+        .expect("failed to open reshard window");
+    let moved = tokio::time::timeout(Duration::from_secs(5), guard.migrate_keys())
+        .await
+        .expect("timed out moving the held slot's keys")
+        .expect("failed to move key while keeping ownership on source");
+    assert_eq!(moved, 1, "the held migration should move the seeded key");
+
+    // Preserve cleanup if the client regresses: finish the handoff before
+    // asserting on the result captured from the ASK window.
+    let ask_result = client
+        .execute(redis_tower::WithDeadline::after(
+            Get::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await;
+    let redirects_after_ask = metrics.redirects.lock().unwrap().clone();
+    tokio::time::timeout(Duration::from_secs(5), guard.complete())
+        .await
+        .expect("timed out completing slot handoff")
+        .expect("failed to complete slot handoff");
+    fixture
+        .wait_for_slot_owner(slot, &target.id, Duration::from_secs(5))
+        .await
+        .expect("target never became the advertised slot owner");
+
+    assert_eq!(
+        ask_result.expect("client should follow ASK with atomic ASKING + GET"),
+        Some(Bytes::from("before-reshard"))
+    );
+    assert_eq!(redirects_after_ask, vec![ClusterRedirectKind::Ask]);
+
+    let moved_result = client
+        .execute(redis_tower::WithDeadline::after(
+            Get::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await
+        .expect("client should follow MOVED after the completed handoff");
+    assert_eq!(moved_result, Some(Bytes::from("before-reshard")));
+    assert_eq!(
+        *metrics.redirects.lock().unwrap(),
+        vec![ClusterRedirectKind::Ask, ClusterRedirectKind::Moved]
+    );
+    assert_eq!(
+        client
+            .topology()
+            .await
+            .master_for_slot(slot)
+            .expect("client topology lost the migrated slot")
+            .addr_string(),
+        target.addr,
+        "MOVED should patch the migrated slot to the new owner"
+    );
+
+    client
+        .execute(redis_tower::WithDeadline::after(
+            Del::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await
+        .ok();
+    tokio::time::timeout(Duration::from_secs(5), client.shutdown())
+        .await
+        .expect("timed out shutting down reshard client");
+}
+
+/// Killing a master in a real 3x3 topology and issuing CLUSTER FAILOVER on its
+/// replica must lead to promotion and automatic replacement of the dead
+/// per-node worker in the client's slot map. The first successful post-kill
+/// read is bounded and timed so this cannot pass by wedging until the test
+/// runner's global timeout.
+#[tokio::test]
+#[ignore = "destructive: starts a dedicated 3-master/3-replica cluster and kills a master"]
+async fn mux_cluster_replaces_killed_master_after_replica_promotion() {
+    let fixture = ClusterFixture::builder()
+        .base_port(17500)
+        .cluster_node_timeout(2000)
+        .start()
+        .await
+        .expect("failed to start failover fixture");
+    let before = fixture
+        .topology()
+        .await
+        .expect("failed to inspect initial topology");
+    let slot = 42;
+    let old_master = before
+        .owner_of_slot(slot)
+        .expect("slot should have a master")
+        .clone();
+    let promoted = before
+        .replicas_of(&old_master.id)
+        .into_iter()
+        .next()
+        .expect("3x3 fixture should have one replica for the slot owner")
+        .clone();
+    let key = key_for_slot(slot);
+
+    let client = MultiplexedClusterClient::connect(&fixture.seed_addr())
+        .await
+        .expect("failed to connect to failover fixture");
+
+    // Seed through a direct connection so WAIT observes this write on the same
+    // socket. That proves the only replica acknowledged the value before its
+    // master is killed, avoiding a timing-only replication assumption.
+    let mut seeder = redis_tower::RedisConnection::connect(&old_master.addr)
+        .await
+        .expect("failed to connect directly to slot owner");
+    seeder
+        .execute(Set::new(&key, "survives-failover"))
+        .await
+        .expect("failed to seed failover key");
+    let acknowledgements = seeder
+        .execute(Wait::new(1, 5000))
+        .await
+        .expect("WAIT failed before failover");
+    assert_eq!(
+        acknowledgements, 1,
+        "replica did not acknowledge seed write"
+    );
+    drop(seeder);
+    assert_eq!(
+        client.execute(Get::new(&key)).await.unwrap(),
+        Some(Bytes::from("survives-failover"))
+    );
+
+    let started = Instant::now();
+    let killed = fixture
+        .kill_slot_owner(slot)
+        .await
+        .expect("failed to kill slot owner");
+    assert_eq!(killed.id, old_master.id);
+    fixture
+        .promote_replica(promoted.index)
+        .await
+        .expect("CLUSTER FAILOVER failed on the surviving replica");
+
+    let recovery_budget = Duration::from_secs(30);
+    let mut attempts = 0usize;
+    let mut failed_attempts = 0usize;
+    let mut last_failure = None;
+    let recovered = loop {
+        attempts += 1;
+        let command = redis_tower::WithDeadline::after(Get::new(&key), Duration::from_secs(2));
+        match client.execute(command).await {
+            Ok(Some(value)) => break value,
+            Ok(None) => {
+                failed_attempts += 1;
+                last_failure = Some("successful GET returned no value".to_string());
+            }
+            Err(error) => {
+                failed_attempts += 1;
+                last_failure = Some(error.to_string());
             }
         }
-        best = best.max(ok);
-        // Two of three masters' worth of keys is the success bar.
-        if ok >= 14 {
-            break;
-        }
-    }
-
+        assert!(
+            started.elapsed() < recovery_budget,
+            "no successful read within {recovery_budget:?} after killing {}; \
+             attempts={attempts}, last_failure={last_failure:?}",
+            old_master.addr,
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let time_to_first_success = started.elapsed();
     assert!(
-        best >= 14,
-        "client served only {best}/24 keys after a master was killed; it wedged the live cluster"
+        time_to_first_success < recovery_budget,
+        "first successful read took {time_to_first_success:?}, exceeding {recovery_budget:?}"
     );
+    assert_eq!(recovered, Bytes::from("survives-failover"));
+
+    let replacement = fixture
+        .wait_for_slot_owner_change(slot, &old_master.id, recovery_budget)
+        .await
+        .expect("the killed master was not replaced");
+    assert_eq!(
+        replacement.id, promoted.id,
+        "the slot owner's only replica should win the election"
+    );
+    let after = fixture
+        .topology()
+        .await
+        .expect("failed to inspect promoted topology");
+    assert_eq!(
+        after.owner_of_slot(slot).map(|node| node.id.as_str()),
+        Some(promoted.id.as_str()),
+        "Redis did not reassign the slot to its only replica"
+    );
+    assert_eq!(
+        client
+            .topology()
+            .await
+            .master_for_slot(slot)
+            .expect("client topology lost the failed-over slot")
+            .addr_string(),
+        promoted.addr,
+        "client retained the killed master after a successful read"
+    );
+    assert_ne!(promoted.addr, old_master.addr);
+    eprintln!(
+        "cluster failover time-to-first-success: {time_to_first_success:?} \
+         (budget {recovery_budget:?}, attempts={attempts}, failed_attempts={failed_attempts}, \
+         last_failure={last_failure:?})"
+    );
+
+    client
+        .execute(redis_tower::WithDeadline::after(
+            Del::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await
+        .ok();
+    tokio::time::timeout(Duration::from_secs(5), client.shutdown())
+        .await
+        .expect("timed out shutting down failover client");
 }
 
 #[tokio::test]

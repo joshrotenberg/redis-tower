@@ -1,7 +1,7 @@
 [package]
 name = "redis-tower-test"
 version = "0.1.0"
-description = "Test utilities for redis-tower: MockConnection and the command_tests! integration macro"
+description = "Test utilities for redis-tower: mocks, command tests, and managed Redis Cluster fixtures"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -16,3 +16,6 @@ categories = ["database", "development-tools::testing"]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
+redis-server-wrapper = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
