@@ -290,6 +290,10 @@ pub struct AutoPipelineService {
     /// Counts only public service handles. Dropping the final lease wakes and
     /// cancels a worker that may be inside reconnect backoff or a factory call.
     lease: WorkerLease,
+    /// Shared connection-health view. The sender is owned only by the worker,
+    /// so this channel closes when that worker terminates even if service
+    /// clones remain alive.
+    connection_health: watch::Receiver<bool>,
     worker: Arc<WorkerHandle>,
 }
 
@@ -394,7 +398,36 @@ impl Drop for WorkerRunGuard {
 struct WorkerLifecycle {
     control: Arc<WorkerControl>,
     shutdown: watch::Receiver<bool>,
+    connection_health: ConnectionHealthPublisher,
     _run_guard: WorkerRunGuard,
+}
+
+/// Worker-owned publisher for the current data-connection health.
+///
+/// Dropping the worker always leaves observers with a final `false` snapshot
+/// before closing the watch channel.
+struct ConnectionHealthPublisher {
+    tx: watch::Sender<bool>,
+}
+
+impl ConnectionHealthPublisher {
+    fn new(tx: watch::Sender<bool>) -> Self {
+        Self { tx }
+    }
+
+    fn set(&self, healthy: bool) {
+        self.tx.send_if_modified(|current| {
+            let changed = *current != healthy;
+            *current = healthy;
+            changed
+        });
+    }
+}
+
+impl Drop for ConnectionHealthPublisher {
+    fn drop(&mut self) {
+        self.set(false);
+    }
 }
 
 struct WorkerLease {
@@ -555,6 +588,7 @@ impl AutoPipelineService {
         let poll_tx = PollSender::new(tx.clone());
         let shed_load = config.shed_load_on_full;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (connection_health_tx, connection_health) = watch::channel(true);
         let control = Arc::new(WorkerControl::new(shutdown_tx, event_bus.clone()));
         let lease = WorkerLease {
             control: Arc::clone(&control),
@@ -565,6 +599,7 @@ impl AutoPipelineService {
         let lifecycle = WorkerLifecycle {
             control: Arc::clone(&control),
             shutdown: shutdown_rx,
+            connection_health: ConnectionHealthPublisher::new(connection_health_tx),
             _run_guard: WorkerRunGuard {
                 control: Arc::clone(&control),
             },
@@ -577,6 +612,7 @@ impl AutoPipelineService {
             poll_tx,
             shed_load,
             lease,
+            connection_health,
             worker: Arc::new(WorkerHandle::new(handle)),
         }
     }
@@ -616,6 +652,64 @@ impl AutoPipelineService {
                 .send(request);
         }
         resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
+    }
+
+    /// Send multiple frames through the queue slot reserved by
+    /// [`Service::poll_ready`] as one atomic worker request.
+    ///
+    /// This is the multi-frame counterpart to [`Service::call`]. It exists for
+    /// frame-level middleware that must prepend connection-local setup to one
+    /// command without allowing another caller to interleave between them. In
+    /// particular, client-side caching in opt-in mode uses it for `CLIENT
+    /// CACHING YES` followed by the cacheable read.
+    ///
+    /// In back-pressure mode the caller must first drive `poll_ready` to
+    /// `Ready(Ok(()))`; this method consumes that exact reservation. In
+    /// load-shedding mode `poll_ready` does not reserve capacity and this
+    /// method follows [`Service::call`] by using `try_send`.
+    pub(crate) fn call_reserved_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Frame>, RedisError>> + Send>> {
+        if frames.is_empty() {
+            // Release a back-pressure reservation even though there is no
+            // worker request to fill it with.
+            self.release_reservation();
+            return Box::pin(async { Ok(Vec::new()) });
+        }
+
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let request = WorkerRequest::Multi {
+            frames,
+            response_tx: resp_tx,
+        };
+
+        let send_result = if self.shed_load {
+            self.tx.try_send(request).map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
+            })
+        } else {
+            self.poll_tx
+                .send_item(request)
+                .map_err(|_| RedisError::ConnectionClosed)
+        };
+
+        Box::pin(async move {
+            send_result?;
+            resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
+        })
+    }
+
+    /// Release a queue slot previously reserved by [`Service::poll_ready`]
+    /// without submitting a worker request.
+    ///
+    /// Frame middleware uses this when it satisfies a request locally after
+    /// readiness was already established. Client-side cache hits are the
+    /// canonical case: they must return the cached response while restoring
+    /// the auto-pipeline queue's full capacity.
+    pub(crate) fn release_reservation(&mut self) {
+        let _ = self.poll_tx.abort_send();
     }
 
     /// Gracefully shut down the pipeline service.
@@ -671,6 +765,24 @@ impl AutoPipelineService {
     pub fn is_alive(&self) -> bool {
         !self.worker.is_finished()
     }
+
+    /// Return the worker's current data-connection health snapshot.
+    ///
+    /// This is crate-visible for middleware that must fail closed when its
+    /// connection-local server state is lost.
+    pub(crate) fn is_connection_healthy(&self) -> bool {
+        *self.connection_health.borrow()
+    }
+
+    /// Subscribe to data-connection health transitions.
+    ///
+    /// The initial value is `true`. Failures publish `false` before request
+    /// responders or disconnect events are notified, and factory-backed
+    /// reconnection publishes `true` only after a replacement connection is
+    /// installed. The channel closes when the worker terminates.
+    pub(crate) fn subscribe_connection_health(&self) -> watch::Receiver<bool> {
+        self.connection_health.clone()
+    }
 }
 
 /// Background task that collects requests and executes them as pipelines.
@@ -690,6 +802,7 @@ async fn pipeline_worker(
     let WorkerLifecycle {
         control,
         mut shutdown,
+        connection_health,
         _run_guard,
     } = lifecycle;
     let mut outage_reported = false;
@@ -701,14 +814,63 @@ async fn pipeline_worker(
         let first = if shutting_down {
             rx.recv().await
         } else {
-            tokio::select! {
-                biased;
-                () = wait_for_shutdown(&mut shutdown) => {
-                    shutting_down = true;
-                    rx.close();
-                    rx.recv().await
+            loop {
+                tokio::select! {
+                    biased;
+                    () = wait_for_shutdown(&mut shutdown) => {
+                        shutting_down = true;
+                        rx.close();
+                        break rx.recv().await;
+                    }
+                    request = rx.recv() => break request,
+                    idle_result = conn.read_idle_push() => match idle_result {
+                        Ok(()) => {
+                            // A push was routed to its subscriber. Re-enter the
+                            // biased select so queued requests retain priority
+                            // over further unsolicited traffic.
+                        }
+                        Err(error) => {
+                            connection_health.set(false);
+                            let failure = PipelineFailure::Connection(error);
+                            publish_worker_outage(
+                                event_bus.as_ref(),
+                                &mut outage_reported,
+                                failure.event_reason(),
+                                &control,
+                            );
+                            match &source {
+                                ConnSource::Fixed => {
+                                    // An idle failure proves this fixed
+                                    // transport cannot serve future work.
+                                    // Close the queue and reject anything that
+                                    // raced with the socket notification.
+                                    rx.close();
+                                    while let Ok(request) = rx.try_recv() {
+                                        request.fail(RedisError::ConnectionClosed);
+                                    }
+                                    return;
+                                }
+                                ConnSource::Factory { factory, reconnect } => {
+                                    if !reconnect_worker_connection(
+                                        &mut conn,
+                                        &mut rx,
+                                        factory.as_ref(),
+                                        reconnect,
+                                        event_bus.as_ref(),
+                                        &mut shutdown,
+                                        &control,
+                                        &connection_health,
+                                        &mut outage_reported,
+                                    )
+                                    .await
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                    },
                 }
-                request = rx.recv() => request,
             }
         };
         let first = match first {
@@ -780,6 +942,7 @@ async fn pipeline_worker(
             config.response_timeout,
             config.metrics_recorder.as_ref(),
             config.reconnect_on_readonly,
+            &connection_health,
         )
         .await;
 
@@ -811,54 +974,78 @@ async fn pipeline_worker(
                     // upstream retry layers can notice.
                 }
                 ConnSource::Factory { factory, reconnect } => {
-                    let started = Instant::now();
-                    match reconnect_with_backoff(
+                    if !reconnect_worker_connection(
+                        &mut conn,
+                        &mut rx,
                         factory.as_ref(),
                         reconnect,
                         event_bus.as_ref(),
                         &mut shutdown,
                         &control,
+                        &connection_health,
+                        &mut outage_reported,
                     )
                     .await
                     {
-                        ReconnectOutcome::Connected(new_conn, attempts) => {
-                            let reconnected = control.with_active_handle(|| {
-                                conn = new_conn;
-                                outage_reported = false;
-                                if let Some(events) = &event_bus {
-                                    events.publish(ConnectionEvent::Reconnected {
-                                        attempts,
-                                        elapsed: started.elapsed(),
-                                    });
-                                }
-                            });
-                            if reconnected.is_none() {
-                                while let Ok(req) = rx.try_recv() {
-                                    req.fail(RedisError::ConnectionClosed);
-                                }
-                                return;
-                            }
-                        }
-                        ReconnectOutcome::Exhausted => {
-                            // Max retries exhausted. Drain any queued
-                            // requests with errors and exit the worker --
-                            // subsequent callers will see ConnectionClosed
-                            // from poll_ready because the channel closes.
-                            while let Ok(req) = rx.try_recv() {
-                                req.fail(RedisError::ConnectionClosed);
-                            }
-                            return;
-                        }
-                        ReconnectOutcome::Shutdown => {
-                            while let Ok(req) = rx.try_recv() {
-                                req.fail(RedisError::ConnectionClosed);
-                            }
-                            return;
-                        }
+                        return;
                     }
                 }
             }
         }
+    }
+}
+
+/// Replace a failed factory-backed worker connection.
+///
+/// Returns `true` when a replacement was installed and the worker should
+/// continue. All terminal outcomes fail requests queued during reconnect and
+/// return `false`.
+#[allow(clippy::too_many_arguments)]
+async fn reconnect_worker_connection(
+    conn: &mut RedisConnection,
+    rx: &mut mpsc::Receiver<WorkerRequest>,
+    factory: &dyn ConnectionFactory,
+    reconnect: &ReconnectConfig,
+    event_bus: Option<&ConnectionEventBus>,
+    shutdown: &mut watch::Receiver<bool>,
+    control: &WorkerControl,
+    connection_health: &ConnectionHealthPublisher,
+    outage_reported: &mut bool,
+) -> bool {
+    let started = Instant::now();
+    match reconnect_with_backoff(factory, reconnect, event_bus, shutdown, control).await {
+        ReconnectOutcome::Connected(new_conn, attempts) => {
+            let reconnected = control.with_active_handle(|| {
+                *conn = new_conn;
+                // Publish health before the lifecycle event so observers can
+                // rely on the event/state ordering in either direction.
+                connection_health.set(true);
+                *outage_reported = false;
+                if let Some(events) = event_bus {
+                    events.publish(ConnectionEvent::Reconnected {
+                        attempts,
+                        elapsed: started.elapsed(),
+                    });
+                }
+            });
+            if reconnected.is_some() {
+                true
+            } else {
+                fail_queued_requests(rx);
+                false
+            }
+        }
+        ReconnectOutcome::Exhausted | ReconnectOutcome::Shutdown => {
+            fail_queued_requests(rx);
+            false
+        }
+    }
+}
+
+fn fail_queued_requests(rx: &mut mpsc::Receiver<WorkerRequest>) {
+    rx.close();
+    while let Ok(request) = rx.try_recv() {
+        request.fail(RedisError::ConnectionClosed);
     }
 }
 
@@ -910,6 +1097,7 @@ async fn flush_batch(
     response_timeout: Option<Duration>,
     recorder: Option<&Arc<dyn MetricsRecorder>>,
     reconnect_on_readonly: bool,
+    connection_health: &ConnectionHealthPublisher,
 ) -> Result<(), PipelineFailure> {
     // A request can be accepted into the worker queue and then cancelled while
     // this worker waits out `batch_window`. `timeout_at` drops the response
@@ -967,6 +1155,7 @@ async fn flush_batch(
                 // replies were never read, so its state is now unknown. Fail
                 // the whole batch and signal the worker (via Err) to discard
                 // and reconnect the connection.
+                connection_health.set(false);
                 for responder in responders {
                     match responder {
                         Responder::Single(tx) => {
@@ -989,6 +1178,10 @@ async fn flush_batch(
             // so the caller still gets the error, then signal the worker to
             // reconnect via the factory onto a real master.
             let saw_readonly = reconnect_on_readonly && responses.iter().any(is_readonly_frame);
+
+            if saw_readonly {
+                connection_health.set(false);
+            }
 
             let mut iter = responses.into_iter();
             for responder in responders {
@@ -1013,6 +1206,7 @@ async fn flush_batch(
             }
         }
         Err(error) => {
+            connection_health.set(false);
             for responder in responders {
                 match responder {
                     Responder::Single(tx) => {
@@ -1184,6 +1378,7 @@ impl Clone for AutoPipelineService {
             poll_tx: PollSender::new(self.tx.clone()),
             shed_load: self.shed_load,
             lease: self.lease.clone(),
+            connection_health: self.connection_health.clone(),
             worker: Arc::clone(&self.worker),
         }
     }
@@ -1331,9 +1526,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn factory_worker_publishes_disconnect_and_reconnect_attempts_in_order() {
+    async fn factory_worker_detects_idle_disconnect_and_reconnects_in_order() {
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use tokio::sync::oneshot;
+        use tokio::sync::{Notify, oneshot};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1349,13 +1544,19 @@ mod tests {
         });
 
         let calls = Arc::new(AtomicUsize::new(0));
+        let allow_reconnect = Arc::new(Notify::new());
         let factory_calls = Arc::clone(&calls);
+        let factory_allow_reconnect = Arc::clone(&allow_reconnect);
         let factory = move || {
             let factory_calls = Arc::clone(&factory_calls);
+            let factory_allow_reconnect = Arc::clone(&factory_allow_reconnect);
             async move {
                 let call = factory_calls.fetch_add(1, Ordering::AcqRel);
                 if call == 1 {
                     return Err(RedisError::ConnectionClosed);
+                }
+                if call == 2 {
+                    factory_allow_reconnect.notified().await;
                 }
                 let stream = tokio::net::TcpStream::connect(addr)
                     .await
@@ -1375,7 +1576,7 @@ mod tests {
             jitter: false,
             connect_timeout: None,
         });
-        let mut service = AutoPipelineService::with_factory_and_events(
+        let service = AutoPipelineService::with_factory_and_events(
             factory,
             AutoPipelineConfig::default(),
             reconnect,
@@ -1383,20 +1584,13 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut health = service.subscribe_connection_health();
         assert_eq!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Connected
         );
 
         first_closed_rx.await.unwrap();
-        futures::future::poll_fn(|cx| service.poll_ready(cx))
-            .await
-            .unwrap();
-        let response = service
-            .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
-            .await;
-        assert!(response.is_err());
-
         assert!(matches!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Disconnected {
@@ -1424,10 +1618,18 @@ mod tests {
                 delay: Duration::ZERO,
             }
         );
+        health.changed().await.unwrap();
+        assert!(!*health.borrow_and_update());
+        assert!(!service.is_connection_healthy());
+
+        allow_reconnect.notify_one();
         assert!(matches!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Reconnected { attempts: 2, .. }
         ));
+        health.changed().await.unwrap();
+        assert!(*health.borrow_and_update());
+        assert!(service.is_connection_healthy());
         assert_eq!(calls.load(Ordering::Acquire), 3);
 
         service.shutdown().await;
@@ -1478,7 +1680,7 @@ mod tests {
             jitter: false,
             connect_timeout: None,
         });
-        let mut service = AutoPipelineService::with_factory_and_events(
+        let service = AutoPipelineService::with_factory_and_events(
             factory,
             AutoPipelineConfig::default(),
             reconnect,
@@ -1492,15 +1694,6 @@ mod tests {
         );
 
         first_closed_rx.await.unwrap();
-        futures::future::poll_fn(|cx| service.poll_ready(cx))
-            .await
-            .unwrap();
-        assert!(
-            service
-                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
-                .await
-                .is_err()
-        );
         assert!(matches!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Disconnected {
@@ -1574,7 +1767,7 @@ mod tests {
             jitter: false,
             connect_timeout: None,
         });
-        let mut service = AutoPipelineService::with_factory_and_events(
+        let service = AutoPipelineService::with_factory_and_events(
             factory,
             AutoPipelineConfig::default(),
             reconnect,
@@ -1588,15 +1781,6 @@ mod tests {
         );
 
         first_closed_rx.await.unwrap();
-        futures::future::poll_fn(|cx| service.poll_ready(cx))
-            .await
-            .unwrap();
-        assert!(
-            service
-                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
-                .await
-                .is_err()
-        );
         assert!(matches!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Disconnected {
@@ -1671,6 +1855,233 @@ mod tests {
         assert!(config.shed_load_on_full);
         assert_eq!(config.response_timeout, Some(Duration::from_millis(250)));
         assert!(!config.reconnect_on_readonly);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fixed_worker_detects_idle_close_and_closes_health_and_queue() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client));
+        let events = ConnectionEventBus::new(4);
+        let mut event_stream = events.subscribe();
+        let mut service =
+            AutoPipelineService::new_with_events(conn, AutoPipelineConfig::default(), events);
+        let mut health = service.subscribe_connection_health();
+
+        assert!(service.is_connection_healthy());
+        assert!(*health.borrow());
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
+
+        drop(server);
+        let disconnected = tokio::time::timeout(Duration::from_secs(1), event_stream.recv())
+            .await
+            .expect("idle close was not detected")
+            .unwrap();
+        assert!(matches!(
+            disconnected,
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::ConnectionError { .. }
+            }
+        ));
+        assert!(
+            !service.is_connection_healthy(),
+            "health must be false before Disconnected is observable"
+        );
+
+        health
+            .changed()
+            .await
+            .expect("the final unhealthy snapshot must be observable");
+        assert!(!*health.borrow_and_update());
+        assert!(
+            health.changed().await.is_err(),
+            "terminal fixed-worker loss must close the health channel"
+        );
+        assert!(
+            futures::future::poll_fn(|cx| service.poll_ready(cx))
+                .await
+                .is_err(),
+            "terminal idle loss must close the request queue"
+        );
+
+        service.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipeline_failure_publishes_unhealthy_before_failing_responder() {
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(server),
+                redis_tower_core::RespCodec::new(),
+            );
+            framed
+                .next()
+                .await
+                .expect("client closed before dispatch")
+                .expect("client sent an invalid request");
+            // Closing after reading the request makes this an in-flight
+            // transport failure rather than an idle-close race.
+        });
+
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client));
+        let events = ConnectionEventBus::new(4);
+        let mut event_stream = events.subscribe();
+        let mut service =
+            AutoPipelineService::new_with_events(conn, AutoPipelineConfig::default(), events);
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        assert!(
+            service
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
+                .await
+                .is_err()
+        );
+        assert!(
+            !service.is_connection_healthy(),
+            "the response future observed failure before shared health changed"
+        );
+        assert!(matches!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::ConnectionError { .. }
+            }
+        ));
+
+        service.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn response_timeout_publishes_unhealthy_before_failing_responder() {
+        use futures::StreamExt;
+        use tokio_util::codec::Framed;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(server),
+                redis_tower_core::RespCodec::new(),
+            );
+            framed
+                .next()
+                .await
+                .expect("client closed before dispatch")
+                .expect("client sent an invalid request");
+            // Deliberately withhold the response until the client's deadline
+            // quarantines and closes the transport.
+            let _ = framed.next().await;
+        });
+
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client));
+        let events = ConnectionEventBus::new(4);
+        let mut event_stream = events.subscribe();
+        let config = AutoPipelineConfig {
+            response_timeout: Some(Duration::from_millis(10)),
+            ..AutoPipelineConfig::default()
+        };
+        let mut service = AutoPipelineService::new_with_events(conn, config, events);
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
+                .await,
+            Err(RedisError::CommandTimeout)
+        ));
+        assert!(
+            !service.is_connection_healthy(),
+            "the timeout responder was notified before shared health changed"
+        );
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::CommandTimeout,
+            }
+        );
+
+        service.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_push_is_routed_without_delaying_the_next_request() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let mut conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client));
+        let mut pushes = conn.subscribe_pushes();
+        let expected_push = Frame::Push(vec![
+            Frame::SimpleString(bytes::Bytes::from_static(b"invalidate")),
+            Frame::Array(Some(vec![Frame::SimpleString(bytes::Bytes::from_static(
+                b"key",
+            ))])),
+        ]);
+        let server_push = expected_push.clone();
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(server),
+                redis_tower_core::RespCodec::new(),
+            );
+            framed.send(server_push).await.unwrap();
+            framed
+                .next()
+                .await
+                .expect("client closed before request")
+                .expect("client sent an invalid request");
+            framed
+                .send(Frame::SimpleString(bytes::Bytes::from_static(b"PONG")))
+                .await
+                .unwrap();
+            // Keep the socket open until the worker's graceful shutdown drops
+            // its side, proving the health assertion below is not racy.
+            let _ = framed.next().await;
+        });
+
+        let mut service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), pushes.recv())
+                .await
+                .expect("idle worker did not route the push")
+                .unwrap(),
+            expected_push
+        );
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
+                .await
+                .unwrap(),
+            Frame::SimpleString(bytes::Bytes::from_static(b"PONG"))
+        );
+        assert!(service.is_connection_healthy());
+
+        service.shutdown().await;
+        server.await.unwrap();
     }
 
     #[cfg(unix)]
@@ -1754,12 +2165,14 @@ mod tests {
         shed_load: bool,
     ) -> AutoPipelineService {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let (_connection_health_tx, connection_health) = watch::channel(true);
         let control = Arc::new(WorkerControl::new(shutdown_tx, None));
         AutoPipelineService {
             poll_tx: PollSender::new(tx.clone()),
             tx,
             shed_load,
             lease: WorkerLease { control },
+            connection_health,
             worker: Arc::new(WorkerHandle::new(handle)),
         }
     }
@@ -2020,6 +2433,60 @@ mod tests {
         assert!(
             pending,
             "poll_ready must pend (back-pressure) when the queue is full"
+        );
+    }
+
+    #[tokio::test]
+    async fn reserved_pipeline_consumes_poll_ready_slot_as_one_request() {
+        let (tx, mut rx) = mpsc::channel::<WorkerRequest>(1);
+        let mut svc = make_test_svc(tx, tokio::spawn(async {}), false);
+
+        futures::future::poll_fn(|cx| svc.poll_ready(cx))
+            .await
+            .unwrap();
+
+        let frames = vec![
+            Frame::SimpleString(b"CLIENT CACHING YES"[..].into()),
+            Frame::SimpleString(b"GET key"[..].into()),
+        ];
+        let response = svc.call_reserved_pipeline(frames.clone());
+
+        let request = rx.recv().await.expect("reserved request should be queued");
+        match request {
+            WorkerRequest::Multi {
+                frames: actual,
+                response_tx,
+            } => {
+                assert_eq!(actual, frames);
+                response_tx
+                    .send(Ok(vec![
+                        Frame::SimpleString(b"OK"[..].into()),
+                        Frame::BulkString(Some(b"value"[..].into())),
+                    ]))
+                    .unwrap();
+            }
+            WorkerRequest::Single { .. } => panic!("reserved pipeline was split into a single"),
+        }
+
+        assert_eq!(response.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn local_response_can_release_poll_ready_reservation() {
+        let (tx, _rx) = mpsc::channel::<WorkerRequest>(1);
+        let mut svc = make_test_svc(tx.clone(), tokio::spawn(async {}), false);
+
+        assert_eq!(tx.capacity(), 1);
+        futures::future::poll_fn(|cx| svc.poll_ready(cx))
+            .await
+            .unwrap();
+        assert_eq!(tx.capacity(), 0, "poll_ready should reserve capacity");
+
+        svc.release_reservation();
+        assert_eq!(
+            tx.capacity(),
+            1,
+            "a locally satisfied request must restore queue capacity"
         );
     }
 

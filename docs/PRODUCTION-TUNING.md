@@ -18,6 +18,7 @@ Client choice has a larger effect than most numeric knobs:
 |---|---|---|
 | Many tasks issuing short, independent commands | `MultiplexedClient` | One auto-pipelined connection; cheap clones; real queue backpressure |
 | Long-running service that must reconnect | Factory-backed `MultiplexedClient` | Retains high concurrency while rebuilding the worker's connection |
+| Repeated standalone reads with tolerable bounded staleness | `CachedMultiplexedClient` | Cloneable auto-pipelined misses plus local hits and RESP3 invalidation tracking |
 | Modest traffic where the simplest reconnecting handle matters most | `ResilientRedisClient` | Built-in reconnect and single-flight recovery, but commands serialize through one mutex |
 | Blocking commands or expensive reply parsing | `ConnectionPool<RedisConnection>` | Multiple independent connections isolate head-of-line blocking |
 | Stateful sequence, pub/sub, or MONITOR | Dedicated `RedisConnection`-based API | Exclusive protocol/session ownership |
@@ -44,6 +45,7 @@ Capture at least these workload characteristics under realistic concurrency:
 - request and response byte distributions, including worst-case collections;
 - fraction of commands that block or perform expensive server work;
 - auto-pipeline batch size and queue depth;
+- client-cache hit/miss, invalidation, eviction, size, and tracking-health data;
 - pool acquisition wait and in-flight commands, when using a pool;
 - reconnect state, offline queue depth, lifecycle-event lag, timeout, cluster
   redirect, and topology refresh rates;
@@ -505,6 +507,8 @@ exporter. The built-in recorder can report:
   latency/count/outcome;
 - `redis_tower.pipeline.batch_size` and
   `redis_tower.pipeline.queue_depth` for worker efficiency and saturation;
+- `redis_tower.cache.events` for bounded hit, miss, invalidation, and eviction
+  counts;
 - `db.client.connection.wait_time`,
   `db.client.connection.pending_requests`, connection count/max, and pool
   lifecycle counters;
@@ -515,6 +519,15 @@ Use stable pool and pipeline names. Do not put keys, user IDs, request IDs, or
 unbounded host strings into metric labels. Pair client metrics with Redis
 `INFO`, latency monitoring, slow log, CPU, memory, eviction, and network data;
 client-side latency alone cannot distinguish its cause.
+
+For cached clients, alert on unhealthy caching before optimizing hit rate.
+While the invalidation receiver is being replaced, redis-tower clears and
+disables the local cache, so a falling hit rate paired with healthy Redis
+latency is an expected safety response rather than silent staleness. A lost
+fixed data worker also clears the cache but requires constructing a new cached
+client; `is_caching_healthy()` distinguishes both cases. See the
+[client-side caching guide](CLIENT-SIDE-CACHING.md) for tracking modes and
+failure semantics.
 
 Tracing can be sampled more aggressively than metrics. Set a slow-command
 threshold on `TracingLayer` to preserve useful tail diagnostics without making

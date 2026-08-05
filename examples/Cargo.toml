@@ -83,6 +83,10 @@ name = "connection_pool"
 path = "connection_pool.rs"
 
 [[example]]
+name = "caching"
+path = "caching.rs"
+
+[[example]]
 name = "cluster"
 path = "cluster.rs"
 

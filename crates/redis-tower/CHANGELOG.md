@@ -29,9 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - metrics-facade recorder, named pool lifecycle and stats metrics, multiplexed queue-depth access/export, and Prometheus/OpenTelemetry examples
 - backward-compatible cluster observability hooks on `MetricsRecorder`, with metrics-facade redirect, topology-refresh, and node-latency metrics
 - connection-configurable RESP frame-size and nesting limits, retained by shared/multiplexed clients and built-in reconnect factories
+- cloneable `CachedMultiplexedClient` with broadcast/server-default/opt-in
+  tracking, address/URL/factory/existing-connection constructors, owned
+  invalidation reconnection, read-your-own-writes eviction, race-safe epochs,
+  bounded TTL/capacity, aggregate statistics, and cache metric events
 
 ### Changed
 
+- `CachedClient` now uses the same bounded actor and owned tracking lifecycle as
+  `CachedMultiplexedClient`, with batching limited to one request for serialized
+  compatibility
 - closure-based transaction helpers now reject shared and routed executors
   before WATCH; direct `Transaction::watch` remains atomic for already-known
   bodies, while read/compute/build retries require an exclusive connection
@@ -46,8 +53,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- fail client-side caching closed when either the invalidation receiver or the
+  fixed data connection is lost, including idle socket loss, and reject caller
+  commands that would mutate the internally managed tracking/session state
 - prune canceled auto-pipeline requests before wire dispatch and quarantine
   pooled or shared connections after a deadline interrupts in-flight I/O
+- return inner Tower readiness reservations on local cache hits through the
+  explicit `ReleaseReadiness` backend contract, preventing bounded services
+  from losing capacity
 - skip the process-owned restart test when the integration suite targets an externally managed Redis server
 
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-v0.1.0) - 2026-06-05
