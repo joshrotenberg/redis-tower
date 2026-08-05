@@ -542,6 +542,16 @@ Cluster throughput at c=128 on a local 3-master cluster (Apple M3 Max):
 See [`crates/cluster-bench`](crates/cluster-bench/) for full results and
 how to reproduce.
 
+The cluster benchmark also has opt-in live topology-churn modes. They compare
+`MultiplexedClusterClient` with redis-rs under the same held reshard or master
+failure, reporting stable-versus-churn p99/p999, dropped operations, recovery
+timing, topology convergence, and redis-tower redirect/refresh counters:
+
+```bash
+BENCH_SCENARIO=reshard cargo run -p cluster-bench --release -- --json
+BENCH_SCENARIO=failover cargo run -p cluster-bench --release -- --json
+```
+
 The single-node command benches start their own `redis-server` on port 6482
 and stop it when the run ends, so they need no server set up in advance:
 
@@ -578,7 +588,7 @@ redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
-redis-tower-test         Test utilities: MockConnection and the command_tests! macro
+redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 ```
 

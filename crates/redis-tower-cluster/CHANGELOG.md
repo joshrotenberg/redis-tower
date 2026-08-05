@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- reusable 3-master/3-replica live-cluster fixtures, deterministic ASK/MOVED
+  reshard coverage, explicit replica-promotion validation, and cluster churn
+  benchmark reporting
 - end-to-end typed command deadlines across routing, node lookup, redirects,
   retries, and pinned-node execution for direct and multiplexed clients
 - multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
