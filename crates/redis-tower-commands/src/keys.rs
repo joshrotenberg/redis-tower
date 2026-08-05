@@ -931,6 +931,208 @@ impl Command for Restore {
     }
 }
 
+/// Authentication used by [`Migrate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MigrateAuth {
+    Password(Bytes),
+    UsernamePassword(Bytes, Bytes),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MigrateKeySelection {
+    Single(Bytes),
+    Multiple(Vec<Bytes>),
+}
+
+/// Result returned by [`Migrate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrateResult {
+    /// The selected keys were transferred successfully.
+    Ok,
+    /// None of the selected keys existed on the source server.
+    NoKey,
+}
+
+/// MIGRATE host port key destination-db timeout \[COPY\] \[REPLACE\]
+/// \[AUTH password | AUTH2 username password\] \[KEYS key \[key ...\]\]
+///
+/// Atomically transfers one or more keys to another Redis server. Use
+/// [`keys`](Self::keys) for the multi-key form; it emits the required empty
+/// key argument followed by `KEYS` and the selected keys.
+#[derive(Debug, Clone)]
+pub struct Migrate {
+    host: Bytes,
+    port: u16,
+    key_selection: MigrateKeySelection,
+    destination_db: u64,
+    timeout_ms: u64,
+    copy: bool,
+    replace: bool,
+    auth: Option<MigrateAuth>,
+}
+
+impl Migrate {
+    /// Construct the single-key form of `MIGRATE`.
+    ///
+    /// Redis reserves the positional empty key as the marker for its multi-key
+    /// syntax. An actual empty key is therefore encoded as `KEYS ""` so it
+    /// retains its normal Redis key semantics.
+    pub fn new(
+        host: impl AsRef<[u8]>,
+        port: u16,
+        key: impl AsRef<[u8]>,
+        destination_db: u64,
+        timeout_ms: u64,
+    ) -> Self {
+        let key = Bytes::copy_from_slice(key.as_ref());
+        let key_selection = if key.is_empty() {
+            MigrateKeySelection::Multiple(vec![key])
+        } else {
+            MigrateKeySelection::Single(key)
+        };
+        Self {
+            host: Bytes::copy_from_slice(host.as_ref()),
+            port,
+            key_selection,
+            destination_db,
+            timeout_ms,
+            copy: false,
+            replace: false,
+            auth: None,
+        }
+    }
+
+    /// Construct the multi-key form of `MIGRATE` with one required key.
+    ///
+    /// Append further keys with [`key`](Self::key).
+    pub fn keys(
+        host: impl AsRef<[u8]>,
+        port: u16,
+        first_key: impl AsRef<[u8]>,
+        destination_db: u64,
+        timeout_ms: u64,
+    ) -> Self {
+        Self {
+            host: Bytes::copy_from_slice(host.as_ref()),
+            port,
+            key_selection: MigrateKeySelection::Multiple(vec![Bytes::copy_from_slice(
+                first_key.as_ref(),
+            )]),
+            destination_db,
+            timeout_ms,
+            copy: false,
+            replace: false,
+            auth: None,
+        }
+    }
+
+    /// Append another key to the multi-key `KEYS` form.
+    ///
+    /// When called on a single-key request, the builder transparently switches
+    /// to the equivalent `KEYS` form and retains the original key first.
+    pub fn key(mut self, key: impl AsRef<[u8]>) -> Self {
+        let key = Bytes::copy_from_slice(key.as_ref());
+        self.key_selection = match self.key_selection {
+            MigrateKeySelection::Single(first) => MigrateKeySelection::Multiple(vec![first, key]),
+            MigrateKeySelection::Multiple(mut keys) => {
+                keys.push(key);
+                MigrateKeySelection::Multiple(keys)
+            }
+        };
+        self
+    }
+
+    /// Leave the source keys in place after transferring them.
+    pub fn copy(mut self) -> Self {
+        self.copy = true;
+        self
+    }
+
+    /// Replace destination keys that already exist.
+    pub fn replace(mut self) -> Self {
+        self.replace = true;
+        self
+    }
+
+    /// Authenticate to the destination with a password.
+    pub fn auth(mut self, password: impl AsRef<[u8]>) -> Self {
+        self.auth = Some(MigrateAuth::Password(Bytes::copy_from_slice(
+            password.as_ref(),
+        )));
+        self
+    }
+
+    /// Authenticate to the destination with a username and password.
+    pub fn auth2(mut self, username: impl AsRef<[u8]>, password: impl AsRef<[u8]>) -> Self {
+        self.auth = Some(MigrateAuth::UsernamePassword(
+            Bytes::copy_from_slice(username.as_ref()),
+            Bytes::copy_from_slice(password.as_ref()),
+        ));
+        self
+    }
+}
+
+impl Command for Migrate {
+    type Response = MigrateResult;
+
+    fn to_frame(&self) -> Frame {
+        let positional_key = match &self.key_selection {
+            MigrateKeySelection::Single(key) => bulk(key),
+            MigrateKeySelection::Multiple(_) => bulk(""),
+        };
+        let mut args = vec![
+            bulk("MIGRATE"),
+            bulk(&self.host),
+            bulk(self.port.to_string()),
+            positional_key,
+            bulk(self.destination_db.to_string()),
+            bulk(self.timeout_ms.to_string()),
+        ];
+        if self.copy {
+            args.push(bulk("COPY"));
+        }
+        if self.replace {
+            args.push(bulk("REPLACE"));
+        }
+        match &self.auth {
+            Some(MigrateAuth::Password(password)) => {
+                args.push(bulk("AUTH"));
+                args.push(bulk(password));
+            }
+            Some(MigrateAuth::UsernamePassword(username, password)) => {
+                args.push(bulk("AUTH2"));
+                args.push(bulk(username));
+                args.push(bulk(password));
+            }
+            None => {}
+        }
+        if let MigrateKeySelection::Multiple(keys) = &self.key_selection {
+            args.push(bulk("KEYS"));
+            args.extend(keys.iter().map(bulk));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(value) if value.eq_ignore_ascii_case(b"OK") => {
+                Ok(MigrateResult::Ok)
+            }
+            Frame::SimpleString(value) if value.eq_ignore_ascii_case(b"NOKEY") => {
+                Ok(MigrateResult::NoKey)
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK or NOKEY",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MIGRATE"
+    }
+}
+
 /// Sort order for SORT and SORT_RO commands.
 #[derive(Clone)]
 pub enum SortOrder {
@@ -1929,5 +2131,90 @@ mod tests {
     fn move_parse_true() {
         let cmd = Move::new("k", 1);
         assert!(cmd.parse_response(Frame::Integer(1)).unwrap());
+    }
+
+    // -- Migrate --
+
+    #[test]
+    fn migrate_single_key_with_options_is_binary_safe() {
+        let cmd = Migrate::new(b"127.0.0.1", 6380, b"source\0key", 2, 5_000)
+            .copy()
+            .replace()
+            .auth(b"secret\0password");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MIGRATE"),
+                bulk("127.0.0.1"),
+                bulk("6380"),
+                bulk(b"source\0key"),
+                bulk("2"),
+                bulk("5000"),
+                bulk("COPY"),
+                bulk("REPLACE"),
+                bulk("AUTH"),
+                bulk(b"secret\0password"),
+            ])
+        );
+        assert_eq!(cmd.name(), "MIGRATE");
+        assert!(!cmd.idempotent());
+    }
+
+    #[test]
+    fn migrate_multiple_keys_and_auth2() {
+        let cmd = Migrate::keys("redis.internal", 6379, b"key\0one", 0, 750)
+            .key(b"key\0two")
+            .auth2(b"user\0name", b"pass\0word");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MIGRATE"),
+                bulk("redis.internal"),
+                bulk("6379"),
+                bulk(""),
+                bulk("0"),
+                bulk("750"),
+                bulk("AUTH2"),
+                bulk(b"user\0name"),
+                bulk(b"pass\0word"),
+                bulk("KEYS"),
+                bulk(b"key\0one"),
+                bulk(b"key\0two"),
+            ])
+        );
+    }
+
+    #[test]
+    fn migrate_empty_key_uses_the_explicit_keys_form() {
+        let cmd = Migrate::new("127.0.0.1", 6380, b"", 0, 5_000);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MIGRATE"),
+                bulk("127.0.0.1"),
+                bulk("6380"),
+                bulk(""),
+                bulk("0"),
+                bulk("5000"),
+                bulk("KEYS"),
+                bulk(""),
+            ])
+        );
+    }
+
+    #[test]
+    fn migrate_parses_ok_and_nokey() {
+        let cmd = Migrate::new("localhost", 6379, "key", 0, 1_000);
+        assert_eq!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+                .unwrap(),
+            MigrateResult::Ok
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("NOKEY")))
+                .unwrap(),
+            MigrateResult::NoKey
+        );
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 }

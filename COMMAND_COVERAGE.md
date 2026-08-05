@@ -2,7 +2,7 @@
 
 # Redis command coverage
 
-`redis-tower` provides typed builders for **475/506 (93.9%)** of the scoped Redis 8.8 command surface. **21/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
+`redis-tower` provides typed builders for **488/506 (96.4%)** of the scoped Redis 8.8 command surface. **23/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
 
 The issue that introduced this report recorded a June 2026 baseline of **393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. The headline above is regenerated from the current source tree.
 
@@ -14,15 +14,15 @@ The issue that introduced this report recorded a June 2026 baseline of **393/506
 | T1 | bitmap | 7 | 7 | 100.0% | — |
 | T1 | cluster | 24 | 32 | 75.0% | `ASKING`<br>`CLUSTER COUNT-FAILURE-REPORTS`<br>`CLUSTER MIGRATION`<br>`CLUSTER MYSHARDID`<br>`CLUSTER SLOT-STATS`<br>`CLUSTER SYNCSLOTS`<br>`READONLY`<br>`READWRITE` |
 | T1 | connection | 24 | 24 | 100.0% | — |
-| T1 | generic | 32 | 33 | 97.0% | `MIGRATE` |
+| T1 | generic | 33 | 33 | 100.0% | — |
 | T1 | geo | 6 | 6 | 100.0% | — |
 | T1 | hash | 27 | 27 | 100.0% | — |
 | T1 | hyperloglog | 3 | 3 | 100.0% | — |
 | T1 | list | 20 | 20 | 100.0% | — |
 | T1 | module | 13 | 13 | 100.0% | — |
 | T1 | pubsub | 8 | 14 | 57.1% | `PSUBSCRIBE`<br>`PUNSUBSCRIBE`<br>`SSUBSCRIBE`<br>`SUBSCRIBE`<br>`SUNSUBSCRIBE`<br>`UNSUBSCRIBE` |
-| T1 | scripting | 20 | 21 | 95.2% | `FUNCTION KILL` |
-| T1 | server | 58 | 72 | 80.6% | `ACL USERS`<br>`COMMAND`<br>`COMMAND GETKEYSANDFLAGS`<br>`LATENCY DOCTOR`<br>`LATENCY HISTOGRAM`<br>`MEMORY MALLOC-STATS`<br>`MEMORY PURGE`<br>`MODULE LOAD`<br>`MODULE LOADEX`<br>`MODULE UNLOAD`<br>`MONITOR`<br>`PSYNC`<br>`SYNC`<br>`TRIMSLOTS` |
+| T1 | scripting | 21 | 21 | 100.0% | — |
+| T1 | server | 69 | 72 | 95.8% | `PSYNC`<br>`SYNC`<br>`TRIMSLOTS` |
 | T1 | set | 17 | 17 | 100.0% | — |
 | T1 | sorted-set | 30 | 30 | 100.0% | — |
 | T1 | stream | 28 | 28 | 100.0% | — |

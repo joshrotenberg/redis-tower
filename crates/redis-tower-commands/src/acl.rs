@@ -51,6 +51,61 @@ impl Command for AclList {
     }
 }
 
+/// ACL USERS
+///
+/// Returns the names of all configured ACL users.
+#[derive(Debug, Clone)]
+pub struct AclUsers;
+
+impl AclUsers {
+    /// Create an `ACL USERS` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for AclUsers {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for AclUsers {
+    type Response = Vec<Bytes>;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("ACL"), bulk("USERS")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(users)) => users
+                .into_iter()
+                .map(|user| match user {
+                    Frame::BulkString(Some(user)) | Frame::SimpleString(user) => Ok(user),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "bulk or simple string",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            Frame::Array(None) => Ok(Vec::new()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "ACL USERS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// ACL GETUSER username
 ///
 /// Returns the ACL rules for a specific user as a complex nested response.
@@ -719,6 +774,34 @@ mod tests {
         )))]));
         let result = cmd.parse_response(frame).unwrap();
         assert_eq!(result, vec![Bytes::from("user default on ~* +@all")]);
+    }
+
+    // -- AclUsers --
+
+    #[test]
+    fn acl_users_to_frame_and_metadata() {
+        let cmd = AclUsers::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("ACL"), bulk("USERS")]));
+        assert_eq!(cmd.name(), "ACL USERS");
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn acl_users_parses_resp2_and_defensive_simple_strings() {
+        let cmd = AclUsers::new();
+        let frame = Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from("default"))),
+            Frame::SimpleString(Bytes::from("application")),
+        ]));
+        assert_eq!(
+            cmd.parse_response(frame).unwrap(),
+            vec![Bytes::from("default"), Bytes::from("application")]
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::Array(None)).unwrap(),
+            Vec::<Bytes>::new()
+        );
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
     // -- AclSetUser --

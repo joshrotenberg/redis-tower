@@ -41,7 +41,7 @@
 //!
 //! # Commands
 //!
-//! The [`commands`] module contains 475+ typed command structs spanning core
+//! The [`commands`] module contains 488+ typed command structs spanning core
 //! Redis and feature-gated Redis Stack modules. Each command implements the
 //! [`Command`] trait, which defines serialization to a RESP [`Frame`] via
 //! `to_frame()` and response parsing via `parse_response()`.
@@ -238,6 +238,31 @@
 //! # }
 //! ```
 //!
+//! # Command Monitoring
+//!
+//! [`MonitorStream`] consumes a dedicated [`RedisConnection`] and yields the
+//! server's `MONITOR` feed as binary-safe [`MonitorEvent`] values. It polls the
+//! connection directly without a background worker.
+//!
+//! `MONITOR` is a short-lived debugging tool, not production telemetry: Redis
+//! must format and stream every eligible command to every monitor, and one
+//! monitor can reduce server throughput substantially.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{MonitorStream, RedisConnection};
+//! use tokio_stream::StreamExt;
+//!
+//! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut events = MonitorStream::new(conn).await?;
+//! while let Some(event) = events.next().await {
+//!     let event = event?;
+//!     println!("{:?} {:?}", event.command, event.arguments);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Streams
 //!
 //! [`StreamConsumer`] wraps XREADGROUP into a Rust [`futures::Stream`] with
@@ -354,6 +379,7 @@ pub mod consumer;
 pub mod credentials;
 mod executor;
 pub mod metrics_layer;
+pub mod monitor;
 pub mod multiplexed;
 pub mod pipeline;
 pub mod pool;
@@ -403,6 +429,7 @@ pub use metrics_layer::{
     MetricsExporterHandle, MetricsFacadeRecorder, spawn_pool_stats_exporter,
     spawn_queue_depth_exporter,
 };
+pub use monitor::{MonitorEvent, MonitorStream};
 pub use multiplexed::MultiplexedClient;
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};

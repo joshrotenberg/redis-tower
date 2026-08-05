@@ -93,6 +93,13 @@ async fn acl_list() {
 }
 
 #[tokio::test]
+async fn acl_users() {
+    let mut c = conn().await;
+    let users = c.execute(AclUsers::new()).await.unwrap();
+    assert!(users.iter().any(|user| user.as_ref() == b"default"));
+}
+
+#[tokio::test]
 async fn acl_getuser_default() {
     let mut c = conn().await;
     // GETUSER returns a complex nested frame; just assert it succeeds.

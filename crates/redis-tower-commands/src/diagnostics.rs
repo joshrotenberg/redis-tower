@@ -138,6 +138,99 @@ impl Command for MemoryStats {
     }
 }
 
+/// MEMORY PURGE
+///
+/// Asks the configured allocator to release memory that it can return to the
+/// operating system.
+#[derive(Debug, Clone)]
+pub struct MemoryPurge;
+
+impl MemoryPurge {
+    /// Create a `MEMORY PURGE` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryPurge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryPurge {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MEMORY"), bulk("PURGE")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(value) if value.eq_ignore_ascii_case(b"OK") => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MEMORY PURGE"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// MEMORY MALLOC-STATS
+///
+/// Returns the allocator's implementation-specific statistics as raw bytes.
+#[derive(Debug, Clone)]
+pub struct MemoryMallocStats;
+
+impl MemoryMallocStats {
+    /// Create a `MEMORY MALLOC-STATS` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for MemoryMallocStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for MemoryMallocStats {
+    type Response = Bytes;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MEMORY"), bulk("MALLOC-STATS")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(value))
+            | Frame::SimpleString(value)
+            | Frame::VerbatimString(_, value) => Ok(value),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk, simple, or verbatim string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "MEMORY MALLOC-STATS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // SLOWLOG subcommands
 // ---------------------------------------------------------------------------
@@ -454,6 +547,125 @@ impl Command for LatencyGraph {
     }
 }
 
+/// LATENCY HISTOGRAM \[command-name \[command-name ...\]\]
+///
+/// Returns cumulative command-latency histograms. The nested response is kept
+/// as a raw frame because RESP2 uses alternating arrays while RESP3 uses maps.
+#[derive(Debug, Clone)]
+pub struct LatencyHistogram {
+    commands: Vec<Bytes>,
+}
+
+impl LatencyHistogram {
+    /// Request histograms for every command that has latency data.
+    pub fn new() -> Self {
+        Self {
+            commands: Vec::new(),
+        }
+    }
+
+    /// Add one binary-safe command name to the filter.
+    pub fn command(mut self, command: impl AsRef<[u8]>) -> Self {
+        self.commands.push(Bytes::copy_from_slice(command.as_ref()));
+        self
+    }
+
+    /// Add multiple binary-safe command names to the filter.
+    pub fn commands<C, I>(mut self, commands: I) -> Self
+    where
+        C: AsRef<[u8]>,
+        I: IntoIterator<Item = C>,
+    {
+        self.commands.extend(
+            commands
+                .into_iter()
+                .map(|command| Bytes::copy_from_slice(command.as_ref())),
+        );
+        self
+    }
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for LatencyHistogram {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("LATENCY"), bulk("HISTOGRAM")];
+        args.extend(self.commands.iter().map(bulk));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            frame @ (Frame::Array(Some(_)) | Frame::Map(_)) => Ok(frame),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array or map",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LATENCY HISTOGRAM"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// LATENCY DOCTOR
+///
+/// Returns Redis's human-readable latency analysis report.
+#[derive(Debug, Clone)]
+pub struct LatencyDoctor;
+
+impl LatencyDoctor {
+    /// Create a `LATENCY DOCTOR` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for LatencyDoctor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for LatencyDoctor {
+    type Response = String;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("LATENCY"), bulk("DOCTOR")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::BulkString(Some(value))
+            | Frame::SimpleString(value)
+            | Frame::VerbatimString(_, value) => Ok(String::from_utf8_lossy(&value).into_owned()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk, simple, or verbatim string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LATENCY DOCTOR"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HELP subcommands
 // ---------------------------------------------------------------------------
@@ -636,6 +848,42 @@ mod tests {
     }
 
     #[test]
+    fn memory_purge_to_frame_and_parse_ok() {
+        let cmd = MemoryPurge::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("MEMORY"), bulk("PURGE")]));
+        assert_eq!(cmd.name(), "MEMORY PURGE");
+        assert!(cmd.idempotent());
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn memory_malloc_stats_accepts_resp2_and_resp3_text() {
+        let cmd = MemoryMallocStats::new();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("MEMORY"), bulk("MALLOC-STATS")])
+        );
+        assert_eq!(cmd.name(), "MEMORY MALLOC-STATS");
+        assert!(cmd.idempotent());
+        assert_eq!(
+            cmd.parse_response(Frame::BulkString(Some(Bytes::from("allocator stats"))))
+                .unwrap(),
+            Bytes::from("allocator stats")
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::VerbatimString(
+                Bytes::from("txt"),
+                Bytes::from("resp3 stats")
+            ))
+            .unwrap(),
+            Bytes::from("resp3 stats")
+        );
+        assert!(cmd.parse_response(Frame::Null).is_err());
+    }
+
+    #[test]
     fn latency_graph_to_frame() {
         let cmd = LatencyGraph::new("command");
         assert_eq!(
@@ -652,6 +900,57 @@ mod tests {
             .parse_response(Frame::BulkString(Some(Bytes::from("command - high . low"))))
             .unwrap();
         assert!(out.contains("command"));
+    }
+
+    #[test]
+    fn latency_histogram_serializes_binary_safe_filters() {
+        let cmd = LatencyHistogram::new()
+            .command(b"GET")
+            .commands([b"SET".as_slice(), b"custom\0command".as_slice()]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("LATENCY"),
+                bulk("HISTOGRAM"),
+                bulk("GET"),
+                bulk("SET"),
+                bulk(b"custom\0command"),
+            ])
+        );
+        assert_eq!(cmd.name(), "LATENCY HISTOGRAM");
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn latency_histogram_preserves_resp2_and_resp3_shapes() {
+        let cmd = LatencyHistogram::new();
+        let resp2 = array(vec![bulk("get"), array(vec![])]);
+        assert_eq!(cmd.parse_response(resp2.clone()).unwrap(), resp2);
+        let resp3 = Frame::Map(vec![(bulk("get"), Frame::Map(vec![]))]);
+        assert_eq!(cmd.parse_response(resp3.clone()).unwrap(), resp3);
+        assert!(cmd.parse_response(Frame::Null).is_err());
+    }
+
+    #[test]
+    fn latency_doctor_accepts_resp2_and_resp3_text() {
+        let cmd = LatencyDoctor::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("LATENCY"), bulk("DOCTOR")]));
+        assert_eq!(cmd.name(), "LATENCY DOCTOR");
+        assert!(cmd.idempotent());
+        assert_eq!(
+            cmd.parse_response(Frame::BulkString(Some(Bytes::from("diagnosis"))))
+                .unwrap(),
+            "diagnosis"
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::VerbatimString(
+                Bytes::from("txt"),
+                Bytes::from("healthy")
+            ))
+            .unwrap(),
+            "healthy"
+        );
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
     #[test]
