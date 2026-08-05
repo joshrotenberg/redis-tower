@@ -566,7 +566,7 @@ BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
 redis-tower              Facade crate
 redis-tower-core         Command trait, RedisConnection, FrameService
 redis-tower-protocol     RESP3 codec
-redis-tower-commands     475+ typed command structs
+redis-tower-commands     488+ typed command structs
 redis-tower-cluster      Cluster routing and topology
 redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
@@ -580,9 +580,12 @@ Typed command conformance against the pinned Redis 8.8 documentation metadata
 is tracked in [`COMMAND_COVERAGE.md`](COMMAND_COVERAGE.md). The report is
 generated from the command implementations and checked in CI. Search, Vector
 Set, and the Redis 8.8 Array data type have typed builders for every scoped
-command name. `FtHybrid` builds text/vector fusion queries, `FtExplain` and
-`FtExplainCli` expose search plans, and the `Ar*` builders cover sparse-array
-reads, writes, scans, textual predicates, aggregates, and ring-buffer workflows.
+command name. The server and operations sweep includes MIGRATE, module and
+memory administration, latency diagnostics, command introspection, and a
+dedicated `MonitorStream`. `FtHybrid` builds text/vector fusion queries,
+`FtExplain` and `FtExplainCli` expose search plans, and the `Ar*` builders cover
+sparse-array reads, writes, scans, textual predicates, aggregates, and
+ring-buffer workflows.
 
 ## Testing
 

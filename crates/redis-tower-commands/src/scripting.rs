@@ -1066,6 +1066,52 @@ impl Command for FunctionFlush {
 }
 
 // ---------------------------------------------------------------------------
+// FUNCTION KILL
+// ---------------------------------------------------------------------------
+
+/// FUNCTION KILL
+///
+/// Terminates a currently executing function. Redis only permits killing a
+/// function that has not yet performed a write.
+#[derive(Debug, Clone)]
+pub struct FunctionKill;
+
+impl FunctionKill {
+    /// Create a `FUNCTION KILL` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for FunctionKill {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for FunctionKill {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("FUNCTION"), bulk("KILL")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(value) if value.eq_ignore_ascii_case(b"OK") => Ok(()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "FUNCTION KILL"
+    }
+}
+
+// ---------------------------------------------------------------------------
 // FUNCTION STATS
 // ---------------------------------------------------------------------------
 
@@ -1626,6 +1672,28 @@ mod tests {
         let cmd = FunctionDelete::new("mylib");
         let frame = Frame::SimpleString(Bytes::from("OK"));
         cmd.parse_response(frame).unwrap();
+    }
+
+    // -- FunctionKill --
+
+    #[test]
+    fn function_kill_to_frame_and_metadata() {
+        let cmd = FunctionKill::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("FUNCTION"), bulk("KILL")]));
+        assert_eq!(cmd.name(), "FUNCTION KILL");
+        assert!(!cmd.idempotent());
+    }
+
+    #[test]
+    fn function_kill_parses_only_ok() {
+        let cmd = FunctionKill::new();
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(
+            cmd.parse_response(Frame::SimpleString(Bytes::from("NOTBUSY")))
+                .is_err()
+        );
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
     // -- FunctionStats --

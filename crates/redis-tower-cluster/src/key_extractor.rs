@@ -17,6 +17,7 @@
 //! | streams | `XREAD`, `XREADGROUP` | first token after `STREAMS` |
 //! | subcommand + key | `OBJECT <sub> key`, `MEMORY USAGE key` | `argv[2]` |
 //! | op + dest | `BITOP <op> dest src...` | `argv[2]` |
+//! | migration | `MIGRATE host port key ...`, `MIGRATE ... "" ... KEYS key...` | `argv[3]` or first key after `KEYS` |
 //!
 //! When `numkeys` is `0` (a keyless script, e.g. `EVAL "..." 0`) there is no
 //! key, so routing falls back to the default node.
@@ -64,7 +65,8 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         // client for the owning slot, not the cluster client.
         b"PING" | b"ECHO" | b"AUTH" | b"SELECT" | b"FLUSHDB" | b"FLUSHALL" | b"DBSIZE"
         | b"INFO" | b"CONFIG" | b"CLUSTER" | b"CLIENT" | b"COMMAND" | b"TIME" | b"MULTI"
-        | b"EXEC" | b"DISCARD" | b"HOTKEYS" => None,
+        | b"EXEC" | b"DISCARD" | b"HOTKEYS" | b"ACL" | b"FUNCTION" | b"LATENCY" | b"MODULE"
+        | b"MONITOR" => None,
 
         // Script / function: `CMD body numkeys key...` -- key follows numkeys
         // at argv[2]. argv[1] is the script text / SHA / function name.
@@ -97,6 +99,10 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         // BITOP op dest src...: argv[1] is the operation (AND/OR/XOR/NOT), so
         // the first key is the destination at argv[2].
         b"BITOP" => as_key(items.get(2)?),
+
+        // MIGRATE host port key db timeout [...], or the multi-key form where
+        // argv[3] is empty and the real keys follow a later KEYS token.
+        b"MIGRATE" => migrate_key(items),
 
         // Default: the key is at argv[1].
         _ => as_key(items.get(1)?),
@@ -141,6 +147,37 @@ fn key_after_numkeys(items: &[Frame], numkeys_idx: usize) -> Option<&[u8]> {
 fn key_after_token<'a>(items: &'a [Frame], token: &[u8]) -> Option<&'a [u8]> {
     let pos = items.iter().position(|f| matches_token(Some(f), token))?;
     as_key(items.get(pos + 1)?)
+}
+
+/// Extract the source key from either form of `MIGRATE`.
+fn migrate_key(items: &[Frame]) -> Option<&[u8]> {
+    let direct = as_key(items.get(3)?)?;
+    if !direct.is_empty() {
+        return Some(direct);
+    }
+
+    // Parse option arities instead of blindly searching for `KEYS`: AUTH and
+    // AUTH2 credentials are binary-safe and may themselves equal that token.
+    // Once the real KEYS marker is reached, every remaining argument is a key.
+    let mut option = 6;
+    while option < items.len() {
+        if matches_token(items.get(option), b"KEYS") {
+            return as_key(items.get(option + 1)?);
+        }
+        if matches_token(items.get(option), b"COPY") || matches_token(items.get(option), b"REPLACE")
+        {
+            option += 1;
+        } else if matches_token(items.get(option), b"AUTH") {
+            items.get(option + 1)?;
+            option += 2;
+        } else if matches_token(items.get(option), b"AUTH2") {
+            items.get(option + 2)?;
+            option += 3;
+        } else {
+            return None;
+        }
+    }
+    None
 }
 
 /// Returns true if the command is read-only, and so safe to route to a replica
@@ -556,6 +593,19 @@ mod tests {
     }
 
     #[test]
+    fn server_operations_families_are_keyless() {
+        for frame in [
+            array(vec![bulk("ACL"), bulk("USERS")]),
+            array(vec![bulk("FUNCTION"), bulk("KILL")]),
+            array(vec![bulk("LATENCY"), bulk("DOCTOR")]),
+            array(vec![bulk("MODULE"), bulk("LOAD"), bulk("/tmp/module.so")]),
+            array(vec![bulk("MONITOR")]),
+        ] {
+            assert_eq!(extract_key(&frame), None);
+        }
+    }
+
+    #[test]
     fn null_frame_returns_none() {
         assert_eq!(extract_key(&Frame::Null), None);
     }
@@ -817,6 +867,105 @@ mod tests {
             bulk("src2"),
         ]);
         assert_eq!(extract_key(&frame), Some(b"dest".as_slice()));
+    }
+
+    #[test]
+    fn migrate_routes_by_direct_or_keys_form_source_key() {
+        let single = array(vec![
+            bulk("MIGRATE"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk("source-key"),
+            bulk("0"),
+            bulk("5000"),
+        ]);
+        assert_eq!(extract_key(&single), Some(b"source-key".as_slice()));
+
+        let multiple = array(vec![
+            bulk("migrate"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk(""),
+            bulk("0"),
+            bulk("5000"),
+            bulk("COPY"),
+            bulk("keys"),
+            bulk("first-key"),
+            bulk("second-key"),
+        ]);
+        assert_eq!(extract_key(&multiple), Some(b"first-key".as_slice()));
+    }
+
+    #[test]
+    fn migrate_skips_keys_tokens_in_credentials_and_key_values() {
+        let auth = array(vec![
+            bulk("MIGRATE"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk(""),
+            bulk("0"),
+            bulk("5000"),
+            bulk("AUTH"),
+            bulk("KEYS"),
+            bulk("KEYS"),
+            bulk("first-key"),
+            bulk("KEYS"),
+        ]);
+        assert_eq!(extract_key(&auth), Some(b"first-key".as_slice()));
+
+        let auth2 = array(vec![
+            bulk("MIGRATE"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk(""),
+            bulk("0"),
+            bulk("5000"),
+            bulk("AUTH2"),
+            bulk("KEYS"),
+            bulk("KEYS"),
+            bulk("KEYS"),
+            bulk("first-key"),
+        ]);
+        assert_eq!(extract_key(&auth2), Some(b"first-key".as_slice()));
+    }
+
+    #[test]
+    fn migrate_routes_an_empty_source_key() {
+        let frame = array(vec![
+            bulk("MIGRATE"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk(""),
+            bulk("0"),
+            bulk("5000"),
+            bulk("KEYS"),
+            bulk(""),
+        ]);
+        assert_eq!(extract_key(&frame), Some(b"".as_slice()));
+    }
+
+    #[test]
+    fn malformed_migrate_without_a_source_key_is_keyless() {
+        assert_eq!(
+            extract_key(&array(vec![
+                bulk("MIGRATE"),
+                bulk("127.0.0.1"),
+                bulk("6380"),
+                bulk(""),
+            ])),
+            None
+        );
+        assert_eq!(
+            extract_key(&array(vec![
+                bulk("MIGRATE"),
+                bulk("127.0.0.1"),
+                bulk("6380"),
+                bulk(""),
+                bulk("0"),
+                bulk("5000"),
+            ])),
+            None
+        );
     }
 
     #[test]

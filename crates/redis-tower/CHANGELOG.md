@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- a dedicated, binary-safe `MonitorStream` over an exclusively owned connection, plus the complete server and operations command sweep
 - complete Redis 8.8 Array command family with version-gated live coverage and cluster-aware read routing
 - Redis-aware `tower-resilience` circuit breaker adapter, operational handle, and high-level client options
 - version-gated live command coverage across Redis 8.0, 8.2, 8.4, 8.6, and 8.8

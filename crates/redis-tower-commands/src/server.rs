@@ -2,6 +2,16 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+fn parse_ok_response(frame: Frame) -> Result<(), RedisError> {
+    match frame {
+        Frame::SimpleString(value) if value.eq_ignore_ascii_case(b"OK") => Ok(()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "OK",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// PING \[message\]
 ///
 /// Returns PONG, or echoes the message if provided.
@@ -52,6 +62,51 @@ impl Command for Ping {
 
     fn name(&self) -> &str {
         "PING"
+    }
+}
+
+/// MONITOR
+///
+/// Switches a connection into Redis's continuous command-monitoring mode.
+/// This command never returns the connection to normal request/response use:
+/// execute it only on a fresh, dedicated [`RedisConnection`](redis_tower_core::RedisConnection).
+/// Applications using the `redis-tower` facade should prefer its
+/// `MonitorStream`, which owns the dedicated connection and decodes events.
+/// Executing `Monitor` through a shared or multiplexed client commandeers that
+/// transport and will stall or corrupt unrelated command traffic.
+#[derive(Debug, Clone)]
+pub struct Monitor;
+
+impl Monitor {
+    /// Create a `MONITOR` request for a fresh dedicated connection.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for Monitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for Monitor {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MONITOR")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_ok_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MONITOR"
+    }
+
+    fn is_blocking(&self) -> bool {
+        true
     }
 }
 
@@ -483,6 +538,53 @@ impl Command for Time {
     }
 }
 
+/// COMMAND
+///
+/// Returns detailed metadata for every command known to the server. The
+/// response is preserved as a raw frame because its deeply nested shape and
+/// aggregate types differ between RESP2 and RESP3.
+#[derive(Debug, Clone)]
+pub struct CommandOverview;
+
+impl CommandOverview {
+    /// Create a root `COMMAND` request.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for CommandOverview {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Command for CommandOverview {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("COMMAND")])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            frame @ (Frame::Array(Some(_)) | Frame::Map(_)) => Ok(frame),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array or map",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "COMMAND"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// COMMAND COUNT
 ///
 /// Returns the total number of commands supported by the server.
@@ -744,6 +846,175 @@ impl Command for ModuleList {
 
     fn idempotent(&self) -> bool {
         true
+    }
+}
+
+/// MODULE LOAD path \[arg \[arg ...\]\]
+///
+/// Loads a Redis module and passes the optional binary-safe arguments to its
+/// initialization function.
+#[derive(Debug, Clone)]
+pub struct ModuleLoad {
+    path: Bytes,
+    args: Vec<Bytes>,
+}
+
+impl ModuleLoad {
+    /// Create a module-load request for `path`.
+    pub fn new(path: impl AsRef<[u8]>) -> Self {
+        Self {
+            path: Bytes::copy_from_slice(path.as_ref()),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append one module initialization argument.
+    pub fn arg(mut self, argument: impl AsRef<[u8]>) -> Self {
+        self.args.push(Bytes::copy_from_slice(argument.as_ref()));
+        self
+    }
+
+    /// Append multiple module initialization arguments.
+    pub fn args<A, I>(mut self, arguments: I) -> Self
+    where
+        A: AsRef<[u8]>,
+        I: IntoIterator<Item = A>,
+    {
+        self.args.extend(
+            arguments
+                .into_iter()
+                .map(|argument| Bytes::copy_from_slice(argument.as_ref())),
+        );
+        self
+    }
+}
+
+impl Command for ModuleLoad {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("MODULE"), bulk("LOAD"), bulk(&self.path)];
+        args.extend(self.args.iter().map(bulk));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_ok_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MODULE LOAD"
+    }
+}
+
+/// MODULE LOADEX path \[CONFIG name value \[CONFIG name value ...\]\]
+/// \[ARGS arg \[arg ...\]\]
+///
+/// Loads a Redis module with optional module configuration values and binary-
+/// safe initialization arguments.
+#[derive(Debug, Clone)]
+pub struct ModuleLoadEx {
+    path: Bytes,
+    configs: Vec<(Bytes, Bytes)>,
+    args: Vec<Bytes>,
+}
+
+impl ModuleLoadEx {
+    /// Create an extended module-load request for `path`.
+    pub fn new(path: impl AsRef<[u8]>) -> Self {
+        Self {
+            path: Bytes::copy_from_slice(path.as_ref()),
+            configs: Vec::new(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Add one module configuration name/value pair.
+    pub fn config(mut self, name: impl AsRef<[u8]>, value: impl AsRef<[u8]>) -> Self {
+        self.configs.push((
+            Bytes::copy_from_slice(name.as_ref()),
+            Bytes::copy_from_slice(value.as_ref()),
+        ));
+        self
+    }
+
+    /// Append one module initialization argument after the `ARGS` token.
+    pub fn arg(mut self, argument: impl AsRef<[u8]>) -> Self {
+        self.args.push(Bytes::copy_from_slice(argument.as_ref()));
+        self
+    }
+
+    /// Append multiple module initialization arguments after the `ARGS` token.
+    pub fn args<A, I>(mut self, arguments: I) -> Self
+    where
+        A: AsRef<[u8]>,
+        I: IntoIterator<Item = A>,
+    {
+        self.args.extend(
+            arguments
+                .into_iter()
+                .map(|argument| Bytes::copy_from_slice(argument.as_ref())),
+        );
+        self
+    }
+}
+
+impl Command for ModuleLoadEx {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![bulk("MODULE"), bulk("LOADEX"), bulk(&self.path)];
+        for (name, value) in &self.configs {
+            args.push(bulk("CONFIG"));
+            args.push(bulk(name));
+            args.push(bulk(value));
+        }
+        if !self.args.is_empty() {
+            args.push(bulk("ARGS"));
+            args.extend(self.args.iter().map(bulk));
+        }
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_ok_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MODULE LOADEX"
+    }
+}
+
+/// MODULE UNLOAD name
+///
+/// Unloads a module by its registered name.
+#[derive(Debug, Clone)]
+pub struct ModuleUnload {
+    name: Bytes,
+}
+
+impl ModuleUnload {
+    /// Create a module-unload request.
+    pub fn new(name: impl AsRef<[u8]>) -> Self {
+        Self {
+            name: Bytes::copy_from_slice(name.as_ref()),
+        }
+    }
+}
+
+impl Command for ModuleUnload {
+    type Response = ();
+
+    fn to_frame(&self) -> Frame {
+        array(vec![bulk("MODULE"), bulk("UNLOAD"), bulk(&self.name)])
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        parse_ok_response(frame)
+    }
+
+    fn name(&self) -> &str {
+        "MODULE UNLOAD"
     }
 }
 
@@ -2544,6 +2815,131 @@ impl Command for CommandGetKeys {
     }
 }
 
+/// One key and its access flags returned by [`CommandGetKeysAndFlags`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandKeyFlags {
+    /// The binary-safe key extracted from the inspected command invocation.
+    pub key: Bytes,
+    /// Redis key-spec flags such as `RW`, `access`, `update`, or `delete`.
+    pub flags: Vec<Bytes>,
+}
+
+/// COMMAND GETKEYSANDFLAGS command \[arg \[arg ...\]\]
+///
+/// Asks Redis to extract both keys and key-access flags from an arbitrary
+/// command invocation.
+#[derive(Debug, Clone)]
+pub struct CommandGetKeysAndFlags {
+    command: Bytes,
+    args: Vec<Bytes>,
+}
+
+impl CommandGetKeysAndFlags {
+    /// Create an inspection request for `command`.
+    pub fn new(command: impl AsRef<[u8]>) -> Self {
+        Self {
+            command: Bytes::copy_from_slice(command.as_ref()),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append one binary-safe argument from the inspected invocation.
+    pub fn arg(mut self, argument: impl AsRef<[u8]>) -> Self {
+        self.args.push(Bytes::copy_from_slice(argument.as_ref()));
+        self
+    }
+
+    /// Append multiple binary-safe arguments from the inspected invocation.
+    pub fn args<A, I>(mut self, arguments: I) -> Self
+    where
+        A: AsRef<[u8]>,
+        I: IntoIterator<Item = A>,
+    {
+        self.args.extend(
+            arguments
+                .into_iter()
+                .map(|argument| Bytes::copy_from_slice(argument.as_ref())),
+        );
+        self
+    }
+
+    fn parse_bytes(frame: Frame) -> Result<Bytes, RedisError> {
+        match frame {
+            Frame::BulkString(Some(value)) | Frame::SimpleString(value) => Ok(value),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "bulk or simple string",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn parse_flags(frame: Frame) -> Result<Vec<Bytes>, RedisError> {
+        let flags = match frame {
+            Frame::Array(Some(flags)) | Frame::Set(flags) => flags,
+            other => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "array or set of flags",
+                    actual: format!("{other:?}"),
+                });
+            }
+        };
+        flags.into_iter().map(Self::parse_bytes).collect()
+    }
+}
+
+impl Command for CommandGetKeysAndFlags {
+    type Response = Vec<CommandKeyFlags>;
+
+    fn to_frame(&self) -> Frame {
+        let mut args = vec![
+            bulk("COMMAND"),
+            bulk("GETKEYSANDFLAGS"),
+            bulk(&self.command),
+        ];
+        args.extend(self.args.iter().map(bulk));
+        array(args)
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        let entries = match frame {
+            Frame::Array(Some(entries)) => entries,
+            Frame::Array(None) => return Ok(Vec::new()),
+            other => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "array of key/flag pairs",
+                    actual: format!("{other:?}"),
+                });
+            }
+        };
+
+        entries
+            .into_iter()
+            .map(|entry| {
+                let mut fields = match entry {
+                    Frame::Array(Some(fields)) if fields.len() == 2 => fields.into_iter(),
+                    other => {
+                        return Err(RedisError::UnexpectedResponse {
+                            expected: "two-element key/flag array",
+                            actual: format!("{other:?}"),
+                        });
+                    }
+                };
+                let key = Self::parse_bytes(fields.next().expect("length checked"))?;
+                let flags = Self::parse_flags(fields.next().expect("length checked"))?;
+                Ok(CommandKeyFlags { key, flags })
+            })
+            .collect()
+    }
+
+    fn name(&self) -> &str {
+        "COMMAND GETKEYSANDFLAGS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
 /// Reply mode for CLIENT REPLY.
 #[derive(Clone)]
 pub enum ClientReplyMode {
@@ -3674,6 +4070,20 @@ mod tests {
         assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
+    // -- Monitor --
+
+    #[test]
+    fn monitor_to_frame_parse_and_metadata() {
+        let cmd = Monitor::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("MONITOR")]));
+        assert_eq!(cmd.name(), "MONITOR");
+        assert!(cmd.is_blocking());
+        assert!(!cmd.idempotent());
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
     // -- FlushDb --
 
     #[test]
@@ -3934,6 +4344,21 @@ mod tests {
         let cmd = Time::new();
         let frame = array(vec![Frame::BulkString(Some(Bytes::from("123")))]);
         assert!(cmd.parse_response(frame).is_err());
+    }
+
+    // -- CommandOverview --
+
+    #[test]
+    fn command_overview_preserves_resp2_and_resp3_shapes() {
+        let cmd = CommandOverview::new();
+        assert_eq!(cmd.to_frame(), array(vec![bulk("COMMAND")]));
+        assert_eq!(cmd.name(), "COMMAND");
+        assert!(cmd.idempotent());
+        let resp2 = array(vec![array(vec![bulk("get")])]);
+        assert_eq!(cmd.parse_response(resp2.clone()).unwrap(), resp2);
+        let resp3 = Frame::Map(vec![(bulk("get"), array(vec![]))]);
+        assert_eq!(cmd.parse_response(resp3.clone()).unwrap(), resp3);
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
     }
 
     // -- CommandCount --
@@ -4204,6 +4629,81 @@ mod tests {
         assert_eq!(cmd.parse_response(frame).unwrap(), vec![Bytes::from("k")]);
     }
 
+    // -- CommandGetKeysAndFlags --
+
+    #[test]
+    fn command_getkeysandflags_serializes_binary_safe_arguments() {
+        let cmd = CommandGetKeysAndFlags::new("MSET").arg(b"key\0one").args([
+            b"value-one".as_slice(),
+            b"key-two".as_slice(),
+            b"value-two".as_slice(),
+        ]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("COMMAND"),
+                bulk("GETKEYSANDFLAGS"),
+                bulk("MSET"),
+                bulk(b"key\0one"),
+                bulk("value-one"),
+                bulk("key-two"),
+                bulk("value-two"),
+            ])
+        );
+        assert_eq!(cmd.name(), "COMMAND GETKEYSANDFLAGS");
+        assert!(cmd.idempotent());
+    }
+
+    #[test]
+    fn command_getkeysandflags_parses_array_and_resp3_set_flags() {
+        let cmd = CommandGetKeysAndFlags::new("MSET");
+        let response = array(vec![
+            array(vec![
+                bulk(b"key\0one"),
+                array(vec![bulk("RW"), bulk("access"), bulk("update")]),
+            ]),
+            array(vec![
+                bulk("key-two"),
+                Frame::Set(vec![bulk("RW"), bulk("access")]),
+            ]),
+        ]);
+        assert_eq!(
+            cmd.parse_response(response).unwrap(),
+            vec![
+                CommandKeyFlags {
+                    key: Bytes::from_static(b"key\0one"),
+                    flags: vec![
+                        Bytes::from("RW"),
+                        Bytes::from("access"),
+                        Bytes::from("update")
+                    ],
+                },
+                CommandKeyFlags {
+                    key: Bytes::from("key-two"),
+                    flags: vec![Bytes::from("RW"), Bytes::from("access")],
+                },
+            ]
+        );
+        assert_eq!(
+            cmd.parse_response(Frame::Array(None)).unwrap(),
+            Vec::<CommandKeyFlags>::new()
+        );
+    }
+
+    #[test]
+    fn command_getkeysandflags_rejects_malformed_entries() {
+        let cmd = CommandGetKeysAndFlags::new("GET");
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+        assert!(
+            cmd.parse_response(array(vec![array(vec![bulk("only-key")])]))
+                .is_err()
+        );
+        assert!(
+            cmd.parse_response(array(vec![array(vec![bulk("key"), Frame::Integer(1)])]))
+                .is_err()
+        );
+    }
+
     // -- ClientReply --
 
     #[test]
@@ -4282,6 +4782,72 @@ mod tests {
         let cmd = ModuleList::new();
         let reply = array(vec![array(vec![bulk("name"), bulk("ReJSON")])]);
         assert_eq!(cmd.parse_response(reply.clone()).unwrap(), reply);
+    }
+
+    #[test]
+    fn module_load_serializes_binary_safe_arguments_and_parses_ok() {
+        let cmd = ModuleLoad::new(b"/tmp/module\0name.so")
+            .arg(b"first\0arg")
+            .args([b"second".as_slice(), b"third".as_slice()]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MODULE"),
+                bulk("LOAD"),
+                bulk(b"/tmp/module\0name.so"),
+                bulk(b"first\0arg"),
+                bulk("second"),
+                bulk("third"),
+            ])
+        );
+        assert_eq!(cmd.name(), "MODULE LOAD");
+        assert!(!cmd.idempotent());
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn module_loadex_orders_configs_before_args() {
+        let cmd = ModuleLoadEx::new("/tmp/module.so")
+            .config(b"setting\0name", b"setting\0value")
+            .config("threads", "4")
+            .arg(b"arg\0one")
+            .args([b"arg-two".as_slice()]);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("MODULE"),
+                bulk("LOADEX"),
+                bulk("/tmp/module.so"),
+                bulk("CONFIG"),
+                bulk(b"setting\0name"),
+                bulk(b"setting\0value"),
+                bulk("CONFIG"),
+                bulk("threads"),
+                bulk("4"),
+                bulk("ARGS"),
+                bulk(b"arg\0one"),
+                bulk("arg-two"),
+            ])
+        );
+        assert_eq!(cmd.name(), "MODULE LOADEX");
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+    }
+
+    #[test]
+    fn module_unload_serializes_binary_safe_name_and_parses_ok() {
+        let cmd = ModuleUnload::new(b"module\0name");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("MODULE"), bulk("UNLOAD"), bulk(b"module\0name")])
+        );
+        assert_eq!(cmd.name(), "MODULE UNLOAD");
+        assert!(!cmd.idempotent());
+        cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
+            .unwrap();
+        assert!(cmd.parse_response(Frame::Null).is_err());
     }
 
     // -- HOTKEYS --

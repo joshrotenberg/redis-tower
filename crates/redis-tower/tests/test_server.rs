@@ -54,6 +54,22 @@ async fn cover_command_docs() {
 }
 
 #[tokio::test]
+async fn cover_command_overview_and_getkeysandflags() {
+    let mut c = conn().await;
+    let overview = c.execute(CommandOverview::new()).await.unwrap();
+    assert!(matches!(overview, Frame::Array(Some(_)) | Frame::Map(_)));
+
+    let key = b"server:command-flags:\x00";
+    let entries = c
+        .execute(CommandGetKeysAndFlags::new("SET").arg(key).arg("value"))
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key.as_ref(), key);
+    assert!(!entries[0].flags.is_empty());
+}
+
+#[tokio::test]
 async fn cover_bgsave() {
     let mut c = conn().await;
     let resp = c.execute(BgSave::new().schedule()).await.unwrap();
@@ -129,6 +145,15 @@ async fn cover_memory_stats() {
 }
 
 #[tokio::test]
+async fn cover_memory_purge_and_malloc_stats() {
+    let mut c = conn().await;
+    c.execute(MemoryPurge::new()).await.unwrap();
+    // The report may be empty when Redis is not built with jemalloc, but the
+    // command must normalize both RESP2 bulk and RESP3 verbatim replies.
+    let _report = c.execute(MemoryMallocStats::new()).await.unwrap();
+}
+
+#[tokio::test]
 async fn cover_latency_latest() {
     let mut c = conn().await;
     // The list may be empty on a freshly started server; must not error.
@@ -140,6 +165,19 @@ async fn cover_latency_reset() {
     let mut c = conn().await;
     // Resets all latency events; returns count of events reset (may be 0).
     let _count = c.execute(LatencyReset::new()).await.unwrap();
+}
+
+#[tokio::test]
+async fn cover_latency_histogram_and_doctor() {
+    let mut c = conn().await;
+    let histogram = c
+        .execute(LatencyHistogram::new().command("get"))
+        .await
+        .unwrap();
+    assert!(matches!(histogram, Frame::Array(Some(_)) | Frame::Map(_)));
+
+    let report = c.execute(LatencyDoctor::new()).await.unwrap();
+    assert!(!report.is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -190,11 +228,12 @@ async fn cover_wait_zero() {
 // would disrupt other tests running in parallel. REPLICAOF and FAILOVER use the
 // isolated two-process topology below instead of the shared standalone server.
 
-/// Reserve two distinct loopback ports and release them for Redis to bind.
+/// Reserve two distinct loopback ports and release them for dedicated Redis
+/// servers to bind.
 ///
 /// Holding both listeners until both ports have been selected prevents the OS
 /// from handing the same ephemeral port back to the second allocation.
-fn free_replication_ports() -> (u16, u16) {
+fn free_server_ports() -> (u16, u16) {
     let first = std::net::TcpListener::bind("127.0.0.1:0").expect("bind first ephemeral port");
     let second = std::net::TcpListener::bind("127.0.0.1:0").expect("bind second ephemeral port");
     let first_port = first.local_addr().expect("first local_addr").port();
@@ -202,6 +241,132 @@ fn free_replication_ports() -> (u16, u16) {
     assert_ne!(first_port, second_port, "ephemeral ports must be distinct");
     drop((first, second));
     (first_port, second_port)
+}
+
+#[tokio::test]
+async fn cover_migrate_empty_single_multi_and_nokey() {
+    // Compatibility jobs use an externally managed service and cannot start a
+    // second destination server. The regular integration job owns both
+    // processes and exercises the real cross-server transfer.
+    if std::env::var_os("REDIS_EXTERNAL_SERVICE").is_some() {
+        return;
+    }
+
+    let (source_port, destination_port) = free_server_ports();
+    let source_server = RedisServer::new()
+        .port(source_port)
+        .save(false)
+        .start()
+        .await
+        .expect("failed to start MIGRATE source server");
+    let destination_server = RedisServer::new()
+        .port(destination_port)
+        .save(false)
+        .start()
+        .await
+        .expect("failed to start MIGRATE destination server");
+
+    let source_addr = source_server.addr();
+    let destination_addr = destination_server.addr();
+    let mut source = RedisConnection::connect(&source_addr)
+        .await
+        .expect("connect to MIGRATE source");
+    let mut destination = RedisConnection::connect(&destination_addr)
+        .await
+        .expect("connect to MIGRATE destination");
+    let prefix = format!("redis-tower:migrate:{}", std::process::id());
+    let single = format!("{prefix}:single");
+    let first = format!("{prefix}:first");
+    let second = format!("{prefix}:second");
+
+    source.execute(Set::new("", "empty-value")).await.unwrap();
+    assert_eq!(
+        source
+            .execute(Migrate::new("127.0.0.1", destination_port, "", 0, 5_000))
+            .await
+            .unwrap(),
+        MigrateResult::Ok
+    );
+    assert_eq!(source.execute(Get::new("")).await.unwrap(), None);
+    assert_eq!(
+        destination.execute(Get::new("")).await.unwrap(),
+        Some(bytes::Bytes::from_static(b"empty-value"))
+    );
+
+    source
+        .execute(Set::new(&single, "single-value"))
+        .await
+        .unwrap();
+    assert_eq!(
+        source
+            .execute(Migrate::new(
+                "127.0.0.1",
+                destination_port,
+                &single,
+                0,
+                5_000,
+            ))
+            .await
+            .unwrap(),
+        MigrateResult::Ok
+    );
+    assert_eq!(source.execute(Get::new(&single)).await.unwrap(), None);
+    assert_eq!(
+        destination.execute(Get::new(&single)).await.unwrap(),
+        Some(bytes::Bytes::from_static(b"single-value"))
+    );
+
+    source.execute(Set::new(&first, "one")).await.unwrap();
+    source.execute(Set::new(&second, "two")).await.unwrap();
+    assert_eq!(
+        source
+            .execute(
+                Migrate::keys("127.0.0.1", destination_port, &first, 0, 5_000)
+                    .key(&second)
+                    .copy(),
+            )
+            .await
+            .unwrap(),
+        MigrateResult::Ok
+    );
+    assert_eq!(
+        source.execute(Get::new(&first)).await.unwrap().unwrap(),
+        bytes::Bytes::from_static(b"one")
+    );
+    assert_eq!(
+        source.execute(Get::new(&second)).await.unwrap().unwrap(),
+        bytes::Bytes::from_static(b"two")
+    );
+    assert_eq!(
+        destination
+            .execute(Get::new(&first))
+            .await
+            .unwrap()
+            .unwrap(),
+        bytes::Bytes::from_static(b"one")
+    );
+    assert_eq!(
+        destination
+            .execute(Get::new(&second))
+            .await
+            .unwrap()
+            .unwrap(),
+        bytes::Bytes::from_static(b"two")
+    );
+
+    assert_eq!(
+        source
+            .execute(Migrate::new(
+                "127.0.0.1",
+                destination_port,
+                format!("{prefix}:missing"),
+                0,
+                5_000,
+            ))
+            .await
+            .unwrap(),
+        MigrateResult::NoKey
+    );
 }
 
 fn info_value<'a>(info: &'a str, field: &str) -> Option<&'a str> {
@@ -250,7 +415,7 @@ async fn wait_for_replication_info(
 /// affected and the selected ports are released for subsequent tests.
 #[tokio::test]
 async fn cover_replicaof_and_failover() {
-    let (first_port, second_port) = free_replication_ports();
+    let (first_port, second_port) = free_server_ports();
     let first_server = RedisServer::new()
         .port(first_port)
         .repl_diskless_sync_delay(0)
