@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `CLIENT TRACKING` redirect and `NOLOOP` options, binary-safe prefixes, and
+  mutually compatible tracking-mode builders
 - typed builders for the remaining server and operations sweep: MIGRATE, MODULE LOAD/LOADEX/UNLOAD, MEMORY PURGE/MALLOC-STATS, LATENCY HISTOGRAM/DOCTOR, ACL USERS, FUNCTION KILL, COMMAND/GETKEYSANDFLAGS, and MONITOR
 - complete typed-builder coverage for the Redis 8.8 Array data type's 18 `AR*` commands, including typed scan, grep, metadata, and aggregate responses
 - generated Redis 8.8 typed-command conformance report with CI drift detection

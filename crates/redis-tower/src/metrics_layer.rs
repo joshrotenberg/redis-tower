@@ -160,6 +160,36 @@ pub enum ClusterTopologyRefreshOutcome {
     Error,
 }
 
+/// A bounded client-side cache event suitable for metrics labels.
+///
+/// Cache keys and command arguments are intentionally absent: emitting them
+/// would create unbounded-cardinality metric series and could expose user
+/// data. Applications that need the current aggregate totals can also read a
+/// [`crate::CacheStatistics`] snapshot from a cached client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheEvent {
+    /// A response was served from the local cache.
+    Hit,
+    /// A cacheable command was not present (or had expired) locally.
+    Miss,
+    /// Redis or a local write invalidated one or more keys.
+    Invalidation,
+    /// A cached entry was removed by invalidation, expiry, or capacity bounds.
+    Eviction,
+}
+
+impl CacheEvent {
+    #[cfg(feature = "metrics")]
+    fn as_label(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Invalidation => "invalidation",
+            Self::Eviction => "eviction",
+        }
+    }
+}
+
 impl ClusterTopologyRefreshOutcome {
     #[cfg(feature = "metrics")]
     fn as_label(self) -> &'static str {
@@ -248,6 +278,17 @@ pub trait MetricsRecorder: Send + Sync + 'static {
         let _ = batch_size;
     }
 
+    /// Called when the client-side cache records an aggregate event.
+    ///
+    /// `count` is normally one, but may be greater when a single invalidation
+    /// removes several cached command variants. The event kind is deliberately
+    /// bounded and carries no Redis keys or command arguments.
+    ///
+    /// The default implementation is a no-op.
+    fn cache_event(&self, event: CacheEvent, count: u64) {
+        let _ = (event, count);
+    }
+
     /// Called when a caller finishes waiting to acquire a pool connection.
     ///
     /// `duration` includes both immediately successful acquisitions and time
@@ -308,6 +349,10 @@ where
 
     fn pipeline_flushed(&self, batch_size: usize) {
         (**self).pipeline_flushed(batch_size);
+    }
+
+    fn cache_event(&self, event: CacheEvent, count: u64) {
+        (**self).cache_event(event, count);
     }
 
     fn pool_acquisition_completed(&self, pool_name: &str, duration: Duration, timed_out: bool) {
@@ -453,6 +498,16 @@ impl MetricsRecorder for MetricsFacadeRecorder {
             "redis_tower.pipeline.batch_size",
         )
         .record(batch_size as f64);
+    }
+
+    fn cache_event(&self, event: CacheEvent, count: u64) {
+        metrics::counter!(
+            description: "Redis client-side cache events",
+            unit: metrics::Unit::Count,
+            "redis_tower.cache.events",
+            "event" => event.as_label(),
+        )
+        .increment(count);
     }
 
     fn pool_acquisition_completed(&self, pool_name: &str, duration: Duration, timed_out: bool) {

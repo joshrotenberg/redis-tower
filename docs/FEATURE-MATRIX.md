@@ -34,7 +34,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Connection pool | yes -- [`pool.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pool.rs) | yes (`bb8`/`deadpool` via features) | yes |
 | Cluster (MOVED/ASK, topology refresh) | yes -- [`redis-tower-cluster`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes |
 | Sentinel discovery + failover | yes -- [`redis-tower-sentinel`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/connection.rs) | yes | yes |
-| Client-side caching (RESP3 tracking) | yes -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs) | no | yes |
+| Client-side caching (RESP3 tracking) | standalone: cloneable cached client, tracking modes, reconnect-safe invalidation, bounds, and metrics; cluster pending -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs), [`cache_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/cache_layer.rs) | yes (`cache-aio`) | yes |
 | Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no | partial (via reconnect policy) |
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | partial (connection-level) | yes |
 | Reconnect with backoff + jitter | yes -- [`reconnect.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/reconnect.rs) | partial | yes |
@@ -63,7 +63,7 @@ comparison is about capability parity across languages, not API shape.
 | Connection pool | yes -- [`pool.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pool.rs) | yes | yes | yes (multiplexed) | yes |
 | Cluster (MOVED/ASK) | yes -- [`redis-tower-cluster`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes | yes | yes |
 | Sentinel | yes -- [`redis-tower-sentinel`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/connection.rs) | yes | yes | yes | yes |
-| Client-side caching | yes -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs) | yes | partial | no | no |
+| Client-side caching | standalone yes; cluster pending -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs), [`cache_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/cache_layer.rs) | yes | partial | no | no |
 | Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no (external) | no (external) | no (external) | no (external) |
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | yes | yes (context) | yes | yes |
 | Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
@@ -92,6 +92,9 @@ These are stated explicitly so the page does not drift back into overclaiming:
    examples show complete backend wiring. Per-node cluster labels remain
    opt-in and bounded to 64 concrete addresses per client plus `_OTHER`, with
    overflow folded into `_OTHER`.
+3. **Client-side caching is standalone-only today.** The standalone cached
+   client owns invalidation tracking and is safe to clone; cluster cache
+   ownership and slot migration remain a separate topology-aware feature.
 
 ## Verifying a cell yourself
 

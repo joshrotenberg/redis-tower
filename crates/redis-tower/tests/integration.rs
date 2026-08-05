@@ -1700,12 +1700,11 @@ async fn resilient_client_connect_url() {
 #[tokio::test]
 async fn csc_cache_hit() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k = "csc_test:cache_hit";
     // Write via a separate connection (bypasses cache).
     let mut writer = conn().await;
     writer.execute(Set::new(k, "hello")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     // First read: cache miss, hits Redis.
     let v1: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
@@ -1723,29 +1722,28 @@ async fn csc_cache_hit() {
 #[tokio::test]
 async fn csc_invalidation() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k = "csc_test:invalidation";
 
     // Write and read to populate cache.
     let mut writer = conn().await;
     writer.execute(Set::new(k, "original")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
     let _: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
     assert_eq!(client.cache_size().await, 1);
 
     // Modify the key from another connection.
     writer.execute(Set::new(k, "modified")).await.unwrap();
 
-    // The invalidation push arrives during the next read from the connection.
-    // The GET below will trigger read_response which routes any push frames.
-    // After the GET, the cache will have the new value (and the old entry
-    // will have been invalidated by the push that arrived before/during the read).
-    //
-    // We need a small delay to let the server send the invalidation.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Allow the owned receiver task to process the redirected invalidation.
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while client.cache_size().await != 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the cached client invalidation");
 
-    // This GET triggers the read that routes the invalidation push,
-    // then sees a cache miss and fetches the new value.
+    // The next GET misses locally and refills with the new value.
     let v: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
     assert_eq!(v, Some(Bytes::from("modified")));
 
@@ -1755,7 +1753,7 @@ async fn csc_invalidation() {
 #[tokio::test]
 async fn csc_write_not_cached() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_test:write_not_cached";
     // SET should not be cached.
@@ -1822,6 +1820,9 @@ async fn tower_csc_with_invalidation() {
     use redis_tower::commands::ClientTracking;
 
     let addr = redis_addr().await;
+    let k = "tower_csc:invalidation";
+    let mut writer = conn().await;
+    writer.execute(Set::new(k, "original")).await.unwrap();
 
     // Data connection as FrameService.
     let frame_svc = FrameService::connect(addr).await.unwrap();
@@ -1843,20 +1844,21 @@ async fn tower_csc_with_invalidation() {
     // Wire up invalidation.
     let _task = spawn_invalidation_task(cache_ref.clone(), stream);
 
-    let k = "tower_csc:invalidation";
-    let mut writer = conn().await;
-    writer.execute(Set::new(k, "original")).await.unwrap();
-
     // Populate cache.
     let _: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
     assert_eq!(cache_ref.read().await.len(), 1);
 
     // Modify from another connection.
     writer.execute(Set::new(k, "modified")).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Cache should be invalidated.
-    assert_eq!(cache_ref.read().await.len(), 0);
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        while !cache_ref.read().await.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the Tower cache invalidation");
 
     // Fresh read gets new value.
     let v: Option<Bytes> = call_ready(&mut svc, Get::new(k)).await.unwrap();
@@ -2665,13 +2667,12 @@ async fn transaction_with_error_aborts_cleanly() {
 #[tokio::test]
 async fn csc_multiple_keys_cached() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k1 = key("csc_multi", "k1");
     let k2 = key("csc_multi", "k2");
     let mut writer = conn().await;
     writer.execute(Set::new(&k1, "v1")).await.unwrap();
     writer.execute(Set::new(&k2, "v2")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let _: Option<Bytes> = client.execute(Get::new(&k1)).await.unwrap();
     let _: Option<Bytes> = client.execute(Get::new(&k2)).await.unwrap();
@@ -2684,11 +2685,10 @@ async fn csc_multiple_keys_cached() {
 #[tokio::test]
 async fn csc_clear_cache() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k = "csc_clear:k";
     let mut writer = conn().await;
     writer.execute(Set::new(k, "val")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let _: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
     assert_eq!(client.cache_size().await, 1);
@@ -2702,7 +2702,7 @@ async fn csc_clear_cache() {
 #[tokio::test]
 async fn csc_set_bypasses_cache() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let k = "csc_set_bypass:k";
     client.execute(Set::new(k, "val")).await.unwrap();
@@ -2714,11 +2714,10 @@ async fn csc_set_bypasses_cache() {
 #[tokio::test]
 async fn csc_hgetall_cached() {
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k = "csc_hgetall:k";
     let mut writer = conn().await;
     writer.execute(HSet::new(k, "f1", "v1")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     let _: Vec<(Bytes, Bytes)> = client.execute(HGetAll::new(k)).await.unwrap();
     assert!(client.cache_size().await >= 1);
@@ -2732,12 +2731,11 @@ async fn csc_hget_fields_do_not_collide() {
     // Regression for the cache-key collision: HGET h f1 and HGET h f2 share a
     // Redis key but must return their own values, not each other's.
     let addr = redis_addr().await;
-    let mut client = redis_tower::CachedClient::connect(addr).await.unwrap();
-
     let k = "csc_hget_collision:h";
     let mut writer = conn().await;
     writer.execute(HSet::new(k, "f1", "v1")).await.unwrap();
     writer.execute(HSet::new(k, "f2", "v2")).await.unwrap();
+    let client = redis_tower::CachedClient::connect(addr).await.unwrap();
 
     // Populate the cache with both fields.
     let a: Option<Bytes> = client.execute(HGet::new(k, "f1")).await.unwrap();

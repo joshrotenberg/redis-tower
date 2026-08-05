@@ -9,6 +9,7 @@
 
 # Operations
 
+- [Client-side caching](CLIENT-SIDE-CACHING.md)
 - [Production tuning](PRODUCTION-TUNING.md)
 
 # Reference

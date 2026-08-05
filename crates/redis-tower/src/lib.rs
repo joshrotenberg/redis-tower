@@ -26,6 +26,7 @@
 //! | Client | When to use |
 //! |--------|-------------|
 //! | [`MultiplexedClient`] | **The default.** One connection, concurrent commands auto-pipelined; cheap to `clone` and share across tasks. |
+//! | [`CachedMultiplexedClient`] | Cloneable standalone client-side caching: local hits, auto-pipelined misses, and owned RESP3 invalidation tracking. |
 //! | [`RedisConnection`] | A single exclusive connection (`&mut self`), or as a building block for the others. |
 //! | [`RedisClient`] | `Arc<Mutex<RedisConnection>>` -- a simple shared handle, but it serializes commands through one lock (lower throughput than `MultiplexedClient`). |
 //! | [`ResilientRedisClient`] | A shared handle with automatic reconnection and exponential backoff, for long-running services. |
@@ -83,7 +84,8 @@
 //! - [`TracingLayer`] -- emits tracing spans for each command.
 //! - [`MetricsLayer`] -- records command latency and counts via a pluggable
 //!   [`MetricsRecorder`].
-//! - [`CacheService`] -- client-side frame caching with invalidation.
+//! - [`CacheLayer`] / [`CacheService`] -- client-side frame caching with
+//!   owned invalidation lifecycle options.
 //! - [`ReconnectService`] -- automatic reconnection with configurable backoff.
 //!
 //! ```no_run
@@ -402,9 +404,9 @@ pub mod json_api;
 pub mod search_api;
 
 pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
-pub use cache_layer::CacheService;
-pub use cache_state::CacheState;
-pub use caching::CachedClient;
+pub use cache_layer::{CacheConfig, CacheLayer, CacheService, ReleaseReadiness};
+pub use cache_state::{CacheState, CacheStatistics};
+pub use caching::{CacheTrackingMode, CachedClient, CachedClientConfig};
 #[allow(deprecated)]
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerLayer, CircuitBreakerService};
 pub use circuit_breaker::{
@@ -424,7 +426,7 @@ pub use credentials::{
 };
 pub use executor::{ExecutorService, RedisExecutor};
 pub use metrics_layer::{
-    ClusterRedirectKind, ClusterTopologyRefreshOutcome, MetricsLayer, MetricsRecorder,
+    CacheEvent, ClusterRedirectKind, ClusterTopologyRefreshOutcome, MetricsLayer, MetricsRecorder,
     MetricsService,
 };
 #[cfg(feature = "metrics")]
@@ -434,7 +436,7 @@ pub use metrics_layer::{
     spawn_queue_depth_exporter,
 };
 pub use monitor::{MonitorEvent, MonitorStream};
-pub use multiplexed::MultiplexedClient;
+pub use multiplexed::{CachedMultiplexedClient, MultiplexedClient};
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
 pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
 pub use pubsub::{
