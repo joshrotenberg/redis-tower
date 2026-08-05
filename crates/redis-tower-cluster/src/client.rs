@@ -84,9 +84,28 @@ impl ClusterClient {
     }
 
     /// Execute a command against the cluster.
+    ///
+    /// A deadline carried by [`redis_tower_core::WithDeadline`] includes time
+    /// spent waiting for the shared cluster-wide mutex as well as routing and
+    /// command execution.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
-        let mut conn = self.inner.lock().await;
-        conn.execute(cmd).await
+        let deadline = cmd.deadline();
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            return Err(RedisError::CommandTimeout);
+        }
+        let operation = async {
+            let mut conn = self.inner.lock().await;
+            // The outer timeout includes mutex acquisition, so call the
+            // deadline-free routed operation to keep one absolute timer.
+            conn.execute_routed(cmd).await
+        };
+
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_elapsed| RedisError::CommandTimeout)?,
+            None => operation.await,
+        }
     }
 
     /// Refresh the cluster topology.
@@ -99,5 +118,28 @@ impl ClusterClient {
     pub async fn read_preference(&self) -> ReadPreference {
         let conn = self.inner.lock().await;
         conn.read_preference()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis_tower_commands::Ping;
+    use redis_tower_core::WithDeadline;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn command_deadline_includes_cluster_mutex_wait() {
+        let client = ClusterClient {
+            inner: Arc::new(Mutex::new(ClusterConnection::empty_for_test())),
+        };
+        let lock = client.inner.lock().await;
+
+        let result = client
+            .execute(WithDeadline::after(Ping::new(), Duration::from_millis(25)))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        drop(lock);
     }
 }

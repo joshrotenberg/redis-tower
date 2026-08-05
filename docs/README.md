@@ -1,0 +1,42 @@
+# redis-tower documentation
+
+redis-tower is a Redis client for Rust where every connection is a Tower
+`Service`. Commands have concrete request and response types, concurrent work
+can be auto-pipelined, and operational policy composes through Tower layers.
+
+If you are evaluating or adopting the project, start here:
+
+- [Migrating from redis-rs](MIGRATING-FROM-REDIS-RS.md) maps the most common
+  redis-rs idioms to redis-tower.
+- [Migrating from Fred](MIGRATING-FROM-FRED.md) covers client construction,
+  command execution, pipelines, transactions, topology, pub/sub, reconnection,
+  and shutdown.
+- [Production tuning](PRODUCTION-TUNING.md) explains client selection,
+  pipeline and pool sizing, timeouts, backpressure, reconnects, observability,
+  and graceful shutdown.
+- The [feature matrix](FEATURE-MATRIX.md) is the canonical, evidence-linked
+  comparison with other Redis clients.
+
+For the short installation example, complete API tour, workspace layout, and
+compatibility policy, see the
+[repository README](https://github.com/joshrotenberg/redis-tower#readme).
+Typed API reference documentation will be published on
+[docs.rs](https://docs.rs/redis-tower) with the first crate release.
+
+## Local preview
+
+Install [mdBook](https://rust-lang.github.io/mdBook/guide/installation.html),
+then run:
+
+```bash
+mdbook serve --open
+```
+
+For the same non-interactive checks used in CI:
+
+```bash
+mdbook build
+python3 scripts/check_docs_links.py
+```
+
+The generated site is written under `target/mdbook` and is never checked in.

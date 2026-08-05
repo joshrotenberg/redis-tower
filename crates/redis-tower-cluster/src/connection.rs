@@ -322,6 +322,24 @@ pub(crate) enum Redirect {
 }
 
 impl ClusterConnection {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            topology: ClusterTopology::new(Vec::new()),
+            default_node: String::new(),
+            host_override: None,
+            address_map: None,
+            read_preference: ReadPreference::Master,
+            read_routing: Arc::new(RoundRobinRouting::new()),
+            max_redirects: MAX_REDIRECTS,
+            credentials: None,
+            resp_limits: RespLimits::default(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        }
+    }
+
     /// Connect to a cluster using a seed node address.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
         Self::connect_inner(
@@ -516,19 +534,44 @@ impl ClusterConnection {
 
     /// Execute a command, routing it to the correct cluster node.
     ///
-    /// Handles MOVED and ASK redirects transparently.
+    /// Handles MOVED and ASK redirects transparently. A deadline carried by
+    /// [`redis_tower_core::WithDeadline`] bounds the complete routing,
+    /// redirect, reconnect, and retry operation.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            return Err(RedisError::CommandTimeout);
+        }
+        let operation = self.execute_routed(cmd);
+
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_elapsed| RedisError::CommandTimeout)?,
+            None => operation.await,
+        }
+    }
+
+    /// Execute after the caller has captured and arranged enforcement of the
+    /// command deadline. Keeping this separate lets [`crate::ClusterClient`]
+    /// include acquisition of its cluster-wide mutex in the same timeout.
+    pub(crate) async fn execute_routed<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
         let initial_node = self.route_command(&cmd_frame).to_string();
 
         let mut target_node = initial_node;
 
         for _ in 0..self.max_redirects {
-            let conn = self.nodes.get_mut(&target_node).ok_or_else(|| {
-                RedisError::Redis(format!("no connection for node {target_node}"))
-            })?;
-
-            let responses = conn.execute_pipeline(vec![cmd_frame.clone()]).await?;
+            // A previous command deadline may have quarantined this node's
+            // socket while a reply was outstanding. Reconnect lazily before
+            // routing the next command to it.
+            self.ensure_connection(&target_node).await?;
+            let responses = self
+                .execute_pipeline_on_node(&target_node, vec![cmd_frame.clone()])
+                .await?;
             let response = responses
                 .into_iter()
                 .next()
@@ -547,18 +590,19 @@ impl ClusterConnection {
                     tracing::debug!(slot, to_addr = %addr, kind = "ASK", "cluster redirect");
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
-                    let asking_conn = self.nodes.get_mut(&addr).ok_or_else(|| {
-                        RedisError::Redis(format!("no connection for ASK node {addr}"))
-                    })?;
-                    asking_conn
-                        .execute_pipeline(vec![array(vec![bulk("ASKING")])])
-                        .await?;
-                    let responses = asking_conn
-                        .execute_pipeline(vec![cmd_frame.clone()])
+                    // Keep ASKING and the migrated command in one checked-out
+                    // pipeline. A timeout cannot otherwise land after ASKING
+                    // succeeds but before the command is sent, leaving its
+                    // one-shot state armed for an unrelated successor.
+                    let responses = self
+                        .execute_pipeline_on_node(
+                            &addr,
+                            vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
+                        )
                         .await?;
                     let response = responses
                         .into_iter()
-                        .next()
+                        .nth(1)
                         .ok_or(RedisError::ConnectionClosed)?;
 
                     if let Frame::Error(ref e) = response {
@@ -592,6 +636,31 @@ impl ClusterConnection {
             "too many redirects ({})",
             self.max_redirects
         )))
+    }
+
+    /// Run a pipeline on one node while making cancellation quarantine-safe.
+    ///
+    /// The connection is removed from the reusable node map before the first
+    /// wire await and returned only after every response is read successfully.
+    /// Dropping this future (for example when a command deadline expires), or
+    /// encountering an I/O/protocol error, therefore drops the socket instead
+    /// of leaving an unread response for a successor.
+    async fn execute_pipeline_on_node(
+        &mut self,
+        addr: &str,
+        frames: Vec<Frame>,
+    ) -> Result<Vec<Frame>, RedisError> {
+        let mut conn = self
+            .nodes
+            .remove(addr)
+            .ok_or_else(|| RedisError::Redis(format!("no connection for node {addr}")))?;
+        match conn.execute_pipeline(frames).await {
+            Ok(responses) => {
+                self.nodes.insert(addr.to_string(), conn);
+                Ok(responses)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Determine which node should handle a command based on its key
@@ -705,13 +774,23 @@ impl ClusterConnection {
 
     /// Refresh the cluster topology from a connected node.
     pub async fn refresh_topology(&mut self) -> Result<(), RedisError> {
-        let conn = self
+        let seed_addr = self
             .nodes
-            .values_mut()
+            .keys()
             .next()
+            .cloned()
             .ok_or(RedisError::ConnectionClosed)?;
-
-        let mut topology = discover_topology(conn).await?;
+        let mut conn = self
+            .nodes
+            .remove(&seed_addr)
+            .ok_or(RedisError::ConnectionClosed)?;
+        let mut topology = match discover_topology(&mut conn).await {
+            Ok(topology) => {
+                self.nodes.insert(seed_addr, conn);
+                topology
+            }
+            Err(error) => return Err(error),
+        };
 
         if let Some(ref map) = self.address_map {
             remap_topology_with_map(&mut topology, map);
@@ -1011,6 +1090,127 @@ mod tests {
     use super::*;
     use crate::topology::SlotRange;
     use bytes::Bytes;
+    use redis_tower_commands::Ping;
+    use redis_tower_core::{RedisStream, WithDeadline};
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn already_expired_command_never_reaches_direct_node() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket_addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(socket_addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        drop(listener);
+
+        let addr = socket_addr.to_string();
+        let mut cluster = ClusterConnection::empty_for_test();
+        cluster.default_node = addr.clone();
+        cluster.nodes.insert(
+            addr.clone(),
+            RedisConnection::from_stream(RedisStream::Tcp(client)),
+        );
+
+        let result = cluster
+            .execute(WithDeadline::new(
+                Ping::new(),
+                tokio::time::Instant::now() - std::time::Duration::from_millis(1),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert!(
+            cluster.nodes.contains_key(&addr),
+            "an expired command must not check out its node connection"
+        );
+        let mut bytes = [0u8; 128];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                server.read(&mut bytes),
+            )
+            .await
+            .is_err(),
+            "an already-expired command reached the cluster node"
+        );
+    }
+
+    #[tokio::test]
+    async fn deadline_quarantines_direct_node_with_unread_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket_addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(socket_addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        drop(listener);
+
+        let server_task = tokio::spawn(async move {
+            let mut request = [0u8; 128];
+            let received = server.read(&mut request).await.unwrap();
+            assert!(received > 0, "client never wrote the timed command");
+
+            // The timeout must drop, rather than return, the checked-out node
+            // connection. That makes the peer observe EOF without replying.
+            assert_eq!(server.read(&mut request).await.unwrap(), 0);
+        });
+
+        let addr = socket_addr.to_string();
+        let mut cluster = ClusterConnection::empty_for_test();
+        cluster.default_node = addr.clone();
+        cluster.nodes.insert(
+            addr.clone(),
+            RedisConnection::from_stream(RedisStream::Tcp(client)),
+        );
+
+        let result = cluster
+            .execute(WithDeadline::after(
+                Ping::new(),
+                std::time::Duration::from_millis(25),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert!(
+            !cluster.nodes.contains_key(&addr),
+            "a socket with an unread response must not return to the node map"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("quarantined socket did not close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn io_error_quarantines_direct_node_with_partial_exchange() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let socket_addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(socket_addr).await.unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        drop(listener);
+
+        let server_task = tokio::spawn(async move {
+            let mut request = [0u8; 128];
+            let received = server.read(&mut request).await.unwrap();
+            assert!(received > 0, "client never wrote the command");
+            // Close without replying, simulating an exchange that may have
+            // been applied server-side but cannot leave this socket aligned.
+        });
+
+        let addr = socket_addr.to_string();
+        let mut cluster = ClusterConnection::empty_for_test();
+        cluster.default_node = addr.clone();
+        cluster.nodes.insert(
+            addr.clone(),
+            RedisConnection::from_stream(RedisStream::Tcp(client)),
+        );
+
+        let result = cluster.execute(Ping::new()).await;
+
+        assert!(result.is_err());
+        assert!(
+            !cluster.nodes.contains_key(&addr),
+            "a socket from a failed exchange must not return to the node map"
+        );
+        server_task.await.unwrap();
+    }
 
     #[test]
     fn parse_moved_redirect() {

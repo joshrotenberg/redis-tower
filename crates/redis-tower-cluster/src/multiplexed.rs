@@ -665,19 +665,38 @@ impl MultiplexedClusterClient {
     /// Handles MOVED and ASK redirects transparently. ASK is handled by
     /// sending `ASKING` + the migrated command as an atomic pipeline through
     /// the target node, preserving single-connection ordering during
-    /// live resharding.
+    /// live resharding. A deadline carried by
+    /// [`redis_tower_core::WithDeadline`] bounds the complete routing,
+    /// readiness, redirect, and retry operation.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
         let observation = self
             .metrics_recorder
             .as_ref()
             .map(|_| (cmd.name().to_ascii_uppercase(), Instant::now()));
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            if let Some((command, started)) = observation {
+                self.record_command_completion(
+                    &command,
+                    started.elapsed(),
+                    Some(ErrorKind::from_error(&RedisError::CommandTimeout)),
+                    None,
+                );
+            }
+            return Err(RedisError::CommandTimeout);
+        }
         let observe_metrics = observation.is_some();
         let cmd_frame = cmd.to_frame();
         let mut last_node = None;
 
-        let result = self
-            .execute_routed(cmd, cmd_frame, observe_metrics, &mut last_node)
-            .await;
+        let operation = self.execute_routed(cmd, cmd_frame, observe_metrics, &mut last_node);
+        let result = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, operation).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(RedisError::CommandTimeout),
+            },
+            None => operation.await,
+        };
         if let Some((command, started)) = observation {
             let error = result.as_ref().err().map(ErrorKind::from_error);
             self.record_command_completion(
@@ -1187,11 +1206,30 @@ impl MultiplexedClusterClient {
         addr: &str,
         cmd: Cmd,
     ) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
         let observation = self
             .metrics_recorder
             .as_ref()
             .map(|_| (cmd.name().to_ascii_uppercase(), Instant::now()));
-        let result = self.execute_on_node_inner(addr, cmd).await;
+        if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+            if let Some((command, started)) = observation {
+                self.record_command_completion(
+                    &command,
+                    started.elapsed(),
+                    Some(ErrorKind::from_error(&RedisError::CommandTimeout)),
+                    Some(addr),
+                );
+            }
+            return Err(RedisError::CommandTimeout);
+        }
+        let operation = self.execute_on_node_inner(addr, cmd);
+        let result = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, operation).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(RedisError::CommandTimeout),
+            },
+            None => operation.await,
+        };
         if let Some((command, started)) = observation {
             let error = result.as_ref().err().map(ErrorKind::from_error);
             self.record_command_completion(&command, started.elapsed(), error, Some(addr));
@@ -2142,6 +2180,7 @@ mod observability_tests {
     use bytes::Bytes;
     use redis_tower::metrics_layer::{ClusterRedirectKind, ErrorKind, MetricsRecorder};
     use redis_tower_commands::Get;
+    use redis_tower_core::WithDeadline;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -2318,6 +2357,126 @@ mod observability_tests {
             (target_addr, target_service),
         ]);
         test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[tokio::test]
+    async fn already_expired_command_skips_routing_and_records_timeout() {
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            String::new(),
+            ClusterTopology::new(Vec::new()),
+            HashMap::new(),
+            Arc::clone(&recorder),
+            true,
+        );
+
+        let result = client
+            .execute(WithDeadline::new(
+                Get::new("key"),
+                tokio::time::Instant::now() - Duration::from_millis(1),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: Some(ErrorKind::Other),
+                node: None,
+            }]
+        );
+
+        let pinned_result = client
+            .execute_on_node(
+                "127.0.0.1:7000",
+                WithDeadline::new(
+                    Get::new("key"),
+                    tokio::time::Instant::now() - Duration::from_millis(1),
+                ),
+            )
+            .await;
+        assert!(matches!(pinned_result, Err(RedisError::CommandTimeout)));
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![
+                CommandCompletion {
+                    command: "GET".to_string(),
+                    error: Some(ErrorKind::Other),
+                    node: None,
+                },
+                CommandCompletion {
+                    command: "GET".to_string(),
+                    error: Some(ErrorKind::Other),
+                    node: Some("127.0.0.1:7000".to_string()),
+                },
+            ]
+        );
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn command_deadline_bounds_routing_lock_and_records_timeout() {
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            String::new(),
+            ClusterTopology::new(Vec::new()),
+            HashMap::new(),
+            Arc::clone(&recorder),
+            false,
+        );
+        let inner_lock = client.inner.write().await;
+
+        let result = client
+            .execute(WithDeadline::after(
+                Get::new("key"),
+                Duration::from_millis(25),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: Some(ErrorKind::Other),
+                node: None,
+            }]
+        );
+        drop(inner_lock);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pinned_node_deadline_bounds_lookup_and_records_timeout() {
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            String::new(),
+            ClusterTopology::new(Vec::new()),
+            HashMap::new(),
+            Arc::clone(&recorder),
+            true,
+        );
+        let inner_lock = client.inner.write().await;
+
+        let result = client
+            .execute_on_node(
+                "127.0.0.1:7000",
+                WithDeadline::after(Get::new("key"), Duration::from_millis(25)),
+            )
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(
+            *recorder.completions.lock().unwrap(),
+            vec![CommandCompletion {
+                command: "GET".to_string(),
+                error: Some(ErrorKind::Other),
+                node: Some("127.0.0.1:7000".to_string()),
+            }]
+        );
+        drop(inner_lock);
+        client.shutdown().await;
     }
 
     #[test]

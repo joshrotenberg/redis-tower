@@ -45,7 +45,7 @@ use tower_service::Service;
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::command_adapter::CommandAdapter;
-use crate::reconnect::ConnectionFactory;
+use crate::reconnect::{ConnectionEventBus, ConnectionFactory};
 use crate::retry::{RetryClient, RetryPolicy};
 use crate::transaction::TransactionExecutor;
 
@@ -83,6 +83,14 @@ use crate::transaction::TransactionExecutor;
 /// [`AutoPipelineService`]. To wrap the client in Tower middleware (circuit
 /// breakers, timeouts, retries), build a `Service<Frame>` stack and pass it to
 /// [`from_layered`](Self::from_layered):
+///
+/// This injection point is below [`CommandAdapter`], so the middleware sees raw
+/// [`Frame`] values rather than typed command metadata. In particular, a
+/// [`CommandTimeoutLayer`](crate::CommandTimeoutLayer) here supplies its static
+/// timeout but cannot inspect [`WithDeadline`](redis_tower_core::WithDeadline)
+/// itself. `MultiplexedClient::execute` and `CommandAdapter` enforce that typed
+/// absolute deadline across readiness and the frame-level call before the
+/// metadata is discarded.
 ///
 /// ```no_run
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,6 +205,21 @@ impl MultiplexedClient<AutoPipelineService> {
         }
     }
 
+    /// Wrap an existing connection and publish its lifecycle events.
+    ///
+    /// This fixed-connection form reports [`crate::ConnectionEvent::Connected`] and a
+    /// later disconnect, but it does not reconnect. Subscribe to `events`
+    /// before this call to observe the initial event.
+    pub fn from_connection_with_events(
+        conn: RedisConnection,
+        config: AutoPipelineConfig,
+        events: ConnectionEventBus,
+    ) -> Self {
+        Self {
+            inner: CommandAdapter::new(AutoPipelineService::new_with_events(conn, config, events)),
+        }
+    }
+
     /// Build a multiplexed client backed by a [`ConnectionFactory`].
     ///
     /// Unlike [`Self::connect`] / [`Self::from_connection`], the resulting
@@ -237,6 +260,25 @@ impl MultiplexedClient<AutoPipelineService> {
         reconnect: AutoPipelineReconnectConfig,
     ) -> Result<Self, RedisError> {
         let svc = AutoPipelineService::with_factory(factory, config, reconnect).await?;
+        Ok(Self {
+            inner: CommandAdapter::new(svc),
+        })
+    }
+
+    /// Build a reconnecting multiplexed client that publishes lifecycle events.
+    ///
+    /// Subscribe to `events` before calling this constructor to observe the
+    /// initial connect result. The same bus can be cloned into a Sentinel or
+    /// cluster topology manager, which can publish
+    /// [`crate::ConnectionEvent::Failover`] after confirming a role change.
+    pub async fn from_factory_with_events(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Result<Self, RedisError> {
+        let svc = AutoPipelineService::with_factory_and_events(factory, config, reconnect, events)
+            .await?;
         Ok(Self {
             inner: CommandAdapter::new(svc),
         })
@@ -318,6 +360,14 @@ where
     /// client adapts typed commands onto the stack, so every [`execute`] flows
     /// through your middleware.
     ///
+    /// The injected service receives raw [`Frame`] requests. Typed metadata
+    /// such as [`Command::deadline`] is therefore not visible inside these
+    /// layers. `execute` enforces that deadline around readiness plus dispatch;
+    /// use [`CommandTimeoutLayer`](crate::CommandTimeoutLayer) here for an
+    /// additional static frame-level timeout, or build a typed stack outside
+    /// [`ExecutorService`](crate::ExecutorService) when middleware itself must
+    /// inspect command metadata.
+    ///
     /// [`execute`]: Self::execute
     ///
     /// # Example
@@ -349,11 +399,26 @@ where
     ///
     /// If other tasks are calling execute concurrently, their commands
     /// will be batched into a single Redis pipeline for efficiency.
+    /// A deadline carried by [`redis_tower_core::WithDeadline`] bounds both
+    /// waiting for inner readiness and the dispatched call, including clients
+    /// built with [`Self::from_layered`].
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
         let mut svc = self.inner.clone();
-        std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
+        let operation = async move {
+            std::future::poll_fn(|cx| {
+                <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx)
+            })
             .await?;
-        Service::call(&mut svc, cmd).await
+            Service::call(&mut svc, cmd).await
+        };
+
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_elapsed| RedisError::CommandTimeout)?,
+            None => operation.await,
+        }
     }
 
     /// Send a PING to verify the connection is alive.
@@ -417,7 +482,11 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use redis_tower_commands::Get;
+    use redis_tower_core::WithDeadline;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+    use std::time::Duration;
     use tower_layer::Layer;
 
     /// A minimal Frame-level service standing in for a real connection, used to
@@ -438,6 +507,26 @@ mod tests {
 
         fn call(&mut self, _req: Frame) -> Self::Future {
             std::future::ready(Ok(self.reply.clone()))
+        }
+    }
+
+    #[derive(Clone)]
+    struct NeverReadyFrameService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Service<Frame> for NeverReadyFrameService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), RedisError>> {
+            Poll::Pending
+        }
+
+        fn call(&mut self, _req: Frame) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(Ok(Frame::Null))
         }
     }
 
@@ -464,7 +553,6 @@ mod tests {
     #[tokio::test]
     async fn from_layered_composes_a_real_tower_layer() {
         use crate::command_timeout::CommandTimeoutLayer;
-        use std::time::Duration;
 
         // Wrap the inner service in an actual middleware layer, then inject it.
         let inner = CommandTimeoutLayer::new(Duration::from_secs(5)).layer(MockFrameService {
@@ -474,5 +562,23 @@ mod tests {
 
         let val: Option<Bytes> = client.execute(Get::new("k")).await.unwrap();
         assert_eq!(val, Some(Bytes::from("through-timeout")));
+    }
+
+    #[tokio::test]
+    async fn typed_deadline_bounds_readiness_above_frame_layers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = MultiplexedClient::from_layered(NeverReadyFrameService {
+            calls: Arc::clone(&calls),
+        });
+
+        let result = client
+            .execute(WithDeadline::after(
+                Get::new("k"),
+                Duration::from_millis(20),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 }

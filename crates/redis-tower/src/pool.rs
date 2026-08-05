@@ -45,6 +45,7 @@ use std::time::{Duration, Instant};
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::{Mutex, MutexGuard};
+use tokio::time::Instant as TokioInstant;
 
 use crate::executor::RedisExecutor;
 use crate::metrics_layer::MetricsRecorder;
@@ -125,6 +126,10 @@ pub struct PoolConfig {
     /// Defaults to [`PoolConfig::DEFAULT_ACQUISITION_TIMEOUT`] (5 seconds).
     /// Set it to `None` -- via [`PoolConfig::disable_acquisition_timeout`] --
     /// to wait forever, restoring the previous unbounded behavior.
+    /// [`Duration::ZERO`] is distinct from `None`: it permits an immediately
+    /// available slot but never waits for a busy one.
+    /// A command wrapped in [`redis_tower_core::WithDeadline`] can impose an
+    /// earlier limit; the earliest deadline wins.
     pub acquisition_timeout: Option<Duration>,
     /// Optional recorder for pool lifecycle metrics.
     ///
@@ -203,7 +208,9 @@ impl PoolConfig {
     /// If all connections are busy when a command is submitted and a slot
     /// does not free up within `timeout`, the call returns
     /// [`RedisError::PoolAcquisitionTimeout`]. Overrides the bounded
-    /// [`PoolConfig::DEFAULT_ACQUISITION_TIMEOUT`].
+    /// [`PoolConfig::DEFAULT_ACQUISITION_TIMEOUT`]. Pass [`Duration::ZERO`] for
+    /// fail-fast acquisition that never waits; use
+    /// [`Self::disable_acquisition_timeout`] to wait without a bound.
     pub fn acquisition_timeout(mut self, timeout: Duration) -> Self {
         self.acquisition_timeout = Some(timeout);
         self
@@ -255,8 +262,8 @@ struct PoolInner<S> {
     dispatch: DispatchStrategy,
     /// Health check interval in milliseconds, or 0 if disabled.
     health_check_interval_ms: u64,
-    /// Acquisition timeout in nanoseconds, or 0 if unlimited.
-    acquisition_timeout_ns: u64,
+    /// Acquisition timeout. `None` means unlimited; zero means do not wait.
+    acquisition_timeout: Option<Duration>,
     /// Optional factory used to replace dead connections after a failed PING.
     factory: Option<Arc<dyn ErasedPoolFactory<Connection = S>>>,
     /// Optional recorder for pool lifecycle events.
@@ -414,12 +421,24 @@ impl<S> PoolInner<S> {
     async fn acquire(
         &self,
         reservation: &mut InflightReservation<'_>,
+        request_deadline: Option<TokioInstant>,
     ) -> Result<(usize, MutexGuard<'_, S>), RedisError> {
         let started = Instant::now();
+        let started_at = TokioInstant::now();
         let preferred = reservation.index();
+
+        if request_deadline.is_some_and(|deadline| deadline <= started_at) {
+            self.record_acquisition(started.elapsed(), true);
+            return Err(RedisError::CommandTimeout);
+        }
 
         // Fast path: the preferred slot is free.
         if let Ok(guard) = self.connections[preferred].try_lock() {
+            if request_deadline.is_some_and(|deadline| deadline <= TokioInstant::now()) {
+                drop(guard);
+                self.record_acquisition(started.elapsed(), true);
+                return Err(RedisError::CommandTimeout);
+            }
             self.record_acquisition(started.elapsed(), false);
             return Ok((preferred, guard));
         }
@@ -431,24 +450,59 @@ impl<S> PoolInner<S> {
         for offset in 1..len {
             let i = (preferred + offset) % len;
             if let Ok(guard) = self.connections[i].try_lock() {
+                if request_deadline.is_some_and(|deadline| deadline <= TokioInstant::now()) {
+                    drop(guard);
+                    self.record_acquisition(started.elapsed(), true);
+                    return Err(RedisError::CommandTimeout);
+                }
                 reservation.transfer_to(i);
                 self.record_acquisition(started.elapsed(), false);
                 return Ok((i, guard));
             }
         }
 
-        // Every slot is busy. Await the preferred slot, honoring the optional
-        // acquisition timeout.
-        let guard = if self.acquisition_timeout_ns > 0 {
-            let timeout_dur = Duration::from_nanos(self.acquisition_timeout_ns);
-            match tokio::time::timeout(timeout_dur, self.connections[preferred].lock()).await {
-                Ok(guard) => guard,
+        // Every slot is busy. Await the preferred slot until the earliest of
+        // the command's absolute deadline and the pool's static acquisition
+        // timeout. Preserve the error that identifies which budget expired.
+        let pool_timeout = self.acquisition_timeout;
+        let pool_deadline = pool_timeout.map(|duration| started_at + duration);
+        let effective_deadline = match (request_deadline, pool_deadline) {
+            (Some(request), Some(pool)) if request <= pool => Some((request, None)),
+            (Some(_request), Some(pool)) => Some((pool, pool_timeout)),
+            (Some(request), None) => Some((request, None)),
+            (None, Some(pool)) => Some((pool, pool_timeout)),
+            (None, None) => None,
+        };
+
+        let guard = if let Some((deadline, expired_pool_timeout)) = effective_deadline {
+            match tokio::time::timeout_at(deadline, self.connections[preferred].lock()).await {
+                Ok(guard) => {
+                    // `timeout_at` polls the lock before its timer. If both
+                    // become ready together, it can therefore return a guard
+                    // at or just after the deadline. Recheck before allowing
+                    // the caller to dispatch work on the acquired slot.
+                    if deadline <= TokioInstant::now() {
+                        drop(guard);
+                        self.record_acquisition(started.elapsed(), true);
+                        return match expired_pool_timeout {
+                            Some(waited) => Err(RedisError::PoolAcquisitionTimeout {
+                                waited,
+                                pool_size: len,
+                            }),
+                            None => Err(RedisError::CommandTimeout),
+                        };
+                    }
+                    guard
+                }
                 Err(_elapsed) => {
                     self.record_acquisition(started.elapsed(), true);
-                    return Err(RedisError::PoolAcquisitionTimeout {
-                        waited: timeout_dur,
-                        pool_size: len,
-                    });
+                    return match expired_pool_timeout {
+                        Some(waited) => Err(RedisError::PoolAcquisitionTimeout {
+                            waited,
+                            pool_size: len,
+                        }),
+                        None => Err(RedisError::CommandTimeout),
+                    };
                 }
             }
         } else {
@@ -552,11 +606,6 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let acquisition_timeout_ns = config
-            .acquisition_timeout
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-
         Ok(Self {
             inner: Arc::new(PoolInner {
                 name: config.name,
@@ -566,7 +615,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
-                acquisition_timeout_ns,
+                acquisition_timeout: config.acquisition_timeout,
                 factory: None,
                 metrics_recorder: config.metrics_recorder,
                 admission_state: AtomicUsize::new(0),
@@ -607,11 +656,6 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let acquisition_timeout_ns = config
-            .acquisition_timeout
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-
         Ok(Self {
             inner: Arc::new(PoolInner {
                 name: config.name,
@@ -621,7 +665,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
-                acquisition_timeout_ns,
+                acquisition_timeout: config.acquisition_timeout,
                 factory: Some(Arc::new(factory)),
                 metrics_recorder: config.metrics_recorder,
                 admission_state: AtomicUsize::new(0),
@@ -656,10 +700,6 @@ where
             .health_check_interval
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let acquisition_timeout_ns = config
-            .acquisition_timeout
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
         let mutexed: Vec<Mutex<S>> = connections.into_iter().map(Mutex::new).collect();
 
         Ok(Self {
@@ -671,7 +711,7 @@ where
                 index: AtomicUsize::new(0),
                 dispatch: config.dispatch,
                 health_check_interval_ms,
-                acquisition_timeout_ns,
+                acquisition_timeout: config.acquisition_timeout,
                 factory: None,
                 metrics_recorder: config.metrics_recorder,
                 admission_state: AtomicUsize::new(0),
@@ -802,6 +842,7 @@ where
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
         let inner = Arc::clone(&self.inner);
         async move {
+            let deadline = cmd.deadline();
             // Keep reservation creation inside the async body. Constructing a
             // trait-method future must not reserve a slot before that future is
             // first polled. Admission and the closed check are one atomic step.
@@ -809,7 +850,7 @@ where
             // Acquire a connection, scanning for a free slot first to avoid
             // head-of-line blocking on a busy one, then falling back to an
             // awaited (optionally timed) lock on the preferred slot.
-            let (idx, mut conn) = inner.acquire(&mut reservation).await?;
+            let (idx, mut conn) = inner.acquire(&mut reservation, deadline).await?;
 
             // Lazy health check: PING if idle beyond the threshold.
             // Gate the syscall behind the interval check to avoid calling
@@ -875,12 +916,18 @@ where
     /// the dead slot is replaced with a fresh connection before the actual
     /// command is executed. If no factory is available, the PING error is
     /// returned to the caller.
+    ///
+    /// If `cmd` is wrapped in [`redis_tower_core::WithDeadline`], pool
+    /// acquisition observes that same absolute deadline. The request deadline
+    /// and [`PoolConfig::acquisition_timeout`] do not add together: whichever
+    /// expires first determines the error.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
         let mut reservation = self.next_index()?;
         // Acquire a connection, scanning for a free slot first to avoid
         // head-of-line blocking on a busy one, then falling back to an awaited
         // (optionally timed) lock on the preferred slot.
-        let (idx, mut conn) = self.inner.acquire(&mut reservation).await?;
+        let (idx, mut conn) = self.inner.acquire(&mut reservation, deadline).await?;
 
         // Lazy health check: PING if idle beyond the threshold.
         // Gate the syscall behind the interval check to avoid calling
@@ -950,7 +997,7 @@ mod tests {
     use super::*;
     use crate::metrics_layer::ErrorKind;
     use bytes::Bytes;
-    use redis_tower_core::Frame;
+    use redis_tower_core::{Frame, WithDeadline};
     use std::collections::VecDeque;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
@@ -1027,6 +1074,38 @@ mod tests {
                 .and_then(|mut q| q.pop_front())
                 .unwrap_or(Frame::Null);
             async move { cmd.parse_response(frame) }
+        }
+    }
+
+    struct DelayedConn {
+        delay: Duration,
+        call_count: AtomicUsize,
+    }
+
+    impl DelayedConn {
+        fn new(delay: Duration) -> Self {
+            Self {
+                delay,
+                call_count: AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.call_count.load(Ordering::Relaxed)
+        }
+    }
+
+    impl RedisExecutor for DelayedConn {
+        fn execute<Cmd: Command>(
+            &mut self,
+            cmd: Cmd,
+        ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            self.call_count.fetch_add(1, Ordering::Relaxed);
+            let delay = self.delay;
+            async move {
+                tokio::time::sleep(delay).await;
+                cmd.parse_response(Frame::SimpleString(Bytes::from("PONG")))
+            }
         }
     }
 
@@ -1585,6 +1664,291 @@ mod tests {
         );
         // Should return well under 1 second (timeout is 50 ms).
         assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn zero_acquisition_timeout_fails_fast_when_all_slots_are_busy() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().acquisition_timeout(Duration::ZERO),
+        )
+        .unwrap();
+        let _guard = pool.inner.connections[0].lock().await;
+
+        let result: Result<String, _> = pool.execute(Ping::new()).await;
+
+        assert!(matches!(
+            result,
+            Err(RedisError::PoolAcquisitionTimeout {
+                waited: Duration::ZERO,
+                pool_size: 1,
+            })
+        ));
+        assert_eq!(pool.stats().total_inflight, 0);
+    }
+
+    #[tokio::test]
+    async fn zero_acquisition_timeout_still_uses_an_immediately_available_slot() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().acquisition_timeout(Duration::ZERO),
+        )
+        .unwrap();
+
+        let result: String = pool.execute(Ping::new()).await.unwrap();
+
+        assert_eq!(result, "PONG");
+    }
+
+    #[tokio::test]
+    async fn request_deadline_bounds_pool_acquisition_without_static_timeout() {
+        let recorder = Arc::new(CountingRecorder::default());
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default()
+                .disable_acquisition_timeout()
+                .metrics_recorder(recorder.clone()),
+        )
+        .unwrap();
+        let _guard = pool.inner.connections[0].lock().await;
+
+        let result: Result<String, _> = pool
+            .execute(WithDeadline::after(Ping::new(), Duration::from_millis(25)))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(pool.stats().total_inflight, 0);
+        let acquisitions = recorder.acquisitions();
+        assert_eq!(acquisitions.len(), 1);
+        assert!(acquisitions[0].2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn request_deadline_wins_when_lock_is_released_at_deadline() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().disable_acquisition_timeout(),
+        )
+        .unwrap();
+        let deadline = TokioInstant::now() + Duration::from_secs(1);
+
+        let holder_pool = pool.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let guard = holder_pool.inner.connections[0].lock().await;
+            locked_tx.send(()).unwrap();
+            tokio::time::sleep_until(deadline).await;
+            drop(guard);
+        });
+        locked_rx.await.unwrap();
+
+        let caller_pool = pool.clone();
+        let caller = tokio::spawn(async move {
+            caller_pool
+                .execute(WithDeadline::new(Ping::new(), deadline))
+                .await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        holder.await.unwrap();
+        let result: Result<String, _> = caller.await.unwrap();
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(pool.inner.connections[0].lock().await.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn static_timeout_wins_when_lock_is_released_at_deadline() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().acquisition_timeout(Duration::from_secs(1)),
+        )
+        .unwrap();
+
+        let holder_pool = pool.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let guard = holder_pool.inner.connections[0].lock().await;
+            locked_tx.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            drop(guard);
+        });
+        locked_rx.await.unwrap();
+
+        let caller_pool = pool.clone();
+        let caller = tokio::spawn(async move { caller_pool.execute(Ping::new()).await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+
+        holder.await.unwrap();
+        let result: Result<String, _> = caller.await.unwrap();
+        assert!(matches!(
+            result,
+            Err(RedisError::PoolAcquisitionTimeout {
+                waited,
+                pool_size: 1,
+            }) if waited == Duration::from_secs(1)
+        ));
+        assert_eq!(pool.inner.connections[0].lock().await.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn static_pool_timeout_wins_when_earlier_than_request_deadline() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default().acquisition_timeout(Duration::from_millis(20)),
+        )
+        .unwrap();
+        let _guard = pool.inner.connections[0].lock().await;
+
+        let result: Result<String, _> = pool
+            .execute(WithDeadline::after(Ping::new(), Duration::from_secs(1)))
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(RedisError::PoolAcquisitionTimeout { .. })
+        ));
+        assert_eq!(pool.stats().total_inflight, 0);
+    }
+
+    #[tokio::test]
+    async fn expired_request_does_not_execute_on_an_idle_pool() {
+        let pool = ConnectionPool::from_connections(
+            vec![MockConn::new(
+                0,
+                vec![Frame::SimpleString(Bytes::from("PONG"))],
+            )],
+            PoolConfig::default(),
+        )
+        .unwrap();
+        let command =
+            WithDeadline::new(Ping::new(), TokioInstant::now() - Duration::from_millis(1));
+
+        let result: Result<String, _> = pool.execute(command).await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(pool.stats().total_inflight, 0);
+        assert_eq!(pool.inner.connections[0].lock().await.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn one_deadline_budget_spans_pool_acquisition_and_execution() {
+        use crate::{CommandTimeoutLayer, ExecutorService};
+        use tower_layer::Layer;
+        use tower_service::Service;
+
+        let pool = ConnectionPool::from_connections(
+            vec![DelayedConn::new(Duration::from_millis(500))],
+            PoolConfig::default().disable_acquisition_timeout(),
+        )
+        .unwrap();
+
+        // Occupy the only slot first, then release it after part of the
+        // request's absolute budget has already been consumed.
+        let holder_pool = pool.clone();
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        let holder = tokio::spawn(async move {
+            let _guard = holder_pool.inner.connections[0].lock().await;
+            let _ = locked_tx.send(());
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        });
+        locked_rx.await.unwrap();
+
+        let mut service = CommandTimeoutLayer::new(Duration::from_secs(1))
+            .with_request_deadlines()
+            .layer(ExecutorService::new(pool.clone()));
+        let result: Result<String, _> = service
+            .call(WithDeadline::after(Ping::new(), Duration::from_millis(200)))
+            .await;
+
+        holder.await.unwrap();
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(pool.stats().total_inflight, 0);
+        assert_eq!(pool.inner.connections[0].lock().await.calls(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_pooled_connection_does_not_reuse_unread_response() {
+        use crate::{CommandTimeoutLayer, ExecutorService};
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_core::{RedisConnection, RedisStream};
+        use redis_tower_protocol::RespCodec;
+        use tokio::sync::oneshot;
+        use tokio_util::codec::Framed;
+        use tower_layer::Layer;
+        use tower_service::Service;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (wire_tx, wire_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (late_attempt_tx, late_attempt_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            framed
+                .next()
+                .await
+                .expect("client closed before first pooled command")
+                .expect("client sent an invalid first pooled command");
+            wire_tx.send(()).unwrap();
+
+            release_rx.await.unwrap();
+            let _ = framed
+                .send(Frame::SimpleString(Bytes::from_static(b"LATE")))
+                .await;
+            late_attempt_tx.send(()).unwrap();
+
+            match tokio::time::timeout(Duration::from_secs(1), framed.next()).await {
+                Ok(None) | Ok(Some(Err(_))) => {}
+                Ok(Some(Ok(frame))) => panic!("timed-out pool slot was reused: {frame:?}"),
+                Err(_) => panic!("timed-out pool socket remained open"),
+            }
+        });
+
+        let connection = RedisConnection::from_stream(RedisStream::Unix(client));
+        let pool = ConnectionPool::from_connections(
+            vec![connection],
+            PoolConfig::default().disable_acquisition_timeout(),
+        )
+        .unwrap();
+        let mut service = CommandTimeoutLayer::new(Duration::from_secs(1))
+            .with_request_deadlines()
+            .layer(ExecutorService::new(pool.clone()));
+        let mut first =
+            Box::pin(service.call(WithDeadline::after(Ping::new(), Duration::from_millis(100))));
+
+        tokio::select! {
+            result = &mut first => panic!("pooled call completed before reaching wire: {result:?}"),
+            observed = wire_rx => observed.unwrap(),
+        }
+        assert!(matches!(first.await, Err(RedisError::CommandTimeout)));
+
+        release_tx.send(()).unwrap();
+        late_attempt_rx.await.unwrap();
+
+        let successor: Result<String, _> = pool.execute(Ping::new()).await;
+        assert!(matches!(successor, Err(RedisError::ConnectionClosed)));
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

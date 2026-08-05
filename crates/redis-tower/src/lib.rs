@@ -413,7 +413,10 @@ pub use circuit_breaker::{
 };
 pub use client::RedisClient;
 pub use command_adapter::CommandAdapter;
-pub use command_timeout::CommandTimeoutLayer;
+pub use command_timeout::{
+    CommandTimeoutLayer, CommandTimeoutService, RequestDeadlineTimeoutLayer,
+    RequestDeadlineTimeoutService,
+};
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
     AuthenticatedConnection, CredentialProvider, Credentials, RotatingAuthClient, StaticCredentials,
@@ -437,9 +440,12 @@ pub use pubsub::{
     KeyspaceEvent, KeyspaceEventStream, MessageKind, NotificationKind, PubSubConnection,
     PubSubMessage,
 };
-pub use reconnect::ResilientConnection;
+pub use reconnect::{
+    ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionEventRecvError,
+    ConnectionEventStream, DEFAULT_CONNECTION_EVENT_CAPACITY, ResilientConnection,
+};
 pub use reconnect_layer::ReconnectService;
-pub use resilient::ResilientRedisClient;
+pub use resilient::{OfflineQueueConfig, ResilientRedisClient};
 pub use retry::{RetryClient, RetryLayer, RetryPolicy, RetryService};
 pub use scan_stream::ScanStream;
 pub use script::Script;
@@ -462,7 +468,7 @@ pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 pub use redis_tower_core::{
     Command, ConnectionConfig, DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, Frame, FrameService,
     FromRedisBytes, KeepaliveConfig, ProtocolVersion, RedisConnection, RedisConvert, RedisError,
-    RedisStream, RedisValueExt, RespCodec, RespLimits,
+    RedisStream, RedisValueExt, RequestDeadline, RespCodec, RespLimits, WithDeadline,
 };
 
 // Re-export TLS config when a TLS backend is enabled.

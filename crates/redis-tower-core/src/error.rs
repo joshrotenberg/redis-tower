@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use redis_tower_protocol::ProtocolError;
 
 /// Errors returned by redis-tower operations.
@@ -83,8 +85,13 @@ pub enum RedisError {
     ReconnectFailed {
         /// The number of reconnection attempts made.
         attempts: usize,
-        /// The last error that caused the reconnection to fail.
-        last_error: Box<RedisError>,
+        /// The shared structured cause from the final reconnect attempt.
+        ///
+        /// This is reference-counted so every waiter released by the same
+        /// failed reconnect campaign observes the identical error variant and
+        /// metadata without reducing it to display text.
+        #[source]
+        last_error: Arc<RedisError>,
     },
 
     /// The circuit breaker is open; request rejected without touching the service.
@@ -100,8 +107,11 @@ pub enum RedisError {
         pool_size: usize,
     },
 
-    /// The internal command queue is full; the caller should shed load.
-    #[error("queue full: the auto-pipeline channel is at capacity")]
+    /// A bounded command queue is full; the caller should shed load.
+    ///
+    /// This can be returned by the auto-pipeline channel or an explicitly
+    /// configured resilient-client offline queue.
+    #[error("queue full: the command queue is at capacity")]
     QueueFull,
 
     /// TCP connection attempt timed out before the OS completed the handshake.
@@ -112,11 +122,10 @@ pub enum RedisError {
     #[error("connect timeout")]
     ConnectTimeout,
 
-    /// A command exceeded its configured per-command deadline.
+    /// A command exceeded its configured duration or absolute deadline.
     ///
-    /// Returned by [`CommandTimeoutService`](https://docs.rs/redis-tower) when
-    /// the inner service does not complete within the configured
-    /// [`CommandTimeoutLayer`](https://docs.rs/redis-tower) duration.
+    /// Returned when a command exceeds a configured timeout or an absolute
+    /// deadline carried by [`WithDeadline`](crate::WithDeadline).
     #[error("command timeout")]
     CommandTimeout,
 
@@ -351,7 +360,7 @@ mod tests {
     fn reconnect_failed_not_retryable() {
         let err = RedisError::ReconnectFailed {
             attempts: 3,
-            last_error: Box::new(RedisError::ConnectionClosed),
+            last_error: Arc::new(RedisError::ConnectionClosed),
         };
         assert!(!err.is_retryable());
     }
@@ -389,7 +398,7 @@ mod tests {
     fn reconnect_failed_not_connection_error() {
         let err = RedisError::ReconnectFailed {
             attempts: 5,
-            last_error: Box::new(RedisError::ConnectionClosed),
+            last_error: Arc::new(RedisError::ConnectionClosed),
         };
         assert!(!err.is_connection_error());
     }
@@ -443,13 +452,20 @@ mod tests {
 
     #[test]
     fn display_reconnect_failed_includes_attempts() {
+        let cause = Arc::new(RedisError::ConnectTimeout);
         let err = RedisError::ReconnectFailed {
             attempts: 3,
-            last_error: Box::new(RedisError::ConnectionClosed),
+            last_error: Arc::clone(&cause),
         };
         let msg = err.to_string();
         assert!(msg.contains("3"));
         assert!(msg.contains("reconnect failed"));
+        assert!(msg.contains("connect timeout"));
+        let source = std::error::Error::source(&err)
+            .unwrap()
+            .downcast_ref::<Arc<RedisError>>()
+            .unwrap();
+        assert!(Arc::ptr_eq(source, &cause));
     }
 
     #[test]

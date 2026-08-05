@@ -28,8 +28,3 @@ __pycache__/
 
 # Redis dump files
 dump.rdb
-
-# Local context
-comparisons/*/target/
-comparisons/*/Cargo.lock
-comparisons/

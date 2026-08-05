@@ -40,13 +40,14 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use redis_tower::auto_pipeline::{
     AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService,
 };
 use redis_tower::command_adapter::CommandAdapter;
 use redis_tower::credentials::CredentialProvider;
+use redis_tower::{ConnectionEvent, ConnectionEventBus};
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::RespLimits;
 use tower_service::Service;
@@ -80,6 +81,7 @@ pub struct MultiplexedSentinelClientBuilder {
     sentinel_addrs: Vec<String>,
     master_name: String,
     config: SentinelConfig,
+    connection_events: Option<ConnectionEventBus>,
 }
 
 impl MultiplexedSentinelClientBuilder {
@@ -109,6 +111,23 @@ impl MultiplexedSentinelClientBuilder {
     /// [`RespLimits::default`].
     pub fn resp_limits(mut self, limits: RespLimits) -> Self {
         self.config.resp_limits = limits;
+        self
+    }
+
+    /// Publish connection and verified master-failover lifecycle events.
+    ///
+    /// Subscribe to the bus before connecting to observe the initial
+    /// [`ConnectionEvent::Connected`] or [`ConnectionEvent::ConnectFailed`]
+    /// event. Initial discovery, data-node connection, and ROLE verification
+    /// failures are all reported as `ConnectFailed`. During reconnect,
+    /// Sentinel's ROLE-verified master endpoint string is compared with the
+    /// previously connected endpoint. An exact address-string change emits
+    /// [`ConnectionEvent::Failover`] before [`ConnectionEvent::Reconnected`].
+    /// This is an endpoint transition, not durable Redis node identity:
+    /// textual aliases for the same server can look different, while replacing
+    /// a node behind the same endpoint does not emit `Failover`.
+    pub fn connection_events(mut self, events: ConnectionEventBus) -> Self {
+        self.connection_events = Some(events);
         self
     }
 
@@ -150,25 +169,42 @@ impl MultiplexedSentinelClientBuilder {
     pub async fn connect(
         self,
     ) -> Result<MultiplexedSentinelClient<AutoPipelineService>, RedisError> {
-        let master_addr = discovery::discover_master_with_config(
-            &self.sentinel_addrs,
-            &self.master_name,
-            &self.config,
-        )
-        .await?;
-        let conn = discovery::connect_hop(
-            &master_addr,
-            self.config.node_credentials.as_ref(),
-            self.config.resp_limits,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            self.config.node_tls.as_ref(),
-        )
-        .await?;
+        let initial = async {
+            let master_addr = discovery::discover_master_with_config(
+                &self.sentinel_addrs,
+                &self.master_name,
+                &self.config,
+            )
+            .await?;
+            discovery::connect_hop(
+                &master_addr,
+                self.config.node_credentials.as_ref(),
+                self.config.resp_limits,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                self.config.node_tls.as_ref(),
+            )
+            .await
+        }
+        .await;
+        let conn = match initial {
+            Ok(conn) => conn,
+            Err(error) => {
+                if let Some(events) = &self.connection_events {
+                    events.publish_with(|| ConnectionEvent::ConnectFailed {
+                        error: Arc::from(error.to_string()),
+                    });
+                }
+                return Err(error);
+            }
+        };
+        let pipeline = match self.connection_events {
+            Some(events) => {
+                AutoPipelineService::new_with_events(conn, AutoPipelineConfig::default(), events)
+            }
+            None => AutoPipelineService::new(conn, AutoPipelineConfig::default()),
+        };
         Ok(MultiplexedSentinelClient {
-            inner: CommandAdapter::new(AutoPipelineService::new(
-                conn,
-                AutoPipelineConfig::default(),
-            )),
+            inner: CommandAdapter::new(pipeline),
         })
     }
 
@@ -184,16 +220,24 @@ impl MultiplexedSentinelClientBuilder {
         let addrs = self.sentinel_addrs;
         let name = self.master_name;
         let config = self.config;
+        let events = self.connection_events;
+        let master_tracker = events
+            .as_ref()
+            .map(|events| VerifiedMasterTracker::new(events.clone()));
 
         let factory = move || {
             let addrs = addrs.clone();
             let name = name.clone();
             let config = config.clone();
+            let master_tracker = master_tracker.clone();
             async move {
                 // Verify ROLE so a reconnect lands on a real master, not a
                 // demoted replica that sentinel still reports during a failover.
-                let (conn, _addr) =
+                let (conn, addr) =
                     discovery::connect_verified_master_with_config(&addrs, &name, &config).await?;
+                if let Some(tracker) = master_tracker {
+                    tracker.observe(&addr);
+                }
                 Ok(conn)
             }
         };
@@ -205,15 +249,71 @@ impl MultiplexedSentinelClientBuilder {
             reconnect_on_readonly: true,
             ..AutoPipelineConfig::default()
         };
-        let svc = AutoPipelineService::with_factory(
-            factory,
-            pipeline_config,
-            AutoPipelineReconnectConfig::default(),
-        )
-        .await?;
+        let reconnect = AutoPipelineReconnectConfig::default();
+        let svc = match events {
+            Some(events) => {
+                AutoPipelineService::with_factory_and_events(
+                    factory,
+                    pipeline_config,
+                    reconnect,
+                    events,
+                )
+                .await?
+            }
+            None => AutoPipelineService::with_factory(factory, pipeline_config, reconnect).await?,
+        };
         Ok(MultiplexedSentinelClient {
             inner: CommandAdapter::new(svc),
         })
+    }
+}
+
+/// Tracks the ROLE-verified Sentinel primary across connection factory calls.
+///
+/// The first successful address establishes a baseline. Only a later exact
+/// address-string change is a failover; a transport reconnect to the same
+/// address is not. This tracks verified endpoints rather than durable node
+/// identity, so aliases for one server can compare different and a replacement
+/// behind one endpoint can compare equal. The mutex is held only for the
+/// in-memory comparison and never across discovery, connection I/O, or event
+/// publication.
+#[derive(Clone)]
+struct VerifiedMasterTracker {
+    events: ConnectionEventBus,
+    current: Arc<Mutex<Option<Arc<str>>>>,
+}
+
+impl VerifiedMasterTracker {
+    fn new(events: ConnectionEventBus) -> Self {
+        Self {
+            events,
+            current: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Record a verified master address, returning whether it changed from an
+    /// established baseline.
+    fn observe(&self, addr: &str) -> bool {
+        let current: Arc<str> = Arc::from(addr);
+        let previous = {
+            let mut known = self
+                .current
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if known.as_deref() == Some(current.as_ref()) {
+                return false;
+            }
+            known.replace(Arc::clone(&current))
+        };
+
+        let Some(previous) = previous else {
+            return false;
+        };
+        self.events.publish(ConnectionEvent::Failover {
+            previous: Some(previous),
+            current: Some(current),
+        });
+        true
     }
 }
 
@@ -274,6 +374,7 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
                 .collect(),
             master_name: master_name.to_string(),
             config: SentinelConfig::default(),
+            connection_events: None,
         }
     }
 
@@ -354,6 +455,25 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
         })
     }
 
+    /// Connect with automatic Sentinel rediscovery and lifecycle events.
+    ///
+    /// In addition to connection/reconnect events, this publishes
+    /// [`ConnectionEvent::Failover`] when a reconnect successfully reaches a
+    /// different ROLE-verified master endpoint string. Endpoint aliases are
+    /// compared textually; this does not establish durable node identity.
+    /// Subscribe before calling this method to observe the initial connection
+    /// event.
+    pub async fn connect_with_reconnect_and_events(
+        sentinel_addrs: &[impl AsRef<str>],
+        master_name: &str,
+        events: ConnectionEventBus,
+    ) -> Result<Self, RedisError> {
+        Self::builder(sentinel_addrs, master_name)
+            .connection_events(events)
+            .connect_with_reconnect()
+            .await
+    }
+
     /// Gracefully shut down the multiplexed sentinel client.
     ///
     /// Signals the background worker to stop accepting new requests, then
@@ -393,11 +513,25 @@ where
     ///
     /// If other tasks are calling execute concurrently, their commands
     /// will be batched into a single Redis pipeline for efficiency.
+    /// A deadline carried by [`redis_tower_core::WithDeadline`] bounds both
+    /// waiting for inner readiness and the dispatched call.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        let deadline = cmd.deadline();
         let mut svc = self.inner.clone();
-        std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
+        let operation = async move {
+            std::future::poll_fn(|cx| {
+                <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx)
+            })
             .await?;
-        Service::call(&mut svc, cmd).await
+            Service::call(&mut svc, cmd).await
+        };
+
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_elapsed| RedisError::CommandTimeout)?,
+            None => operation.await,
+        }
     }
 }
 
@@ -407,7 +541,10 @@ mod tests {
     use bytes::Bytes;
     use redis_tower::credentials::StaticCredentials;
     use redis_tower_commands::Get;
+    use redis_tower_core::WithDeadline;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
+    use std::time::Duration;
 
     #[test]
     fn builder_defaults_to_standard_resp_limits() {
@@ -424,6 +561,93 @@ mod tests {
         let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
             .resp_limits(limits);
         assert_eq!(builder.config.resp_limits, limits);
+    }
+
+    #[test]
+    fn builder_retains_connection_event_bus() {
+        let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
+            .connection_events(ConnectionEventBus::default());
+        assert!(builder.connection_events.is_some());
+    }
+
+    #[tokio::test]
+    async fn builder_connect_publishes_discovery_failure() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+
+        let result = MultiplexedSentinelClient::builder(&["127.0.0.1:0"], "missing")
+            .connection_events(events)
+            .connect()
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ConnectFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn builder_reconnecting_connect_publishes_verified_factory_failure() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        let addrs: [&str; 0] = [];
+
+        let result = MultiplexedSentinelClient::builder(&addrs, "missing")
+            .connection_events(events)
+            .connect_with_reconnect()
+            .await;
+        assert!(result.is_err());
+        assert!(matches!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ConnectFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn verified_master_change_emits_failover_between_attempt_and_reconnected() {
+        let events = ConnectionEventBus::new(8);
+        let mut stream = events.subscribe();
+        let tracker = VerifiedMasterTracker::new(events.clone());
+
+        // The first verified address establishes the baseline, and a normal
+        // reconnect to that same address is not a failover.
+        assert!(!tracker.observe("redis-a:6379"));
+        assert!(!tracker.observe("redis-a:6379"));
+
+        // AutoPipeline publishes the attempt before invoking the factory. The
+        // factory's verified address tracker publishes Failover, and the worker
+        // publishes Reconnected only after the factory returns.
+        events.publish(ConnectionEvent::ReconnectAttempt {
+            attempt: 1,
+            delay: Duration::from_millis(10),
+        });
+        assert!(tracker.observe("redis-b:6379"));
+        events.publish(ConnectionEvent::Reconnected {
+            attempts: 1,
+            elapsed: Duration::from_millis(12),
+        });
+
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ReconnectAttempt {
+                attempt: 1,
+                delay: Duration::from_millis(10),
+            }
+        );
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::Failover {
+                previous: Some(Arc::from("redis-a:6379")),
+                current: Some(Arc::from("redis-b:6379")),
+            }
+        );
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::Reconnected {
+                attempts: 1,
+                elapsed: Duration::from_millis(12),
+            }
+        );
     }
 
     #[derive(Clone)]
@@ -445,6 +669,26 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NeverReadyFrameService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Service<Frame> for NeverReadyFrameService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), RedisError>> {
+            Poll::Pending
+        }
+
+        fn call(&mut self, _req: Frame) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(Ok(Frame::Null))
+        }
+    }
+
     #[tokio::test]
     async fn from_layered_routes_execute_through_injected_service() {
         let inner = MockFrameService {
@@ -455,6 +699,24 @@ mod tests {
         let client2 = client.clone();
         let val: Option<Bytes> = client2.execute(Get::new("k")).await.unwrap();
         assert_eq!(val, Some(Bytes::from("layered")));
+    }
+
+    #[tokio::test]
+    async fn typed_deadline_bounds_layered_readiness() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = MultiplexedSentinelClient::from_layered(NeverReadyFrameService {
+            calls: Arc::clone(&calls),
+        });
+
+        let result = client
+            .execute(WithDeadline::after(
+                Get::new("k"),
+                Duration::from_millis(20),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WithDeadline<Cmd>` end-to-end absolute deadlines honored by deadline-aware
+  command timeout middleware, typed retries, multiplexed dispatch, resilient
+  offline queueing and replay, circuit breakers, and pool acquisition and I/O
+- an opt-in bounded offline queue for `ResilientRedisClient`, with ticket-order
+  replay restricted to idempotent typed commands, cancellation-safe connection
+  quarantine, a finite per-command replay budget, and one shared structured
+  reconnect-exhaustion cause for every released waiter
+- bounded, clone-friendly connection lifecycle event streams for connect,
+  disconnect, reconnect, exhaustion, intentional shutdown, and
+  topology-confirmed failover events
 - a dedicated, binary-safe `MonitorStream` over an exclusively owned connection, plus the complete server and operations command sweep
 - complete Redis 8.8 Array command family with version-gated live coverage and cluster-aware read routing
 - Redis-aware `tower-resilience` circuit breaker adapter, operational handle, and high-level client options
@@ -20,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- reconnectors consistently treat `max_retries` as retries after the first
+  reconnect attempt and apply `connect_timeout` to initial and replacement
+  factory calls
 - circuit health now counts only connection and timeout failures; Redis command errors such as `WRONGTYPE` no longer trip the breaker
 
 ### Deprecated
@@ -28,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- prune canceled auto-pipeline requests before wire dispatch and quarantine
+  pooled or shared connections after a deadline interrupts in-flight I/O
 - skip the process-owned restart test when the integration suite targets an externally managed Redis server
 
 ## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-v0.1.0) - 2026-06-05

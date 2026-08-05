@@ -34,7 +34,7 @@ aws-lc-rs) or `tls-native-tls`.
 
 ## Connecting
 
-```rust
+```rust,ignore
 // redis-rs (async, multiplexed)
 let client = redis::Client::open("redis://127.0.0.1/")?;
 let mut con = client.get_multiplexed_async_connection().await?;
@@ -52,7 +52,7 @@ connection use `RedisConnection`; for an `Arc<Mutex<_>>` shareable handle use
 
 ## Running commands
 
-```rust
+```rust,ignore
 // redis-rs
 use redis::AsyncCommands;
 con.set("key", "value").await?;
@@ -69,7 +69,7 @@ Each command's response type is its natural Redis shape (`Get` -> `Option<Bytes>
 for," bring in `RedisValueExt` and call `parse_into` -- this replaces the
 `FromRedisValue` type inference redis-rs does on `get`:
 
-```rust
+```rust,ignore
 use redis_tower::RedisValueExt;
 let v: String = client.execute(Get::new("key")).await?.parse_into()?;
 let n: i64    = client.execute(Get::new("counter")).await?.parse_into()?;
@@ -77,7 +77,7 @@ let n: i64    = client.execute(Get::new("counter")).await?.parse_into()?;
 
 Command options that are method chains in redis-rs are builder methods here:
 
-```rust
+```rust,ignore
 // redis-rs:  con.set_options("k", "v", SetOptions::default().with_expiration(EX(10)))
 // redis-tower:
 client.execute(Set::new("k", "v").ex(10)).await?;   // SET k v EX 10
@@ -86,7 +86,7 @@ client.execute(Set::new("k", "v").nx()).await?;     // SET k v NX -> bool
 
 ### Arbitrary / not-yet-typed commands
 
-```rust
+```rust,ignore
 // redis-rs
 redis::cmd("SET").arg("key").arg("value").query_async(&mut con).await?;
 
@@ -98,7 +98,7 @@ let reply = client.execute(RawCommand::new("SET").arg("key").arg("value")).await
 
 ## Pipelining
 
-```rust
+```rust,ignore
 // redis-rs
 let (a, b): (i64, i64) = redis::pipe()
     .cmd("INCR").arg("k")
@@ -123,7 +123,7 @@ already batched into pipelines automatically -- you only need an explicit
 
 ## Transactions (MULTI/EXEC, WATCH)
 
-```rust
+```rust,ignore
 // redis-rs
 let (n,): (i64,) = redis::pipe().atomic()
     .cmd("INCR").arg("k")
@@ -143,7 +143,7 @@ result is `Aborted` if a watched key changed before `EXEC`.
 
 ## Pub/Sub
 
-```rust
+```rust,ignore
 // redis-rs
 let mut pubsub = client.get_async_pubsub().await?;
 pubsub.subscribe("channel").await?;
@@ -167,7 +167,7 @@ survive the reconnect instead of silently going quiet.
 
 ## Cluster
 
-```rust
+```rust,ignore
 // redis-rs
 let client = redis::cluster::ClusterClient::new(vec!["redis://127.0.0.1:6379/"])?;
 let mut con = client.get_async_connection().await?;
@@ -185,7 +185,7 @@ automatically.
 
 ## Sentinel
 
-```rust
+```rust,ignore
 // redis-rs
 let mut sentinel = redis::sentinel::SentinelClient::build(
     vec!["redis://127.0.0.1:26379/"], "mymaster".into(),
@@ -208,7 +208,7 @@ The client verifies `ROLE` after discovery and re-authenticates across failover.
 
 ## TLS, custom CA, and mTLS
 
-```rust
+```rust,ignore
 // redis-rs: rediss:// + the tls features
 let client = redis::Client::open("rediss://host:6380/")?;
 
@@ -225,7 +225,7 @@ let conn = RedisConnection::connect_url_with_tls("rediss://host:6380", &tls).awa
 
 ## Automatic reconnection
 
-```rust
+```rust,ignore
 // redis-rs
 let mut con = redis::aio::ConnectionManager::new(client).await?;
 
@@ -260,7 +260,7 @@ on `ErrorKind`, use the classification helpers:
 Because every client is a Tower `Service`, you can wrap the frame-level service
 in a stack and hand it to `MultiplexedClient::from_layered`:
 
-```rust
+```rust,ignore
 use redis_tower::{TracingLayer, MetricsLayer, CircuitBreakerLayer, CommandTimeoutLayer};
 ```
 

@@ -35,15 +35,276 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Lifecycle events
+//!
+//! Event delivery is bounded and observational: a slow consumer reports lag
+//! but never delays reconnection.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::reconnect::{
+//!     AddrConnectionFactory, ConnectionEventBus, ReconnectConfig, ResilientConnection,
+//! };
+//!
+//! let events = ConnectionEventBus::default();
+//! let mut stream = events.subscribe();
+//! let _connection = ResilientConnection::new_with_events(
+//!     AddrConnectionFactory::new("127.0.0.1:6379"),
+//!     ReconnectConfig::default(),
+//!     events,
+//! ).await?;
+//!
+//! while let Ok(event) = stream.recv().await {
+//!     println!("connection event: {event:?}");
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
+use futures::Stream;
 use redis_tower_core::{Command, ConnectionConfig, ProtocolVersion, RedisConnection, RedisError};
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+/// Default number of connection lifecycle events retained for each subscriber.
+pub const DEFAULT_CONNECTION_EVENT_CAPACITY: usize = 64;
+
+/// Why an established Redis connection became unusable.
+///
+/// This is deliberately clone-friendly: error text is held in an [`Arc<str>`]
+/// because a broadcast event may be observed by many subscribers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectionDisconnectReason {
+    /// A connection operation returned an error that requires replacement.
+    ConnectionError {
+        /// Human-readable error text from the failing connection operation.
+        ///
+        /// This text can include endpoint names and Redis/server details. Treat
+        /// it as potentially sensitive when exporting or logging events.
+        error: Arc<str>,
+    },
+    /// A pipelined response exceeded its configured deadline.
+    CommandTimeout,
+    /// Redis replied `READONLY`, indicating that a formerly writable node was
+    /// demoted to a replica.
+    ReadOnly,
+    /// A direct connection wrapper was dropped, or the last client/service
+    /// handle closed and its background worker stopped cleanly. This terminal
+    /// transition is distinct from any earlier outage disconnect.
+    Shutdown,
+}
+
+/// A programmatic connection lifecycle notification.
+///
+/// Events are emitted in transition order. For example, a reconnect that fails
+/// once and then succeeds produces `Disconnected`, `ReconnectAttempt`,
+/// `ReconnectFailed`, `ReconnectAttempt`, and `Reconnected` in that order.
+/// Slow consumers receive an explicit [`ConnectionEventRecvError::Lagged`]
+/// error rather than applying backpressure to connection progress. A
+/// producer's `Disconnected { reason: Shutdown }` is its terminal event, though
+/// a shared bus may continue carrying events from other producers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConnectionEvent {
+    /// The initial connection was established.
+    Connected,
+    /// An initial connection attempt failed.
+    ConnectFailed {
+        /// Human-readable error text from the failed connection attempt.
+        ///
+        /// This text can include endpoint names and Redis/server details. Treat
+        /// it as potentially sensitive when exporting or logging events.
+        error: Arc<str>,
+    },
+    /// An established connection became unusable.
+    Disconnected {
+        /// The condition that caused the disconnect transition.
+        reason: ConnectionDisconnectReason,
+    },
+    /// A reconnect attempt was scheduled with a backoff delay.
+    ReconnectAttempt {
+        /// One-based reconnect attempt number.
+        attempt: usize,
+        /// Delay before this attempt starts.
+        delay: Duration,
+    },
+    /// A reconnect attempt failed.
+    ReconnectFailed {
+        /// One-based reconnect attempt number.
+        attempt: usize,
+        /// Human-readable error text from the failed attempt.
+        ///
+        /// This text can include endpoint names and Redis/server details. Treat
+        /// it as potentially sensitive when exporting or logging events.
+        error: Arc<str>,
+    },
+    /// A new connection was established after a disconnect.
+    Reconnected {
+        /// Number of attempts needed to reconnect.
+        attempts: usize,
+        /// Total time spent in the reconnect campaign.
+        elapsed: Duration,
+    },
+    /// The configured reconnect budget was exhausted.
+    ReconnectExhausted {
+        /// Number of reconnect attempts that were made.
+        attempts: usize,
+    },
+    /// A topology manager observed a primary endpoint change.
+    ///
+    /// Standalone reconnectors do not infer failover from a socket failure.
+    /// The multiplexed Sentinel client publishes this automatically because it
+    /// has one primary and can report a ROLE-verified previous/current address
+    /// pair. This compares the exact endpoint strings returned by Sentinel; it
+    /// does not establish durable Redis node identity. Textual aliases for the
+    /// same server can therefore look like a failover, while a replacement at
+    /// the same endpoint does not produce this event.
+    /// Redis Cluster can change several slot-scoped primaries independently, so
+    /// the core API intentionally does not collapse every cluster topology diff
+    /// into one misleading global failover. Cluster integrations retain the
+    /// explicit [`ConnectionEventBus::publish`] producer hook for transitions
+    /// they can identify precisely.
+    Failover {
+        /// Previous primary address, when known.
+        previous: Option<Arc<str>>,
+        /// New primary address, when known.
+        current: Option<Arc<str>>,
+    },
+}
+
+/// Error returned while receiving connection lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum ConnectionEventRecvError {
+    /// The subscriber fell behind the bounded event buffer.
+    #[error("connection event subscriber lagged and skipped {skipped} event(s)")]
+    Lagged {
+        /// Number of events skipped before the oldest retained event.
+        skipped: u64,
+    },
+    /// Every publisher was dropped and no further events can arrive.
+    #[error("connection event stream closed")]
+    Closed,
+}
+
+/// Clone-friendly bounded broadcaster for connection lifecycle events.
+///
+/// Each subscriber has an independent cursor over the same bounded ring. A
+/// slow subscriber does not block reconnect or failover progress; it receives
+/// [`ConnectionEventRecvError::Lagged`] with the exact number of skipped
+/// events. Publishing when there are no subscribers is a constant-time no-op.
+/// Use [`publish_with`](Self::publish_with) to avoid constructing an event
+/// payload in that case.
+///
+/// The bus does not spawn a task. Events are published synchronously at the
+/// lifecycle transition that produced them.
+#[derive(Debug, Clone)]
+pub struct ConnectionEventBus {
+    tx: broadcast::Sender<ConnectionEvent>,
+}
+
+impl ConnectionEventBus {
+    /// Create an event bus with the requested bounded buffer capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `capacity` is zero.
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "connection event capacity must be non-zero");
+        let (tx, _) = broadcast::channel(capacity);
+        Self { tx }
+    }
+
+    /// Subscribe to events published after this call.
+    ///
+    /// Broadcast subscriptions do not replay earlier events. Create the stream
+    /// before passing a clone of the bus to a `*_with_events` constructor when
+    /// the initial [`ConnectionEvent::Connected`] or
+    /// [`ConnectionEvent::ConnectFailed`] event matters.
+    pub fn subscribe(&self) -> ConnectionEventStream {
+        ConnectionEventStream {
+            inner: BroadcastStream::new(self.tx.subscribe()),
+        }
+    }
+
+    /// Return the number of active event subscribers.
+    pub fn subscriber_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
+    /// Publish an event without waiting for subscribers.
+    ///
+    /// Returns `true` when at least one subscriber was present. A subscriber
+    /// that has fallen behind observes lag independently; it never delays this
+    /// call or connection progress.
+    pub fn publish(&self, event: ConnectionEvent) -> bool {
+        if self.tx.receiver_count() == 0 {
+            return false;
+        }
+        self.tx.send(event).is_ok()
+    }
+
+    /// Lazily construct and publish an event when subscribers are present.
+    ///
+    /// Returns `false` without invoking `make_event` when no subscriber exists.
+    pub fn publish_with(&self, make_event: impl FnOnce() -> ConnectionEvent) -> bool {
+        if self.tx.receiver_count() == 0 {
+            return false;
+        }
+        self.tx.send(make_event()).is_ok()
+    }
+}
+
+impl Default for ConnectionEventBus {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONNECTION_EVENT_CAPACITY)
+    }
+}
+
+/// A bounded asynchronous stream of [`ConnectionEvent`] values.
+///
+/// The [`Stream`] implementation yields lag as an error item and ends when all
+/// bus publishers are dropped. [`recv`](Self::recv) represents that terminal
+/// state explicitly as [`ConnectionEventRecvError::Closed`].
+#[derive(Debug)]
+pub struct ConnectionEventStream {
+    inner: BroadcastStream<ConnectionEvent>,
+}
+
+impl ConnectionEventStream {
+    /// Receive the next lifecycle event or an explicit lag/closed error.
+    pub async fn recv(&mut self) -> Result<ConnectionEvent, ConnectionEventRecvError> {
+        futures::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx))
+            .await
+            .unwrap_or(Err(ConnectionEventRecvError::Closed))
+    }
+}
+
+impl Stream for ConnectionEventStream {
+    type Item = Result<ConnectionEvent, ConnectionEventRecvError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(event))) => Poll::Ready(Some(Ok(event))),
+            Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(skipped)))) => {
+                Poll::Ready(Some(Err(ConnectionEventRecvError::Lagged { skipped })))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
 
 /// Factory for creating new Redis connections.
 ///
@@ -250,7 +511,7 @@ impl crate::pool::PoolFactory for Resp3AddrConnectionFactory {
 ///
 /// # Defaults
 ///
-/// - `max_retries`: `None` (infinite)
+/// - `max_retries`: `None` (infinite retries after the first reconnect attempt)
 /// - `base_delay`: 100ms
 /// - `max_delay`: 5s
 /// - `jitter`: `true`
@@ -268,7 +529,11 @@ impl crate::pool::PoolFactory for Resp3AddrConnectionFactory {
 /// deterministic backoff, which is useful in tests.
 #[derive(Debug, Clone)]
 pub struct ReconnectConfig {
-    /// Maximum number of reconnection attempts. `None` means infinite.
+    /// Maximum number of retries after the first reconnection attempt.
+    ///
+    /// `Some(0)` still permits one reconnect attempt. `Some(n)` permits at
+    /// most `n + 1` total reconnect attempts, while `None` retries forever.
+    /// Initial construction is separate and is not counted in this budget.
     pub max_retries: Option<usize>,
     /// Initial delay before first reconnection attempt.
     pub base_delay: Duration,
@@ -280,7 +545,8 @@ pub struct ReconnectConfig {
     /// value in `[0, cap)` rather than the deterministic exponential value,
     /// spreading reconnect attempts across time.
     pub jitter: bool,
-    /// Per-attempt connect timeout applied to each `factory.connect()` call.
+    /// Per-attempt connect timeout applied to each `factory.connect()` call,
+    /// including the initial call made by reconnecting constructors.
     ///
     /// When `Some`, each call to the [`ConnectionFactory`] is wrapped in
     /// `tokio::time::timeout`. If the factory does not complete within this
@@ -306,7 +572,10 @@ impl Default for ReconnectConfig {
 }
 
 impl ReconnectConfig {
-    /// Set the maximum number of reconnection attempts.
+    /// Set the maximum number of retries after the first reconnect attempt.
+    ///
+    /// Passing zero allows the first reconnect attempt but no retry after it.
+    /// Passing `n` allows at most `n + 1` total reconnect attempts.
     #[must_use]
     pub fn max_retries(mut self, n: usize) -> Self {
         self.max_retries = Some(n);
@@ -347,9 +616,10 @@ impl ReconnectConfig {
     /// Set a timeout for each individual connection attempt.
     ///
     /// When set, each call to [`ConnectionFactory::connect`] is wrapped in
-    /// [`tokio::time::timeout`]. If the factory does not complete within
-    /// this duration the attempt is counted as a failure and the reconnect
-    /// loop retries after the next backoff delay.
+    /// [`tokio::time::timeout`], including the initial factory call made by
+    /// reconnecting constructors. If a reconnect factory does not complete
+    /// within this duration, the attempt is counted as a failure and the loop
+    /// retries after the next backoff delay.
     ///
     /// When not set (the default), connection attempts run without a timeout
     /// and may block for the OS-default TCP timeout — potentially several
@@ -358,6 +628,16 @@ impl ReconnectConfig {
     pub fn connect_timeout(mut self, d: Duration) -> Self {
         self.connect_timeout = Some(d);
         self
+    }
+
+    /// Return whether the zero-based reconnect attempt is past the budget.
+    pub(crate) fn attempt_exhausted(&self, attempt: usize) -> bool {
+        self.max_retries.map(|max| attempt > max).unwrap_or(false)
+    }
+
+    /// Return the finite total attempt budget, when configured.
+    pub(crate) fn total_attempt_budget(&self) -> Option<usize> {
+        self.max_retries.map(|max| max.saturating_add(1))
     }
 
     pub(crate) fn delay_for_attempt(&self, attempt: usize) -> Duration {
@@ -377,6 +657,19 @@ impl ReconnectConfig {
         } else {
             cap
         }
+    }
+}
+
+/// Connect through a factory while applying the configured per-attempt limit.
+pub(crate) async fn connect_with_timeout(
+    factory: &dyn ConnectionFactory,
+    timeout: Option<Duration>,
+) -> Result<RedisConnection, RedisError> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, factory.connect())
+            .await
+            .map_err(|_| RedisError::ConnectTimeout)?,
+        None => factory.connect().await,
     }
 }
 
@@ -520,6 +813,10 @@ pub struct ResilientConnection {
     /// occurs and when reconnection begins, because the flag is only checked
     /// in poll_ready. This is acceptable for most use cases.
     pub(crate) needs_reconnect: Arc<AtomicBool>,
+    event_bus: Option<ConnectionEventBus>,
+    disconnect_reported: Option<Arc<AtomicBool>>,
+    shutdown_reported: Option<Arc<AtomicBool>>,
+    lifecycle_lock: Option<Arc<StdMutex<()>>>,
     pub(crate) on_connect: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(crate) on_reconnect: Option<Arc<dyn Fn(usize) + Send + Sync>>,
 }
@@ -530,20 +827,57 @@ impl ResilientConnection {
         factory: impl ConnectionFactory,
         config: ReconnectConfig,
     ) -> Result<Self, RedisError> {
+        Self::new_inner(factory, config, None).await
+    }
+
+    /// Create a resilient connection that publishes lifecycle events.
+    ///
+    /// Subscribe to `events` before calling this constructor to observe the
+    /// initial [`ConnectionEvent::Connected`] or
+    /// [`ConnectionEvent::ConnectFailed`] event. Event consumption is never
+    /// required for connection progress; lagging subscribers are skipped by
+    /// the bounded broadcaster.
+    pub async fn new_with_events(
+        factory: impl ConnectionFactory,
+        config: ReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Result<Self, RedisError> {
+        Self::new_inner(factory, config, Some(events)).await
+    }
+
+    async fn new_inner(
+        factory: impl ConnectionFactory,
+        config: ReconnectConfig,
+        event_bus: Option<ConnectionEventBus>,
+    ) -> Result<Self, RedisError> {
         let factory = Arc::new(factory);
-        let conn = if let Some(t) = config.connect_timeout {
-            let r = tokio::time::timeout(t, factory.connect())
-                .await
-                .map_err(|_| RedisError::ConnectTimeout)?;
-            r?
-        } else {
-            factory.connect().await?
+        let result = connect_with_timeout(factory.as_ref(), config.connect_timeout).await;
+        let conn = match result {
+            Ok(conn) => conn,
+            Err(error) => {
+                if let Some(events) = &event_bus {
+                    events.publish_with(|| ConnectionEvent::ConnectFailed {
+                        error: Arc::from(error.to_string()),
+                    });
+                }
+                return Err(error);
+            }
         };
+        if let Some(events) = &event_bus {
+            events.publish(ConnectionEvent::Connected);
+        }
+        let disconnect_reported = event_bus.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
+        let shutdown_reported = event_bus.as_ref().map(|_| Arc::new(AtomicBool::new(false)));
+        let lifecycle_lock = event_bus.as_ref().map(|_| Arc::new(StdMutex::new(())));
         Ok(Self {
             factory,
             config,
             state: ConnState::Connected(conn),
             needs_reconnect: Arc::new(AtomicBool::new(false)),
+            event_bus,
+            disconnect_reported,
+            shutdown_reported,
+            lifecycle_lock,
             on_connect: None,
             on_reconnect: None,
         })
@@ -577,6 +911,13 @@ impl ResilientConnection {
                     && e.is_connection_error()
                 {
                     self.needs_reconnect.store(true, Ordering::Release);
+                    publish_disconnect_before_shutdown(
+                        self.event_bus.as_ref(),
+                        self.disconnect_reported.as_deref(),
+                        self.shutdown_reported.as_deref(),
+                        self.lifecycle_lock.as_deref(),
+                        e,
+                    );
                 }
                 result
             }
@@ -589,19 +930,36 @@ impl ResilientConnection {
     /// success log can report the total reconnection duration rather than the
     /// duration of the final attempt alone.
     fn trigger_reconnect(&mut self, attempt: usize, started: Instant) {
-        if let Some(max) = self.config.max_retries
-            && attempt > max
-        {
+        if self.config.attempt_exhausted(attempt) {
+            if let Some(events) = &self.event_bus {
+                events.publish(ConnectionEvent::ReconnectExhausted { attempts: attempt });
+            }
             self.state = ConnState::Failed;
             return;
         }
         let delay = self.config.delay_for_attempt(attempt);
         tracing::warn!(attempt, delay = ?delay, "redis: connection lost, reconnecting");
+        if let Some(events) = &self.event_bus {
+            events.publish(ConnectionEvent::ReconnectAttempt {
+                attempt: attempt + 1,
+                delay,
+            });
+        }
         self.state = ConnState::WaitingToReconnect {
             attempt,
             sleep: Box::pin(tokio::time::sleep(delay)),
             started,
         };
+    }
+}
+
+impl Drop for ResilientConnection {
+    fn drop(&mut self) {
+        let _guard = self.lifecycle_lock.as_ref().map(|lock| {
+            lock.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        });
+        publish_shutdown_once(self.event_bus.as_ref(), self.shutdown_reported.as_deref());
     }
 }
 
@@ -627,8 +985,8 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                 ConnState::Connected(_) => return Poll::Ready(Ok(())),
                 ConnState::Failed => {
                     return Poll::Ready(Err(RedisError::ReconnectFailed {
-                        attempts: self.config.max_retries.unwrap_or(0),
-                        last_error: Box::new(RedisError::ConnectionClosed),
+                        attempts: self.config.total_attempt_budget().unwrap_or(0),
+                        last_error: Arc::new(RedisError::ConnectionClosed),
                     }));
                 }
                 ConnState::WaitingToReconnect {
@@ -640,16 +998,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                         let attempt = *attempt;
                         let started = *started;
                         let connect_timeout = self.config.connect_timeout;
-                        let future: ReconnectFuture = if let Some(t) = connect_timeout {
-                            let inner = self.factory.connect();
-                            Box::pin(async move {
-                                tokio::time::timeout(t, inner)
-                                    .await
-                                    .map_err(|_| RedisError::ConnectTimeout)?
-                            })
-                        } else {
-                            self.factory.connect()
-                        };
+                        let factory = Arc::clone(&self.factory);
+                        let future: ReconnectFuture = Box::pin(async move {
+                            connect_with_timeout(factory.as_ref(), connect_timeout).await
+                        });
                         self.state = ConnState::Reconnecting {
                             attempt,
                             future,
@@ -665,9 +1017,19 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                 } => match future.as_mut().poll(cx) {
                     Poll::Ready(Ok(conn)) => {
                         let attempt = *attempt;
-                        let elapsed_ms = started.elapsed().as_millis();
+                        let elapsed = started.elapsed();
+                        let elapsed_ms = elapsed.as_millis();
                         self.state = ConnState::Connected(conn);
+                        if let Some(disconnect_reported) = &self.disconnect_reported {
+                            disconnect_reported.store(false, Ordering::Release);
+                        }
                         tracing::info!(attempt, elapsed_ms, "redis: reconnected successfully");
+                        if let Some(events) = &self.event_bus {
+                            events.publish(ConnectionEvent::Reconnected {
+                                attempts: attempt + 1,
+                                elapsed,
+                            });
+                        }
                         if attempt > 0
                             && let Some(ref cb) = self.on_reconnect
                         {
@@ -682,6 +1044,12 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                         let attempt = *attempt;
                         let started = *started;
                         tracing::warn!(attempt, error = %e, "redis: reconnect attempt failed");
+                        if let Some(events) = &self.event_bus {
+                            events.publish_with(|| ConnectionEvent::ReconnectFailed {
+                                attempt: attempt + 1,
+                                error: Arc::from(e.to_string()),
+                            });
+                        }
                         self.trigger_reconnect(attempt + 1, started);
                     }
                     Poll::Pending => return Poll::Pending,
@@ -698,6 +1066,10 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
 
         let future = <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd);
         let needs_reconnect = Arc::clone(&self.needs_reconnect);
+        let event_bus = self.event_bus.clone();
+        let disconnect_reported = self.disconnect_reported.clone();
+        let shutdown_reported = self.shutdown_reported.clone();
+        let lifecycle_lock = self.lifecycle_lock.clone();
 
         Box::pin(async move {
             let result = future.await;
@@ -705,15 +1077,277 @@ impl<Cmd: Command> tower_service::Service<Cmd> for ResilientConnection {
                 && e.is_connection_error()
             {
                 needs_reconnect.store(true, Ordering::Release);
+                publish_disconnect_before_shutdown(
+                    event_bus.as_ref(),
+                    disconnect_reported.as_deref(),
+                    shutdown_reported.as_deref(),
+                    lifecycle_lock.as_deref(),
+                    e,
+                );
             }
             result
         })
     }
 }
 
+pub(crate) fn publish_disconnect_once(
+    event_bus: Option<&ConnectionEventBus>,
+    disconnect_reported: Option<&AtomicBool>,
+    error: &RedisError,
+) {
+    let (Some(events), Some(disconnect_reported)) = (event_bus, disconnect_reported) else {
+        return;
+    };
+    if disconnect_reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    events.publish_with(|| ConnectionEvent::Disconnected {
+        reason: ConnectionDisconnectReason::ConnectionError {
+            error: Arc::from(error.to_string()),
+        },
+    });
+}
+
+pub(crate) fn publish_disconnect_before_shutdown(
+    event_bus: Option<&ConnectionEventBus>,
+    disconnect_reported: Option<&AtomicBool>,
+    shutdown_reported: Option<&AtomicBool>,
+    lifecycle_lock: Option<&StdMutex<()>>,
+    error: &RedisError,
+) {
+    let _guard = lifecycle_lock.map(|lock| {
+        lock.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    });
+    if shutdown_reported.is_some_and(|reported| reported.load(Ordering::Acquire)) {
+        return;
+    }
+    publish_disconnect_once(event_bus, disconnect_reported, error);
+}
+
+pub(crate) fn publish_shutdown_once(
+    event_bus: Option<&ConnectionEventBus>,
+    shutdown_reported: Option<&AtomicBool>,
+) {
+    let (Some(events), Some(shutdown_reported)) = (event_bus, shutdown_reported) else {
+        return;
+    };
+    if shutdown_reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    events.publish(ConnectionEvent::Disconnected {
+        reason: ConnectionDisconnectReason::Shutdown,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn event_bus_delivers_ordered_events_to_multiple_subscribers() {
+        let events = ConnectionEventBus::new(8);
+        let mut first = events.subscribe();
+        let mut second = events.subscribe();
+
+        let expected = [
+            ConnectionEvent::Connected,
+            ConnectionEvent::ReconnectAttempt {
+                attempt: 1,
+                delay: Duration::from_millis(25),
+            },
+            ConnectionEvent::Reconnected {
+                attempts: 1,
+                elapsed: Duration::from_millis(30),
+            },
+            ConnectionEvent::Failover {
+                previous: Some(Arc::from("redis-a:6379")),
+                current: Some(Arc::from("redis-b:6379")),
+            },
+        ];
+        for event in expected.iter().cloned() {
+            assert!(events.publish(event));
+        }
+
+        for expected_event in &expected {
+            assert_eq!(first.recv().await.unwrap(), expected_event.clone());
+            assert_eq!(second.recv().await.unwrap(), expected_event.clone());
+        }
+    }
+
+    #[tokio::test]
+    async fn event_stream_reports_lag_then_continues_with_retained_event() {
+        let events = ConnectionEventBus::new(1);
+        let mut stream = events.subscribe();
+
+        events.publish(ConnectionEvent::Connected);
+        events.publish(ConnectionEvent::ReconnectAttempt {
+            attempt: 1,
+            delay: Duration::ZERO,
+        });
+        events.publish(ConnectionEvent::ReconnectExhausted { attempts: 1 });
+
+        let skipped = match stream.recv().await.unwrap_err() {
+            ConnectionEventRecvError::Lagged { skipped } => skipped,
+            other => panic!("expected lag error, got {other:?}"),
+        };
+        assert!(skipped >= 1);
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ReconnectExhausted { attempts: 1 }
+        );
+    }
+
+    #[tokio::test]
+    async fn event_stream_reports_closed_after_last_publisher_drops() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        drop(events);
+
+        assert_eq!(
+            stream.recv().await.unwrap_err(),
+            ConnectionEventRecvError::Closed
+        );
+    }
+
+    #[test]
+    fn lazy_publish_skips_payload_work_without_subscribers() {
+        let events = ConnectionEventBus::new(4);
+        let constructed = AtomicBool::new(false);
+
+        assert!(!events.publish_with(|| {
+            constructed.store(true, Ordering::Release);
+            ConnectionEvent::Connected
+        }));
+        assert!(!constructed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn shutdown_is_distinct_from_an_outage_and_emitted_once() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        let disconnect_reported = AtomicBool::new(false);
+        let shutdown_reported = AtomicBool::new(false);
+
+        publish_disconnect_once(
+            Some(&events),
+            Some(&disconnect_reported),
+            &RedisError::ConnectionClosed,
+        );
+        publish_shutdown_once(Some(&events), Some(&shutdown_reported));
+        publish_shutdown_once(Some(&events), Some(&shutdown_reported));
+
+        assert!(matches!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::ConnectionError { .. }
+            }
+        ));
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::Shutdown,
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), stream.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_connect_failure_is_observable() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        let factory = || async { Err::<RedisConnection, _>(RedisError::ConnectionClosed) };
+
+        let result = ResilientConnection::new_with_events(
+            factory,
+            ReconnectConfig::default(),
+            events.clone(),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ConnectFailed {
+                error: Arc::from("connection closed"),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_connect_timeout_is_observable() {
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        let factory =
+            || async { futures::future::pending::<Result<RedisConnection, RedisError>>().await };
+
+        let result = ResilientConnection::new_with_events(
+            factory,
+            ReconnectConfig::default().connect_timeout(Duration::from_millis(10)),
+            events,
+        )
+        .await;
+        assert!(matches!(result, Err(RedisError::ConnectTimeout)));
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::ConnectFailed {
+                error: Arc::from(RedisError::ConnectTimeout.to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_healthy_connection_publishes_shutdown_once() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _stream = stream;
+            futures::future::pending::<()>().await;
+        });
+        let factory = move || async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+            Ok(RedisConnection::from_stream(
+                redis_tower_core::RedisStream::Tcp(stream),
+            ))
+        };
+        let events = ConnectionEventBus::new(4);
+        let mut stream = events.subscribe();
+        let connection = ResilientConnection::new_with_events(
+            factory,
+            ReconnectConfig::default(),
+            events.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stream.recv().await.unwrap(), ConnectionEvent::Connected);
+
+        drop(connection);
+        assert_eq!(
+            stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::Shutdown,
+            }
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), stream.recv())
+                .await
+                .is_err()
+        );
+
+        server.abort();
+    }
 
     #[test]
     fn named_factories_retain_connection_config() {
@@ -829,27 +1463,31 @@ mod tests {
 
     // -- retry-limit boundary tests --
     //
-    // `trigger_reconnect` transitions to `ConnState::Failed` when
-    // `attempt > max_retries`. `ResilientConnection::new` requires a live
-    // connection, so we exercise the same predicate `trigger_reconnect` uses
-    // against the config directly.
+    // `max_retries` counts retries after the first reconnect attempt. These
+    // helpers are shared by every reconnecting surface.
 
     #[test]
     fn max_retries_zero_allows_one_attempt() {
-        // max_retries: Some(0) means attempt 0 is allowed but attempt 1 fails.
         let config = ReconnectConfig::default().max_retries(0);
-        let should_fail =
-            |attempt: usize| config.max_retries.map(|max| attempt > max).unwrap_or(false);
-        assert!(!should_fail(0), "attempt 0 should be within max_retries 0");
-        assert!(should_fail(1), "attempt 1 should exceed max_retries 0");
+        assert!(!config.attempt_exhausted(0));
+        assert!(config.attempt_exhausted(1));
+        assert_eq!(config.total_attempt_budget(), Some(1));
+    }
+
+    #[test]
+    fn max_retries_three_allows_four_total_attempts() {
+        let config = ReconnectConfig::default().max_retries(3);
+        assert!(!config.attempt_exhausted(3));
+        assert!(config.attempt_exhausted(4));
+        assert_eq!(config.total_attempt_budget(), Some(4));
     }
 
     #[test]
     fn max_retries_none_never_fails() {
         let config = ReconnectConfig::default(); // max_retries: None
         let attempt = 9999usize;
-        let should_fail = config.max_retries.map(|max| attempt > max).unwrap_or(false);
-        assert!(!should_fail, "max_retries: None should never fail");
+        assert!(!config.attempt_exhausted(attempt));
+        assert_eq!(config.total_attempt_budget(), None);
     }
 
     // -- reconnect success log includes duration --
@@ -907,7 +1545,15 @@ mod tests {
             jitter: false,
             ..Default::default()
         };
-        let mut conn = ResilientConnection::new(factory, config).await.unwrap();
+        let lifecycle = ConnectionEventBus::new(8);
+        let mut lifecycle_stream = lifecycle.subscribe();
+        let mut conn = ResilientConnection::new_with_events(factory, config, lifecycle)
+            .await
+            .unwrap();
+        assert_eq!(
+            lifecycle_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
 
         let capture = EventCapture::default();
         let subscriber = tracing_subscriber::registry().with(capture.clone());
@@ -920,6 +1566,18 @@ mod tests {
         })
         .await
         .expect("reconnect should succeed against the loopback listener");
+
+        assert_eq!(
+            lifecycle_stream.recv().await.unwrap(),
+            ConnectionEvent::ReconnectAttempt {
+                attempt: 1,
+                delay: Duration::from_millis(1),
+            }
+        );
+        assert!(matches!(
+            lifecycle_stream.recv().await.unwrap(),
+            ConnectionEvent::Reconnected { attempts: 1, .. }
+        ));
 
         let events = capture.events.lock().unwrap();
         assert!(

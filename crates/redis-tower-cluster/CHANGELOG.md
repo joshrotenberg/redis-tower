@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- end-to-end typed command deadlines across routing, node lookup, redirects,
+  retries, and pinned-node execution for direct and multiplexed clients
 - multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
 - configurable RESP decode limits across cluster discovery, node connections, topology refreshes, and reconnects
 
 ### Fixed
 
+- quarantine a direct node connection after canceled or incomplete command I/O,
+  and send `ASKING` with its redirected command as one atomic exchange
 - route both MIGRATE forms by their source key and keep keyless server/operations families on the default node
 - route Redis 8.8 Array reads to replicas while keeping all mutating `AR*` commands on masters
 - route MSETEX by its numkeys-prefixed key list, classify HOTKEYS as keyless, and allow DIGEST replica reads

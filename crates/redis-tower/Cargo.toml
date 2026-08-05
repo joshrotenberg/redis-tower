@@ -26,7 +26,7 @@ commands-sketch = ["redis-tower-commands/sketch"]
 commands-tdigest = ["redis-tower-commands/tdigest"]
 commands-timeseries = ["redis-tower-commands/timeseries"]
 commands-vector-sets = ["redis-tower-commands/vector-sets"]
-serde = ["dep:serde", "dep:serde_json", "commands-json", "redis-tower-core/serde"]
+serde = ["dep:serde", "dep:serde_json", "commands-json", "commands-search", "redis-tower-core/serde"]
 metrics = ["dep:metrics"]
 
 [dependencies]
@@ -34,12 +34,12 @@ serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
-redis-tower-commands = { workspace = true }
+redis-tower-commands = { workspace = true, default-features = false }
 async-stream = { workspace = true }
 
 tower-service = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
-tokio-stream = { workspace = true }
+tokio-stream = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
@@ -51,7 +51,7 @@ tower-resilience-circuitbreaker = { workspace = true }
 rand = "0.9"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "test-util"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true, features = ["buffer", "timeout"] }
 bytes = { workspace = true }
