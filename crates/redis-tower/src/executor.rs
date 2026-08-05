@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 use crate::caching::CachedClient;
 use crate::client::RedisClient;
-use crate::multiplexed::MultiplexedClient;
+use crate::multiplexed::{CachedMultiplexedClient, MultiplexedClient};
 use crate::resilient::ResilientRedisClient;
 
 /// Trait for executing Redis commands, enabling test mocking.
@@ -121,12 +121,25 @@ impl RedisExecutor for MultiplexedClient {
     }
 }
 
+/// The cached multiplexed newtype retains the same executor surface as the
+/// standard [`MultiplexedClient`]. Its `execute` method also takes `&self`;
+/// the trait's mutable receiver is satisfied trivially.
+impl RedisExecutor for CachedMultiplexedClient {
+    fn execute<Cmd: Command>(
+        &mut self,
+        cmd: Cmd,
+    ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        CachedMultiplexedClient::execute(self, cmd)
+    }
+}
+
 /// A Tower [`Service`](tower_service::Service) adapter over any cloneable
 /// [`RedisExecutor`].
 ///
 /// redis-tower's middleware [`Layer`](tower_layer::Layer)s wrap a `Service`,
 /// but the high-level clients (`RedisClient`, `MultiplexedClient`,
-/// `ConnectionPool`, `CachedClient`, `ResilientRedisClient`) are
+/// `CachedMultiplexedClient`, `ConnectionPool`, `CachedClient`,
+/// `ResilientRedisClient`) are
 /// `RedisExecutor`s rather than `Service`s. This newtype bridges them so a
 /// `tower::ServiceBuilder` stack can sit in front of a real client.
 ///

@@ -43,6 +43,7 @@ let val: String = client.execute(Get::new("key")).await?.parse_into()?;
 | Client | When to use |
 |--------|-------------|
 | `MultiplexedClient` | **The default.** One connection, concurrent commands auto-pipelined; cheap to clone and share across tasks. |
+| `CachedMultiplexedClient` | The cloneable standalone client when repeated reads benefit from RESP3 server-assisted caching; hits stay local and misses remain auto-pipelined. |
 | `RedisConnection` | A single exclusive connection (`&mut self`), or a building block for the others. |
 | `RedisClient` | `Arc<Mutex<RedisConnection>>` -- a simple shared handle, but serializes commands through one lock (lower throughput than `MultiplexedClient`; a naive benchmark will under-report it). |
 | `ResilientRedisClient` | A shared handle with automatic reconnection + backoff, for long-running services. |
@@ -120,7 +121,8 @@ let svc = CommandAdapter::new(
 );
 ```
 
-Built-in layers: `TracingLayer`, `MetricsLayer`, `CacheService`, `ReconnectService`.
+Built-in middleware: `TracingLayer`, `MetricsLayer`, `CacheLayer`, and
+`ReconnectService`.
 
 Composes with [tower-resilience](https://crates.io/crates/tower-resilience) for
 circuit breaking, retry with backoff, rate limiting, and bulkhead isolation.
@@ -189,6 +191,8 @@ The built-in recorder emits:
 - commands: `db.client.operation.duration` and `redis_tower.commands`;
 - auto-pipelines: `redis_tower.pipeline.batch_size` and
   `redis_tower.pipeline.queue_depth`;
+- client-side caching: `redis_tower.cache.events`, with bounded hit, miss,
+  invalidation, and eviction event labels;
 - pool waits and lifecycle: `db.client.connection.wait_time`,
   `db.client.connection.timeouts`, `redis_tower.pool.health_check_failures`,
   and `redis_tower.pool.connection_replacements`;
@@ -314,13 +318,41 @@ EVAL on NOSCRIPT.
 ## Client-side caching
 
 ```rust,ignore
-let mut client = CachedClient::connect("127.0.0.1:6379").await?;
-let val = client.execute(Get::new("key")).await?;  // cache miss
-let val = client.execute(Get::new("key")).await?;  // cache hit
+use std::time::Duration;
+use redis_tower::{
+    CacheTrackingMode, CachedClientConfig, CachedMultiplexedClient,
+    commands::Get,
+};
+
+let config = CachedClientConfig::new()
+    .max_entries(50_000)
+    .client_ttl(Some(Duration::from_secs(15)))
+    .tracking_mode(CacheTrackingMode::broadcast_with_prefixes(["user:"]));
+let client =
+    CachedMultiplexedClient::connect_with_config("127.0.0.1:6379", config).await?;
+
+let val = client.execute(Get::new("user:42")).await?; // Redis miss
+let val = client.clone().execute(Get::new("user:42")).await?; // local hit
+let stats = client.cache_statistics().await;
+# let _ = (val, stats);
 ```
 
-Uses two RESP3 connections with CLIENT TRACKING BCAST for invalidation.
-Also available as `CacheService` for Tower layer composition.
+The cached client owns two RESP3 connections, reconnects its invalidation
+receiver, disables and clears caching while either connection is unhealthy,
+evicts locally around writes, and rejects stale inserts from reads that race an
+invalidation. A fixed data worker fails closed when its socket is lost, while a
+replacement receiver can safely reinstall tracking. Broadcast (optionally
+prefix-filtered), Redis server-default, and opt-in tracking modes are available.
+Address, URL, connection-config, factory, and existing-connection constructors
+keep authentication, database, TLS/Unix transport, and RESP limits consistent
+across both cache connections. `CachedClient` remains as the serialized
+compatibility form, and `CacheLayer` / `CacheService` support custom Tower
+composition. Place the cache directly above a backend implementing
+`ReleaseReadiness`, with other middleware outside it, so local hits return any
+capacity reserved by `poll_ready`.
+
+See the [client-side caching guide](docs/CLIENT-SIDE-CACHING.md) for failure
+semantics, bounds, metrics, and current standalone-only scope.
 
 ## JSON API
 

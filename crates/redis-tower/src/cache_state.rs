@@ -11,9 +11,13 @@
 //! O(1) lookups instead of an O(n) suffix scan that over-evicts.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use redis_tower_core::Frame;
+
+use crate::metrics_layer::{CacheEvent, MetricsRecorder};
 
 /// Default maximum number of cached entries (memory bound).
 pub(crate) const DEFAULT_MAX_ENTRIES: usize = 10_000;
@@ -21,6 +25,10 @@ pub(crate) const DEFAULT_MAX_ENTRIES: usize = 10_000;
 /// this is treated as a miss even if no invalidation arrived -- a safety
 /// backstop against missed invalidations (Redis CSC guidance).
 pub(crate) const DEFAULT_TTL: Duration = Duration::from_secs(30);
+/// Maximum number of per-key invalidation epochs retained when the cache itself
+/// is configured as unbounded. Epoch pruning advances the global generation,
+/// so dropping bookkeeping can never make an old in-flight read current again.
+const DEFAULT_MAX_EPOCHS: usize = DEFAULT_MAX_ENTRIES;
 
 /// The cacheable read commands. The key these read is always argument 1.
 ///
@@ -91,28 +99,358 @@ pub(crate) fn extract_cache_entry(frame: &Frame) -> Option<(Vec<u8>, Vec<u8>)> {
 /// `invalidate` message. Keys are raw bytes (binary-safe).
 pub(crate) fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
     let items = match frame {
-        Frame::Push(items) if items.len() >= 2 => items,
-        Frame::Array(Some(items)) if items.len() >= 2 => items,
+        Frame::Push(items) if !items.is_empty() => items,
+        Frame::Array(Some(items)) if !items.is_empty() => items,
         _ => return None,
     };
 
     match &items[0] {
-        Frame::BulkString(Some(b)) if b.as_ref() == b"invalidate" => {}
+        Frame::BulkString(Some(b)) | Frame::SimpleString(b) if b.as_ref() == b"invalidate" => {}
         _ => return None,
     }
 
-    match &items[1] {
-        Frame::Array(Some(keys)) => {
+    match items.get(1) {
+        Some(Frame::Array(Some(keys))) => {
             let mut result = Vec::new();
             for key in keys {
-                if let Frame::BulkString(Some(b)) = key {
-                    result.push(b.to_vec());
-                }
+                let bytes = match key {
+                    Frame::BulkString(Some(b)) | Frame::SimpleString(b) => b,
+                    // The message is recognizably an invalidation but its key
+                    // payload is malformed. Flush instead of risking a stale
+                    // entry by applying only a partial key list.
+                    _ => return Some(Vec::new()),
+                };
+                result.push(bytes.to_vec());
             }
             Some(result)
         }
-        Frame::Null | Frame::Array(None) => Some(Vec::new()),
+        Some(Frame::Null | Frame::Array(None)) => Some(Vec::new()),
+        // Once the frame is recognizably an invalidation, any missing or
+        // malformed payload must flush rather than be ignored.
+        _ => Some(Vec::new()),
+    }
+}
+
+/// Commands known not to mutate Redis keyspace. Unknown commands are treated
+/// as mutations by [`command_invalidation`] so new Redis/module commands remain
+/// correct until explicitly classified.
+const READ_ONLY_COMMANDS: &[&[u8]] = &[
+    b"BITCOUNT",
+    b"BITFIELD_RO",
+    b"BITPOS",
+    b"COMMAND",
+    b"DBSIZE",
+    b"DUMP",
+    b"ECHO",
+    b"EXISTS",
+    b"EXPIRETIME",
+    b"FCALL_RO",
+    b"FT.AGGREGATE",
+    b"FT.EXPLAIN",
+    b"FT.EXPLAINCLI",
+    b"FT.INFO",
+    b"FT.PROFILE",
+    b"FT.SEARCH",
+    b"GEOHASH",
+    b"GEOPOS",
+    b"GEODIST",
+    b"GEOSEARCH",
+    b"GET",
+    b"GETBIT",
+    b"GETRANGE",
+    b"HEXISTS",
+    b"HGET",
+    b"HGETALL",
+    b"HKEYS",
+    b"HLEN",
+    b"HMGET",
+    b"HRANDFIELD",
+    b"HSCAN",
+    b"HSTRLEN",
+    b"HVALS",
+    b"INFO",
+    b"KEYS",
+    b"LATENCY",
+    b"LINDEX",
+    b"LLEN",
+    b"LPOS",
+    b"LRANGE",
+    b"MEMORY",
+    b"MGET",
+    b"OBJECT",
+    b"PEXPIRETIME",
+    b"PFCOUNT",
+    b"PING",
+    b"PTTL",
+    b"PUBSUB",
+    b"PUBLISH",
+    b"RANDOMKEY",
+    b"ROLE",
+    b"SCAN",
+    b"SCARD",
+    b"SDIFF",
+    b"SINTER",
+    b"SINTERCARD",
+    b"SISMEMBER",
+    b"SMEMBERS",
+    b"SMISMEMBER",
+    b"SORT_RO",
+    b"SRANDMEMBER",
+    b"SSCAN",
+    b"STRLEN",
+    b"SUNION",
+    b"TIME",
+    b"TTL",
+    b"TYPE",
+    b"WAIT",
+    b"WAITAOF",
+    b"XINFO",
+    b"XLEN",
+    b"XPENDING",
+    b"XRANGE",
+    b"XREAD",
+    b"XREVRANGE",
+    b"ZCARD",
+    b"ZCOUNT",
+    b"ZDIFF",
+    b"ZINTER",
+    b"ZINTERCARD",
+    b"ZLEXCOUNT",
+    b"ZMSCORE",
+    b"ZRANDMEMBER",
+    b"ZRANGE",
+    b"ZRANGEBYLEX",
+    b"ZRANGEBYSCORE",
+    b"ZRANK",
+    b"ZREVRANGE",
+    b"ZREVRANGEBYLEX",
+    b"ZREVRANGEBYSCORE",
+    b"ZREVRANK",
+    b"ZSCAN",
+    b"ZSCORE",
+    b"ZUNION",
+    b"JSON.ARRINDEX",
+    b"JSON.ARRLEN",
+    b"JSON.DEBUG",
+    b"JSON.GET",
+    b"JSON.MGET",
+    b"JSON.OBJKEYS",
+    b"JSON.OBJLEN",
+    b"JSON.RESP",
+    b"JSON.STRLEN",
+    b"JSON.TYPE",
+];
+
+/// Mutations whose first argument is the only Redis key they change.
+const FIRST_KEY_MUTATIONS: &[&[u8]] = &[
+    b"APPEND",
+    b"BITFIELD",
+    b"DECR",
+    b"DECRBY",
+    b"EXPIRE",
+    b"EXPIREAT",
+    b"GETDEL",
+    b"GETEX",
+    b"GETSET",
+    b"GEOADD",
+    b"HDEL",
+    b"HINCRBY",
+    b"HINCRBYFLOAT",
+    b"HMSET",
+    b"HSET",
+    b"HSETNX",
+    b"INCR",
+    b"INCRBY",
+    b"INCRBYFLOAT",
+    b"LINSERT",
+    b"LPOP",
+    b"LPUSH",
+    b"LPUSHX",
+    b"LREM",
+    b"LSET",
+    b"LTRIM",
+    b"PERSIST",
+    b"PEXPIRE",
+    b"PEXPIREAT",
+    b"PFADD",
+    b"PSETEX",
+    b"RESTORE",
+    b"RPOP",
+    b"RPUSH",
+    b"RPUSHX",
+    b"SADD",
+    b"SREM",
+    b"SET",
+    b"SETBIT",
+    b"SETEX",
+    b"SETNX",
+    b"SETRANGE",
+    b"SPOP",
+    b"XACK",
+    b"XADD",
+    b"XAUTOCLAIM",
+    b"XCLAIM",
+    b"XDEL",
+    b"XSETID",
+    b"XTRIM",
+    b"ZADD",
+    b"ZINCRBY",
+    b"ZPOPMAX",
+    b"ZPOPMIN",
+    b"ZREM",
+    b"ZREMRANGEBYLEX",
+    b"ZREMRANGEBYRANK",
+    b"ZREMRANGEBYSCORE",
+    b"JSON.ARRAPPEND",
+    b"JSON.ARRINSERT",
+    b"JSON.ARRPOP",
+    b"JSON.ARRTRIM",
+    b"JSON.CLEAR",
+    b"JSON.DEL",
+    b"JSON.FORGET",
+    b"JSON.MERGE",
+    b"JSON.NUMINCRBY",
+    b"JSON.NUMMULTBY",
+    b"JSON.SET",
+    b"JSON.STRAPPEND",
+    b"JSON.TOGGLE",
+];
+
+enum CommandInvalidation {
+    None,
+    Keys(Vec<Vec<u8>>),
+    Clear,
+}
+
+fn bulk_arg(frame: &Frame) -> Option<&[u8]> {
+    match frame {
+        Frame::BulkString(Some(value)) => Some(value.as_ref()),
         _ => None,
+    }
+}
+
+/// Return the connection-local command reserved by managed cached clients.
+///
+/// These commands can disable tracking, change RESP protocol/reply semantics,
+/// or close/reset the data connection. Cached clients reject them before
+/// dispatch so callers cannot silently invalidate the owned lifecycle.
+pub(crate) fn managed_cache_state_command(frame: &Frame) -> Option<&'static str> {
+    let items = match frame {
+        Frame::Array(Some(items)) if !items.is_empty() => items,
+        _ => return None,
+    };
+    let command = bulk_arg(&items[0])?;
+
+    if command.eq_ignore_ascii_case(b"RESET") {
+        return Some("RESET");
+    }
+    if command.eq_ignore_ascii_case(b"HELLO") {
+        return Some("HELLO");
+    }
+    if command.eq_ignore_ascii_case(b"QUIT") {
+        return Some("QUIT");
+    }
+    if !command.eq_ignore_ascii_case(b"CLIENT") {
+        return None;
+    }
+
+    let subcommand = items.get(1).and_then(bulk_arg)?;
+    if subcommand.eq_ignore_ascii_case(b"TRACKING") {
+        Some("CLIENT TRACKING")
+    } else if subcommand.eq_ignore_ascii_case(b"CACHING") {
+        Some("CLIENT CACHING")
+    } else if subcommand.eq_ignore_ascii_case(b"REPLY") {
+        Some("CLIENT REPLY")
+    } else {
+        None
+    }
+}
+
+fn command_invalidation(frame: &Frame) -> CommandInvalidation {
+    let items = match frame {
+        Frame::Array(Some(items)) if !items.is_empty() => items,
+        _ => return CommandInvalidation::Clear,
+    };
+    let Some(command) = bulk_arg(&items[0]) else {
+        return CommandInvalidation::Clear;
+    };
+    let command: Vec<u8> = command.iter().map(u8::to_ascii_uppercase).collect();
+
+    if READ_ONLY_COMMANDS.contains(&command.as_slice()) {
+        return CommandInvalidation::None;
+    }
+
+    if FIRST_KEY_MUTATIONS.contains(&command.as_slice()) {
+        return items
+            .get(1)
+            .and_then(bulk_arg)
+            .map(|key| CommandInvalidation::Keys(vec![key.to_vec()]))
+            .unwrap_or(CommandInvalidation::Clear);
+    }
+
+    match command.as_slice() {
+        // XGROUP's first argument is the subcommand; its stream key is the
+        // second argument. In particular, CREATE ... MKSTREAM can change a
+        // cached TYPE response from `none` to `stream`.
+        b"XGROUP" => items
+            .get(2)
+            .and_then(bulk_arg)
+            .map(|key| CommandInvalidation::Keys(vec![key.to_vec()]))
+            .unwrap_or(CommandInvalidation::Clear),
+
+        // Every remaining argument is a key.
+        b"DEL" | b"UNLINK" => collect_keys(&items[1..]),
+
+        // Alternating key/value pairs.
+        b"MSET" | b"MSETNX" => {
+            if items.len() < 3 || items.len().is_multiple_of(2) {
+                return CommandInvalidation::Clear;
+            }
+            collect_keys(items[1..].iter().step_by(2))
+        }
+
+        // Both endpoints can change.
+        b"RENAME" | b"RENAMENX" | b"LMOVE" | b"BLMOVE" | b"RPOPLPUSH" | b"BRPOPLPUSH"
+        | b"SMOVE" => collect_keys(items.iter().skip(1).take(2)),
+
+        // Only the destination changes.
+        b"COPY" => collect_keys(items.iter().skip(2).take(1)),
+        b"BITOP" => collect_keys(items.iter().skip(2).take(1)),
+        b"GEOSEARCHSTORE" | b"PFMERGE" | b"SDIFFSTORE" | b"SINTERSTORE" | b"SUNIONSTORE"
+        | b"ZDIFFSTORE" | b"ZINTERSTORE" | b"ZUNIONSTORE" => {
+            collect_keys(items.iter().skip(1).take(1))
+        }
+
+        // Blocking pops use every argument except the trailing timeout as a
+        // key. More complex numkeys-based variants conservatively clear below.
+        b"BLPOP" | b"BRPOP" | b"BZPOPMAX" | b"BZPOPMIN" if items.len() >= 3 => {
+            collect_keys(items.iter().skip(1).take(items.len() - 2))
+        }
+
+        // Database switches and global mutations invalidate every local entry.
+        b"FLUSHALL" | b"FLUSHDB" | b"SELECT" | b"SWAPDB" => CommandInvalidation::Clear,
+
+        // Unknown commands may be module writes or future Redis mutations.
+        _ => CommandInvalidation::Clear,
+    }
+}
+
+/// Whether `frame` can change cached keyspace state.
+///
+/// Unknown and malformed commands return `true` so callers fail safely when
+/// Redis or a module adds a mutation this crate does not yet classify.
+pub(crate) fn command_may_mutate(frame: &Frame) -> bool {
+    !matches!(command_invalidation(frame), CommandInvalidation::None)
+}
+
+fn collect_keys<'a>(items: impl IntoIterator<Item = &'a Frame>) -> CommandInvalidation {
+    let keys: Option<Vec<Vec<u8>>> = items
+        .into_iter()
+        .map(|item| bulk_arg(item).map(<[u8]>::to_vec))
+        .collect();
+    match keys {
+        Some(keys) if !keys.is_empty() => CommandInvalidation::Keys(keys),
+        _ => CommandInvalidation::Clear,
     }
 }
 
@@ -123,6 +461,31 @@ struct Entry {
     frame: Frame,
     /// When the entry was stored, for the per-entry client TTL.
     stored_at: Instant,
+}
+
+/// Aggregate client-side cache counters.
+///
+/// The snapshot contains no Redis keys or command arguments, so it is safe to
+/// expose through diagnostics without leaking data or creating unbounded label
+/// cardinality.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheStatistics {
+    /// Responses served from the local cache.
+    pub hits: u64,
+    /// Cacheable requests that required a Redis roundtrip.
+    pub misses: u64,
+    /// Key or full-cache invalidation operations observed locally.
+    pub invalidations: u64,
+    /// Cached entries removed by invalidation, expiry, or capacity bounds.
+    pub evictions: u64,
+}
+
+/// A point-in-time invalidation token captured before a cacheable request is
+/// sent to Redis. The response may only be inserted if both values still match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CacheEpoch {
+    generation: u64,
+    key_epoch: u64,
 }
 
 /// The client-side cache: response entries keyed by the full command, plus a
@@ -143,6 +506,20 @@ pub struct CacheState {
     max_size: usize,
     /// Per-entry freshness deadline (`None` = no client TTL).
     ttl: Option<Duration>,
+    /// Advances for full-cache invalidations and whenever per-key epoch
+    /// bookkeeping is pruned.
+    generation: u64,
+    /// Latest invalidation epoch for each Redis key.
+    key_epochs: HashMap<Vec<u8>, u64>,
+    /// Monotonic source for per-key epochs within a generation.
+    next_key_epoch: u64,
+    /// Bound for `key_epochs`; never zero.
+    max_key_epochs: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    invalidations: AtomicU64,
+    evictions: AtomicU64,
+    recorder: Option<Arc<dyn MetricsRecorder>>,
 }
 
 impl Default for CacheState {
@@ -155,12 +532,36 @@ impl CacheState {
     /// Create a cache bounded to `max_size` entries (`0` = unbounded) with an
     /// optional per-entry client TTL.
     pub(crate) fn new(max_size: usize, ttl: Option<Duration>) -> Self {
+        Self::new_with_recorder(max_size, ttl, None)
+    }
+
+    /// Create a cache and optionally forward aggregate events to a metrics
+    /// recorder. The in-memory counters are always enabled.
+    pub(crate) fn new_with_recorder(
+        max_size: usize,
+        ttl: Option<Duration>,
+        recorder: Option<Arc<dyn MetricsRecorder>>,
+    ) -> Self {
         Self {
             entries: HashMap::new(),
             index: HashMap::new(),
             enabled: true,
             max_size,
             ttl,
+            generation: 0,
+            key_epochs: HashMap::new(),
+            next_key_epoch: 0,
+            max_key_epochs: if max_size == 0 {
+                DEFAULT_MAX_EPOCHS
+            } else {
+                max_size
+            }
+            .max(1),
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            invalidations: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+            recorder,
         }
     }
 
@@ -169,34 +570,92 @@ impl CacheState {
     /// the client TTL, so the caller fetches fresh from the server.
     pub(crate) fn get(&self, cache_key: &[u8]) -> Option<&Frame> {
         if !self.enabled {
+            self.record_event(CacheEvent::Miss, 1);
             return None;
         }
-        let entry = self.entries.get(cache_key)?;
+        let Some(entry) = self.entries.get(cache_key) else {
+            self.record_event(CacheEvent::Miss, 1);
+            return None;
+        };
         if let Some(ttl) = self.ttl
-            && entry.stored_at.elapsed() > ttl
+            && entry.stored_at.elapsed() >= ttl
         {
             // Expired: don't serve it. The entry is left in place and will be
             // overwritten by the re-fetch's insert (removing it would need
             // &mut, and the Tower read path only holds a read lock).
+            self.record_event(CacheEvent::Miss, 1);
             return None;
         }
+        self.record_event(CacheEvent::Hit, 1);
         Some(&entry.frame)
+    }
+
+    /// Capture the key and full-cache generations before dispatching a cache
+    /// miss to Redis.
+    ///
+    /// Pass this token to [`insert_if_current`](Self::insert_if_current). If a
+    /// server invalidation or local write races the request, the token no
+    /// longer matches and the stale response is discarded. Returns `None`
+    /// while caching is disabled so a read begun without invalidation tracking
+    /// can never populate the cache after tracking recovers.
+    pub(crate) fn snapshot_epoch(&self, redis_key: &[u8]) -> Option<CacheEpoch> {
+        self.enabled.then(|| CacheEpoch {
+            generation: self.generation,
+            key_epoch: self.key_epochs.get(redis_key).copied().unwrap_or(0),
+        })
     }
 
     /// Store `frame` under `cache_key`, recording the reverse-index link to
     /// `redis_key`. If the cache is bounded and full of *new* keys, one
     /// arbitrary existing entry is evicted first.
-    pub(crate) fn insert(&mut self, cache_key: Vec<u8>, redis_key: Vec<u8>, frame: Frame) {
+    #[cfg(test)]
+    pub(crate) fn insert(&mut self, cache_key: Vec<u8>, redis_key: Vec<u8>, frame: Frame) -> bool {
+        let Some(epoch) = self.snapshot_epoch(&redis_key) else {
+            return false;
+        };
+        self.insert_if_current(cache_key, redis_key, frame, epoch)
+    }
+
+    /// Store a response only if its invalidation epoch is still current.
+    ///
+    /// Returns `false` when caching is disabled or an invalidation raced the
+    /// Redis request. A rejected response is never visible through the cache.
+    pub(crate) fn insert_if_current(
+        &mut self,
+        cache_key: Vec<u8>,
+        redis_key: Vec<u8>,
+        frame: Frame,
+        epoch: CacheEpoch,
+    ) -> bool {
         // Don't populate the cache while tracking is unhealthy.
-        if !self.enabled {
-            return;
+        if !self.enabled || self.snapshot_epoch(&redis_key) != Some(epoch) {
+            return false;
         }
+
+        // Expired entries remain observable as misses on the read-only lookup
+        // path. Remove and count one when their replacement arrives.
+        let replacing_expired = self
+            .entries
+            .get(&cache_key)
+            .is_some_and(|entry| self.ttl.is_some_and(|ttl| entry.stored_at.elapsed() >= ttl));
+        if replacing_expired && self.remove_entry(&cache_key) {
+            self.record_event(CacheEvent::Eviction, 1);
+        }
+
         if self.max_size > 0
             && !self.entries.contains_key(&cache_key)
             && self.entries.len() >= self.max_size
             && let Some(victim) = self.entries.keys().next().cloned()
+            && self.remove_entry(&victim)
         {
-            self.remove(&victim);
+            self.record_event(CacheEvent::Eviction, 1);
+        }
+
+        // An exact-key overwrite should normally point at the same Redis key,
+        // but keep the reverse index correct even for manually constructed
+        // state in tests or downstream integrations.
+        if self.entries.contains_key(&cache_key) {
+            self.remove_entry(&cache_key);
         }
         self.index
             .entry(redis_key.clone())
@@ -210,21 +669,55 @@ impl CacheState {
                 stored_at: Instant::now(),
             },
         );
+        true
     }
 
     /// Evict every cache entry that depends on `redis_key`.
     pub(crate) fn invalidate(&mut self, redis_key: &[u8]) {
+        self.advance_key_epoch(redis_key);
+        self.record_event(CacheEvent::Invalidation, 1);
         if let Some(cache_keys) = self.index.remove(redis_key) {
+            let count = cache_keys.len() as u64;
             for ck in cache_keys {
                 self.entries.remove(&ck);
             }
+            self.record_event(CacheEvent::Eviction, count);
         }
     }
 
     /// Drop all cached entries and index links.
     pub(crate) fn clear(&mut self) {
+        self.advance_generation();
+        self.key_epochs.clear();
+        self.next_key_epoch = 0;
+        self.record_event(CacheEvent::Invalidation, 1);
+        let evicted = self.entries.len() as u64;
         self.entries.clear();
         self.index.clear();
+        self.record_event(CacheEvent::Eviction, evicted);
+    }
+
+    /// Synchronously invalidate cache state affected by `request`.
+    ///
+    /// Common single- and multi-key mutations invalidate only their affected
+    /// keys. Known read-only commands preserve the cache. Unknown or malformed
+    /// commands conservatively clear it, which is safe for module commands and
+    /// future Redis mutations the client does not yet recognize.
+    ///
+    /// Cached services call this both before dispatch and after a successful
+    /// write. Advancing the epoch twice is intentional: the first call removes
+    /// values that predate the write, while the second rejects reads that raced
+    /// the write window (including when `NOLOOP` suppresses server pushes).
+    pub(crate) fn invalidate_for_command(&mut self, request: &Frame) {
+        match command_invalidation(request) {
+            CommandInvalidation::None => {}
+            CommandInvalidation::Keys(keys) => {
+                for key in keys {
+                    self.invalidate(&key);
+                }
+            }
+            CommandInvalidation::Clear => self.clear(),
+        }
     }
 
     /// Disable caching because the tracking connection was lost: clears all
@@ -257,15 +750,67 @@ impl CacheState {
         self.entries.is_empty()
     }
 
+    /// Return a lock-free snapshot of the aggregate cache counters.
+    pub fn statistics(&self) -> CacheStatistics {
+        CacheStatistics {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            invalidations: self.invalidations.load(Ordering::Relaxed),
+            evictions: self.evictions.load(Ordering::Relaxed),
+        }
+    }
+
     /// Remove a single entry and its reverse-index link.
-    fn remove(&mut self, cache_key: &[u8]) {
-        if let Some(entry) = self.entries.remove(cache_key)
-            && let Some(set) = self.index.get_mut(&entry.redis_key)
-        {
+    fn remove_entry(&mut self, cache_key: &[u8]) -> bool {
+        let Some(entry) = self.entries.remove(cache_key) else {
+            return false;
+        };
+        if let Some(set) = self.index.get_mut(&entry.redis_key) {
             set.remove(cache_key);
             if set.is_empty() {
                 self.index.remove(&entry.redis_key);
             }
+        }
+        true
+    }
+
+    fn advance_key_epoch(&mut self, redis_key: &[u8]) {
+        if !self.key_epochs.contains_key(redis_key) && self.key_epochs.len() >= self.max_key_epochs
+        {
+            // Advancing the generation before pruning ensures a miss that
+            // captured a now-removed key epoch can never compare equal again.
+            self.advance_generation();
+            self.key_epochs.clear();
+            self.next_key_epoch = 0;
+        }
+
+        if self.next_key_epoch == u64::MAX {
+            self.advance_generation();
+            self.key_epochs.clear();
+            self.next_key_epoch = 0;
+        }
+        self.next_key_epoch += 1;
+        self.key_epochs
+            .insert(redis_key.to_vec(), self.next_key_epoch);
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn record_event(&self, event: CacheEvent, count: u64) {
+        if count == 0 {
+            return;
+        }
+        let counter = match event {
+            CacheEvent::Hit => &self.hits,
+            CacheEvent::Miss => &self.misses,
+            CacheEvent::Invalidation => &self.invalidations,
+            CacheEvent::Eviction => &self.evictions,
+        };
+        counter.fetch_add(count, Ordering::Relaxed);
+        if let Some(recorder) = &self.recorder {
+            recorder.cache_event(event, count);
         }
     }
 }
@@ -274,6 +819,26 @@ impl CacheState {
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingMetrics {
+        events: Mutex<Vec<(CacheEvent, u64)>>,
+    }
+
+    impl MetricsRecorder for RecordingMetrics {
+        fn command_completed(
+            &self,
+            _command: &str,
+            _duration: Duration,
+            _error: Option<crate::metrics_layer::ErrorKind>,
+        ) {
+        }
+
+        fn cache_event(&self, event: CacheEvent, count: u64) {
+            self.events.lock().unwrap().push((event, count));
+        }
+    }
 
     fn bulk(s: &str) -> Frame {
         Frame::BulkString(Some(Bytes::from(s.to_string())))
@@ -359,6 +924,34 @@ mod tests {
     }
 
     #[test]
+    fn parse_invalidation_accepts_resp3_simple_strings() {
+        let f = Frame::Push(vec![
+            Frame::SimpleString(Bytes::from_static(b"invalidate")),
+            Frame::Array(Some(vec![Frame::SimpleString(Bytes::from_static(b"key"))])),
+        ]);
+        assert_eq!(parse_invalidation(&f), Some(vec![b"key".to_vec()]));
+    }
+
+    #[test]
+    fn malformed_recognized_invalidation_fails_safe_to_full_clear() {
+        let f = Frame::Push(vec![
+            Frame::SimpleString(Bytes::from_static(b"invalidate")),
+            Frame::Array(Some(vec![Frame::Integer(42)])),
+        ]);
+        assert_eq!(parse_invalidation(&f), Some(Vec::new()));
+    }
+
+    #[test]
+    fn malformed_or_missing_invalidation_payload_fails_safe_to_full_clear() {
+        for frame in [
+            Frame::Push(vec![bulk("invalidate")]),
+            Frame::Push(vec![bulk("invalidate"), bulk("not-an-array")]),
+        ] {
+            assert_eq!(parse_invalidation(&frame), Some(Vec::new()));
+        }
+    }
+
+    #[test]
     fn parse_invalidation_flush_is_empty() {
         let f = Frame::Push(vec![bulk("invalidate"), Frame::Null]);
         assert_eq!(parse_invalidation(&f), Some(Vec::new()));
@@ -368,6 +961,29 @@ mod tests {
     fn parse_invalidation_non_invalidate_is_none() {
         let f = Frame::Push(vec![bulk("other"), Frame::Null]);
         assert!(parse_invalidation(&f).is_none());
+    }
+
+    #[test]
+    fn managed_connection_state_commands_are_detected_without_blocking_diagnostics() {
+        for (parts, expected) in [
+            (&["CLIENT", "TRACKING", "OFF"][..], "CLIENT TRACKING"),
+            (&["client", "caching", "yes"][..], "CLIENT CACHING"),
+            (&["CLIENT", "REPLY", "OFF"][..], "CLIENT REPLY"),
+            (&["RESET"][..], "RESET"),
+            (&["HELLO", "2"][..], "HELLO"),
+            (&["QUIT"][..], "QUIT"),
+        ] {
+            assert_eq!(managed_cache_state_command(&frame(parts)), Some(expected));
+        }
+
+        for parts in [
+            &["CLIENT", "TRACKINGINFO"][..],
+            &["CLIENT", "GETREDIR"][..],
+            &["CLIENT", "ID"][..],
+            &["GET", "key"][..],
+        ] {
+            assert_eq!(managed_cache_state_command(&frame(parts)), None);
+        }
     }
 
     #[test]
@@ -393,6 +1009,18 @@ mod tests {
         let (k2, rk2) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
         state.insert(k2.clone(), rk2, bulk("vb"));
         assert!(state.get(&k2).is_some());
+    }
+
+    #[test]
+    fn disabled_cache_does_not_issue_an_insertion_epoch() {
+        let mut state = CacheState::default();
+        let (_, redis_key) = extract_cache_entry(&frame(&["GET", "key"])).unwrap();
+
+        state.disable();
+        assert!(state.snapshot_epoch(&redis_key).is_none());
+
+        state.enable();
+        assert!(state.snapshot_epoch(&redis_key).is_some());
     }
 
     #[test]
@@ -425,5 +1053,164 @@ mod tests {
             state.get(&k).is_some(),
             "no TTL configured -> never expires"
         );
+    }
+
+    #[test]
+    fn zero_ttl_never_serves_a_cached_response() {
+        let mut state = CacheState::new(1, Some(Duration::ZERO));
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(cache_key.clone(), redis_key, bulk("value"));
+        assert!(state.get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn key_invalidation_rejects_a_racing_miss() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let before_request = state.snapshot_epoch(&redis_key).unwrap();
+
+        state.invalidate(&redis_key);
+
+        assert!(!state.insert_if_current(
+            cache_key.clone(),
+            redis_key,
+            bulk("stale"),
+            before_request,
+        ));
+        assert!(state.get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn full_clear_rejects_every_racing_miss() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let before_request = state.snapshot_epoch(&redis_key).unwrap();
+
+        state.clear();
+
+        assert!(!state.insert_if_current(cache_key, redis_key, bulk("stale"), before_request,));
+    }
+
+    #[test]
+    fn pruning_key_epochs_advances_the_global_generation() {
+        let mut state = CacheState {
+            max_key_epochs: 1,
+            ..CacheState::default()
+        };
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "old"])).unwrap();
+        let before_prune = state.snapshot_epoch(&redis_key).unwrap();
+
+        state.invalidate(b"first");
+        state.invalidate(b"second"); // prunes `first` before recording `second`
+
+        assert_eq!(state.key_epochs.len(), 1);
+        assert!(!state.insert_if_current(cache_key, redis_key, bulk("stale"), before_prune,));
+    }
+
+    #[test]
+    fn local_writes_invalidate_only_known_keys_and_advance_twice() {
+        let mut state = CacheState::default();
+        let (a_cache_key, a_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let (b_cache_key, b_key) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
+        state.insert(a_cache_key.clone(), a_key.clone(), bulk("old-a"));
+        state.insert(b_cache_key.clone(), b_key, bulk("old-b"));
+
+        state.invalidate_for_command(&frame(&["SET", "a", "new-a"]));
+        let during_write = state.snapshot_epoch(&a_key).unwrap();
+        state.invalidate_for_command(&frame(&["SET", "a", "new-a"]));
+
+        assert!(state.get(&a_cache_key).is_none());
+        assert!(state.get(&b_cache_key).is_some());
+        assert!(!state.insert_if_current(a_cache_key, a_key, bulk("raced"), during_write));
+    }
+
+    #[test]
+    fn known_reads_preserve_cache_and_unknown_commands_clear_it() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(cache_key.clone(), redis_key.clone(), bulk("value"));
+
+        state.invalidate_for_command(&frame(&["TTL", "a"]));
+        assert!(state.get(&cache_key).is_some());
+
+        state.invalidate_for_command(&frame(&["FUTURE.WRITE", "a"]));
+        assert!(state.get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn mutation_classifier_handles_reads_stateful_commands_and_xgroup_key() {
+        assert!(!command_may_mutate(&frame(&["TTL", "a"])));
+        assert!(command_may_mutate(&frame(&["SET", "a", "value"])));
+        assert!(command_may_mutate(&frame(&["CLIENT", "TRACKING", "OFF"])));
+
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["TYPE", "stream-key"])).unwrap();
+        state.insert(cache_key.clone(), redis_key, bulk("none"));
+        state.invalidate_for_command(&frame(&[
+            "XGROUP",
+            "CREATE",
+            "stream-key",
+            "group",
+            "$",
+            "MKSTREAM",
+        ]));
+        assert!(state.get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn cache_statistics_count_hits_misses_invalidations_and_evictions() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+
+        assert!(state.get(&cache_key).is_none());
+        state.insert(cache_key.clone(), redis_key.clone(), bulk("value"));
+        assert!(state.get(&cache_key).is_some());
+        state.invalidate(&redis_key);
+
+        assert_eq!(
+            state.statistics(),
+            CacheStatistics {
+                hits: 1,
+                misses: 1,
+                invalidations: 1,
+                evictions: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn cache_events_are_forwarded_to_the_metrics_recorder() {
+        let recorder = Arc::new(RecordingMetrics::default());
+        let metrics: Arc<dyn MetricsRecorder> = recorder.clone();
+        let mut state = CacheState::new_with_recorder(1, None, Some(metrics));
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+
+        assert!(state.get(&cache_key).is_none());
+        state.insert(cache_key.clone(), redis_key.clone(), bulk("value"));
+        assert!(state.get(&cache_key).is_some());
+        state.invalidate(&redis_key);
+
+        assert_eq!(
+            *recorder.events.lock().unwrap(),
+            vec![
+                (CacheEvent::Miss, 1),
+                (CacheEvent::Hit, 1),
+                (CacheEvent::Invalidation, 1),
+                (CacheEvent::Eviction, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn replacing_an_expired_entry_counts_an_eviction() {
+        let mut state = CacheState::new(1, Some(Duration::from_millis(1)));
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        state.insert(cache_key.clone(), redis_key.clone(), bulk("old"));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(state.get(&cache_key).is_none());
+
+        state.insert(cache_key, redis_key, bulk("fresh"));
+
+        assert_eq!(state.statistics().evictions, 1);
     }
 }

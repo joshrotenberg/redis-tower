@@ -305,16 +305,18 @@ impl Command for Auth {
     }
 }
 
-/// CLIENT TRACKING ON|OFF \[REDIRECT client-id\] \[PREFIX prefix\] \[BCAST\] \[OPTIN\] \[OPTOUT\]
+/// CLIENT TRACKING ON|OFF \[REDIRECT client-id\] \[PREFIX prefix\] \[BCAST\] \[OPTIN\] \[OPTOUT\] \[NOLOOP\]
 ///
 /// Enable or disable server-assisted client-side caching.
 #[derive(Clone)]
 pub struct ClientTracking {
     enabled: bool,
+    redirect: Option<i64>,
     bcast: bool,
-    prefixes: Vec<String>,
+    prefixes: Vec<Bytes>,
     optin: bool,
     optout: bool,
+    noloop: bool,
 }
 
 impl ClientTracking {
@@ -322,10 +324,12 @@ impl ClientTracking {
     pub fn on() -> Self {
         Self {
             enabled: true,
+            redirect: None,
             bcast: false,
             prefixes: Vec::new(),
             optin: false,
             optout: false,
+            noloop: false,
         }
     }
 
@@ -333,34 +337,66 @@ impl ClientTracking {
     pub fn off() -> Self {
         Self {
             enabled: false,
+            redirect: None,
             bcast: false,
             prefixes: Vec::new(),
             optin: false,
             optout: false,
+            noloop: false,
         }
+    }
+
+    /// Redirect invalidation messages to another connection's client ID.
+    ///
+    /// The ID can be obtained with [`ClientId`]. Redirecting is useful when a
+    /// dedicated RESP3 connection owns the invalidation push stream while a
+    /// separate connection executes data commands.
+    pub fn redirect(mut self, client_id: i64) -> Self {
+        self.redirect = Some(client_id);
+        self
     }
 
     /// Enable broadcasting mode (invalidate all keys matching prefixes).
     pub fn bcast(mut self) -> Self {
         self.bcast = true;
+        self.optin = false;
+        self.optout = false;
         self
     }
 
-    /// Add a key prefix to track (only with BCAST mode).
-    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.prefixes.push(prefix.into());
+    /// Add a binary-safe key prefix to track and enable BCAST mode.
+    pub fn prefix(mut self, prefix: impl AsRef<[u8]>) -> Self {
+        self.bcast = true;
+        self.optin = false;
+        self.optout = false;
+        self.prefixes.push(Bytes::copy_from_slice(prefix.as_ref()));
         self
     }
 
     /// Enable opt-in mode (only track keys after CLIENT CACHING YES).
     pub fn optin(mut self) -> Self {
+        self.bcast = false;
+        self.prefixes.clear();
         self.optin = true;
+        self.optout = false;
         self
     }
 
     /// Enable opt-out mode (track all keys, skip after CLIENT CACHING NO).
     pub fn optout(mut self) -> Self {
+        self.bcast = false;
+        self.prefixes.clear();
+        self.optin = false;
         self.optout = true;
+        self
+    }
+
+    /// Suppress invalidations caused by writes on the tracked connection.
+    ///
+    /// Cached clients must pair this with synchronous local write invalidation
+    /// so their own writes cannot leave stale entries behind.
+    pub fn noloop(mut self) -> Self {
+        self.noloop = true;
         self
     }
 }
@@ -374,18 +410,29 @@ impl Command for ClientTracking {
             bulk("TRACKING"),
             bulk(if self.enabled { "ON" } else { "OFF" }),
         ];
-        if self.bcast {
-            args.push(bulk("BCAST"));
-        }
-        for prefix in &self.prefixes {
-            args.push(bulk("PREFIX"));
-            args.push(bulk(prefix.as_str()));
-        }
-        if self.optin {
-            args.push(bulk("OPTIN"));
-        }
-        if self.optout {
-            args.push(bulk("OPTOUT"));
+        // Redis accepts no options with OFF. Omitting any options that were
+        // added to an OFF builder keeps the serialized command valid.
+        if self.enabled {
+            if let Some(client_id) = self.redirect {
+                args.push(bulk("REDIRECT"));
+                args.push(bulk(client_id.to_string()));
+            }
+            if self.bcast {
+                args.push(bulk("BCAST"));
+            }
+            for prefix in &self.prefixes {
+                args.push(bulk("PREFIX"));
+                args.push(bulk(prefix));
+            }
+            if self.optin {
+                args.push(bulk("OPTIN"));
+            }
+            if self.optout {
+                args.push(bulk("OPTOUT"));
+            }
+            if self.noloop {
+                args.push(bulk("NOLOOP"));
+            }
         }
         array(args)
     }
@@ -4458,6 +4505,78 @@ mod tests {
             }
             _ => panic!("expected array"),
         }
+    }
+
+    #[test]
+    fn client_tracking_redirect_noloop_to_frame() {
+        let cmd = ClientTracking::on().redirect(42).noloop();
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("TRACKING"),
+                bulk("ON"),
+                bulk("REDIRECT"),
+                bulk("42"),
+                bulk("NOLOOP"),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_tracking_prefix_is_binary_safe() {
+        let prefix = [0, 0xff, b':'];
+        let cmd = ClientTracking::on().prefix(prefix);
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("TRACKING"),
+                bulk("ON"),
+                bulk("BCAST"),
+                bulk("PREFIX"),
+                bulk(prefix),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_tracking_mode_builders_keep_modes_compatible() {
+        let optin = ClientTracking::on().bcast().prefix("ignored:").optin();
+        assert_eq!(
+            optin.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("TRACKING"),
+                bulk("ON"),
+                bulk("OPTIN"),
+            ])
+        );
+
+        let bcast = ClientTracking::on().optout().prefix("active:");
+        assert_eq!(
+            bcast.to_frame(),
+            array(vec![
+                bulk("CLIENT"),
+                bulk("TRACKING"),
+                bulk("ON"),
+                bulk("BCAST"),
+                bulk("PREFIX"),
+                bulk("active:"),
+            ])
+        );
+    }
+
+    #[test]
+    fn client_tracking_off_omits_incompatible_options() {
+        let cmd = ClientTracking::off()
+            .redirect(42)
+            .noloop()
+            .prefix("unused:");
+        assert_eq!(
+            cmd.to_frame(),
+            array(vec![bulk("CLIENT"), bulk("TRACKING"), bulk("OFF")])
+        );
     }
 
     // -- Echo --

@@ -34,6 +34,7 @@ multiplexed clients (the only crate that sees all of them).
 | `RedisConnection` | `redis-tower-core` | Basic single-connection client |
 | `RedisClient` | `redis-tower/client.rs` | Arc<Mutex<RedisConnection>>, cloneable |
 | `MultiplexedClient` | `redis-tower/multiplexed.rs` | Auto-pipeline, single TCP conn, high concurrency |
+| `CachedMultiplexedClient` | `redis-tower/{multiplexed,cache_layer,caching}.rs` | Cloneable standalone CSC, auto-pipelined misses, owned RESP3 invalidation tracking |
 | `ConnectionPool<S>` | `redis-tower/pool.rs` | Generic pool; works with any `RedisExecutor` impl |
 | `ClusterConnection` | `redis-tower-cluster/connection.rs` | Cluster-aware, MOVED/ASK redirect handling |
 | `MultiplexedClusterClient` | `redis-tower-cluster/multiplexed.rs` | Per-node auto-pipeline, no global mutex |
@@ -43,7 +44,7 @@ multiplexed clients (the only crate that sees all of them).
 | `SyncClient` | `redis-tower-sync/lib.rs` | Blocking wrapper, uses tokio Runtime internally |
 | `UniversalClient` | `redis-tower-client/lib.rs` | Enum over Standalone/Cluster/Sentinel multiplexed clients; `connect_url` picks the variant by scheme (`redis://`, `redis+cluster://`, `redis+sentinel://h1,h2/master`) |
 
-`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClient`, `MultiplexedClusterClient`, and `UniversalClient`.
+`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `MultiplexedClient`, `CachedMultiplexedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClusterClient`, and `UniversalClient`.
 
 ### Cluster-wide SCAN (`redis-tower-cluster/scan_stream.rs`)
 
@@ -62,7 +63,10 @@ All live in `redis-tower/src/`:
 - `auto_pipeline.rs` -- `AutoPipelineService`: batches concurrent calls; bounded queue with real back-pressure (`poll_ready` awaits capacity via `PollSender`), opt-in `QueueFull` load-shedding (`AutoPipelineConfig::shed_load_on_full`)
 - `tracing_layer.rs` -- span per command with OTel DB semconv fields (`db.system`, `db.statement`, `server.address`). Separately, `redis-tower-core`'s connectors emit a `redis.connect` span (fields `server.address`, `tls`, plus `server.tls.hostname` for TLS) around every transport connect, so connection setup is observable even without the command layer.
 - `metrics_layer.rs` -- `MetricsRecorder` hook with `ErrorKind` enum (7 variants, not just `bool`)
-- `cache_layer.rs` / `caching.rs` -- client-side caching
+- `cache_layer.rs` / `caching.rs` -- cloneable standalone client-side caching;
+  broadcast/server-default/opt-in tracking, per-key epochs, local write
+  invalidation, bounded TTL/capacity/statistics, and cache-disable/reconnect
+  lifecycle
 - `circuit_breaker.rs` -- Redis-aware adapter over `tower-resilience-circuitbreaker`; connection/timeout classifier, shared state handle, deprecated legacy aliases
 - `command_timeout.rs` -- `CommandTimeoutLayer`: per-command deadline
 - `retry.rs` -- `RetryLayer`/`RetryService`: idempotent-aware automatic retries at the **command altitude** (needs `Command::idempotent`, so it sits above the frame lowering). Default policy `idempotent && err.is_retryable()`, configurable attempt budget and exponential backoff + jitter (`RetryPolicy`). Opt in on a client via `.retry(policy)`, which returns a `RetryClient` bridging through `ExecutorService`. A non-idempotent write is never re-sent, so a retry cannot silently duplicate data.

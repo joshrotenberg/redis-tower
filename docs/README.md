@@ -14,6 +14,8 @@ If you are evaluating or adopting the project, start here:
 - [Production tuning](PRODUCTION-TUNING.md) explains client selection,
   pipeline and pool sizing, timeouts, backpressure, reconnects, observability,
   and graceful shutdown.
+- [Client-side caching](CLIENT-SIDE-CACHING.md) covers cloneable cached clients,
+  tracking modes, invalidation races, failure behavior, and cache metrics.
 - The [feature matrix](FEATURE-MATRIX.md) is the canonical, evidence-linked
   comparison with other Redis clients.
 
