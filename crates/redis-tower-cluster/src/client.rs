@@ -1,7 +1,10 @@
 //! Shared, cloneable cluster client.
 
+use std::future::Future;
 use std::sync::Arc;
 
+use redis_tower::TransactionExecutor;
+use redis_tower_core::Frame;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::Mutex;
 
@@ -121,12 +124,41 @@ impl ClusterClient {
     }
 }
 
+/// Delegate a complete cluster transaction while holding the cluster-wide
+/// mutex for slot validation, node selection, and the full wire exchange.
+impl TransactionExecutor for ClusterClient {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            inner
+                .lock()
+                .await
+                .execute_transaction(watch_frames, command_frames)
+                .await
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use redis_tower_commands::Ping;
     use redis_tower_core::WithDeadline;
     use std::time::Duration;
+
+    fn assert_transaction_executor<T: TransactionExecutor>() {}
+
+    #[test]
+    fn cluster_client_supports_generic_execution_and_transactions() {
+        assert_transaction_executor::<ClusterClient>();
+        const { assert!(!ClusterClient::SUPPORTS_TRANSACTION_RETRY) }
+    }
 
     #[tokio::test]
     async fn command_deadline_includes_cluster_mutex_wait() {

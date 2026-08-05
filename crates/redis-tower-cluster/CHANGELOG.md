@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- node-grouped `ClusterPipeline` execution with per-command redirect handling,
+  explicit cross-slot `MGET`/`MSET`/`DEL` helpers, and slot-pinned
+  WATCH/MULTI/EXEC support on `ClusterConnection` and `ClusterClient`; keyed
+  transactions fail closed on unknown ownership, never replay redirects, and
+  reject closure-based transaction helpers before WATCH
 - reusable 3-master/3-replica live-cluster fixtures, deterministic ASK/MOVED
   reshard coverage, explicit replica-promotion validation, and cluster churn
   benchmark reporting
@@ -19,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- count `max_redirects` as actual redirect/transient follow-ups after the
+  initial attempt, including chained ASK/MOVED responses, without target setup
+  or backoff after the budget is exhausted
 - quarantine a direct node connection after canceled or incomplete command I/O,
   and send `ASKING` with its redirected command as one atomic exchange
 - route both MIGRATE forms by their source key and keep keyless server/operations families on the default node

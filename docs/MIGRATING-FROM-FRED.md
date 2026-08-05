@@ -234,16 +234,15 @@ match Transaction::new()
         # let _ = (value, observed);
     }
     TransactionResult::Aborted => {
-        // A watched key changed; rebuild the transaction or use
-        // transaction_with_retries for a bounded retry loop.
+        // A watched key changed; rebuild this already-known transaction.
     }
 }
 ```
 
 The standard `MultiplexedClient` sends the complete WATCH/MULTI/EXEC sequence
-as one contiguous worker request. For complex read-compute-write logic that
-must retain exclusive access, use a dedicated `RedisConnection` or an
-appropriately sized connection pool.
+as one contiguous worker request. For read-compute-write logic and a bounded
+retry loop, call `transaction_with_retries` on a dedicated `RedisConnection`
+or an exclusive connection checked out from an appropriately sized pool.
 
 ## Pooling and blocking commands
 

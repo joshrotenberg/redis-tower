@@ -10,8 +10,10 @@
 //! - Read-heavy workloads (GET, HGET, etc.)
 //! - Situations where connection pool overhead is undesirable
 //!
-//! For transactions (MULTI/EXEC) or commands that require exclusive
-//! connection access, use [`RedisConnection`] directly or via
+//! Direct [`Transaction`](crate::Transaction) execution submits one atomic
+//! WATCH/MULTI/EXEC batch. Workflows that need separate calls while holding
+//! exclusive connection state, including the closure-based `transaction`
+//! helpers and blocking commands, require [`RedisConnection`] directly or via
 //! [`ConnectionPool`](crate::pool::ConnectionPool).
 //!
 //! # Example
@@ -45,6 +47,7 @@ use tower_service::Service;
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
 use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::command_adapter::CommandAdapter;
+use crate::pipeline::PipelineExecutor;
 use crate::reconnect::{ConnectionEventBus, ConnectionFactory};
 use crate::retry::{RetryClient, RetryPolicy};
 use crate::transaction::TransactionExecutor;
@@ -63,9 +66,9 @@ use crate::transaction::TransactionExecutor;
 /// `MultiplexedClient` is `Clone + Send + Sync`. All clones share the same
 /// background worker task and a single TCP connection. Concurrent callers from
 /// any number of tasks are safe; their commands are automatically batched into
-/// pipelines. For workloads requiring exclusive connection access (transactions,
-/// blocking commands), use [`RedisConnection`] directly or
-/// [`ConnectionPool`](crate::pool::ConnectionPool).
+/// pipelines. Direct [`Transaction`](crate::Transaction) values are supported;
+/// for workflows requiring exclusive connection access across separate calls,
+/// use [`RedisConnection`] directly or [`ConnectionPool`](crate::pool::ConnectionPool).
 ///
 /// # Blocking commands
 ///
@@ -115,6 +118,13 @@ use crate::transaction::TransactionExecutor;
 /// atomically here (the whole WATCH/MULTI/EXEC sequence is sent as one
 /// contiguous pipeline via [`AutoPipelineService::call_pipeline`], so no other
 /// task's commands interleave).
+///
+/// The closure-based [`transaction()`](crate::transaction()) and
+/// [`transaction_with_retries`](crate::transaction_with_retries) helpers are
+/// rejected before WATCH because their read/build window spans separate queue
+/// submissions. A direct [`Transaction`](crate::Transaction) may include WATCH
+/// when its body is already known; read/compute/build retries require a
+/// dedicated [`RedisConnection`].
 ///
 /// Do **not** drive a transaction with the raw `Multi`/`Exec` command builders
 /// over [`execute`](Self::execute): each `execute` is an independent
@@ -431,6 +441,29 @@ where
     }
 }
 
+/// Explicit pipelining for the standard multiplexed client.
+///
+/// All frames are submitted as one [`AutoPipelineService::call_pipeline`]
+/// request, so they remain contiguous on the shared connection and their raw
+/// response frames are returned in the same order. Cloning the service handle
+/// keeps the returned future independent of the caller's borrow while retaining
+/// `call_pipeline`'s cancellation behavior: if the future is dropped before the
+/// worker flushes it, the queued batch is pruned rather than sent after its
+/// caller has gone away.
+///
+/// Only the default `AutoPipelineService`-backed client supports this. A
+/// layered client built with [`from_layered`](MultiplexedClient::from_layered)
+/// has no atomic multi-frame call surface.
+impl PipelineExecutor for MultiplexedClient<AutoPipelineService> {
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+        let mut svc = self.inner.clone().into_inner();
+        async move { svc.call_pipeline(frames).await }
+    }
+}
+
 /// Atomic MULTI/EXEC for the standard multiplexed client.
 ///
 /// The WATCH/MULTI/commands/EXEC frames are sent as one contiguous batch via
@@ -442,6 +475,8 @@ where
 /// with [`from_layered`](MultiplexedClient::from_layered) has no
 /// `call_pipeline`).
 impl TransactionExecutor for MultiplexedClient<AutoPipelineService> {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
     fn execute_transaction(
         &mut self,
         watch_frames: Vec<Frame>,
@@ -535,6 +570,109 @@ mod tests {
         // The standard client supports atomic MULTI/EXEC via call_pipeline.
         fn assert_txn_executor<T: TransactionExecutor>() {}
         assert_txn_executor::<MultiplexedClient>();
+    }
+
+    #[test]
+    fn multiplexed_client_is_pipeline_executor() {
+        fn assert_pipeline_executor<T: PipelineExecutor>() {}
+        assert_pipeline_executor::<MultiplexedClient>();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipeline_executor_preserves_binary_frames_and_response_order() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client_stream));
+        let mut client = MultiplexedClient::from_connection(conn);
+
+        let binary_key = Bytes::from_static(b"key:\0\xff");
+        let binary_value = Bytes::from_static(b"value:\0\x80\xff");
+        let requests = vec![
+            array(vec![
+                bulk("SET"),
+                Frame::BulkString(Some(binary_key.clone())),
+                Frame::BulkString(Some(binary_value.clone())),
+            ]),
+            array(vec![
+                bulk("GET"),
+                Frame::BulkString(Some(binary_key.clone())),
+            ]),
+        ];
+        let expected_requests = requests.clone();
+        let responses = vec![
+            Frame::SimpleString(Bytes::from_static(b"OK")),
+            Frame::BulkString(Some(binary_value)),
+        ];
+        let expected_responses = responses.clone();
+
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(server_stream),
+                redis_tower_core::RespCodec::new(),
+            );
+            for expected in expected_requests {
+                assert_eq!(framed.next().await.unwrap().unwrap(), expected);
+            }
+            for response in responses {
+                framed.send(response).await.unwrap();
+            }
+        });
+
+        let actual = PipelineExecutor::execute_pipeline(&mut client, requests)
+            .await
+            .unwrap();
+        assert_eq!(actual, expected_responses);
+
+        server.await.unwrap();
+        client.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_pipeline_executor_request_is_pruned_before_wire() {
+        use tokio::io::AsyncReadExt;
+
+        let (client_stream, mut server_stream) = tokio::net::UnixStream::pair().unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client_stream));
+        let batch_window = Duration::from_millis(200);
+        let mut client = MultiplexedClient::from_connection_with_config(
+            conn,
+            AutoPipelineConfig {
+                batch_window,
+                ..AutoPipelineConfig::default()
+            },
+        );
+
+        let request = array(vec![
+            bulk("SET"),
+            bulk("cancelled-pipeline"),
+            bulk("must-not-land"),
+        ]);
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                PipelineExecutor::execute_pipeline(&mut client, vec![request]),
+            )
+            .await
+            .is_err(),
+            "pipeline unexpectedly completed without a server response"
+        );
+
+        let mut bytes = [0u8; 128];
+        assert!(
+            tokio::time::timeout(
+                batch_window + Duration::from_millis(100),
+                server_stream.read(&mut bytes),
+            )
+            .await
+            .is_err(),
+            "a cancelled multiplexed pipeline reached the Redis socket"
+        );
+
+        client.shutdown().await;
     }
 
     #[tokio::test]

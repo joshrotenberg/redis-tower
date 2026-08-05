@@ -1,10 +1,10 @@
 //! Redis transactions (MULTI/EXEC) with optional WATCH support.
 //!
 //! [`Transaction`] builds a sequence of commands that are executed atomically
-//! via MULTI/EXEC. For optimistic locking, use [`Transaction::watch`] to
-//! observe keys before the transaction; if any watched key is modified by
-//! another client, the transaction is aborted and
-//! [`TransactionResult::Aborted`] is returned.
+//! via MULTI/EXEC. [`Transaction::watch`] protects a body that is already
+//! known; if any watched key is modified before EXEC, the transaction is
+//! aborted and [`TransactionResult::Aborted`] is returned. Read/compute/build
+//! optimistic locking uses [`transaction`] with an exclusive connection.
 //!
 //! # Example
 //!
@@ -45,10 +45,36 @@ use crate::pipeline::{PipelineResults, ResponseParser};
 /// ## Exclusive access
 ///
 /// Transactions require exclusive access to a single connection for the
-/// duration of WATCH/MULTI/EXEC. The `Arc<Mutex<C>>` blanket impl satisfies
-/// this automatically: the mutex is locked for the entire transaction call,
-/// preventing any other caller from interleaving commands.
+/// duration of WATCH/MULTI/EXEC. Direct [`Transaction::execute`] calls satisfy
+/// this on the shared implementations by submitting or locking the complete
+/// exchange at once. The closure-based [`transaction`] helpers additionally
+/// span a user-supplied read/build window and are therefore available only on
+/// executors that can reserve one connection across separate calls.
 pub trait TransactionExecutor {
+    /// Whether the executor can keep a standalone WATCH active on the same
+    /// physical connection across the read/build window used by
+    /// [`transaction`] and [`transaction_with_retries`].
+    ///
+    /// Shared and routed executors set this to `false`: locking or routing each
+    /// call independently cannot reserve one connection from WATCH through
+    /// EXEC. Direct [`Transaction::watch`] remains safe for a body that is
+    /// already known because all of its WATCH/MULTI/EXEC frames are handed to
+    /// [`execute_transaction`](Self::execute_transaction) in one call.
+    const SUPPORTS_TRANSACTION_RETRY: bool = true;
+
+    /// Reject the closure-based transaction helpers before WATCH or any other
+    /// command is sent when this executor cannot reserve their full window.
+    fn validate_transaction_retry(&self) -> Result<(), RedisError> {
+        if Self::SUPPORTS_TRANSACTION_RETRY {
+            Ok(())
+        } else {
+            Err(RedisError::Redis(
+                "transaction() and transaction_with_retries() are unsupported by this executor; Transaction::watch() is safe only when the body is already known; use an exclusive RedisConnection for WATCH/read/build retries"
+                    .to_string(),
+            ))
+        }
+    }
+
     /// Execute a WATCH/MULTI/EXEC transaction.
     ///
     /// `watch_frames` is the serialized WATCH command (empty if no WATCH keys).
@@ -74,6 +100,8 @@ impl TransactionExecutor for RedisConnection {
 }
 
 impl<C: TransactionExecutor + Send> TransactionExecutor for Arc<Mutex<C>> {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
     fn execute_transaction(
         &mut self,
         watch_frames: Vec<Frame>,
@@ -90,6 +118,8 @@ impl<C: TransactionExecutor + Send> TransactionExecutor for Arc<Mutex<C>> {
 }
 
 impl TransactionExecutor for RedisClient {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
     fn execute_transaction(
         &mut self,
         watch_frames: Vec<Frame>,
@@ -321,6 +351,10 @@ pub const DEFAULT_TRANSACTION_RETRIES: usize = 16;
 /// the same requirement redis-rs places on its `transaction` helper.) The
 /// returned `Transaction` should carry the commands only; the WATCH is issued
 /// by this helper, so do not also call [`Transaction::watch`] on it.
+/// Shared or routed executors that cannot reserve this complete window reject
+/// the helper before WATCH is sent or `build` is invoked. A direct
+/// [`Transaction::watch`] is suitable only when its body is already known; use
+/// a dedicated [`RedisConnection`] for read/compute/build retries.
 ///
 /// Uses [`DEFAULT_TRANSACTION_RETRIES`] as the cap. Use
 /// [`transaction_with_retries`] to choose a different cap.
@@ -378,6 +412,12 @@ where
     C: RedisExecutor + TransactionExecutor + Send,
     F: AsyncFnMut(&mut C) -> Result<Transaction, RedisError>,
 {
+    // Some routed executors cannot reserve one physical connection across the
+    // standalone WATCH, user-supplied read/build closure, and later EXEC. Fail
+    // before WATCH or any closure side effect instead of silently weakening
+    // optimistic locking.
+    conn.validate_transaction_retry()?;
+
     let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
     let mut remaining = max_retries;
 
@@ -411,8 +451,55 @@ where
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn connected_pair() -> (RedisConnection, tokio::net::UnixStream) {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        (
+            RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client)),
+            server,
+        )
+    }
+
+    #[cfg(unix)]
+    async fn assert_no_wire_request(mut server: tokio::net::UnixStream) {
+        use tokio::io::AsyncReadExt;
+
+        let mut bytes = [0u8; 128];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                server.read(&mut bytes),
+            )
+            .await
+            .is_err(),
+            "transaction helper wrote to Redis before rejecting the executor"
+        );
+    }
+
+    fn assert_retry_helper_unsupported(result: &Result<PipelineResults, RedisError>) {
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("shared executor was accepted"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("transaction_with_retries()"));
+        assert!(message.contains("Transaction::watch()"));
+    }
+
     fn committed() -> TransactionResult {
         TransactionResult::Committed(PipelineResults::from_raw(Vec::new()))
+    }
+
+    #[test]
+    fn retry_helper_capability_is_limited_to_exclusive_connections() {
+        const {
+            assert!(<RedisConnection as TransactionExecutor>::SUPPORTS_TRANSACTION_RETRY);
+            assert!(!<RedisClient as TransactionExecutor>::SUPPORTS_TRANSACTION_RETRY);
+            assert!(!<crate::MultiplexedClient as TransactionExecutor>::SUPPORTS_TRANSACTION_RETRY);
+            assert!(
+                !<Arc<Mutex<RedisConnection>> as TransactionExecutor>::SUPPORTS_TRANSACTION_RETRY
+            );
+        }
     }
 
     #[test]
@@ -551,6 +638,90 @@ mod tests {
             };
             async move { Ok(responses) }
         }
+    }
+
+    #[tokio::test]
+    async fn transaction_helper_rejects_arc_mutex_before_watch_or_build() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let inner = Arc::new(Mutex::new(RetryMockConn {
+            aborts_before_commit: 0,
+            exec_calls: 0,
+            watch_calls: 0,
+        }));
+        let mut shared = Arc::clone(&inner);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let build_counter = Arc::clone(&build_calls);
+
+        let result = transaction_with_retries(
+            &mut shared,
+            ["key"],
+            0,
+            async move |_conn: &mut Arc<Mutex<RetryMockConn>>| {
+                build_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(Transaction::new())
+            },
+        )
+        .await;
+
+        assert_retry_helper_unsupported(&result);
+        assert_eq!(build_calls.load(Ordering::SeqCst), 0);
+        let inner = inner.lock().await;
+        assert_eq!(inner.watch_calls, 0);
+        assert_eq!(inner.exec_calls, 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn transaction_helper_rejects_redis_client_before_watch_or_build() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (conn, server) = connected_pair();
+        let mut client = RedisClient::from_connection(conn);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let build_counter = Arc::clone(&build_calls);
+
+        let result = transaction_with_retries(
+            &mut client,
+            ["key"],
+            0,
+            async move |_conn: &mut RedisClient| {
+                build_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(Transaction::new())
+            },
+        )
+        .await;
+
+        assert_retry_helper_unsupported(&result);
+        assert_eq!(build_calls.load(Ordering::SeqCst), 0);
+        assert_no_wire_request(server).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn transaction_helper_rejects_multiplexed_client_before_watch_or_build() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let (conn, server) = connected_pair();
+        let mut client = crate::MultiplexedClient::from_connection(conn);
+        let build_calls = Arc::new(AtomicUsize::new(0));
+        let build_counter = Arc::clone(&build_calls);
+
+        let result = transaction_with_retries(
+            &mut client,
+            ["key"],
+            0,
+            async move |_conn: &mut crate::MultiplexedClient| {
+                build_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(Transaction::new())
+            },
+        )
+        .await;
+
+        assert_retry_helper_unsupported(&result);
+        assert_eq!(build_calls.load(Ordering::SeqCst), 0);
+        assert_no_wire_request(server).await;
+        client.shutdown().await;
     }
 
     #[tokio::test]

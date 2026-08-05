@@ -24,6 +24,832 @@
 
 use redis_tower_core::Frame;
 
+use crate::slot::{extract_hash_tag, slot_for_key};
+
+/// All Redis keys referenced by one serialized command.
+///
+/// Unlike [`extract_key`], this result distinguishes commands whose complete
+/// key specification is known from commands that merely have a routable first
+/// argument. Pipelines may use the latter for backwards-compatible routing;
+/// transactions must reject it because they cannot prove that every key hashes
+/// to the same slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandKeys<'a> {
+    /// A known command that never addresses a Redis key.
+    Keyless,
+    /// A known command and every key it addresses, in wire order.
+    ///
+    /// Order and duplicates are retained so callers can split and reassemble
+    /// commands such as `MGET` without losing positional semantics.
+    Known(Vec<&'a [u8]>),
+    /// A command outside the maintained key-spec table.
+    ///
+    /// `first_key` mirrors the legacy `argv[1]` routing fallback when that
+    /// argument is a bulk string, but it is not proof that the command has only
+    /// one key.
+    Unknown {
+        /// Command name exactly as serialized by the caller.
+        command: &'a [u8],
+        /// Legacy first-key fallback, if present and binary-safe.
+        first_key: Option<&'a [u8]>,
+    },
+}
+
+/// Hash slots referenced by one serialized command.
+///
+/// This is the slot-level counterpart of [`CommandKeys`]. Key order and
+/// duplicates are retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSlots<'a> {
+    /// A known keyless command.
+    Keyless,
+    /// Slots for every key in a known command, in key order.
+    Known(Vec<u16>),
+    /// A command outside the maintained key-spec table.
+    Unknown {
+        /// Command name exactly as serialized by the caller.
+        command: &'a [u8],
+        /// Slot for the legacy first-key fallback, when one exists.
+        first_slot: Option<u16>,
+    },
+}
+
+/// A malformed command frame or key layout.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum KeyExtractionError {
+    /// The request was not a non-empty RESP array.
+    #[error("invalid Redis command frame: {0}")]
+    InvalidFrame(&'static str),
+    /// A required argument is absent.
+    #[error("malformed {command} command: missing argument {index} ({expected})")]
+    MissingArgument {
+        command: String,
+        index: usize,
+        expected: &'static str,
+    },
+    /// An argument has the wrong RESP type.
+    #[error("malformed {command} command: argument {index} must be {expected}")]
+    InvalidArgument {
+        command: String,
+        index: usize,
+        expected: &'static str,
+    },
+    /// A `numkeys` argument is not a valid non-negative integer.
+    #[error("malformed {command} command: argument {index} is not a valid numkeys value")]
+    InvalidNumKeys { command: String, index: usize },
+    /// The frame contains fewer key arguments than its declared count.
+    #[error(
+        "malformed {command} command: declares {declared} keys but only {available} are present"
+    )]
+    KeyCountMismatch {
+        command: String,
+        declared: usize,
+        available: usize,
+    },
+    /// A command-specific dynamic layout is invalid.
+    #[error("malformed {command} command: {detail}")]
+    InvalidLayout {
+        command: String,
+        detail: &'static str,
+    },
+}
+
+/// Failure to prove that a group of commands belongs to one hash slot.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SlotExtractionError {
+    /// One frame has an invalid key layout.
+    #[error(transparent)]
+    Malformed(#[from] KeyExtractionError),
+    /// Unknown commands cannot be declared transaction-safe from raw frames.
+    #[error(
+        "cannot determine every Redis key for unknown command {command}; slot pinning is unsafe"
+    )]
+    UnknownCommand { command: String },
+    /// At least two keys hash to different cluster slots.
+    #[error("CROSSSLOT keys in request hash to different slots ({first} and {second})")]
+    CrossSlot { first: u16, second: u16 },
+}
+
+/// Extract every Redis key addressed by `frame`.
+///
+/// Known command layouts follow Redis key specifications, including dynamic
+/// `numkeys` forms, scripts/functions, stream reads, destination/source
+/// commands, and the multi-key commands used by cluster pipelines. Malformed
+/// known commands return an error rather than silently falling back to a
+/// default node. Commands outside the table return [`CommandKeys::Unknown`].
+pub fn extract_keys(frame: &Frame) -> Result<CommandKeys<'_>, KeyExtractionError> {
+    let items = command_items(frame)?;
+    let command = command_bytes(items)?;
+    let upper = command
+        .iter()
+        .map(u8::to_ascii_uppercase)
+        .collect::<Vec<_>>();
+    let name = upper.as_slice();
+
+    let keys = match name {
+        // Server, connection, transaction-boundary, and cluster-wide commands.
+        b"ACL" | b"AUTH" | b"BGREWRITEAOF" | b"BGSAVE" | b"CLIENT" | b"CLUSTER" | b"COMMAND"
+        | b"CONFIG" | b"DBSIZE" | b"DISCARD" | b"ECHO" | b"EXEC" | b"FAILOVER" | b"FLUSHALL"
+        | b"FLUSHDB" | b"FT.CONFIG" | b"FT._LIST" | b"FUNCTION" | b"HELLO" | b"HOTKEYS"
+        | b"INFO" | b"KEYS" | b"LASTSAVE" | b"LATENCY" | b"LOLWUT" | b"MODULE" | b"MONITOR"
+        | b"MULTI" | b"PING" | b"PUBLISH" | b"PUBSUB" | b"RANDOMKEY" | b"READONLY"
+        | b"READWRITE" | b"REPLICAOF" | b"RESET" | b"ROLE" | b"SAVE" | b"SCAN" | b"SCRIPT"
+        | b"SELECT" | b"SHUTDOWN" | b"SLOWLOG" | b"SWAPDB" | b"TIME" | b"TS.MGET"
+        | b"TS.MRANGE" | b"TS.MREVRANGE" | b"TS.QUERYINDEX" | b"UNWATCH" | b"WAIT" | b"WAITAOF" => {
+            CommandKeys::Keyless
+        }
+
+        // Every argument is a key.
+        b"DEL" | b"EXISTS" | b"MGET" | b"PFCOUNT" | b"SDIFF" | b"SINTER" | b"SUNION" | b"TOUCH"
+        | b"UNLINK" | b"WATCH" => {
+            CommandKeys::Known(keys_in_range(items, command, 1, items.len())?)
+        }
+
+        // Alternating key/value forms.
+        b"MSET" | b"MSETNX" => {
+            CommandKeys::Known(strided_keys(items, command, 1, 2, "key/value pairs")?)
+        }
+        // JSON.MSET key path value [key path value ...].
+        b"JSON.MSET" | b"TS.MADD" => CommandKeys::Known(strided_keys(
+            items,
+            command,
+            1,
+            3,
+            "key/path/value triples",
+        )?),
+        // JSON.MGET key [key ...] path: the final argument is not a key.
+        b"JSON.MGET" => {
+            if items.len() < 3 {
+                return Err(invalid_layout(
+                    command,
+                    "requires at least one key and a path",
+                ));
+            }
+            CommandKeys::Known(keys_in_range(items, command, 1, items.len() - 1)?)
+        }
+
+        // Script/function body/name numkeys key [key ...] arg [arg ...].
+        b"EVAL" | b"EVALSHA" | b"EVAL_RO" | b"EVALSHA_RO" | b"FCALL" | b"FCALL_RO" => {
+            CommandKeys::Known(keys_after_numkeys(items, command, 2, 3, true)?)
+        }
+
+        // numkeys key [key ...] [options].
+        b"LMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZINTERCARD" | b"ZMPOP" | b"ZUNION" => {
+            CommandKeys::Known(keys_after_numkeys(items, command, 1, 2, false)?)
+        }
+        // timeout numkeys key [key ...] [options].
+        b"BLMPOP" | b"BZMPOP" => {
+            CommandKeys::Known(keys_after_numkeys(items, command, 2, 3, false)?)
+        }
+        // destination numkeys source [source ...] [options].
+        b"CMS.MERGE" | b"TDIGEST.MERGE" | b"ZDIFFSTORE" | b"ZINTERSTORE" | b"ZUNIONSTORE" => {
+            let mut keys = vec![required_key(items, command, 1, "destination key")?];
+            keys.extend(keys_after_numkeys(items, command, 2, 3, false)?);
+            CommandKeys::Known(keys)
+        }
+        // MSETEX numkeys key value [key value ...] [options].
+        b"MSETEX" => CommandKeys::Known(msetex_keys(items, command)?),
+
+        // Blocking key lists end with a timeout argument.
+        b"BLPOP" | b"BRPOP" | b"BZPOPMAX" | b"BZPOPMIN" => {
+            if items.len() < 3 {
+                return Err(invalid_layout(
+                    command,
+                    "requires at least one key and a timeout",
+                ));
+            }
+            CommandKeys::Known(keys_in_range(items, command, 1, items.len() - 1)?)
+        }
+
+        // Commands with two fixed key arguments.
+        b"BLMOVE" | b"BRPOPLPUSH" | b"COPY" | b"GEOSEARCHSTORE" | b"LCS" | b"LMOVE" | b"RENAME"
+        | b"RENAMENX" | b"RPOPLPUSH" | b"SMOVE" | b"TS.CREATERULE" | b"TS.DELETERULE"
+        | b"ZRANGESTORE" => CommandKeys::Known(vec![
+            required_key(items, command, 1, "first key")?,
+            required_key(items, command, 2, "second key")?,
+        ]),
+
+        // Destination plus every source key.
+        b"BITOP" => {
+            if items.len() < 4 {
+                return Err(invalid_layout(
+                    command,
+                    "requires an operation, destination key, and source key",
+                ));
+            }
+            CommandKeys::Known(keys_in_range(items, command, 2, items.len())?)
+        }
+        b"PFMERGE" | b"SDIFFSTORE" | b"SINTERSTORE" | b"SUNIONSTORE" => {
+            CommandKeys::Known(keys_in_range(items, command, 1, items.len())?)
+        }
+
+        // Stream reads encode N keys followed by N IDs after STREAMS.
+        b"XREAD" | b"XREADGROUP" => {
+            CommandKeys::Known(stream_read_keys(items, command, name == b"XREADGROUP")?)
+        }
+
+        // MIGRATE has either one source key or a KEYS tail after options.
+        b"MIGRATE" => CommandKeys::Known(migrate_keys_strict(items, command)?),
+
+        // Optional destination keys introduced by STORE/STOREDIST.
+        b"SORT" | b"SORT_RO" => CommandKeys::Known(sort_keys(items, command)?),
+        b"GEORADIUS" => CommandKeys::Known(keys_with_optional_store(items, command, 6)?),
+        b"GEORADIUSBYMEMBER" => CommandKeys::Known(keys_with_optional_store(items, command, 5)?),
+
+        // Subcommand-first families.
+        b"MEMORY" => {
+            if matches_token(items.get(1), b"USAGE") {
+                CommandKeys::Known(vec![required_key(items, command, 2, "key")?])
+            } else {
+                CommandKeys::Keyless
+            }
+        }
+        b"OBJECT" => {
+            if matches_token(items.get(1), b"HELP") {
+                CommandKeys::Keyless
+            } else {
+                CommandKeys::Known(vec![required_key(items, command, 2, "key")?])
+            }
+        }
+        b"XGROUP" | b"XINFO" => {
+            if matches_token(items.get(1), b"HELP") {
+                CommandKeys::Keyless
+            } else {
+                CommandKeys::Known(vec![required_key(items, command, 2, "stream key")?])
+            }
+        }
+        b"FT.CURSOR" => CommandKeys::Known(vec![required_key(items, command, 2, "index name")?]),
+
+        // Every remaining command exported by redis-tower-commands has one
+        // routing key at argv[1]. Fields, members, paths, and options that
+        // follow are deliberately not keys.
+        _ if is_known_single_key(name) => {
+            CommandKeys::Known(vec![required_key(items, command, 1, "key")?])
+        }
+
+        // Preserve the original router's permissive argv[1] fallback for
+        // custom/module commands, but mark it unknown so an atomic transaction
+        // cannot mistake a partial key list for a complete one.
+        _ => CommandKeys::Unknown {
+            command,
+            first_key: items.get(1).and_then(as_key),
+        },
+    };
+
+    Ok(keys)
+}
+
+/// Extract every hash slot addressed by `frame`.
+pub fn extract_slots(frame: &Frame) -> Result<CommandSlots<'_>, KeyExtractionError> {
+    Ok(match extract_keys(frame)? {
+        CommandKeys::Keyless => CommandSlots::Keyless,
+        CommandKeys::Known(keys) => {
+            CommandSlots::Known(keys.into_iter().map(slot_for_key).collect())
+        }
+        CommandKeys::Unknown { command, first_key } => CommandSlots::Unknown {
+            command,
+            first_slot: first_key.map(slot_for_key),
+        },
+    })
+}
+
+/// Determine the authoritative routing slot for one explicit pipeline frame.
+///
+/// Known command layouts are validated in full: every key must hash to the
+/// same slot or the frame is rejected with [`SlotExtractionError::CrossSlot`].
+/// Commands outside the maintained key-spec table retain the cluster client's
+/// backwards-compatible routing behavior and use their first bulk-string
+/// argument as the routing key. Unknown commands without such an argument, and
+/// known keyless commands, return `Ok(None)` so the caller can use its default
+/// node.
+///
+/// This is deliberately less strict than [`common_slot`]. A non-atomic
+/// pipeline can safely preserve legacy routing for custom commands, while a
+/// transaction must reject them because it cannot prove that every key is
+/// pinned to one slot.
+pub fn pipeline_routing_slot(frame: &Frame) -> Result<Option<u16>, SlotExtractionError> {
+    match extract_slots(frame)? {
+        CommandSlots::Keyless => Ok(None),
+        CommandSlots::Known(slots) => common_known_slot(slots),
+        CommandSlots::Unknown { first_slot, .. } => Ok(first_slot),
+    }
+}
+
+/// Prove that every key in `frames` hashes to one cluster slot.
+///
+/// Returns `Ok(None)` for an empty/keyless group. Unknown commands are rejected
+/// even when they have a routable first argument: raw frames do not provide
+/// enough information to prove that a custom command has no additional keys.
+pub fn common_slot(frames: &[Frame]) -> Result<Option<u16>, SlotExtractionError> {
+    let mut common = None;
+    for frame in frames {
+        match extract_slots(frame)? {
+            CommandSlots::Keyless => {}
+            CommandSlots::Known(slots) => {
+                if let Some(slot) = common_known_slot(slots)? {
+                    if let Some(first) = common {
+                        if first != slot {
+                            return Err(SlotExtractionError::CrossSlot {
+                                first,
+                                second: slot,
+                            });
+                        }
+                    } else {
+                        common = Some(slot);
+                    }
+                }
+            }
+            CommandSlots::Unknown { command, .. } => {
+                return Err(SlotExtractionError::UnknownCommand {
+                    command: String::from_utf8_lossy(command).into_owned(),
+                });
+            }
+        }
+    }
+    Ok(common)
+}
+
+fn common_known_slot(
+    slots: impl IntoIterator<Item = u16>,
+) -> Result<Option<u16>, SlotExtractionError> {
+    let mut common = None;
+    for slot in slots {
+        if let Some(first) = common {
+            if first != slot {
+                return Err(SlotExtractionError::CrossSlot {
+                    first,
+                    second: slot,
+                });
+            }
+        } else {
+            common = Some(slot);
+        }
+    }
+    Ok(common)
+}
+
+fn command_items(frame: &Frame) -> Result<&[Frame], KeyExtractionError> {
+    match frame {
+        Frame::Array(Some(items)) if !items.is_empty() => Ok(items),
+        Frame::Array(Some(_)) => Err(KeyExtractionError::InvalidFrame(
+            "expected a non-empty command array",
+        )),
+        Frame::Array(None) => Err(KeyExtractionError::InvalidFrame(
+            "null arrays are not command requests",
+        )),
+        _ => Err(KeyExtractionError::InvalidFrame(
+            "expected a non-empty RESP array",
+        )),
+    }
+}
+
+fn command_bytes(items: &[Frame]) -> Result<&[u8], KeyExtractionError> {
+    match items.first() {
+        Some(Frame::BulkString(Some(command))) if !command.is_empty() => Ok(command),
+        Some(Frame::BulkString(Some(_))) => Err(KeyExtractionError::InvalidFrame(
+            "command name must not be empty",
+        )),
+        Some(_) => Err(KeyExtractionError::InvalidFrame(
+            "command name must be a non-null bulk string",
+        )),
+        None => Err(KeyExtractionError::InvalidFrame(
+            "expected a non-empty command array",
+        )),
+    }
+}
+
+fn command_display(command: &[u8]) -> String {
+    String::from_utf8_lossy(command).into_owned()
+}
+
+fn invalid_layout(command: &[u8], detail: &'static str) -> KeyExtractionError {
+    KeyExtractionError::InvalidLayout {
+        command: command_display(command),
+        detail,
+    }
+}
+
+fn required_key<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    index: usize,
+    expected: &'static str,
+) -> Result<&'a [u8], KeyExtractionError> {
+    match items.get(index) {
+        Some(Frame::BulkString(Some(key))) => Ok(key),
+        Some(_) => Err(KeyExtractionError::InvalidArgument {
+            command: command_display(command),
+            index,
+            expected: "a non-null bulk-string key",
+        }),
+        None => Err(KeyExtractionError::MissingArgument {
+            command: command_display(command),
+            index,
+            expected,
+        }),
+    }
+}
+
+fn keys_in_range<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    start: usize,
+    end: usize,
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    if start >= end {
+        return Err(invalid_layout(command, "requires at least one key"));
+    }
+    (start..end)
+        .map(|index| required_key(items, command, index, "key"))
+        .collect()
+}
+
+fn strided_keys<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    start: usize,
+    stride: usize,
+    layout: &'static str,
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    let remaining = items.len().saturating_sub(start);
+    if remaining == 0 || !remaining.is_multiple_of(stride) {
+        return Err(invalid_layout(command, layout));
+    }
+    (start..items.len())
+        .step_by(stride)
+        .map(|index| required_key(items, command, index, "key"))
+        .collect()
+}
+
+fn strict_numkeys(
+    items: &[Frame],
+    command: &[u8],
+    index: usize,
+    allow_zero: bool,
+) -> Result<usize, KeyExtractionError> {
+    let Some(value) = items.get(index) else {
+        return Err(KeyExtractionError::MissingArgument {
+            command: command_display(command),
+            index,
+            expected: "numkeys",
+        });
+    };
+    let Some(parsed) = parse_int(value) else {
+        return Err(KeyExtractionError::InvalidNumKeys {
+            command: command_display(command),
+            index,
+        });
+    };
+    if parsed < 0 || (!allow_zero && parsed == 0) {
+        return Err(KeyExtractionError::InvalidNumKeys {
+            command: command_display(command),
+            index,
+        });
+    }
+    usize::try_from(parsed).map_err(|_| KeyExtractionError::InvalidNumKeys {
+        command: command_display(command),
+        index,
+    })
+}
+
+fn keys_after_numkeys<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    numkeys_index: usize,
+    first_key: usize,
+    allow_zero: bool,
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    let count = strict_numkeys(items, command, numkeys_index, allow_zero)?;
+    let available = items.len().saturating_sub(first_key);
+    if available < count {
+        return Err(KeyExtractionError::KeyCountMismatch {
+            command: command_display(command),
+            declared: count,
+            available,
+        });
+    }
+    (first_key..first_key + count)
+        .map(|index| required_key(items, command, index, "declared key"))
+        .collect()
+}
+
+fn msetex_keys<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    let count = strict_numkeys(items, command, 1, false)?;
+    let first_key = 2;
+    let required_args = count.checked_mul(2).ok_or_else(|| {
+        invalid_layout(command, "declared key count overflows the command layout")
+    })?;
+    let available_args = items.len().saturating_sub(first_key);
+    if available_args < required_args {
+        return Err(KeyExtractionError::KeyCountMismatch {
+            command: command_display(command),
+            declared: count,
+            available: available_args / 2,
+        });
+    }
+    (0..count)
+        .map(|offset| required_key(items, command, first_key + offset * 2, "declared key"))
+        .collect()
+}
+
+fn stream_read_keys<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    grouped: bool,
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    let mut index = if grouped {
+        if !matches_token(items.get(1), b"GROUP") {
+            return Err(invalid_layout(
+                command,
+                "XREADGROUP requires GROUP group consumer before options",
+            ));
+        }
+        // GROUP, group, consumer. The names are binary-safe and may themselves
+        // equal STREAMS, so begin option parsing after both of them.
+        if items.len() < 4 {
+            return Err(invalid_layout(
+                command,
+                "XREADGROUP requires a group and consumer",
+            ));
+        }
+        4
+    } else {
+        1
+    };
+
+    while index < items.len() && !matches_token(items.get(index), b"STREAMS") {
+        if matches_token(items.get(index), b"COUNT") || matches_token(items.get(index), b"BLOCK") {
+            if items.get(index + 1).is_none() {
+                return Err(KeyExtractionError::MissingArgument {
+                    command: command_display(command),
+                    index: index + 1,
+                    expected: "option value",
+                });
+            }
+            index += 2;
+        } else if grouped && matches_token(items.get(index), b"NOACK") {
+            index += 1;
+        } else {
+            return Err(invalid_layout(
+                command,
+                "expected COUNT, BLOCK, NOACK, or STREAMS",
+            ));
+        }
+    }
+
+    if !matches_token(items.get(index), b"STREAMS") {
+        return Err(invalid_layout(command, "missing STREAMS section"));
+    }
+    let first_key = index + 1;
+    let key_and_id_count = items.len().saturating_sub(first_key);
+    if key_and_id_count < 2 || key_and_id_count % 2 != 0 {
+        return Err(invalid_layout(
+            command,
+            "STREAMS must be followed by equally many keys and IDs",
+        ));
+    }
+    let key_count = key_and_id_count / 2;
+    keys_in_range(items, command, first_key, first_key + key_count)
+}
+
+fn migrate_keys_strict<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    if items.len() < 6 {
+        return Err(invalid_layout(
+            command,
+            "requires host, port, key, database, and timeout",
+        ));
+    }
+    let direct = required_key(items, command, 3, "source key")?;
+    if !direct.is_empty() {
+        return Ok(vec![direct]);
+    }
+
+    let mut option = 6;
+    while option < items.len() {
+        if matches_token(items.get(option), b"KEYS") {
+            return keys_in_range(items, command, option + 1, items.len());
+        }
+        if matches_token(items.get(option), b"COPY") || matches_token(items.get(option), b"REPLACE")
+        {
+            option += 1;
+        } else if matches_token(items.get(option), b"AUTH") {
+            if items.get(option + 1).is_none() {
+                return Err(KeyExtractionError::MissingArgument {
+                    command: command_display(command),
+                    index: option + 1,
+                    expected: "AUTH password",
+                });
+            }
+            option += 2;
+        } else if matches_token(items.get(option), b"AUTH2") {
+            if items.get(option + 2).is_none() {
+                return Err(KeyExtractionError::MissingArgument {
+                    command: command_display(command),
+                    index: option + 2,
+                    expected: "AUTH2 username and password",
+                });
+            }
+            option += 3;
+        } else {
+            return Err(invalid_layout(
+                command,
+                "empty source key requires a KEYS section after valid options",
+            ));
+        }
+    }
+    Err(invalid_layout(
+        command,
+        "empty source key requires a non-empty KEYS section",
+    ))
+}
+
+fn sort_keys<'a>(items: &'a [Frame], command: &[u8]) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    let mut keys = vec![required_key(items, command, 1, "source key")?];
+    let mut option = 2;
+    while option < items.len() {
+        let is_by = matches_token(items.get(option), b"BY");
+        let is_get = matches_token(items.get(option), b"GET");
+        if is_by || is_get {
+            let pattern = required_key(items, command, option + 1, "BY/GET pattern")?;
+            // Redis performs pattern substitution only when `*` is present.
+            // Constant BY/GET values (including BY nosort and GET #) do not
+            // address an external key.
+            if pattern.contains(&b'*') {
+                let tag = extract_hash_tag(pattern);
+                if tag == pattern || tag.contains(&b'*') {
+                    return Err(invalid_layout(
+                        command,
+                        "substituting BY/GET patterns require a fixed non-empty hash tag",
+                    ));
+                }
+                // Redis derives concrete external keys by substituting the
+                // sorted element into the pattern. A fixed tag pins every such
+                // key, so retaining the pattern gives slot_for_key the exact
+                // routing input needed for cross-slot validation.
+                keys.push(pattern);
+            }
+            option += 2;
+        } else if matches_token(items.get(option), b"LIMIT") {
+            if items.get(option + 2).is_none() {
+                return Err(KeyExtractionError::MissingArgument {
+                    command: command_display(command),
+                    index: option + 2,
+                    expected: "LIMIT offset and count",
+                });
+            }
+            option += 3;
+        } else if matches_token(items.get(option), b"ASC")
+            || matches_token(items.get(option), b"DESC")
+            || matches_token(items.get(option), b"ALPHA")
+        {
+            option += 1;
+        } else if matches_token(items.get(option), b"STORE") {
+            keys.push(required_key(
+                items,
+                command,
+                option + 1,
+                "STORE destination key",
+            )?);
+            option += 2;
+        } else {
+            return Err(invalid_layout(command, "unrecognized SORT option layout"));
+        }
+    }
+    Ok(keys)
+}
+
+fn keys_with_optional_store<'a>(
+    items: &'a [Frame],
+    command: &[u8],
+    options_start: usize,
+) -> Result<Vec<&'a [u8]>, KeyExtractionError> {
+    if items.len() < options_start {
+        return Err(invalid_layout(command, "missing required radius arguments"));
+    }
+    let mut keys = vec![required_key(items, command, 1, "source key")?];
+    let mut option = options_start;
+    while option < items.len() {
+        if matches_token(items.get(option), b"WITHCOORD")
+            || matches_token(items.get(option), b"WITHDIST")
+            || matches_token(items.get(option), b"WITHHASH")
+            || matches_token(items.get(option), b"ASC")
+            || matches_token(items.get(option), b"DESC")
+        {
+            option += 1;
+        } else if matches_token(items.get(option), b"COUNT") {
+            if items.get(option + 1).is_none() {
+                return Err(KeyExtractionError::MissingArgument {
+                    command: command_display(command),
+                    index: option + 1,
+                    expected: "COUNT value",
+                });
+            }
+            option += 2;
+            if matches_token(items.get(option), b"ANY") {
+                option += 1;
+            }
+        } else if matches_token(items.get(option), b"STORE")
+            || matches_token(items.get(option), b"STOREDIST")
+        {
+            keys.push(required_key(
+                items,
+                command,
+                option + 1,
+                "STORE destination key",
+            )?);
+            option += 2;
+        } else {
+            return Err(invalid_layout(
+                command,
+                "unrecognized GEORADIUS option layout",
+            ));
+        }
+    }
+    Ok(keys)
+}
+
+fn is_known_single_key(command: &[u8]) -> bool {
+    matches!(
+        command,
+        // Core strings, generic keyspace, hashes, lists, sets, sorted sets.
+        b"APPEND" | b"BITCOUNT" | b"BITFIELD" | b"BITFIELD_RO" | b"BITPOS"
+        | b"DECR" | b"DECRBY" | b"DELEX" | b"DIGEST" | b"DUMP" | b"EXPIRE"
+        | b"EXPIREAT" | b"EXPIRETIME" | b"GET" | b"GETBIT" | b"GETDEL" | b"GETEX"
+        | b"GETRANGE" | b"GETSET" | b"INCR" | b"INCRBY" | b"INCRBYFLOAT"
+        | b"INCREX" | b"MOVE" | b"PERSIST" | b"PEXPIRE" | b"PEXPIREAT"
+        | b"PEXPIRETIME" | b"PFADD" | b"PSETEX" | b"PTTL" | b"RESTORE" | b"SET"
+        | b"SETBIT" | b"SETEX" | b"SETNX" | b"SETRANGE" | b"STRLEN" | b"SUBSTR"
+        | b"TTL" | b"TYPE"
+        | b"HDEL" | b"HEXISTS" | b"HEXPIRE" | b"HEXPIREAT" | b"HEXPIRETIME"
+        | b"HGET" | b"HGETALL" | b"HGETDEL" | b"HGETEX" | b"HINCRBY"
+        | b"HINCRBYFLOAT" | b"HKEYS" | b"HLEN" | b"HMGET" | b"HPERSIST"
+        | b"HPEXPIRE" | b"HPEXPIREAT" | b"HPEXPIRETIME" | b"HPTTL"
+        | b"HRANDFIELD" | b"HSCAN" | b"HSET" | b"HSETEX" | b"HSETNX"
+        | b"HSTRLEN" | b"HTTL" | b"HVALS"
+        | b"LINDEX" | b"LINSERT" | b"LLEN" | b"LPOP" | b"LPOS" | b"LPUSH"
+        | b"LPUSHX" | b"LRANGE" | b"LREM" | b"LSET" | b"LTRIM" | b"RPOP"
+        | b"RPUSH" | b"RPUSHX"
+        | b"SADD" | b"SCARD" | b"SISMEMBER" | b"SMEMBERS" | b"SMISMEMBER"
+        | b"SPOP" | b"SPUBLISH" | b"SRANDMEMBER" | b"SREM" | b"SSCAN"
+        | b"ZADD" | b"ZCARD" | b"ZCOUNT" | b"ZINCRBY" | b"ZLEXCOUNT" | b"ZMSCORE"
+        | b"ZPOPMAX" | b"ZPOPMIN" | b"ZRANDMEMBER" | b"ZRANGE"
+        | b"ZRANGEBYLEX" | b"ZRANGEBYSCORE" | b"ZRANK" | b"ZREM"
+        | b"ZREMRANGEBYLEX" | b"ZREMRANGEBYRANK" | b"ZREMRANGEBYSCORE"
+        | b"ZREVRANGE" | b"ZREVRANGEBYLEX" | b"ZREVRANGEBYSCORE" | b"ZREVRANK"
+        | b"ZSCAN" | b"ZSCORE"
+        // Streams (subcommand-first and multi-stream reads are handled above).
+        | b"XACK" | b"XACKDEL" | b"XADD" | b"XAUTOCLAIM" | b"XCFGSET"
+        | b"XCLAIM" | b"XDEL" | b"XDELEX" | b"XIDMPRECORD" | b"XLEN" | b"XNACK"
+        | b"XPENDING" | b"XRANGE" | b"XREVRANGE" | b"XSETID" | b"XTRIM"
+        // Geo commands without a destination key.
+        | b"GEOADD" | b"GEODIST" | b"GEOHASH" | b"GEOPOS" | b"GEOSEARCH"
+        | b"GEORADIUS_RO" | b"GEORADIUSBYMEMBER_RO"
+        // Redis JSON.
+        | b"JSON.ARRAPPEND" | b"JSON.ARRINDEX" | b"JSON.ARRINSERT"
+        | b"JSON.ARRLEN" | b"JSON.ARRPOP" | b"JSON.ARRTRIM" | b"JSON.CLEAR"
+        | b"JSON.DEL" | b"JSON.FORGET" | b"JSON.GET" | b"JSON.MERGE"
+        | b"JSON.NUMINCRBY" | b"JSON.OBJKEYS" | b"JSON.OBJLEN" | b"JSON.RESP"
+        | b"JSON.SET" | b"JSON.STRAPPEND" | b"JSON.STRLEN" | b"JSON.TOGGLE"
+        | b"JSON.TYPE"
+        // Search/index commands use their index/alias as their routing key.
+        | b"FT.AGGREGATE" | b"FT.ALIASADD" | b"FT.ALIASDEL" | b"FT.ALIASUPDATE"
+        | b"FT.ALTER" | b"FT.CREATE" | b"FT.DICTADD" | b"FT.DICTDEL"
+        | b"FT.DICTDUMP" | b"FT.DROPINDEX" | b"FT.EXPLAIN" | b"FT.EXPLAINCLI"
+        | b"FT.HYBRID" | b"FT.INFO" | b"FT.PROFILE" | b"FT.SEARCH"
+        | b"FT.SPELLCHECK" | b"FT.SUGADD" | b"FT.SUGDEL" | b"FT.SUGGET"
+        | b"FT.SUGLEN" | b"FT.SYNDUMP" | b"FT.SYNUPDATE" | b"FT.TAGVALS"
+        // Time series commands with one key.
+        | b"TS.ADD" | b"TS.ALTER" | b"TS.CREATE" | b"TS.DECRBY" | b"TS.DEL"
+        | b"TS.GET" | b"TS.INCRBY" | b"TS.INFO" | b"TS.RANGE" | b"TS.REVRANGE"
+        // Probabilistic structures.
+        | b"BF.ADD" | b"BF.CARD" | b"BF.EXISTS" | b"BF.INFO" | b"BF.INSERT"
+        | b"BF.LOADCHUNK" | b"BF.MADD" | b"BF.MEXISTS" | b"BF.RESERVE"
+        | b"BF.SCANDUMP" | b"CF.ADD" | b"CF.ADDNX" | b"CF.COUNT" | b"CF.DEL"
+        | b"CF.EXISTS" | b"CF.INFO" | b"CF.INSERT" | b"CF.INSERTNX"
+        | b"CF.LOADCHUNK" | b"CF.MEXISTS" | b"CF.RESERVE" | b"CF.SCANDUMP"
+        | b"CMS.INCRBY" | b"CMS.INFO" | b"CMS.INITBYDIM" | b"CMS.INITBYPROB"
+        | b"CMS.QUERY" | b"TDIGEST.ADD" | b"TDIGEST.BYRANK"
+        | b"TDIGEST.BYREVRANK" | b"TDIGEST.CDF" | b"TDIGEST.CREATE"
+        | b"TDIGEST.INFO" | b"TDIGEST.MAX" | b"TDIGEST.MIN" | b"TDIGEST.QUANTILE"
+        | b"TDIGEST.RANK" | b"TDIGEST.RESET" | b"TDIGEST.REVRANK"
+        | b"TDIGEST.TRIMMED_MEAN" | b"TOPK.ADD" | b"TOPK.COUNT" | b"TOPK.INCRBY"
+        | b"TOPK.INFO" | b"TOPK.LIST" | b"TOPK.QUERY" | b"TOPK.RESERVE"
+        // Redis 8.8 arrays and vector sets.
+        | b"ARCOUNT" | b"ARDEL" | b"ARDELRANGE" | b"ARGET" | b"ARGETRANGE"
+        | b"ARGREP" | b"ARINFO" | b"ARINSERT" | b"ARLASTITEMS" | b"ARLEN"
+        | b"ARMGET" | b"ARMSET" | b"ARNEXT" | b"AROP" | b"ARRING" | b"ARSCAN"
+        | b"ARSEEK" | b"ARSET" | b"VADD" | b"VCARD" | b"VDIM" | b"VEMB"
+        | b"VGETATTR" | b"VINFO" | b"VISMEMBER" | b"VLINKS" | b"VRANDMEMBER"
+        | b"VRANGE" | b"VREM" | b"VSETATTR" | b"VSIM"
+    )
+}
+
 /// Extract the first key from a command frame.
 ///
 /// Returns `None` for keyless commands (`PING`, `FLUSHDB`, ...), for
@@ -56,13 +882,10 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
     match &buf[..cmd_name.len()] {
         // Keyless commands route to the default node.
         //
-        // MULTI/EXEC/DISCARD are keyless and route to the default node, but the
-        // commands queued between them route by their own keys -- so a
-        // transaction driven with raw command builders scatters across nodes
-        // and does NOT execute atomically on a cluster. Atomic cluster
-        // transactions require all keys in one slot plus a slot-pinned executor
-        // (not yet implemented). Drive a transaction against a single-node
-        // client for the owning slot, not the cluster client.
+        // MULTI/EXEC/DISCARD are keyless. Driving them as independent raw
+        // commands would still scatter queued commands across nodes; use
+        // `redis_tower::Transaction`, whose ClusterConnection executor proves
+        // one common slot and pins the complete exchange to its master.
         b"PING" | b"ECHO" | b"AUTH" | b"SELECT" | b"FLUSHDB" | b"FLUSHALL" | b"DBSIZE"
         | b"INFO" | b"CONFIG" | b"CLUSTER" | b"CLIENT" | b"COMMAND" | b"TIME" | b"MULTI"
         | b"EXEC" | b"DISCARD" | b"HOTKEYS" | b"ACL" | b"FUNCTION" | b"LATENCY" | b"MODULE"
@@ -276,7 +1099,723 @@ pub fn is_readonly_command(frame: &Frame) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    fn known_keys<'a>(result: &'a CommandKeys<'a>) -> &'a [&'a [u8]] {
+        match result {
+            CommandKeys::Known(keys) => keys,
+            other => panic!("expected known keys, got {other:?}"),
+        }
+    }
+
+    // --- comprehensive key/slot extraction used by pipelines/transactions ---
+
+    #[test]
+    fn extract_keys_distinguishes_known_keyless_and_unknown_commands() {
+        assert_eq!(
+            extract_keys(&array(vec![bulk("PING")])).unwrap(),
+            CommandKeys::Keyless
+        );
+
+        let get = array(vec![bulk("GET"), bulk("key")]);
+        assert_eq!(
+            extract_keys(&get).unwrap(),
+            CommandKeys::Known(vec![b"key".as_slice()])
+        );
+
+        let custom = array(vec![bulk("CUSTOM.CMD"), bulk("route"), bulk("maybe-key")]);
+        assert_eq!(
+            extract_keys(&custom).unwrap(),
+            CommandKeys::Unknown {
+                command: b"CUSTOM.CMD",
+                first_key: Some(b"route"),
+            }
+        );
+
+        let custom_without_args = array(vec![bulk("CUSTOM.NOARGS")]);
+        assert_eq!(
+            extract_keys(&custom_without_args).unwrap(),
+            CommandKeys::Unknown {
+                command: b"CUSTOM.NOARGS",
+                first_key: None,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_keys_covers_legacy_single_key_commands() {
+        for command in [
+            "GEORADIUS_RO",
+            "GEORADIUSBYMEMBER_RO",
+            "SUBSTR",
+            "JSON.RESP",
+        ] {
+            assert_eq!(
+                extract_keys(&array(vec![bulk(command), bulk("key")])).unwrap(),
+                CommandKeys::Known(vec![b"key".as_slice()]),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn extract_keys_is_binary_safe_and_preserves_order_and_duplicates() {
+        let first = Bytes::from_static(b"\0{same}\xff");
+        let second = Bytes::from_static(b"other\0key");
+        let frame = Frame::Array(Some(vec![
+            bulk("MGET"),
+            Frame::BulkString(Some(first.clone())),
+            Frame::BulkString(Some(second.clone())),
+            Frame::BulkString(Some(first.clone())),
+        ]));
+
+        let result = extract_keys(&frame).unwrap();
+        assert_eq!(
+            known_keys(&result),
+            &[first.as_ref(), second.as_ref(), first.as_ref()]
+        );
+    }
+
+    #[test]
+    fn extract_keys_handles_pipeline_split_commands() {
+        let mget = array(vec![bulk("MGET"), bulk("a"), bulk("b"), bulk("a")]);
+        assert_eq!(
+            extract_keys(&mget).unwrap(),
+            CommandKeys::Known(vec![b"a".as_slice(), b"b".as_slice(), b"a".as_slice()])
+        );
+
+        let del = array(vec![bulk("DEL"), bulk("a"), bulk("b")]);
+        assert_eq!(
+            extract_keys(&del).unwrap(),
+            CommandKeys::Known(vec![b"a".as_slice(), b"b".as_slice()])
+        );
+
+        let mset = array(vec![
+            bulk("MSET"),
+            bulk("a"),
+            bulk("one"),
+            bulk("b"),
+            bulk("two"),
+        ]);
+        assert_eq!(
+            extract_keys(&mset).unwrap(),
+            CommandKeys::Known(vec![b"a".as_slice(), b"b".as_slice()])
+        );
+
+        let malformed = array(vec![bulk("MSET"), bulk("a"), bulk("one"), bulk("b")]);
+        assert!(matches!(
+            extract_keys(&malformed),
+            Err(KeyExtractionError::InvalidLayout { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_keys_handles_strided_module_multi_key_commands() {
+        let json = array(vec![
+            bulk("JSON.MSET"),
+            bulk("json-a"),
+            bulk("$.x"),
+            bulk("1"),
+            bulk("json-b"),
+            bulk("$.y"),
+            bulk("2"),
+        ]);
+        assert_eq!(
+            extract_keys(&json).unwrap(),
+            CommandKeys::Known(vec![b"json-a".as_slice(), b"json-b".as_slice()])
+        );
+
+        let ts = array(vec![
+            bulk("TS.MADD"),
+            bulk("ts-a"),
+            bulk("1"),
+            bulk("1.5"),
+            bulk("ts-b"),
+            bulk("2"),
+            bulk("2.5"),
+        ]);
+        assert_eq!(
+            extract_keys(&ts).unwrap(),
+            CommandKeys::Known(vec![b"ts-a".as_slice(), b"ts-b".as_slice()])
+        );
+
+        let json_mget = array(vec![
+            bulk("JSON.MGET"),
+            bulk("a"),
+            bulk("b"),
+            bulk("$.field"),
+        ]);
+        assert_eq!(
+            extract_keys(&json_mget).unwrap(),
+            CommandKeys::Known(vec![b"a".as_slice(), b"b".as_slice()])
+        );
+    }
+
+    #[test]
+    fn extract_keys_handles_scripts_and_validates_numkeys() {
+        let script = array(vec![
+            bulk("EVAL"),
+            bulk("return 1"),
+            bulk("2"),
+            bulk("{u}:a"),
+            bulk("{u}:b"),
+            bulk("arg"),
+        ]);
+        assert_eq!(
+            extract_keys(&script).unwrap(),
+            CommandKeys::Known(vec![b"{u}:a".as_slice(), b"{u}:b".as_slice()])
+        );
+
+        let keyless = array(vec![bulk("FCALL"), bulk("f"), bulk("0"), bulk("arg")]);
+        assert_eq!(
+            extract_keys(&keyless).unwrap(),
+            CommandKeys::Known(Vec::new())
+        );
+
+        for malformed in [
+            array(vec![bulk("EVAL"), bulk("return 1"), bulk("nope")]),
+            array(vec![bulk("EVAL"), bulk("return 1"), bulk("-1")]),
+        ] {
+            assert!(matches!(
+                extract_keys(&malformed),
+                Err(KeyExtractionError::InvalidNumKeys { .. })
+            ));
+        }
+
+        let missing = array(vec![
+            bulk("EVALSHA"),
+            bulk("sha"),
+            bulk("2"),
+            bulk("only-one"),
+        ]);
+        assert!(matches!(
+            extract_keys(&missing),
+            Err(KeyExtractionError::KeyCountMismatch {
+                declared: 2,
+                available: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn extract_keys_handles_numkeys_command_families() {
+        let lmpop = array(vec![
+            bulk("LMPOP"),
+            bulk("2"),
+            bulk("list-a"),
+            bulk("list-b"),
+            bulk("LEFT"),
+        ]);
+        assert_eq!(
+            extract_keys(&lmpop).unwrap(),
+            CommandKeys::Known(vec![b"list-a".as_slice(), b"list-b".as_slice()])
+        );
+
+        let blocking = array(vec![
+            bulk("BZMPOP"),
+            bulk("1.0"),
+            Frame::Integer(2),
+            bulk("z-a"),
+            bulk("z-b"),
+            bulk("MAX"),
+        ]);
+        assert_eq!(
+            extract_keys(&blocking).unwrap(),
+            CommandKeys::Known(vec![b"z-a".as_slice(), b"z-b".as_slice()])
+        );
+
+        let store = array(vec![
+            bulk("ZINTERSTORE"),
+            bulk("dest"),
+            bulk("2"),
+            bulk("z-a"),
+            bulk("z-b"),
+            bulk("WEIGHTS"),
+            bulk("1"),
+            bulk("2"),
+        ]);
+        assert_eq!(
+            extract_keys(&store).unwrap(),
+            CommandKeys::Known(vec![
+                b"dest".as_slice(),
+                b"z-a".as_slice(),
+                b"z-b".as_slice(),
+            ])
+        );
+
+        let zero = array(vec![bulk("ZMPOP"), bulk("0"), bulk("MIN")]);
+        assert!(matches!(
+            extract_keys(&zero),
+            Err(KeyExtractionError::InvalidNumKeys { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_keys_handles_msetex_key_value_stride() {
+        let frame = array(vec![
+            bulk("MSETEX"),
+            bulk("2"),
+            bulk("a"),
+            bulk("one"),
+            bulk("b"),
+            bulk("two"),
+            bulk("EX"),
+            bulk("60"),
+        ]);
+        assert_eq!(
+            extract_keys(&frame).unwrap(),
+            CommandKeys::Known(vec![b"a".as_slice(), b"b".as_slice()])
+        );
+
+        let missing_pair = array(vec![
+            bulk("MSETEX"),
+            bulk("2"),
+            bulk("a"),
+            bulk("one"),
+            bulk("b"),
+        ]);
+        assert!(matches!(
+            extract_keys(&missing_pair),
+            Err(KeyExtractionError::KeyCountMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_keys_handles_streams_without_token_collisions() {
+        let xread = array(vec![
+            bulk("XREAD"),
+            bulk("COUNT"),
+            bulk("2"),
+            bulk("STREAMS"),
+            bulk("stream-a"),
+            bulk("stream-b"),
+            bulk("0"),
+            bulk("$"),
+        ]);
+        assert_eq!(
+            extract_keys(&xread).unwrap(),
+            CommandKeys::Known(vec![b"stream-a".as_slice(), b"stream-b".as_slice()])
+        );
+
+        // Group and consumer names are binary-safe and may equal STREAMS; they
+        // must not be mistaken for the structural STREAMS token.
+        let group = array(vec![
+            bulk("XREADGROUP"),
+            bulk("GROUP"),
+            bulk("STREAMS"),
+            bulk("STREAMS"),
+            bulk("NOACK"),
+            bulk("STREAMS"),
+            bulk("real-a"),
+            bulk("real-b"),
+            bulk(">"),
+            bulk(">"),
+        ]);
+        assert_eq!(
+            extract_keys(&group).unwrap(),
+            CommandKeys::Known(vec![b"real-a".as_slice(), b"real-b".as_slice()])
+        );
+
+        let uneven = array(vec![
+            bulk("XREAD"),
+            bulk("STREAMS"),
+            bulk("a"),
+            bulk("b"),
+            bulk("0"),
+        ]);
+        assert!(matches!(
+            extract_keys(&uneven),
+            Err(KeyExtractionError::InvalidLayout { .. })
+        ));
+    }
+
+    #[test]
+    fn extract_keys_handles_source_destination_and_optional_store_layouts() {
+        for command in [
+            "BRPOPLPUSH",
+            "COPY",
+            "LMOVE",
+            "RENAME",
+            "SMOVE",
+            "ZRANGESTORE",
+        ] {
+            let frame = array(vec![bulk(command), bulk("source"), bulk("destination")]);
+            assert_eq!(
+                extract_keys(&frame).unwrap(),
+                CommandKeys::Known(vec![b"source".as_slice(), b"destination".as_slice(),]),
+                "{command}"
+            );
+        }
+
+        let bitop = array(vec![
+            bulk("BITOP"),
+            bulk("AND"),
+            bulk("destination"),
+            bulk("source-a"),
+            bulk("source-b"),
+        ]);
+        assert_eq!(
+            extract_keys(&bitop).unwrap(),
+            CommandKeys::Known(vec![
+                b"destination".as_slice(),
+                b"source-a".as_slice(),
+                b"source-b".as_slice(),
+            ])
+        );
+
+        let sort = array(vec![
+            bulk("SORT"),
+            bulk("{sort}:source"),
+            bulk("BY"),
+            bulk("{sort}:weight_*"),
+            bulk("GET"),
+            bulk("#"),
+            bulk("STORE"),
+            bulk("{sort}:destination"),
+        ]);
+        assert_eq!(
+            extract_keys(&sort).unwrap(),
+            CommandKeys::Known(vec![
+                b"{sort}:source".as_slice(),
+                b"{sort}:weight_*".as_slice(),
+                b"{sort}:destination".as_slice(),
+            ])
+        );
+
+        let radius = array(vec![
+            bulk("GEORADIUS"),
+            bulk("geo"),
+            bulk("1"),
+            bulk("2"),
+            bulk("3"),
+            bulk("km"),
+            bulk("COUNT"),
+            bulk("10"),
+            bulk("ANY"),
+            bulk("STOREDIST"),
+            bulk("geo-result"),
+        ]);
+        assert_eq!(
+            extract_keys(&radius).unwrap(),
+            CommandKeys::Known(vec![b"geo".as_slice(), b"geo-result".as_slice()])
+        );
+    }
+
+    #[test]
+    fn sort_external_patterns_with_a_fixed_tag_are_binary_safe_and_pinned() {
+        let source = Bytes::from_static(b"\0{sort-slot}\xff:source");
+        let by = Bytes::from_static(b"\xff{sort-slot}\0:weight_*");
+        let get = Bytes::from_static(b"{sort-slot}:object_*->field");
+        let destination = Bytes::from_static(b"{sort-slot}:destination");
+        let frame = Frame::Array(Some(vec![
+            bulk("SORT"),
+            Frame::BulkString(Some(source.clone())),
+            bulk("BY"),
+            Frame::BulkString(Some(by.clone())),
+            bulk("GET"),
+            Frame::BulkString(Some(get.clone())),
+            bulk("STORE"),
+            Frame::BulkString(Some(destination.clone())),
+        ]));
+
+        let result = extract_keys(&frame).unwrap();
+        assert_eq!(
+            known_keys(&result),
+            &[
+                source.as_ref(),
+                by.as_ref(),
+                get.as_ref(),
+                destination.as_ref(),
+            ]
+        );
+        assert_eq!(
+            common_slot(&[frame]).unwrap(),
+            Some(slot_for_key(b"{sort-slot}"))
+        );
+    }
+
+    #[test]
+    fn sort_external_patterns_are_checked_for_cross_slot_access() {
+        let frame = array(vec![
+            bulk("SORT"),
+            bulk("{source}:items"),
+            bulk("BY"),
+            bulk("{other}:weight_*"),
+            bulk("GET"),
+            bulk("{source}:object_*"),
+            bulk("STORE"),
+            bulk("{source}:result"),
+        ]);
+
+        assert!(matches!(
+            common_slot(&[frame]),
+            Err(SlotExtractionError::CrossSlot { .. })
+        ));
+    }
+
+    #[test]
+    fn sort_get_hash_is_keyless_and_sort_ro_patterns_are_validated() {
+        let frame = array(vec![
+            bulk("SORT_RO"),
+            bulk("{sort-ro}:items"),
+            bulk("BY"),
+            bulk("{sort-ro}:weight_*"),
+            bulk("GET"),
+            bulk("#"),
+            bulk("GET"),
+            bulk("{sort-ro}:object_*"),
+        ]);
+        assert_eq!(
+            extract_keys(&frame).unwrap(),
+            CommandKeys::Known(vec![
+                b"{sort-ro}:items".as_slice(),
+                b"{sort-ro}:weight_*".as_slice(),
+                b"{sort-ro}:object_*".as_slice(),
+            ])
+        );
+        assert_eq!(
+            common_slot(&[frame]).unwrap(),
+            Some(slot_for_key(b"{sort-ro}"))
+        );
+
+        let cross_slot = array(vec![
+            bulk("SORT_RO"),
+            bulk("{sort-ro}:items"),
+            bulk("GET"),
+            bulk("{other}:object_*"),
+        ]);
+        assert!(matches!(
+            common_slot(&[cross_slot]),
+            Err(SlotExtractionError::CrossSlot { .. })
+        ));
+    }
+
+    #[test]
+    fn sort_constant_by_and_get_patterns_do_not_address_external_keys() {
+        let frame = array(vec![
+            bulk("SORT"),
+            bulk("{sort}:items"),
+            bulk("BY"),
+            bulk("nosort"),
+            bulk("GET"),
+            bulk("constant"),
+            bulk("GET"),
+            bulk("#"),
+            bulk("STORE"),
+            bulk("{sort}:result"),
+        ]);
+
+        assert_eq!(
+            extract_keys(&frame).unwrap(),
+            CommandKeys::Known(vec![
+                b"{sort}:items".as_slice(),
+                b"{sort}:result".as_slice(),
+            ])
+        );
+        assert_eq!(
+            common_slot(&[frame]).unwrap(),
+            Some(slot_for_key(b"{sort}"))
+        );
+    }
+
+    #[test]
+    fn sort_rejects_patterns_without_a_fixed_non_empty_tag() {
+        for frame in [
+            array(vec![
+                bulk("SORT"),
+                bulk("{sort}:items"),
+                bulk("BY"),
+                bulk("weight_*"),
+            ]),
+            array(vec![
+                bulk("SORT"),
+                bulk("{sort}:items"),
+                bulk("GET"),
+                bulk("{tenant_*}:object_*"),
+            ]),
+            array(vec![
+                bulk("SORT"),
+                bulk("{sort}:items"),
+                bulk("GET"),
+                bulk("{}:object_*"),
+            ]),
+            array(vec![
+                bulk("SORT_RO"),
+                bulk("{sort}:items"),
+                bulk("GET"),
+                bulk("object_*"),
+            ]),
+        ] {
+            assert!(matches!(
+                extract_keys(&frame),
+                Err(KeyExtractionError::InvalidLayout {
+                    detail: "substituting BY/GET patterns require a fixed non-empty hash tag",
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn comprehensive_migrate_parser_is_binary_safe_and_option_aware() {
+        let frame = array(vec![
+            bulk("MIGRATE"),
+            bulk("127.0.0.1"),
+            bulk("6380"),
+            bulk(""),
+            bulk("0"),
+            bulk("5000"),
+            bulk("AUTH2"),
+            bulk("KEYS"),
+            bulk("KEYS"),
+            bulk("COPY"),
+            bulk("KEYS"),
+            bulk("first"),
+            bulk("KEYS"),
+            bulk(""),
+        ]);
+        assert_eq!(
+            extract_keys(&frame).unwrap(),
+            CommandKeys::Known(vec![
+                b"first".as_slice(),
+                b"KEYS".as_slice(),
+                b"".as_slice(),
+            ])
+        );
+    }
+
+    #[test]
+    fn malformed_known_frames_return_clear_client_side_errors() {
+        for frame in [
+            Frame::Null,
+            Frame::Array(None),
+            Frame::Array(Some(Vec::new())),
+            Frame::Array(Some(vec![Frame::Integer(1)])),
+        ] {
+            let error = extract_keys(&frame).unwrap_err();
+            assert!(error.to_string().starts_with("invalid Redis command frame"));
+        }
+
+        let missing = array(vec![bulk("GET")]);
+        let error = extract_keys(&missing).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "malformed GET command: missing argument 1 (key)"
+        );
+
+        let wrong_type = Frame::Array(Some(vec![bulk("GET"), Frame::Integer(1)]));
+        let error = extract_keys(&wrong_type).unwrap_err();
+        assert!(error.to_string().contains("argument 1 must be"));
+    }
+
+    #[test]
+    fn extract_slots_preserves_order_duplicates_and_unknown_status() {
+        let frame = array(vec![
+            bulk("MGET"),
+            bulk("{a}:1"),
+            bulk("{b}:1"),
+            bulk("{a}:1"),
+        ]);
+        assert_eq!(
+            extract_slots(&frame).unwrap(),
+            CommandSlots::Known(vec![
+                slot_for_key(b"{a}:1"),
+                slot_for_key(b"{b}:1"),
+                slot_for_key(b"{a}:1"),
+            ])
+        );
+
+        let unknown = array(vec![bulk("CUSTOM.CMD"), bulk("route")]);
+        assert_eq!(
+            extract_slots(&unknown).unwrap(),
+            CommandSlots::Unknown {
+                command: b"CUSTOM.CMD",
+                first_slot: Some(slot_for_key(b"route")),
+            }
+        );
+    }
+
+    #[test]
+    fn pipeline_routing_slot_validates_known_keys_and_preserves_custom_routing() {
+        let same_slot = array(vec![
+            bulk("MGET"),
+            bulk("{pipeline}:one"),
+            bulk("{pipeline}:two"),
+        ]);
+        assert_eq!(
+            pipeline_routing_slot(&same_slot).unwrap(),
+            Some(slot_for_key(b"{pipeline}"))
+        );
+
+        let cross_slot = array(vec![bulk("MGET"), bulk("{a}:one"), bulk("{b}:two")]);
+        assert!(matches!(
+            pipeline_routing_slot(&cross_slot),
+            Err(SlotExtractionError::CrossSlot { .. })
+        ));
+
+        let custom = array(vec![
+            bulk("CUSTOM.CMD"),
+            bulk("{custom}:route"),
+            bulk("arg"),
+        ]);
+        assert_eq!(
+            pipeline_routing_slot(&custom).unwrap(),
+            Some(slot_for_key(b"{custom}:route"))
+        );
+        assert_eq!(
+            pipeline_routing_slot(&array(vec![bulk("CUSTOM.NOARGS")])).unwrap(),
+            None
+        );
+        assert_eq!(
+            pipeline_routing_slot(&array(vec![bulk("PING")])).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn common_slot_accepts_keyless_and_same_slot_frames() {
+        let frames = vec![
+            array(vec![bulk("PING")]),
+            array(vec![bulk("SET"), bulk("{user}:a"), bulk("1")]),
+            array(vec![bulk("MGET"), bulk("{user}:b"), bulk("{user}:a")]),
+            array(vec![
+                bulk("EVAL"),
+                bulk("return 1"),
+                bulk("1"),
+                bulk("{user}:script"),
+            ]),
+        ];
+        assert_eq!(common_slot(&frames).unwrap(), Some(slot_for_key(b"{user}")));
+        assert_eq!(common_slot(&[]).unwrap(), None);
+        assert_eq!(
+            common_slot(&[array(vec![bulk("PING")]), array(vec![bulk("TIME")])]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn common_slot_crossslot_display_matches_redis_error_contract() {
+        let frames = [array(vec![bulk("MGET"), bulk("{a}:1"), bulk("{b}:1")])];
+        let error = common_slot(&frames).unwrap_err();
+        assert!(matches!(error, SlotExtractionError::CrossSlot { .. }));
+        assert!(error.to_string().starts_with("CROSSSLOT"));
+    }
+
+    #[test]
+    fn common_slot_rejects_unknown_and_malformed_commands() {
+        let unknown = [array(vec![bulk("CUSTOM.CMD"), bulk("route")])];
+        let error = common_slot(&unknown).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "cannot determine every Redis key for unknown command CUSTOM.CMD; slot pinning is unsafe"
+        );
+
+        let malformed = [array(vec![bulk("MSET"), bulk("key")])];
+        let error = common_slot(&malformed).unwrap_err();
+        assert!(error.to_string().starts_with("malformed MSET command:"));
+    }
 
     #[test]
     fn extract_key_from_get() {

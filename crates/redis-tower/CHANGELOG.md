@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- explicit `Pipeline` execution through the standard `MultiplexedClient`, sent
+  as one ordered, cancellation-aware auto-pipeline batch
 - `WithDeadline<Cmd>` end-to-end absolute deadlines honored by deadline-aware
   command timeout middleware, typed retries, multiplexed dispatch, resilient
   offline queueing and replay, circuit breakers, and pool acquisition and I/O
@@ -30,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- closure-based transaction helpers now reject shared and routed executors
+  before WATCH; direct `Transaction::watch` remains atomic for already-known
+  bodies, while read/compute/build retries require an exclusive connection
 - reconnectors consistently treat `max_retries` as retries after the first
   reconnect attempt and apply `connect_timeout` to initial and replacement
   factory calls

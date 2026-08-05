@@ -138,8 +138,11 @@ match Transaction::new().push(Incr::new("k")).execute(&mut conn).await? {
 }
 ```
 
-For optimistic locking, `WATCH` keys with `Transaction::new().watch(["k"])...`; the
-result is `Aborted` if a watched key changed before `EXEC`.
+When the transaction body is already known, protect it with
+`Transaction::new().watch(["k"])...`; the result is `Aborted` if a watched key
+changed before `EXEC`. For read-compute-write retries, use `transaction` with a
+dedicated `RedisConnection` so the read and build remain inside the WATCH
+window.
 
 ## Pub/Sub
 
