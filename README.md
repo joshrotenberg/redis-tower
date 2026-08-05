@@ -390,12 +390,44 @@ tokio::spawn(async move {
 });
 ```
 
-MOVED/ASK redirects are handled automatically. The multiplexed client traces
-redirects and topology-refresh lifecycle events; a configured recorder also
-emits redirect counters and refresh count/duration metrics. Per-node command
-latency labels are opt-in: they are disabled by default and, when enabled, are
-limited to 64 concrete addresses per client plus `_OTHER`; additional addresses
-use the `_OTHER` label.
+Explicit cluster pipelines pin commands to their owning masters, preserve
+submission order within each master batch, dispatch different master batches
+concurrently, and restore the original result order. There is no total
+execution order across hash slots, and cancellation after dispatch can leave
+some node batches applied:
+
+```rust,ignore
+use redis_tower_cluster::ClusterPipeline;
+
+let results = ClusterPipeline::new()
+    .push(Set::new("{user:1}:name", "Alice"))
+    .push(Set::new("{user:2}:name", "Bob"))
+    .push(Get::new("{user:1}:name"))
+    .execute(&client)
+    .await?;
+```
+
+Use `mget_split`, `mset_split`, and `del_split` when one logical multi-key
+operation intentionally spans hash slots. `MGET` restores caller order;
+cross-slot `MSET` and `DEL` are atomic only within each slot group and can
+partially apply if another group fails. `ClusterConnection` and `ClusterClient`
+also accept `Transaction`; every WATCH and command key must share one hash slot
+(use a common `{hash-tag}`), and mixed-slot transactions are rejected before
+anything is written. `Transaction::watch` can protect a transaction body that
+is already known. The closure-based `transaction` helpers are rejected because
+their separate WATCH/read/build calls cannot reserve one cluster-node
+connection, so read/compute/build optimistic locking is not available on the
+cluster clients.
+
+Ordinary commands and cluster pipelines handle MOVED/ASK redirects
+automatically. Transactions surface redirects without replay because Redis may
+already have observed WATCH or MULTI; MOVED still updates topology for the next
+freshly built transaction. The multiplexed client traces redirects and
+topology-refresh lifecycle events; a configured recorder also emits redirect
+counters and refresh count/duration metrics. Per-node command latency labels
+are opt-in: they are disabled by default and, when enabled, are limited to 64
+concrete addresses per client plus `_OTHER`; additional addresses use the
+`_OTHER` label.
 
 ## Sentinel
 

@@ -14,13 +14,33 @@
 //! | Credential rotation across reconnects | [`MultiplexedClusterClient`] |
 //! | Per-node background auto-pipelining of concurrent requests | [`MultiplexedClusterClient`] |
 //!
-//! # Transactions
+//! # Pipelines and transactions
 //!
-//! MULTI/EXEC is **not** supported on the cluster clients: commands route to
-//! their key's node while MULTI/EXEC route to the default node, so a
-//! transaction scatters and is not atomic. Atomic cluster transactions need
-//! all keys in one hash slot plus a slot-pinned executor (not yet implemented).
-//! For a transaction, target a single-node client for the owning slot.
+//! [`ClusterPipeline`] preserves the typed [`redis_tower::Pipeline`] result
+//! surface while executing through [`MultiplexedClusterClient`]. It pins
+//! commands to masters from one topology snapshot, preserves submission order
+//! within each node batch, sends different node batches concurrently, and
+//! restores the original result order. There is no total execution order
+//! across slots. A redirect retries only the affected command; a transport
+//! failure or cancellation after dispatch is ambiguous because another node's
+//! batch may already have executed.
+//!
+//! Cross-slot `MGET`, `MSET`, and `DEL` are available through the explicit
+//! [`MultiplexedClusterClient::mget_split`],
+//! [`MultiplexedClusterClient::mset_split`], and
+//! [`MultiplexedClusterClient::del_split`] helpers. `MSET` and `DEL` are atomic
+//! only within one hash-slot group and can partially apply if another group
+//! fails.
+//!
+//! [`ClusterConnection`] and [`ClusterClient`] implement
+//! [`redis_tower::TransactionExecutor`]. They validate every WATCH and command
+//! key before I/O, reject mixed slots, and pin the complete MULTI/EXEC exchange
+//! to the owning master. [`redis_tower::Transaction::watch`] can protect a body
+//! that is already known. The closure-based `redis_tower::transaction` helpers
+//! are rejected before I/O because their separate WATCH/read/build calls cannot
+//! reserve one node connection, so read/compute/build optimistic locking is
+//! unsupported. Transactions are not currently exposed on
+//! [`MultiplexedClusterClient`]; use [`ClusterConnection`] or [`ClusterClient`].
 //!
 //! ## [`ClusterClient`]
 //!
@@ -61,13 +81,16 @@
 //!
 //! # Redirect Handling
 //!
-//! MOVED and ASK redirects are handled transparently. MOVED triggers a
-//! topology patch and retries against the new owner. ASK sends `ASKING`
-//! followed by the command on the same connection -- for
+//! Ordinary commands and cluster pipelines handle MOVED and ASK redirects
+//! transparently. MOVED triggers a topology patch and retries against the new
+//! owner. ASK sends `ASKING` followed by the command on the same connection -- for
 //! [`MultiplexedClusterClient`], that happens via
 //! [`AutoPipelineService::call_pipeline`](redis_tower::AutoPipelineService::call_pipeline),
 //! which guarantees the two frames land contiguously on the wire with
-//! no interleaving from other concurrent callers.
+//! no interleaving from other concurrent callers. Transactions never replay a
+//! redirect because Redis may already have observed WATCH or MULTI; MOVED still
+//! updates topology for a freshly built future transaction before the error is
+//! returned.
 //!
 //! # Cluster-wide SCAN
 //!
@@ -118,6 +141,7 @@ mod client;
 mod connection;
 pub mod key_extractor;
 mod multiplexed;
+pub mod pipeline;
 pub mod scan_stream;
 pub mod slot;
 pub mod topology;
@@ -128,6 +152,7 @@ pub use connection::{
     ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
+pub use pipeline::ClusterPipeline;
 pub use scan_stream::{
     ClusterScan, ClusterScanItem, MAX_MEMBERSHIP_ROUNDS, MAX_SCAN_CONCURRENCY, ScanClusterStream,
 };

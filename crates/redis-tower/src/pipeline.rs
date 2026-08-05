@@ -36,9 +36,10 @@ use crate::client::RedisClient;
 /// A connection type that can execute a batch of Redis frames in a single
 /// roundtrip (pipelining).
 ///
-/// Implemented by [`RedisConnection`]. The `Arc<Mutex<C>>` blanket impl and
-/// the [`RedisClient`] impl allow pool-managed and shared clients to be passed
-/// directly to [`Pipeline::execute`].
+/// Implemented by [`RedisConnection`], [`RedisClient`], and the standard
+/// [`MultiplexedClient`](crate::MultiplexedClient). The `Arc<Mutex<C>>` blanket impl also allows
+/// pool-managed and shared executors to be passed directly to
+/// [`Pipeline::execute`].
 ///
 /// # Note on transactions
 ///
@@ -98,7 +99,8 @@ struct PipelineEntry {
 /// the [`PipelineResults`] by index.
 ///
 /// Accepts any type that implements [`PipelineExecutor`], including
-/// [`RedisConnection`], [`RedisClient`], and `Arc<Mutex<C>>` for any
+/// [`RedisConnection`], [`RedisClient`], the standard
+/// [`MultiplexedClient`](crate::MultiplexedClient), and `Arc<Mutex<C>>` for any
 /// `C: PipelineExecutor + Send`.
 ///
 /// # Example
@@ -149,6 +151,7 @@ impl Pipeline {
     /// Execute all queued commands in a single roundtrip.
     ///
     /// Accepts any [`PipelineExecutor`]: [`RedisConnection`], [`RedisClient`],
+    /// the standard [`MultiplexedClient`](crate::MultiplexedClient),
     /// `Arc<Mutex<RedisConnection>>`, etc.
     pub async fn execute<E: PipelineExecutor>(
         self,

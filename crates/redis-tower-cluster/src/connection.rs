@@ -116,7 +116,7 @@ impl ReadRoutingStrategy for FirstReplicaRouting {
     }
 }
 
-/// Maximum number of redirects before giving up.
+/// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
 
 /// Backoff applied before retrying a transient cluster error (TRYAGAIN,
@@ -253,8 +253,10 @@ impl ClusterConnectionBuilder {
     /// Set the maximum number of MOVED/ASK redirects to follow for a single
     /// command before giving up with an error.
     ///
-    /// Each redirect is a round-trip to another node, so this bounds the worst
-    /// case latency of one command during a resharding. Defaults to 5.
+    /// The initial node attempt is always made, including when `max` is zero.
+    /// Each followed redirect is another round-trip, so this bounds the worst
+    /// case latency of one command during a resharding. Transient cluster
+    /// replies share the same follow-up budget. Defaults to 5.
     pub fn max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
         self
@@ -563,62 +565,72 @@ impl ClusterConnection {
         let initial_node = self.route_command(&cmd_frame).to_string();
 
         let mut target_node = initial_node;
+        let mut send_asking = false;
+        let mut followups_used = 0usize;
 
-        for _ in 0..self.max_redirects {
+        loop {
             // A previous command deadline may have quarantined this node's
             // socket while a reply was outstanding. Reconnect lazily before
             // routing the next command to it.
             self.ensure_connection(&target_node).await?;
-            let responses = self
-                .execute_pipeline_on_node(&target_node, vec![cmd_frame.clone()])
-                .await?;
-            let response = responses
+            let response = if send_asking {
+                // ASKING is connection-local and one-shot, so keep it in the
+                // same checked-out exchange as the migrated command.
+                self.execute_pipeline_on_node(
+                    &target_node,
+                    vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
+                )
+                .await?
                 .into_iter()
-                .next()
-                .ok_or(RedisError::ConnectionClosed)?;
+                .nth(1)
+                .ok_or(RedisError::ConnectionClosed)?
+            } else {
+                self.execute_pipeline_on_node(&target_node, vec![cmd_frame.clone()])
+                    .await?
+                    .into_iter()
+                    .next()
+                    .ok_or(RedisError::ConnectionClosed)?
+            };
 
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
                     tracing::debug!(slot, from_addr = %target_node, to_addr = %addr, kind = "MOVED", "cluster redirect");
+                    if followups_used >= self.max_redirects {
+                        break;
+                    }
+                    followups_used += 1;
                     let addr = self.remap_addr(&addr);
                     self.ensure_connection(&addr).await?;
                     self.update_slot_owner(slot, &addr);
                     target_node = addr;
+                    send_asking = false;
                     continue;
                 }
                 Some(Redirect::Ask { slot, addr }) => {
                     tracing::debug!(slot, to_addr = %addr, kind = "ASK", "cluster redirect");
-                    let addr = self.remap_addr(&addr);
-                    self.ensure_connection(&addr).await?;
-                    // Keep ASKING and the migrated command in one checked-out
-                    // pipeline. A timeout cannot otherwise land after ASKING
-                    // succeeds but before the command is sent, leaving its
-                    // one-shot state armed for an unrelated successor.
-                    let responses = self
-                        .execute_pipeline_on_node(
-                            &addr,
-                            vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
-                        )
-                        .await?;
-                    let response = responses
-                        .into_iter()
-                        .nth(1)
-                        .ok_or(RedisError::ConnectionClosed)?;
-
-                    if let Frame::Error(ref e) = response {
-                        return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
+                    if followups_used >= self.max_redirects {
+                        break;
                     }
-                    return cmd.parse_response(response);
+                    followups_used += 1;
+                    let addr = self.remap_addr(&addr);
+                    target_node = addr;
+                    send_asking = true;
+                    continue;
                 }
                 None => {
                     // Transient cluster errors: retry within the redirect
                     // budget rather than surfacing on first occurrence.
                     if let Some(transient) = TransientError::from_frame(&response) {
+                        if followups_used >= self.max_redirects {
+                            break;
+                        }
+                        followups_used += 1;
                         if transient == TransientError::ClusterDown {
                             // The cluster view may be stale (election / moved
                             // slots); refresh best-effort and re-route the key.
                             let _ = self.refresh_topology().await;
                             target_node = self.route_command(&cmd_frame).to_string();
+                            send_asking = false;
                         }
                         tracing::debug!(?transient, node = %target_node, "transient cluster error; retrying");
                         tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
@@ -660,6 +672,49 @@ impl ClusterConnection {
                 Ok(responses)
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Run a complete WATCH/MULTI/EXEC exchange on one master connection.
+    ///
+    /// As with [`execute_pipeline_on_node`](Self::execute_pipeline_on_node),
+    /// the connection is removed from the reusable map before the first wire
+    /// await. Cancellation or an incomplete exchange therefore quarantines
+    /// the socket instead of leaving transaction state behind for a successor.
+    async fn execute_transaction_on_node(
+        &mut self,
+        addr: &str,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> Result<Option<Vec<Frame>>, RedisError> {
+        let mut conn = self
+            .nodes
+            .remove(addr)
+            .ok_or_else(|| RedisError::Redis(format!("no connection for node {addr}")))?;
+        match conn.execute_transaction(watch_frames, command_frames).await {
+            Ok(responses) => {
+                self.nodes.insert(addr.to_string(), conn);
+                Ok(responses)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve a hash slot to its master. Only a genuinely keyless transaction
+    /// may use the default node; a keyed transaction fails closed when the
+    /// current topology cannot prove who owns its slot.
+    fn transaction_node(&self, slot: Option<u16>) -> Result<String, RedisError> {
+        match slot {
+            Some(slot) => self
+                .topology
+                .master_for_slot(slot)
+                .map(NodeAddr::addr_string)
+                .ok_or_else(|| {
+                    RedisError::Redis(format!(
+                        "CLUSTERDOWN no known master owns transaction slot {slot}"
+                    ))
+                }),
+            None => Ok(self.default_node.clone()),
         }
     }
 
@@ -848,6 +903,58 @@ impl redis_tower::RedisExecutor for ClusterConnection {
     ) -> impl std::future::Future<Output = Result<Cmd::Response, redis_tower_core::RedisError>> + Send
     {
         ClusterConnection::execute(self, cmd)
+    }
+}
+
+/// Slot-pinned WATCH/MULTI/EXEC for the exclusive cluster connection.
+///
+/// Every key is validated before a node connection is touched. Transactions
+/// with keys from different hash slots are rejected client-side, while same-
+/// slot transactions are sent in their entirety to that slot's master. The
+/// exchange is never replayed after an ambiguous transport failure or cluster
+/// redirect. [`redis_tower::Transaction::watch`] can protect a body that is
+/// already known in the same preflighted, pinned exchange. The closure-based
+/// `redis_tower::transaction` helpers are intentionally unavailable: their
+/// standalone WATCH/read/build sequence cannot reserve one cluster node
+/// connection safely, so read/compute/build optimistic locking is unsupported.
+impl redis_tower::TransactionExecutor for ClusterConnection {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        let mut transaction_frames =
+            Vec::with_capacity(watch_frames.len().saturating_add(command_frames.len()));
+        transaction_frames.extend(watch_frames.iter().cloned());
+        transaction_frames.extend(command_frames.iter().cloned());
+        let slot = key_extractor::common_slot(&transaction_frames)
+            .map_err(|error| RedisError::Redis(error.to_string()));
+
+        async move {
+            let slot = slot?;
+            let node = self.transaction_node(slot)?;
+            self.ensure_connection(&node).await?;
+            let result = self
+                .execute_transaction_on_node(&node, watch_frames, command_frames)
+                .await;
+
+            // A transaction is never replayed: after WATCH or MULTI reaches
+            // Redis, a retry could violate optimistic-locking or duplicate an
+            // applied write. A MOVED response is nevertheless authoritative
+            // topology feedback, so patch that one slot for a freshly built
+            // future transaction before surfacing the original error.
+            if let Err(RedisError::Redis(message)) = &result {
+                let redirect = Frame::Error(message.clone().into());
+                if let Some(Redirect::Moved { slot, addr }) = parse_redirect(&redirect) {
+                    let addr = self.remap_addr(&addr);
+                    self.update_slot_owner(slot, &addr);
+                }
+            }
+
+            result
+        }
     }
 }
 
@@ -1090,9 +1197,76 @@ mod tests {
     use super::*;
     use crate::topology::SlotRange;
     use bytes::Bytes;
-    use redis_tower_commands::Ping;
+    use redis_tower_commands::{Get, Ping};
     use redis_tower_core::{RedisStream, WithDeadline};
     use tokio::io::AsyncReadExt;
+    #[cfg(unix)]
+    use tokio::io::AsyncWriteExt;
+
+    #[cfg(unix)]
+    fn topology_for_addr(addr: &str, start: u16, end: u16) -> ClusterTopology {
+        let (host, port) = addr.rsplit_once(':').unwrap();
+        ClusterTopology::new(vec![SlotRange {
+            start,
+            end,
+            master: NodeAddr {
+                host: host.to_string(),
+                port: port.parse().unwrap(),
+            },
+            replicas: Vec::new(),
+        }])
+    }
+
+    #[cfg(unix)]
+    fn cluster_over_stream(
+        addr: &str,
+        client: tokio::net::UnixStream,
+        topology: ClusterTopology,
+    ) -> ClusterConnection {
+        let mut cluster = ClusterConnection::empty_for_test();
+        cluster.default_node = addr.to_string();
+        cluster.topology = topology;
+        cluster.nodes.insert(
+            addr.to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(client)),
+        );
+        cluster
+    }
+
+    #[cfg(unix)]
+    async fn assert_no_wire_request(server: &mut tokio::net::UnixStream) {
+        let mut bytes = [0u8; 128];
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(25),
+                server.read(&mut bytes),
+            )
+            .await
+            .is_err(),
+            "transaction preflight wrote to the cluster node"
+        );
+    }
+
+    #[cfg(unix)]
+    async fn read_until_contains(server: &mut tokio::net::UnixStream, needle: &[u8]) {
+        let mut received = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let mut bytes = [0u8; 256];
+                let count = server.read(&mut bytes).await.unwrap();
+                assert!(count > 0, "connection closed before {needle:?} arrived");
+                received.extend_from_slice(&bytes[..count]);
+                if received
+                    .windows(needle.len())
+                    .any(|window| window == needle)
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}"));
+    }
 
     #[tokio::test]
     async fn already_expired_command_never_reaches_direct_node() {
@@ -1132,6 +1306,62 @@ mod tests {
             .is_err(),
             "an already-expired command reached the cluster node"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn zero_redirect_budget_still_makes_the_initial_attempt() {
+        let addr = "127.0.0.1:7000";
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(addr, client, topology_for_addr(addr, 0, 16_383));
+        cluster.max_redirects = 0;
+
+        let server_task = tokio::spawn(async move {
+            read_until_contains(&mut server, b"PING").await;
+            server.write_all(b"+PONG\r\n").await.unwrap();
+        });
+
+        assert_eq!(cluster.execute(Ping::new()).await.unwrap(), "PONG");
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn one_redirect_budget_follows_one_moved_reply() {
+        let source_addr = "127.0.0.1:7000";
+        let target_addr = "127.0.0.1:7001";
+        let (source_client, mut source_server) = tokio::net::UnixStream::pair().unwrap();
+        let (target_client, mut target_server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(
+            source_addr,
+            source_client,
+            topology_for_addr(source_addr, 0, 16_383),
+        );
+        cluster.nodes.insert(
+            target_addr.to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(target_client)),
+        );
+        cluster.max_redirects = 1;
+        let slot = slot_for_key(b"foo");
+
+        let source_task = tokio::spawn(async move {
+            read_until_contains(&mut source_server, b"GET").await;
+            source_server
+                .write_all(format!("-MOVED {slot} {target_addr}\r\n").as_bytes())
+                .await
+                .unwrap();
+        });
+        let target_task = tokio::spawn(async move {
+            read_until_contains(&mut target_server, b"GET").await;
+            target_server.write_all(b"$5\r\nvalue\r\n").await.unwrap();
+        });
+
+        assert_eq!(
+            cluster.execute(Get::new("foo")).await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+        source_task.await.unwrap();
+        target_task.await.unwrap();
     }
 
     #[tokio::test]
@@ -1210,6 +1440,179 @@ mod tests {
             "a socket from a failed exchange must not return to the node map"
         );
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn transaction_rejects_watch_body_cross_slot_before_wire_io() {
+        let addr = "127.0.0.1:7000";
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(addr, client, topology_for_addr(addr, 0, 16_383));
+
+        let result = <ClusterConnection as redis_tower::TransactionExecutor>::execute_transaction(
+            &mut cluster,
+            vec![array(vec![bulk("WATCH"), bulk("foo")])],
+            vec![array(vec![bulk("SET"), bulk("hello"), bulk("value")])],
+        )
+        .await;
+
+        let error = result.expect_err("mixed-slot transaction unexpectedly executed");
+        assert!(error.to_string().contains("CROSSSLOT"));
+        assert!(cluster.nodes.contains_key(addr));
+        assert_no_wire_request(&mut server).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn keyed_transaction_fails_closed_when_slot_is_unmapped() {
+        let addr = "127.0.0.1:7000";
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(addr, client, topology_for_addr(addr, 0, 0));
+        let slot = slot_for_key(b"foo");
+        assert_ne!(slot, 0);
+
+        let result = <ClusterConnection as redis_tower::TransactionExecutor>::execute_transaction(
+            &mut cluster,
+            Vec::new(),
+            vec![array(vec![bulk("SET"), bulk("foo"), bulk("value")])],
+        )
+        .await;
+
+        let error = result.expect_err("unmapped transaction fell back to the default node");
+        assert!(
+            error.to_string().contains(&format!(
+                "CLUSTERDOWN no known master owns transaction slot {slot}"
+            )),
+            "unexpected unmapped-slot error: {error}"
+        );
+        assert!(cluster.nodes.contains_key(addr));
+        assert_no_wire_request(&mut server).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn transaction_moved_updates_topology_without_replay() {
+        let source_addr = "127.0.0.1:7000";
+        let target_addr = "127.0.0.1:7001";
+        let (source_client, mut source_server) = tokio::net::UnixStream::pair().unwrap();
+        let (target_client, mut target_server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(
+            source_addr,
+            source_client,
+            topology_for_addr(source_addr, 0, 16_383),
+        );
+        cluster.nodes.insert(
+            target_addr.to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(target_client)),
+        );
+        let slot = slot_for_key(b"foo");
+        let moved = format!("-MOVED {slot} {target_addr}\r\n");
+
+        let server_task = tokio::spawn(async move {
+            read_until_contains(&mut source_server, b"MULTI").await;
+            source_server.write_all(b"+OK\r\n").await.unwrap();
+            read_until_contains(&mut source_server, b"SET").await;
+            source_server.write_all(moved.as_bytes()).await.unwrap();
+            read_until_contains(&mut source_server, b"DISCARD").await;
+            source_server.write_all(b"+OK\r\n").await.unwrap();
+        });
+
+        let result = <ClusterConnection as redis_tower::TransactionExecutor>::execute_transaction(
+            &mut cluster,
+            Vec::new(),
+            vec![array(vec![bulk("SET"), bulk("foo"), bulk("value")])],
+        )
+        .await;
+
+        let error = result.expect_err("MOVED transaction unexpectedly succeeded");
+        assert!(error.to_string().contains("MOVED"));
+        assert_eq!(
+            cluster
+                .topology
+                .master_for_slot(slot)
+                .expect("MOVED slot was not retained")
+                .addr_string(),
+            target_addr
+        );
+        assert!(
+            !cluster.nodes.contains_key(source_addr),
+            "errored transaction connection returned to the reusable node map"
+        );
+        server_task.await.unwrap();
+        assert_no_wire_request(&mut target_server).await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cancelled_transaction_quarantines_checked_out_node() {
+        let addr = "127.0.0.1:7000";
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(addr, client, topology_for_addr(addr, 0, 16_383));
+        let server_task = tokio::spawn(async move {
+            read_until_contains(&mut server, b"MULTI").await;
+            let mut bytes = [0u8; 128];
+            assert_eq!(
+                server.read(&mut bytes).await.unwrap(),
+                0,
+                "cancelled transaction left its socket reusable"
+            );
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(25),
+            <ClusterConnection as redis_tower::TransactionExecutor>::execute_transaction(
+                &mut cluster,
+                Vec::new(),
+                vec![array(vec![bulk("SET"), bulk("foo"), bulk("value")])],
+            ),
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "transaction unexpectedly received a response"
+        );
+        assert!(
+            !cluster.nodes.contains_key(addr),
+            "cancelled transaction returned its checked-out node to the map"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), server_task)
+            .await
+            .expect("quarantined transaction socket did not close")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cluster_transaction_helper_rejects_before_watch_or_build() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let addr = "127.0.0.1:7000";
+        let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = cluster_over_stream(addr, client, topology_for_addr(addr, 0, 16_383));
+        let build_called = Arc::new(AtomicBool::new(false));
+        let build_flag = Arc::clone(&build_called);
+
+        let result = redis_tower::transaction_with_retries(
+            &mut cluster,
+            ["foo"],
+            0,
+            async move |_conn: &mut ClusterConnection| {
+                build_flag.store(true, Ordering::SeqCst);
+                Ok(redis_tower::Transaction::new())
+            },
+        )
+        .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("cluster accepted closure-based transaction helper"),
+        };
+        assert!(error.to_string().contains("transaction_with_retries()"));
+        assert!(error.to_string().contains("Transaction::watch()"));
+        assert!(!build_called.load(Ordering::SeqCst));
+        assert!(cluster.nodes.contains_key(addr));
+        assert_no_wire_request(&mut server).await;
     }
 
     #[test]

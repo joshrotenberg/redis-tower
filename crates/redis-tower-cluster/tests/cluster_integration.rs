@@ -5,16 +5,19 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
+use redis_tower::Transaction;
 use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::pool::ConnectionPool;
 use redis_tower_cluster::{
-    ClusterConnection, ClusterScan, ClusterScanItem, MultiplexedClusterClient, ScanClusterStream,
+    ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan, ClusterScanItem,
+    MultiplexedClusterClient, ScanClusterStream,
 };
 use redis_tower_commands::*;
 use redis_tower_test::cluster::{ClusterFixture, ClusterNodeRole, key_for_slot};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
@@ -49,6 +52,55 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
     MultiplexedClusterClient::connect(&cluster.addr())
         .await
         .expect("failed to connect to multiplexed cluster")
+}
+
+fn commandstat_calls(info: &str, command: &str) -> u64 {
+    let prefix = format!("cmdstat_{command}:");
+    info.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .and_then(|fields| {
+            fields
+                .split(',')
+                .find_map(|field| field.strip_prefix("calls="))
+        })
+        .and_then(|calls| calls.parse().ok())
+        .unwrap_or(0)
+}
+
+async fn master_commandstat_calls(fixture: &ClusterFixture, command: &str) -> Vec<(usize, u64)> {
+    let topology = fixture
+        .topology()
+        .await
+        .expect("failed to inspect commandstats topology");
+    let mut calls = Vec::new();
+    for master in topology.masters() {
+        let info = fixture
+            .run_node(master.index, &["INFO", "commandstats"])
+            .await
+            .expect("failed to read master commandstats");
+        calls.push((master.index, commandstat_calls(&info, command)));
+    }
+    calls
+}
+
+fn assert_commandstat_incremented_only_on(
+    before: &[(usize, u64)],
+    after: &[(usize, u64)],
+    owner_index: usize,
+    command: &str,
+) {
+    assert_eq!(after.len(), before.len(), "master set changed during test");
+    for (index, before_calls) in before {
+        let after_calls = after
+            .iter()
+            .find_map(|(candidate, calls)| (candidate == index).then_some(*calls))
+            .unwrap_or_else(|| panic!("master {index} disappeared during test"));
+        let expected = before_calls + if *index == owner_index { 1 } else { 0 };
+        assert_eq!(
+            after_calls, expected,
+            "{command} reached unexpected master {index}; owner is {owner_index}"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -443,6 +495,342 @@ async fn mux_cluster_shutdown_drains_and_last_clone_wins() {
 
     // The last clone drains the workers cleanly.
     clone.shutdown().await;
+}
+
+/// Explicit cluster pipelines group by concrete node while preserving the
+/// caller's typed result order. The split helpers intentionally relax Redis's
+/// single-slot atomicity rule, so exercise their duplicate, missing-key, and
+/// input-order contracts across three exact slots.
+#[tokio::test]
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster for cross-slot batches"]
+async fn mux_cluster_pipeline_and_split_helpers_preserve_order() {
+    let fixture = tokio::time::timeout(Duration::from_secs(60), ClusterFixture::start())
+        .await
+        .expect("timed out starting cluster batch fixture")
+        .expect("failed to start cluster batch fixture");
+    let client = tokio::time::timeout(
+        Duration::from_secs(10),
+        MultiplexedClusterClient::connect(&fixture.seed_addr()),
+    )
+    .await
+    .expect("timed out connecting cluster batch client")
+    .expect("failed to connect cluster batch client");
+
+    let low_slot = key_for_slot(42);
+    let middle_slot = key_for_slot(6_000);
+    let high_slot = key_for_slot(12_000);
+    let missing_slot = key_for_slot(9_000);
+    assert_ne!(
+        redis_tower_cluster::slot_for_key(low_slot.as_bytes()),
+        redis_tower_cluster::slot_for_key(middle_slot.as_bytes())
+    );
+    assert_ne!(
+        redis_tower_cluster::slot_for_key(middle_slot.as_bytes()),
+        redis_tower_cluster::slot_for_key(high_slot.as_bytes())
+    );
+    let topology = fixture
+        .topology()
+        .await
+        .expect("failed to inspect cluster batch topology");
+    let owners: HashSet<&str> = [42, 6_000, 12_000]
+        .into_iter()
+        .map(|slot| {
+            topology
+                .owner_of_slot(slot)
+                .expect("exact test slot should have an owner")
+                .id
+                .as_str()
+        })
+        .collect();
+    assert_eq!(owners.len(), 3, "pipeline keys must span all three masters");
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.del_split([
+            low_slot.as_bytes(),
+            middle_slot.as_bytes(),
+            high_slot.as_bytes(),
+            missing_slot.as_bytes(),
+        ]),
+    )
+    .await
+    .expect("timed out cleaning cluster batch keys")
+    .expect("failed to clean cluster batch keys");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.mset_split([
+            (low_slot.as_bytes(), b"40".as_slice()),
+            (middle_slot.as_bytes(), b"middle".as_slice()),
+            (high_slot.as_bytes(), b"tail".as_slice()),
+        ]),
+    )
+    .await
+    .expect("timed out seeding mixed-slot pipeline keys")
+    .expect("failed to seed mixed-slot pipeline keys");
+
+    let pipeline_results = tokio::time::timeout(
+        Duration::from_secs(5),
+        ClusterPipeline::new()
+            .push(Get::new(&high_slot))
+            .push(StrLen::new(&middle_slot))
+            .push(Incr::new(&low_slot))
+            .push(Get::new(&low_slot))
+            .execute(&client),
+    )
+    .await
+    .expect("timed out executing mixed-slot typed pipeline")
+    .expect("mixed-slot typed pipeline failed");
+    assert_eq!(
+        pipeline_results.get::<Option<Bytes>>(0).unwrap().as_deref(),
+        Some(&b"tail"[..])
+    );
+    assert_eq!(*pipeline_results.get::<i64>(1).unwrap(), 6);
+    assert_eq!(*pipeline_results.get::<i64>(2).unwrap(), 41);
+    assert_eq!(
+        pipeline_results.get::<Option<Bytes>>(3).unwrap().as_deref(),
+        Some(&b"41"[..])
+    );
+
+    // A duplicate MSET key remains in its slot-local input order, so the last
+    // value wins exactly as it does for an ordinary same-slot MSET.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.mset_split([
+            (middle_slot.as_bytes(), b"middle-first".as_slice()),
+            (low_slot.as_bytes(), b"low".as_slice()),
+            (high_slot.as_bytes(), b"high".as_slice()),
+            (middle_slot.as_bytes(), b"middle-last".as_slice()),
+        ]),
+    )
+    .await
+    .expect("timed out executing split MSET")
+    .expect("split MSET failed");
+
+    let values = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.mget_split([
+            high_slot.as_bytes(),
+            middle_slot.as_bytes(),
+            missing_slot.as_bytes(),
+            low_slot.as_bytes(),
+            middle_slot.as_bytes(),
+        ]),
+    )
+    .await
+    .expect("timed out executing split MGET")
+    .expect("split MGET failed");
+    assert_eq!(
+        values,
+        vec![
+            Some(Bytes::from_static(b"high")),
+            Some(Bytes::from_static(b"middle-last")),
+            None,
+            Some(Bytes::from_static(b"low")),
+            Some(Bytes::from_static(b"middle-last")),
+        ],
+        "split MGET must restore duplicate and missing values to input order"
+    );
+
+    let deleted = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.del_split([
+            middle_slot.as_bytes(),
+            low_slot.as_bytes(),
+            middle_slot.as_bytes(),
+            missing_slot.as_bytes(),
+            high_slot.as_bytes(),
+        ]),
+    )
+    .await
+    .expect("timed out executing split DEL")
+    .expect("split DEL failed");
+    assert_eq!(deleted, 3, "duplicate and missing DEL keys count once/zero");
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.mget_split([
+                low_slot.as_bytes(),
+                middle_slot.as_bytes(),
+                high_slot.as_bytes(),
+            ]),
+        )
+        .await
+        .expect("timed out verifying split DEL cleanup")
+        .expect("failed to verify split DEL cleanup"),
+        vec![None, None, None]
+    );
+
+    tokio::time::timeout(Duration::from_secs(5), client.shutdown())
+        .await
+        .expect("timed out shutting down cluster batch client");
+}
+
+/// Cluster transactions must pin every frame to one master before touching the
+/// wire. Exercise both shared and exclusive clients, prove a cross-slot body is
+/// rejected without partial writes, and exercise WATCH through the direct
+/// transaction surface that submits one preflighted, pinned exchange.
+#[tokio::test]
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster for transactions"]
+async fn cluster_transactions_are_slot_pinned_and_watch_safe() {
+    let fixture = tokio::time::timeout(Duration::from_secs(60), ClusterFixture::start())
+        .await
+        .expect("timed out starting transaction fixture")
+        .expect("failed to start transaction fixture");
+    let seed = fixture.seed_addr();
+
+    tokio::time::timeout(Duration::from_secs(20), async {
+        // Appending outside the generated hash tag creates distinct keys in
+        // exactly the same slot.
+        let transaction_slot = 12_000;
+        let topology = fixture
+            .topology()
+            .await
+            .expect("failed to inspect transaction topology");
+        let transaction_owner = topology
+            .owner_of_slot(transaction_slot)
+            .expect("transaction slot should have an owner")
+            .index;
+        assert_ne!(
+            transaction_owner,
+            topology
+                .owner_of_slot(0)
+                .expect("default slot should have an owner")
+                .index,
+            "transaction test must target a non-default master"
+        );
+        let same_slot_base = key_for_slot(transaction_slot);
+        let counter = format!("{same_slot_base}:counter");
+        let marker = format!("{same_slot_base}:marker");
+        let mut shared = ClusterClient::connect(&seed)
+            .await
+            .expect("failed to connect shared cluster client");
+        shared
+            .execute(Del::keys([counter.clone(), marker.clone()]))
+            .await
+            .expect("failed to clean same-slot transaction keys");
+
+        let watch_calls_before = master_commandstat_calls(&fixture, "watch").await;
+        let transaction_multi_calls_before = master_commandstat_calls(&fixture, "multi").await;
+
+        let committed = Transaction::new()
+            .watch([counter.clone()])
+            .push(Set::new(&counter, "40"))
+            .push(Incr::new(&counter))
+            .push(Set::new(&marker, "committed"))
+            .push(Get::new(&counter))
+            .execute(&mut shared)
+            .await
+            .expect("same-slot ClusterClient transaction should execute")
+            .unwrap();
+        assert_eq!(*committed.get::<i64>(1).unwrap(), 41);
+        assert_eq!(
+            committed.get::<Option<Bytes>>(3).unwrap().as_deref(),
+            Some(&b"41"[..])
+        );
+        assert_eq!(
+            shared.execute(Get::new(&marker)).await.unwrap(),
+            Some(Bytes::from_static(b"committed"))
+        );
+        assert_commandstat_incremented_only_on(
+            &watch_calls_before,
+            &master_commandstat_calls(&fixture, "watch").await,
+            transaction_owner,
+            "WATCH",
+        );
+        assert_commandstat_incremented_only_on(
+            &transaction_multi_calls_before,
+            &master_commandstat_calls(&fixture, "multi").await,
+            transaction_owner,
+            "MULTI",
+        );
+
+        let mut exclusive = ClusterConnection::connect(&seed)
+            .await
+            .expect("failed to connect exclusive cluster connection");
+        let cross_slot_a = key_for_slot(42);
+        let cross_slot_b = key_for_slot(12_000);
+        exclusive.execute(Del::new(&cross_slot_a)).await.ok();
+        exclusive.execute(Del::new(&cross_slot_b)).await.ok();
+        let multi_calls_before = master_commandstat_calls(&fixture, "multi").await;
+        assert!(
+            multi_calls_before.iter().any(|(_, calls)| *calls > 0),
+            "the committed transaction should make MULTI commandstats observable"
+        );
+        let cross_slot_error = match Transaction::new()
+            .push(Set::new(&cross_slot_a, "must-not-land-a"))
+            .push(Set::new(&cross_slot_b, "must-not-land-b"))
+            .execute(&mut exclusive)
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("mixed-slot transaction unexpectedly reached Redis"),
+        };
+        assert!(
+            cross_slot_error.to_string().contains("CROSSSLOT"),
+            "unexpected mixed-slot error: {cross_slot_error}"
+        );
+        assert_eq!(
+            master_commandstat_calls(&fixture, "multi").await,
+            multi_calls_before,
+            "mixed-slot preflight must reject before MULTI reaches any master"
+        );
+        assert_eq!(
+            exclusive.execute(Get::new(&cross_slot_a)).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            exclusive.execute(Get::new(&cross_slot_b)).await.unwrap(),
+            None
+        );
+
+        let watch_calls_before = master_commandstat_calls(&fixture, "watch").await;
+        let helper_multi_calls_before = master_commandstat_calls(&fixture, "multi").await;
+        let build_called = Arc::new(AtomicBool::new(false));
+        let build_flag = Arc::clone(&build_called);
+        let helper_result = redis_tower::transaction_with_retries(
+            &mut exclusive,
+            [counter.clone()],
+            0,
+            async move |_connection: &mut ClusterConnection| {
+                build_flag.store(true, Ordering::SeqCst);
+                Ok(Transaction::new())
+            },
+        )
+        .await;
+        let helper_error = match helper_result {
+            Err(error) => error,
+            Ok(_) => panic!("cluster accepted the closure-based transaction helper"),
+        };
+        assert!(
+            helper_error
+                .to_string()
+                .contains("transaction_with_retries()")
+        );
+        assert!(helper_error.to_string().contains("Transaction::watch()"));
+        assert!(
+            !build_called.load(Ordering::SeqCst),
+            "unsupported helper invoked its build closure"
+        );
+        assert_eq!(
+            master_commandstat_calls(&fixture, "watch").await,
+            watch_calls_before,
+            "unsupported helper must reject before WATCH"
+        );
+        assert_eq!(
+            master_commandstat_calls(&fixture, "multi").await,
+            helper_multi_calls_before,
+            "unsupported helper must reject before MULTI"
+        );
+
+        shared
+            .execute(Del::keys([counter, marker]))
+            .await
+            .expect("failed to clean same-slot transaction keys");
+        exclusive.execute(Del::new(cross_slot_a)).await.ok();
+        exclusive.execute(Del::new(cross_slot_b)).await.ok();
+    })
+    .await
+    .expect("cluster transaction coverage exceeded its hard timeout");
 }
 
 /// A real held reshard exposes both redirect modes in their protocol order.
