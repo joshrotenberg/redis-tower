@@ -12,5 +12,5 @@ rust-version.workspace = true
 
 [dev-dependencies]
 docker-wrapper = { workspace = true }
-redis-tower = { workspace = true }
+redis-tower = { workspace = true, features = ["commands-stack"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

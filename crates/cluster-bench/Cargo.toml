@@ -9,9 +9,9 @@ name = "cluster-bench"
 path = "src/main.rs"
 
 [dependencies]
-redis-tower = { path = "../redis-tower" }
+redis-tower = { path = "../redis-tower", default-features = false }
 redis-tower-cluster = { path = "../redis-tower-cluster" }
-redis-tower-commands = { path = "../redis-tower-commands" }
+redis-tower-commands = { path = "../redis-tower-commands", default-features = false }
 redis-tower-core = { path = "../redis-tower-core" }
 redis-tower-protocol = { path = "../redis-tower-protocol" }
 redis-server-wrapper = { workspace = true }

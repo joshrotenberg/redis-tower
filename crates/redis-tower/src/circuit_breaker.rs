@@ -48,7 +48,6 @@ use tower_resilience_circuitbreaker::{
 };
 use tower_service::Service;
 
-use crate::command_adapter::CommandAdapter;
 use crate::executor::RedisExecutor;
 use crate::retry::{RetryClient, RetryPolicy};
 
@@ -61,6 +60,58 @@ type ClassifierFn = fn(&Result<Frame, RedisError>) -> bool;
 type RedisClassifier = FnClassifier<ClassifierFn>;
 type InnerLayer = UpstreamCircuitBreakerLayer<RedisClassifier>;
 type InnerHandle = UpstreamCircuitBreakerHandle<RedisClassifier>;
+
+#[derive(Debug)]
+struct BreakerRequest {
+    frame: Frame,
+    deadline: Option<tokio::time::Instant>,
+}
+
+/// Applies a typed command's absolute deadline inside the breaker so the
+/// breaker observes and classifies an in-flight timeout.
+#[derive(Clone)]
+struct DeadlineFrameService<S> {
+    inner: S,
+}
+
+impl<S> DeadlineFrameService<S> {
+    fn new(inner: S) -> Self {
+        Self { inner }
+    }
+}
+
+impl<S> Service<BreakerRequest> for DeadlineFrameService<S>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+{
+    type Response = Frame;
+    type Error = RedisError;
+    type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, request: BreakerRequest) -> Self::Future {
+        if request
+            .deadline
+            .is_some_and(|deadline| deadline <= tokio::time::Instant::now())
+        {
+            return Box::pin(async { Err(RedisError::CommandTimeout) });
+        }
+
+        let future = self.inner.call(request.frame);
+        Box::pin(async move {
+            match request.deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, future)
+                    .await
+                    .map_err(|_elapsed| RedisError::CommandTimeout)?,
+                None => future.await,
+            }
+        })
+    }
+}
 
 /// Configuration for the Redis-aware circuit breaker.
 ///
@@ -203,7 +254,7 @@ impl<S> Layer<S> for RedisCircuitBreakerLayer {
 
     fn layer(&self, service: S) -> Self::Service {
         RedisCircuitBreakerService {
-            inner: self.inner.layer(service),
+            inner: self.inner.layer(DeadlineFrameService::new(service)),
             handle: self.handle.clone(),
         }
     }
@@ -211,7 +262,7 @@ impl<S> Layer<S> for RedisCircuitBreakerLayer {
 
 /// RedisError-preserving service produced by [`RedisCircuitBreakerLayer`].
 pub struct RedisCircuitBreakerService<S> {
-    inner: UpstreamCircuitBreaker<S, RedisClassifier>,
+    inner: UpstreamCircuitBreaker<DeadlineFrameService<S>, RedisClassifier>,
     handle: RedisCircuitBreakerHandle,
 }
 
@@ -228,6 +279,19 @@ impl<S> RedisCircuitBreakerService<S> {
     /// Clone a read-only handle for health checks and operational metrics.
     pub fn handle(&self) -> RedisCircuitBreakerHandle {
         self.handle.clone()
+    }
+
+    fn call_with_deadline(
+        &mut self,
+        frame: Frame,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>
+    where
+        S: Service<Frame, Response = Frame, Error = RedisError> + Clone + Send + 'static,
+        S::Future: Send + 'static,
+    {
+        let future = self.inner.call(BreakerRequest { frame, deadline });
+        Box::pin(async move { future.await.map_err(map_circuit_error) })
     }
 }
 
@@ -261,8 +325,7 @@ where
     }
 
     fn call(&mut self, request: Frame) -> Self::Future {
-        let future = self.inner.call(request);
-        Box::pin(async move { future.await.map_err(map_circuit_error) })
+        self.call_with_deadline(request, None)
     }
 }
 
@@ -272,7 +335,7 @@ where
 /// `ResilientRedisClient::with_circuit_breaker`.
 #[derive(Clone)]
 pub struct RedisCircuitBreakerClient<S> {
-    inner: CommandAdapter<RedisCircuitBreakerService<S>>,
+    inner: RedisCircuitBreakerService<S>,
     handle: RedisCircuitBreakerHandle,
 }
 
@@ -282,7 +345,7 @@ impl<S> RedisCircuitBreakerClient<S> {
         let layer = RedisCircuitBreakerLayer::new(config);
         let handle = layer.handle();
         Self {
-            inner: CommandAdapter::new(layer.layer(service)),
+            inner: layer.layer(service),
             handle,
         }
     }
@@ -299,20 +362,36 @@ where
     S::Future: Send + 'static,
 {
     /// Execute a typed command through the circuit breaker.
+    ///
+    /// A deadline carried by [`redis_tower_core::WithDeadline`] bounds both
+    /// waiting for inner readiness and the dispatched call.
     pub fn execute<Cmd: Command + 'static>(
         &self,
         command: Cmd,
     ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+        let deadline = command.deadline();
         let mut service = self.inner.clone();
         async move {
-            std::future::poll_fn(|cx| {
-                <CommandAdapter<RedisCircuitBreakerService<S>> as Service<Cmd>>::poll_ready(
-                    &mut service,
-                    cx,
-                )
-            })
-            .await?;
-            Service::call(&mut service, command).await
+            let readiness = std::future::poll_fn(|cx| service.poll_ready(cx));
+            match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, readiness)
+                    .await
+                    .map_err(|_elapsed| RedisError::CommandTimeout)?,
+                None => readiness.await,
+            }?;
+
+            if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+                return Err(RedisError::CommandTimeout);
+            }
+
+            let frame = command.to_frame();
+            let response = service.call_with_deadline(frame, deadline).await?;
+            if let Frame::Error(ref error) = response {
+                return Err(RedisError::Redis(
+                    String::from_utf8_lossy(error).into_owned(),
+                ));
+            }
+            command.parse_response(response)
         }
     }
 
@@ -365,6 +444,7 @@ pub type CircuitBreakerService<S> = RedisCircuitBreakerService<S>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use redis_tower_core::WithDeadline;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -398,8 +478,102 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct NeverReadyService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Service<Frame> for NeverReadyService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Frame, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn call(&mut self, _request: Frame) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            std::future::ready(Ok(Frame::SimpleString("PONG".into())))
+        }
+    }
+
+    #[derive(Clone)]
+    struct SlowService {
+        calls: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl Service<Frame> for SlowService {
+        type Response = Frame;
+        type Error = RedisError;
+        type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _request: Frame) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                Ok(Frame::SimpleString("PONG".into()))
+            })
+        }
+    }
+
     fn ping() -> Frame {
         Frame::Array(Some(vec![Frame::BulkString(Some("PING".into()))]))
+    }
+
+    #[tokio::test]
+    async fn typed_deadline_bounds_circuit_breaker_readiness() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let config = RedisCircuitBreakerConfig {
+            failure_threshold: 1,
+            recovery_probe_interval: Duration::from_secs(5),
+        };
+        let client = RedisCircuitBreakerClient::new(
+            NeverReadyService {
+                calls: Arc::clone(&calls),
+            },
+            config,
+        );
+        let handle = client.circuit_breaker_handle();
+
+        let result = client
+            .execute(WithDeadline::after(Ping::new(), Duration::from_millis(20)))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(handle.state(), RedisCircuitState::Closed);
+        assert_eq!(handle.metrics().await.total_calls, 0);
+    }
+
+    #[tokio::test]
+    async fn dispatched_typed_deadline_counts_as_circuit_failure() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = RedisCircuitBreakerClient::new(
+            SlowService {
+                calls: Arc::clone(&calls),
+                delay: Duration::from_millis(100),
+            },
+            RedisCircuitBreakerConfig {
+                failure_threshold: 1,
+                recovery_probe_interval: Duration::from_secs(5),
+            },
+        );
+        let handle = client.circuit_breaker_handle();
+
+        let result = client
+            .execute(WithDeadline::after(Ping::new(), Duration::from_millis(20)))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(handle.state(), RedisCircuitState::Open);
     }
 
     #[tokio::test]
@@ -482,6 +656,12 @@ mod tests {
         ));
         assert!(redis_error_is_circuit_failure(&RedisError::ConnectTimeout));
         assert!(redis_error_is_circuit_failure(&RedisError::CommandTimeout));
+        assert!(redis_error_is_circuit_failure(
+            &RedisError::ReconnectFailed {
+                attempts: 1,
+                last_error: Arc::new(RedisError::ConnectTimeout),
+            }
+        ));
         assert!(!redis_error_is_circuit_failure(&RedisError::Redis(
             "WRONGTYPE bad value".into()
         )));

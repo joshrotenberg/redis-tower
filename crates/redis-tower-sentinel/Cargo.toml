@@ -28,10 +28,10 @@ tls-native-tls = [
 ]
 
 [dependencies]
-redis-tower = { workspace = true }
+redis-tower = { workspace = true, default-features = false }
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
-redis-tower-commands = { workspace = true }
+redis-tower-commands = { workspace = true, default-features = false }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -43,6 +43,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+redis-tower-commands = { workspace = true, default-features = false, features = ["vector-sets"] }
 redis-tower-test = { path = "../redis-test-harness" }
 redis-server-wrapper = { workspace = true }
 

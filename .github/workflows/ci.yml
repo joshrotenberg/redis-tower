@@ -51,6 +51,11 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install mdBook
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook@0.5.4
+
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
@@ -58,6 +63,15 @@ jobs:
         run: cargo doc --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+
+      - name: Build the documentation site
+        run: mdbook build
+
+      - name: Test the documentation site
+        run: mdbook test
+
+      - name: Check local documentation links
+        run: python3 scripts/check_docs_links.py
 
   command-coverage:
     name: Command Coverage

@@ -147,6 +147,11 @@ async fn read_response_from(
 /// correct Tower contract for a non-multiplexed connection. For shared access
 /// across tasks, wrap with `tower::buffer::Buffer`.
 ///
+/// Cancelling an in-flight `Service::call` closes the connection. Once a
+/// request may have reached Redis, reusing its transport could let the next
+/// call consume the cancelled request's late response. A subsequent
+/// `poll_ready` therefore returns [`RedisError::ConnectionClosed`].
+///
 /// # Example
 ///
 /// Typed command types such as `Get` live in the `redis-tower-commands` crate,
@@ -867,12 +872,22 @@ impl RedisConnection {
     /// response starts being read. Consider using `AutoPipelineService`
     /// for large-value workloads, or splitting large values across
     /// multiple keys.
+    ///
+    /// Cancelling this future after dispatch closes the connection. The
+    /// transport is checked out of `self` until a complete response has been
+    /// read, preventing a later command from consuming a cancelled command's
+    /// response.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         self.ensure_framed().await?;
         let frame = cmd.to_frame();
-        let framed = self.framed.as_mut().unwrap();
+        let push_tx = self.push_tx.clone();
+        let mut framed = self.framed.take().expect("framed transport was ensured");
         framed.send(frame).await.map_err(RedisError::from)?;
-        let response = read_response_from(framed, &self.push_tx).await?;
+        let response = read_response_from(&mut framed, &push_tx).await?;
+
+        // A complete response restores protocol alignment. Return the
+        // transport before mapping Redis/application parse errors.
+        self.framed = Some(framed);
 
         if let Frame::Error(ref e) = response {
             return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
@@ -884,10 +899,12 @@ impl RedisConnection {
     /// Send multiple command frames and read all responses in a single roundtrip.
     ///
     /// Used by pipeline and transaction implementations.
+    /// Cancelling before every response has been read closes the connection.
     pub async fn execute_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
         self.ensure_framed().await?;
         let count = frames.len();
-        let framed = self.framed.as_mut().unwrap();
+        let push_tx = self.push_tx.clone();
+        let mut framed = self.framed.take().expect("framed transport was ensured");
 
         // Send all frames, buffering writes.
         for (i, frame) in frames.into_iter().enumerate() {
@@ -901,10 +918,11 @@ impl RedisConnection {
         // Read all responses, routing push frames to the channel.
         let mut responses = Vec::with_capacity(count);
         for _ in 0..count {
-            let response = read_response_from(framed, &self.push_tx).await?;
+            let response = read_response_from(&mut framed, &push_tx).await?;
             responses.push(response);
         }
 
+        self.framed = Some(framed);
         Ok(responses)
     }
 
@@ -917,13 +935,15 @@ impl RedisConnection {
         command_frames: Vec<Frame>,
     ) -> Result<Option<Vec<Frame>>, RedisError> {
         self.ensure_framed().await?;
-        let framed = self.framed.as_mut().unwrap();
+        let push_tx = self.push_tx.clone();
+        let mut framed = self.framed.take().expect("framed transport was ensured");
 
         // Send WATCH keys if any.
         for frame in watch_frames {
             framed.send(frame).await.map_err(RedisError::from)?;
-            let response = read_response_from(framed, &self.push_tx).await?;
+            let response = read_response_from(&mut framed, &push_tx).await?;
             if let Frame::Error(e) = response {
+                self.framed = Some(framed);
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
             }
         }
@@ -933,30 +953,45 @@ impl RedisConnection {
             .send(array(vec![bulk("MULTI")]))
             .await
             .map_err(RedisError::from)?;
-        let multi_resp = read_response_from(framed, &self.push_tx).await?;
+        let multi_resp = read_response_from(&mut framed, &push_tx).await?;
         if let Frame::Error(e) = multi_resp {
+            self.framed = Some(framed);
             return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
         }
 
         // Send each command, expect QUEUED for each.
         for frame in &command_frames {
             framed.send(frame.clone()).await.map_err(RedisError::from)?;
-            let queued_resp = read_response_from(framed, &self.push_tx).await?;
+            let queued_resp = read_response_from(&mut framed, &push_tx).await?;
             match queued_resp {
                 Frame::SimpleString(ref s) if &s[..] == b"QUEUED" => {}
                 Frame::Error(e) => {
+                    let error = RedisError::Redis(String::from_utf8_lossy(&e).into_owned());
                     // Abort the transaction on error.
-                    let _ = framed.send(array(vec![bulk("DISCARD")])).await;
-                    let _ = framed.next().await;
-                    return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
+                    let aligned = if framed.send(array(vec![bulk("DISCARD")])).await.is_ok() {
+                        read_response_from(&mut framed, &push_tx).await.is_ok()
+                    } else {
+                        false
+                    };
+                    if aligned {
+                        self.framed = Some(framed);
+                    }
+                    return Err(error);
                 }
                 _ => {
-                    let _ = framed.send(array(vec![bulk("DISCARD")])).await;
-                    let _ = framed.next().await;
-                    return Err(RedisError::UnexpectedResponse {
+                    let error = RedisError::UnexpectedResponse {
                         expected: "QUEUED",
                         actual: format!("{queued_resp:?}"),
-                    });
+                    };
+                    let aligned = if framed.send(array(vec![bulk("DISCARD")])).await.is_ok() {
+                        read_response_from(&mut framed, &push_tx).await.is_ok()
+                    } else {
+                        false
+                    };
+                    if aligned {
+                        self.framed = Some(framed);
+                    }
+                    return Err(error);
                 }
             }
         }
@@ -966,7 +1001,11 @@ impl RedisConnection {
             .send(array(vec![bulk("EXEC")]))
             .await
             .map_err(RedisError::from)?;
-        let exec_resp = read_response_from(framed, &self.push_tx).await?;
+        let exec_resp = read_response_from(&mut framed, &push_tx).await?;
+
+        // EXEC produced a complete response, so the transaction exchange is
+        // aligned even when Redis reports an application-level error.
+        self.framed = Some(framed);
 
         match exec_resp {
             Frame::Array(Some(results)) => Ok(Some(results)),
@@ -1057,23 +1096,15 @@ impl RedisConnection {
     }
 }
 
-/// Guard that returns the framed transport via the oneshot channel on drop.
+/// Owns the framed transport while a `Service::call` future is in flight.
 ///
-/// This ensures the transport is not leaked when a `Service::call` future is
-/// cancelled (e.g., by `tokio::time::timeout`, `select!`, or task abort).
-/// On the success path the future takes the fields out of the guard before
-/// it is dropped, so the `Drop` impl becomes a no-op.
+/// The transport is returned through `return_tx` only after a complete
+/// response frame has been read. Dropping the future, or encountering a
+/// transport/protocol error before that boundary, drops both fields and closes
+/// the connection rather than leaving a late response for the next request.
 struct FrameGuard {
     framed: Option<Framed<RedisStream, RespCodec>>,
     return_tx: Option<oneshot::Sender<Framed<RedisStream, RespCodec>>>,
-}
-
-impl Drop for FrameGuard {
-    fn drop(&mut self) {
-        if let (Some(framed), Some(tx)) = (self.framed.take(), self.return_tx.take()) {
-            let _ = tx.send(framed);
-        }
-    }
 }
 
 impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
@@ -1117,8 +1148,8 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
         // Enqueue the frame synchronously (valid after poll_ready returned Ready).
         let frame = cmd.to_frame();
         if let Err(e) = Pin::new(&mut framed).start_send(frame) {
-            // Put framed back since we failed before spawning the future.
-            self.framed = Some(framed);
+            // A sink error leaves the connection state uncertain. Quarantine
+            // it rather than allowing a later call to reuse the transport.
             return Box::pin(async move { Err(RedisError::from(e)) });
         }
 
@@ -1126,8 +1157,9 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
         let (return_tx, return_rx) = oneshot::channel();
         self.inflight = Some(return_rx);
 
-        // Use a guard to ensure the framed transport is returned even if the
-        // future is dropped (e.g., timeout, select!, task cancellation).
+        // Keep the transport owned by the call future. Cancellation or an I/O
+        // error before a complete response drops it; reading a complete frame
+        // restores protocol alignment even if command parsing later fails.
         let mut guard = FrameGuard {
             framed: Some(framed),
             return_tx: Some(return_tx),
@@ -1142,7 +1174,9 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
             // Read response, routing push frames.
             let response = read_response_from(framed, &push_tx).await?;
 
-            // Explicitly return the transport on success (disarms the guard).
+            // A complete response restores protocol alignment. Return the
+            // transport before interpreting application or parsing errors so
+            // a healthy connection survives WRONGTYPE and similar responses.
             let _ = guard
                 .return_tx
                 .take()
@@ -1522,23 +1556,131 @@ mod tests {
     }
 
     #[test]
-    fn frame_guard_returns_transport_on_drop() {
-        // Verify that FrameGuard sends the framed transport back when dropped.
+    fn frame_guard_cancels_transport_return_on_drop() {
         let (return_tx, mut return_rx) = oneshot::channel::<Framed<RedisStream, RespCodec>>();
 
-        // We cannot easily construct a real Framed without a socket, but we can
-        // verify the guard sends the return_tx by checking the receiver is not
-        // cancelled after the guard is dropped with both fields populated.
-        //
-        // Since we need a real Framed to test the full path, we instead test
-        // that dropping a guard with return_tx=None does NOT panic.
         let guard = FrameGuard {
             framed: None,
             return_tx: Some(return_tx),
         };
         drop(guard);
-        // Sender was dropped (framed was None), so receiver should get an error.
+
+        // Cancellation drops the sender instead of returning a transport.
         assert!(return_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn cancelling_typed_call_after_wire_quarantines_transport() {
+        use tower_service::Service;
+
+        let (client, server) = stream_pair().await;
+        let (wire_tx, mut wire_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (late_attempt_tx, late_attempt_rx) = oneshot::channel();
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(server, RespCodec::new());
+            framed
+                .next()
+                .await
+                .expect("client closed before sending its command")
+                .expect("client sent an invalid command frame");
+            wire_tx.send(()).unwrap();
+
+            release_rx.await.unwrap();
+            let late_result = framed.send(Frame::SimpleString(b"LATE"[..].into())).await;
+            late_attempt_tx.send(()).unwrap();
+
+            // A small response can reach the kernel even after the peer has
+            // closed. Either way, the quarantined socket must not carry a
+            // second request.
+            if late_result.is_ok() {
+                match tokio::time::timeout(Duration::from_secs(1), framed.next()).await {
+                    Ok(None) | Ok(Some(Err(_))) => {}
+                    Ok(Some(Ok(frame))) => panic!("cancelled socket was reused: {frame:?}"),
+                    Err(_) => panic!("cancelled socket remained open"),
+                }
+            }
+        });
+
+        let mut conn = RedisConnection::from_stream(client);
+        futures::future::poll_fn(|cx| Service::<DummyCmd>::poll_ready(&mut conn, cx))
+            .await
+            .unwrap();
+        let mut call = Service::<DummyCmd>::call(&mut conn, DummyCmd);
+
+        // Drive the call until the server has decoded the request, then cancel
+        // it while the response is deliberately withheld.
+        tokio::select! {
+            result = &mut call => panic!("call completed before cancellation: {result:?}"),
+            observed = &mut wire_rx => observed.unwrap(),
+        }
+        drop(call);
+
+        release_tx.send(()).unwrap();
+        late_attempt_rx.await.unwrap();
+
+        let mut cx = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let readiness = Service::<DummyCmd>::poll_ready(&mut conn, &mut cx);
+        let is_closed = matches!(readiness, Poll::Ready(Err(RedisError::ConnectionClosed)));
+        drop(conn);
+        server_task.await.unwrap();
+
+        assert!(
+            is_closed,
+            "cancelled connection was reusable: {readiness:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_error_response_keeps_typed_connection_reusable() {
+        use tower_service::Service;
+
+        let (client, server) = stream_pair().await;
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(server, RespCodec::new());
+
+            framed
+                .next()
+                .await
+                .expect("client closed before first command")
+                .expect("client sent an invalid first command");
+            framed
+                .send(Frame::Error(b"WRONGTYPE test error"[..].into()))
+                .await
+                .unwrap();
+
+            framed
+                .next()
+                .await
+                .expect("connection closed after Redis error")
+                .expect("client sent an invalid second command");
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+        });
+
+        let mut conn = RedisConnection::from_stream(client);
+        futures::future::poll_fn(|cx| Service::<DummyCmd>::poll_ready(&mut conn, cx))
+            .await
+            .unwrap();
+        let error = Service::<DummyCmd>::call(&mut conn, DummyCmd)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RedisError::Redis(ref message) if message.starts_with("WRONGTYPE")
+        ));
+
+        futures::future::poll_fn(|cx| Service::<DummyCmd>::poll_ready(&mut conn, cx))
+            .await
+            .expect("complete Redis error response should preserve readiness");
+        Service::<DummyCmd>::call(&mut conn, DummyCmd)
+            .await
+            .expect("connection should remain usable after Redis error");
+
+        server_task.await.unwrap();
     }
 
     #[test]

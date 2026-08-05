@@ -19,6 +19,15 @@
 //! retries that are on by default only for the commands where they cannot
 //! corrupt data.
 //!
+//! A command carrying a [`Command::deadline`] keeps that one absolute budget
+//! across every retry. [`RetryService`] applies it while waiting for inner
+//! readiness inside `call`, during each attempt, and during backoff, so retry
+//! middleware cannot reset or sleep past the deadline regardless of layer
+//! order. Tower's outer `poll_ready` runs before the service receives a
+//! request, so request metadata cannot bound that caller-controlled wait;
+//! [`RetryClient::execute`] owns the command early enough to bound both outer
+//! readiness and the full retry call.
+//!
 //! # Two ways to use it
 //!
 //! Compose it as a Tower layer over a bridged client:
@@ -201,7 +210,11 @@ impl<S> Layer<S> for RetryLayer {
 ///
 /// Requires `Cmd: Clone` because each attempt re-issues a fresh copy of the
 /// command. Produced by [`RetryLayer`], or constructed directly with
-/// [`RetryService::new`].
+/// [`RetryService::new`]. The service continues to propagate its inner
+/// readiness through [`Service::poll_ready`] for Tower backpressure. The
+/// ready inner service is moved into [`Service::call`], and readiness is
+/// reacquired before each retry. Those retry readiness waits are bounded by a
+/// typed command's absolute deadline.
 #[derive(Debug, Clone)]
 pub struct RetryService<S> {
     inner: S,
@@ -226,21 +239,49 @@ where
     type Future = Pin<Box<dyn Future<Output = Result<Cmd::Response, RedisError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // Preserve the inner service's Tower backpressure. `call` moves this
+        // exact ready instance into its future, and each retry reacquires
+        // readiness there under the request deadline. The ergonomic
+        // `RetryClient::execute` also bounds this outer readiness wait because
+        // it already owns `cmd`.
         self.inner.poll_ready(cx)
     }
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {
-        // Clone the inner service into the future so it owns a `'static`
-        // handle. For every redis-tower client this is a cheap Arc bump that
-        // shares the same connection, so retries reuse the live pipeline.
-        let mut inner = self.inner.clone();
+        // Move the exact service instance that `poll_ready` admitted into the
+        // future, replacing it with a cheap clone for the next caller. This is
+        // the standard Tower readiness-preserving clone pattern: cloning the
+        // ready instance directly could discard a reserved capacity permit.
+        let replacement = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, replacement);
         let policy = self.policy.clone();
         Box::pin(async move {
             let idempotent = cmd.idempotent();
+            let deadline = cmd.deadline();
             let mut attempt = 0usize;
+            let mut needs_readiness = false;
             loop {
-                std::future::poll_fn(|cx| inner.poll_ready(cx)).await?;
-                let result = inner.call(cmd.clone()).await;
+                if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+                    return Err(RedisError::CommandTimeout);
+                }
+
+                if needs_readiness {
+                    let ready = std::future::poll_fn(|cx| inner.poll_ready(cx));
+                    match deadline {
+                        Some(deadline) => tokio::time::timeout_at(deadline, ready)
+                            .await
+                            .map_err(|_elapsed| RedisError::CommandTimeout)??,
+                        None => ready.await?,
+                    }
+                }
+
+                let call = inner.call(cmd.clone());
+                let result = match deadline {
+                    Some(deadline) => tokio::time::timeout_at(deadline, call)
+                        .await
+                        .map_err(|_elapsed| RedisError::CommandTimeout)?,
+                    None => call.await,
+                };
                 match result {
                     Ok(response) => return Ok(response),
                     Err(err) => {
@@ -253,8 +294,15 @@ where
                                 error = %err,
                                 "redis: retrying idempotent command after retryable error"
                             );
-                            tokio::time::sleep(delay).await;
+                            let sleep = tokio::time::sleep(delay);
+                            match deadline {
+                                Some(deadline) => tokio::time::timeout_at(deadline, sleep)
+                                    .await
+                                    .map_err(|_elapsed| RedisError::CommandTimeout)?,
+                                None => sleep.await,
+                            }
                             attempt += 1;
+                            needs_readiness = true;
                             continue;
                         }
                         return Err(err);
@@ -275,6 +323,8 @@ where
 ///
 /// `execute` requires `Cmd: Clone` (every command builder derives it) because a
 /// retry re-sends a copy of the command.
+/// [`WithDeadline`](redis_tower_core::WithDeadline) bounds readiness, every
+/// attempt, and backoff with one absolute instant; retrying never resets it.
 ///
 /// [`MultiplexedClient`]: crate::MultiplexedClient
 /// [`ResilientRedisClient`]: crate::ResilientRedisClient
@@ -303,12 +353,22 @@ where
     where
         Cmd: Command + Clone + Send + 'static,
     {
+        let deadline = cmd.deadline();
         let mut svc = self.inner.clone();
-        std::future::poll_fn(|cx| {
-            <RetryService<ExecutorService<C>> as Service<Cmd>>::poll_ready(&mut svc, cx)
-        })
-        .await?;
-        <RetryService<ExecutorService<C>> as Service<Cmd>>::call(&mut svc, cmd).await
+        let operation = async move {
+            std::future::poll_fn(|cx| {
+                <RetryService<ExecutorService<C>> as Service<Cmd>>::poll_ready(&mut svc, cx)
+            })
+            .await?;
+            <RetryService<ExecutorService<C>> as Service<Cmd>>::call(&mut svc, cmd).await
+        };
+
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, operation)
+                .await
+                .map_err(|_elapsed| RedisError::CommandTimeout)?,
+            None => operation.await,
+        }
     }
 }
 
@@ -316,6 +376,7 @@ where
 mod tests {
     use super::*;
     use redis_tower_commands::{Get, Incr};
+    use redis_tower_core::WithDeadline;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -356,6 +417,50 @@ mod tests {
                     cmd.parse_response(redis_tower_core::Frame::Null)
                 }
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct SlowExecutor {
+        calls: Arc<AtomicUsize>,
+        delay: Duration,
+    }
+
+    impl RedisExecutor for SlowExecutor {
+        fn execute<Cmd: Command>(
+            &mut self,
+            cmd: Cmd,
+        ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let delay = self.delay;
+            async move {
+                tokio::time::sleep(delay).await;
+                cmd.parse_response(redis_tower_core::Frame::Null)
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReadyForFirstAttemptService {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Service<WithDeadline<Get>> for ReadyForFirstAttemptService {
+        type Response = Option<bytes::Bytes>;
+        type Error = RedisError;
+        type Future = std::future::Ready<Result<Self::Response, RedisError>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            if self.calls.load(Ordering::SeqCst) == 0 {
+                Poll::Ready(Ok(()))
+            } else {
+                Poll::Pending
+            }
+        }
+
+        fn call(&mut self, _cmd: WithDeadline<Get>) -> Self::Future {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Err(RedisError::ConnectionClosed))
         }
     }
 
@@ -469,5 +574,90 @@ mod tests {
         let result: Option<bytes::Bytes> = svc.call(Get::new("k")).await.unwrap();
         assert_eq!(result, None);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn absolute_deadline_bounds_retry_backoff() {
+        let exec = FlakyExecutor::new(usize::MAX, || RedisError::ConnectionClosed);
+        let counter = exec.calls.clone();
+        let policy = RetryPolicy::new(5)
+            .base_delay(Duration::from_millis(200))
+            .max_delay(Duration::from_millis(200))
+            .jitter(false);
+        let client = RetryClient::new(exec, policy);
+
+        let result = client
+            .execute(WithDeadline::after(
+                Get::new("k"),
+                Duration::from_millis(20),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn absolute_deadline_bounds_each_retry_attempt() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let client = RetryClient::new(
+            SlowExecutor {
+                calls: Arc::clone(&calls),
+                delay: Duration::from_millis(100),
+            },
+            no_jitter(3),
+        );
+
+        let result = client
+            .execute(WithDeadline::after(
+                Get::new("k"),
+                Duration::from_millis(20),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn absolute_deadline_bounds_inner_readiness() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut service = RetryService::new(
+            ReadyForFirstAttemptService {
+                calls: Arc::clone(&calls),
+            },
+            no_jitter(3),
+        );
+
+        std::future::poll_fn(|cx| Service::<WithDeadline<Get>>::poll_ready(&mut service, cx))
+            .await
+            .unwrap();
+        let result = service
+            .call(WithDeadline::after(
+                Get::new("k"),
+                Duration::from_millis(20),
+            ))
+            .await;
+
+        assert!(matches!(result, Err(RedisError::CommandTimeout)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retry_service_preserves_inner_backpressure() {
+        let calls = Arc::new(AtomicUsize::new(1));
+        let mut service = RetryService::new(
+            ReadyForFirstAttemptService {
+                calls: Arc::clone(&calls),
+            },
+            no_jitter(3),
+        );
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let readiness = Service::<WithDeadline<Get>>::poll_ready(&mut service, &mut cx);
+
+        assert!(readiness.is_pending());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

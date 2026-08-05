@@ -18,9 +18,9 @@ otel = [
 ]
 
 [dependencies]
-redis-tower = { workspace = true, features = ["serde"] }
+redis-tower = { workspace = true, features = ["commands-stack", "serde"] }
 redis-tower-core = { workspace = true }
-redis-tower-commands = { workspace = true }
+redis-tower-commands = { workspace = true, features = ["stack"] }
 redis-tower-cluster = { workspace = true }
 redis-tower-sentinel = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

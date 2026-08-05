@@ -1,0 +1,21 @@
+[book]
+title = "redis-tower"
+authors = ["Josh Rotenberg and redis-tower contributors"]
+description = "Guides and operational documentation for the Tower-native Redis client for Rust"
+language = "en"
+src = "docs"
+
+[rust]
+edition = "2024"
+
+[build]
+build-dir = "target/mdbook"
+create-missing = false
+
+[output.html]
+site-url = "/redis-tower/"
+git-repository-url = "https://github.com/joshrotenberg/redis-tower"
+edit-url-template = "https://github.com/joshrotenberg/redis-tower/edit/main/{path}"
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+no-section-label = true

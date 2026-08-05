@@ -13,9 +13,9 @@ keywords = ["redis", "sync", "blocking", "client"]
 categories = ["database", "network-programming"]
 
 [dependencies]
-redis-tower = { workspace = true }
+redis-tower = { workspace = true, features = ["commands-stack"] }
 redis-tower-core = { workspace = true }
-redis-tower-commands = { workspace = true }
+redis-tower-commands = { workspace = true, features = ["stack"] }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]

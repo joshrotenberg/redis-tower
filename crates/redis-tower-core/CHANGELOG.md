@@ -9,12 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `WithDeadline<Cmd>` for carrying one absolute command deadline through
+  middleware, retries, and resource acquisition
+- structured, reference-counted reconnect failure causes so every waiter from
+  one exhausted campaign retains the original error variant and metadata
 - configurable TCP keepalive, connect timeout, protocol negotiation, and RESP
   decode limits through `ConnectionConfig` across TCP, TLS, URL, and existing
   stream connection paths
 
 ### Fixed
 
+- discard a connection after canceled or incomplete command I/O so a late
+  response cannot be consumed by a later request, while retaining connections
+  after complete Redis and response-conversion errors
 - select rustls's `ring` crypto provider explicitly so feature unification with
   other rustls consumers cannot leave the process with ambiguous providers
 

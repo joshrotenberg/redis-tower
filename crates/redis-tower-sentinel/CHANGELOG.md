@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- end-to-end typed command deadlines across layered readiness and multiplexed
+  dispatch
+- bounded connection lifecycle events with automatic failover notification
+  when Sentinel reconnects to a different ROLE-verified primary endpoint, plus
+  observable initial discovery, node-connect, and ROLE-verification failures
 - configurable RESP frame-size and nesting limits across sentinel discovery,
   data-node connections, failover rediscovery, and multiplexed reconnects
 

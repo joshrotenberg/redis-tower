@@ -54,7 +54,7 @@ pub mod tls;
 mod url;
 pub mod value;
 
-pub use command::Command;
+pub use command::{Command, RequestDeadline, WithDeadline};
 pub use connection::{ConnectionConfig, KeepaliveConfig, ProtocolVersion, RedisConnection};
 pub use error::RedisError;
 pub use frame_service::FrameService;

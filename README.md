@@ -13,8 +13,13 @@ Commands are typed structs with compile-time response types. Middleware
 standard Tower layers. 450+ commands, including Redis Stack modules
 behind feature flags.
 
-**Coming from redis-rs?** See the [migration guide](docs/MIGRATING-FROM-REDIS-RS.md)
-for side-by-side idiom mappings.
+**Documentation:** Read the
+[redis-tower guide](https://joshrotenberg.com/redis-tower/) for migration
+and production guidance, or browse its [Markdown source](docs/README.md).
+
+**Coming from another Rust client?** See the migration guides for
+[redis-rs](docs/MIGRATING-FROM-REDIS-RS.md) and
+[Fred](docs/MIGRATING-FROM-FRED.md).
 
 **Comparing clients?** The [feature matrix](docs/FEATURE-MATRIX.md) weighs
 redis-tower against redis-rs, fred, Lettuce, go-redis, StackExchange.Redis, and
@@ -443,8 +448,9 @@ Other resilience building blocks:
 
 - **Health checks** -- `ResilientRedisClient::health_check()` for `/health`
   endpoints and Kubernetes readiness probes.
-- **Per-command timeouts** -- `CommandTimeoutLayer` enforces a deadline on each
-  command.
+- **Per-command timeouts** -- `CommandTimeoutLayer` applies a generic static
+  timeout; call `.with_request_deadlines()` to let a `WithDeadline<Cmd>` carry
+  one earlier absolute budget through typed middleware.
 - **Pool health** -- `ConnectionPool` replaces dead connections after a failed
   health check and exposes live `PoolStats`.
 - **Error taxonomy** -- `RedisError::is_retryable()`, `is_connection_error()`,
