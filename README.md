@@ -49,6 +49,7 @@ let val: String = client.execute(Get::new("key")).await?.parse_into()?;
 | `ResilientRedisClient` | A shared handle with automatic reconnection + backoff, for long-running services. |
 | `ConnectionPool<S>` | N connections -- for blocking commands (`BLPOP`) or CPU-bound reply parsing, where one multiplexed connection would head-of-line block. |
 | `MultiplexedClusterClient` | Redis Cluster, high concurrency (`redis-tower-cluster`). |
+| `CachedMultiplexedClusterClient` | Redis Cluster with one shared RESP3 server-assisted cache and fail-closed invalidation coverage across every master (`redis-tower-cluster`; master reads only). |
 | `MultiplexedSentinelClient` | Sentinel-managed failover, high concurrency (`redis-tower-sentinel`). |
 | `SyncClient` | Blocking (non-`async`) contexts (`redis-tower-sync`). |
 
@@ -340,7 +341,25 @@ let stats = client.cache_statistics().await;
 # let _ = (val, stats);
 ```
 
-The cached client owns two RESP3 connections, reconnects its invalidation
+Redis Cluster uses the same cache configuration through
+`redis-tower-cluster`:
+
+```rust,ignore
+use redis_tower::{CacheTrackingMode, CachedClientConfig, commands::Get};
+use redis_tower_cluster::CachedMultiplexedClusterClient;
+
+let config = CachedClientConfig::new()
+    .tracking_mode(CacheTrackingMode::OptIn);
+let cluster = CachedMultiplexedClusterClient::builder("127.0.0.1:7000")
+    .cache_config(config)
+    .connect()
+    .await?;
+
+let value = cluster.execute(Get::new("user:42")).await?;
+# let _ = value;
+```
+
+`CachedMultiplexedClient` owns two RESP3 connections, reconnects its invalidation
 receiver, disables and clears caching while either connection is unhealthy,
 evicts locally around writes, and rejects stale inserts from reads that race an
 invalidation. A fixed data worker fails closed when its socket is lost, while a
@@ -354,8 +373,23 @@ composition. Place the cache directly above a backend implementing
 `ReleaseReadiness`, with other middleware outside it, so local hits return any
 capacity reserved by `poll_ready`.
 
+`CachedMultiplexedClusterClient` keeps one shared cache above cluster routing,
+forces RESP3, and owns a separate invalidation receiver for every current
+master. Cache use is enabled only after all masters have `CLIENT TRACKING`
+redirected to healthy receivers. A data/receiver loss clears and disables the
+cache globally until complete coverage is rebuilt. MOVED patches invalidate
+the affected slot immediately so an in-flight response from the previous owner
+cannot populate the cache; any receiver handover or topology-wide coverage
+reconfiguration then clears globally before cache use resumes. Opt-in requests
+keep `CLIENT CACHING YES` adjacent to the command. Redis's one-shot `ASKING`
+and `CLIENT CACHING YES` flags cannot prefix the same command, so an ASK closes
+the cache gate and retries as `[ASKING, command]` without caching that response.
+The initial cluster cache is intentionally master-only: configuring `Replica`
+or `PreferReplica` read preference is rejected rather than promising
+invalidations the client cannot prove complete.
+
 See the [client-side caching guide](docs/CLIENT-SIDE-CACHING.md) for failure
-semantics, bounds, metrics, and current standalone-only scope.
+semantics, bounds, and metrics.
 
 ## JSON API
 
