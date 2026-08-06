@@ -74,10 +74,13 @@ let client = MultiplexedClient::connect_with_connection_config(
 
 `RedisConnection`, `RedisClient`, and `MultiplexedClient` expose configured
 connectors directly. The built-in address and URL reconnect factories retain
-the config for resilient clients and pool replacements. Cluster and Sentinel
-builders accept `.resp_limits(...)` and apply the limits to discovery, every
-data node, failover/topology changes, and reconnects. `PubSubConnection`
-inherits the codec from the connection or factory supplied to it.
+the config for resilient clients and pool replacements. Both Redis Cluster
+builders accept `.connection_config(...)` and `.protocol(...)`; they apply the
+complete config to discovery, every data node, redirects, topology changes,
+and reconnects, authenticating protected nodes before final RESP negotiation.
+Cluster and Sentinel builders retain `.resp_limits(...)` as a convenience.
+`PubSubConnection` inherits the codec from the connection or factory supplied
+to it.
 
 ## Connection pool
 

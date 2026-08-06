@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - configurable TCP keepalive, connect timeout, protocol negotiation, and RESP
   decode limits through `ConnectionConfig` across TCP, TLS, URL, and existing
   stream connection paths
+- public protocol negotiation on an established `RedisConnection`, including
+  explicit RESP3-to-RESP2 switching for connection setup that must authenticate
+  before sending `HELLO`
 
 ### Fixed
 

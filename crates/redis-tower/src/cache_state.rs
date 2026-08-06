@@ -58,7 +58,8 @@ fn push_arg(buf: &mut Vec<u8>, arg: &[u8]) {
 ///   index so invalidation of that key evicts this entry.
 ///
 /// Returns `None` for non-cacheable commands or malformed frames.
-pub(crate) fn extract_cache_entry(frame: &Frame) -> Option<(Vec<u8>, Vec<u8>)> {
+#[doc(hidden)]
+pub fn extract_cache_entry(frame: &Frame) -> Option<(Vec<u8>, Vec<u8>)> {
     let items = match frame {
         Frame::Array(Some(items)) if items.len() >= 2 => items,
         _ => return None,
@@ -97,7 +98,8 @@ pub(crate) fn extract_cache_entry(frame: &Frame) -> Option<(Vec<u8>, Vec<u8>)> {
 /// Returns `Some(vec![])` for a flush-everything invalidation (null payload),
 /// `Some(keys)` for specific keys, or `None` if the frame is not an
 /// `invalidate` message. Keys are raw bytes (binary-safe).
-pub(crate) fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
+#[doc(hidden)]
+pub fn parse_invalidation(frame: &Frame) -> Option<Vec<Vec<u8>>> {
     let items = match frame {
         Frame::Push(items) if !items.is_empty() => items,
         Frame::Array(Some(items)) if !items.is_empty() => items,
@@ -334,7 +336,8 @@ fn bulk_arg(frame: &Frame) -> Option<&[u8]> {
 /// These commands can disable tracking, change RESP protocol/reply semantics,
 /// or close/reset the data connection. Cached clients reject them before
 /// dispatch so callers cannot silently invalidate the owned lifecycle.
-pub(crate) fn managed_cache_state_command(frame: &Frame) -> Option<&'static str> {
+#[doc(hidden)]
+pub fn managed_cache_state_command(frame: &Frame) -> Option<&'static str> {
     let items = match frame {
         Frame::Array(Some(items)) if !items.is_empty() => items,
         _ => return None,
@@ -439,7 +442,8 @@ fn command_invalidation(frame: &Frame) -> CommandInvalidation {
 ///
 /// Unknown and malformed commands return `true` so callers fail safely when
 /// Redis or a module adds a mutation this crate does not yet classify.
-pub(crate) fn command_may_mutate(frame: &Frame) -> bool {
+#[doc(hidden)]
+pub fn command_may_mutate(frame: &Frame) -> bool {
     !matches!(command_invalidation(frame), CommandInvalidation::None)
 }
 
@@ -458,6 +462,9 @@ fn collect_keys<'a>(items: impl IntoIterator<Item = &'a Frame>) -> CommandInvali
 struct Entry {
     /// The Redis key this entry depends on (for reverse-index cleanup).
     redis_key: Vec<u8>,
+    /// The optional cluster partition and the generation under which this
+    /// entry was populated. Standalone caches leave this unset.
+    partition: Option<PartitionEpoch>,
     frame: Frame,
     /// When the entry was stored, for the per-entry client TTL.
     stored_at: Instant,
@@ -481,11 +488,24 @@ pub struct CacheStatistics {
 }
 
 /// A point-in-time invalidation token captured before a cacheable request is
-/// sent to Redis. The response may only be inserted if both values still match.
+/// sent to Redis. The response may only be inserted if every value still
+/// matches.
+///
+/// This type is public only so sibling workspace crates can integrate with the
+/// shared cache implementation. Its fields intentionally remain opaque.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct CacheEpoch {
+pub struct CacheEpoch {
     generation: u64,
     key_epoch: u64,
+    partition: Option<PartitionEpoch>,
+}
+
+/// A partition identifier paired with its current ownership generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PartitionEpoch {
+    partition: u16,
+    generation: u64,
 }
 
 /// The client-side cache: response entries keyed by the full command, plus a
@@ -499,6 +519,8 @@ pub struct CacheState {
     entries: HashMap<Vec<u8>, Entry>,
     /// `redis_key -> {cache_key}`.
     index: HashMap<Vec<u8>, HashSet<Vec<u8>>>,
+    /// `partition -> {cache_key}` for targeted topology invalidation.
+    partition_index: HashMap<u16, HashSet<Vec<u8>>>,
     /// When `false`, the tracking connection is unhealthy: reads pass through to
     /// the server and nothing is cached, so stale data can never be served.
     enabled: bool,
@@ -511,6 +533,8 @@ pub struct CacheState {
     generation: u64,
     /// Latest invalidation epoch for each Redis key.
     key_epochs: HashMap<Vec<u8>, u64>,
+    /// Latest ownership/invalidation generation for each partition.
+    partition_generations: HashMap<u16, u64>,
     /// Monotonic source for per-key epochs within a generation.
     next_key_epoch: u64,
     /// Bound for `key_epochs`; never zero.
@@ -545,11 +569,13 @@ impl CacheState {
         Self {
             entries: HashMap::new(),
             index: HashMap::new(),
+            partition_index: HashMap::new(),
             enabled: true,
             max_size,
             ttl,
             generation: 0,
             key_epochs: HashMap::new(),
+            partition_generations: HashMap::new(),
             next_key_epoch: 0,
             max_key_epochs: if max_size == 0 {
                 DEFAULT_MAX_EPOCHS
@@ -569,6 +595,19 @@ impl CacheState {
     /// when caching is disabled (passthrough) or when the entry is older than
     /// the client TTL, so the caller fetches fresh from the server.
     pub(crate) fn get(&self, cache_key: &[u8]) -> Option<&Frame> {
+        self.get_inner(cache_key, None)
+    }
+
+    /// Look up a response scoped to `partition` (a Redis Cluster slot).
+    ///
+    /// Entries from a previous partition generation are treated as misses.
+    /// This method is public only for the workspace cluster integration.
+    #[doc(hidden)]
+    pub fn get_in_partition(&self, cache_key: &[u8], partition: u16) -> Option<&Frame> {
+        self.get_inner(cache_key, Some(partition))
+    }
+
+    fn get_inner(&self, cache_key: &[u8], partition: Option<u16>) -> Option<&Frame> {
         if !self.enabled {
             self.record_event(CacheEvent::Miss, 1);
             return None;
@@ -577,6 +616,11 @@ impl CacheState {
             self.record_event(CacheEvent::Miss, 1);
             return None;
         };
+        let expected_partition = partition.map(|partition| self.partition_epoch(partition));
+        if entry.partition != expected_partition {
+            self.record_event(CacheEvent::Miss, 1);
+            return None;
+        }
         if let Some(ttl) = self.ttl
             && entry.stored_at.elapsed() >= ttl
         {
@@ -599,9 +643,28 @@ impl CacheState {
     /// while caching is disabled so a read begun without invalidation tracking
     /// can never populate the cache after tracking recovers.
     pub(crate) fn snapshot_epoch(&self, redis_key: &[u8]) -> Option<CacheEpoch> {
+        self.snapshot_epoch_inner(redis_key, None)
+    }
+
+    /// Capture an invalidation token for a key routed through `partition`.
+    ///
+    /// A later key invalidation, partition invalidation/ownership change, full
+    /// clear, or suspension makes the token stale. This method is public only
+    /// for the workspace cluster integration.
+    #[doc(hidden)]
+    pub fn snapshot_epoch_in_partition(
+        &self,
+        redis_key: &[u8],
+        partition: u16,
+    ) -> Option<CacheEpoch> {
+        self.snapshot_epoch_inner(redis_key, Some(partition))
+    }
+
+    fn snapshot_epoch_inner(&self, redis_key: &[u8], partition: Option<u16>) -> Option<CacheEpoch> {
         self.enabled.then(|| CacheEpoch {
             generation: self.generation,
             key_epoch: self.key_epochs.get(redis_key).copied().unwrap_or(0),
+            partition: partition.map(|partition| self.partition_epoch(partition)),
         })
     }
 
@@ -627,8 +690,36 @@ impl CacheState {
         frame: Frame,
         epoch: CacheEpoch,
     ) -> bool {
+        self.insert_if_current_inner(cache_key, redis_key, frame, None, epoch)
+    }
+
+    /// Store a response only if its key, global, and partition generations are
+    /// still current.
+    ///
+    /// This is the cluster-scoped counterpart to the standalone insertion
+    /// path. It is public only for the workspace cluster integration.
+    #[doc(hidden)]
+    pub fn insert_if_current_in_partition(
+        &mut self,
+        cache_key: Vec<u8>,
+        redis_key: Vec<u8>,
+        frame: Frame,
+        partition: u16,
+        epoch: CacheEpoch,
+    ) -> bool {
+        self.insert_if_current_inner(cache_key, redis_key, frame, Some(partition), epoch)
+    }
+
+    fn insert_if_current_inner(
+        &mut self,
+        cache_key: Vec<u8>,
+        redis_key: Vec<u8>,
+        frame: Frame,
+        partition: Option<u16>,
+        epoch: CacheEpoch,
+    ) -> bool {
         // Don't populate the cache while tracking is unhealthy.
-        if !self.enabled || self.snapshot_epoch(&redis_key) != Some(epoch) {
+        if !self.enabled || self.snapshot_epoch_inner(&redis_key, partition) != Some(epoch) {
             return false;
         }
 
@@ -661,10 +752,17 @@ impl CacheState {
             .entry(redis_key.clone())
             .or_default()
             .insert(cache_key.clone());
+        if let Some(partition) = partition {
+            self.partition_index
+                .entry(partition)
+                .or_default()
+                .insert(cache_key.clone());
+        }
         self.entries.insert(
             cache_key,
             Entry {
                 redis_key,
+                partition: epoch.partition,
                 frame,
                 stored_at: Instant::now(),
             },
@@ -673,27 +771,50 @@ impl CacheState {
     }
 
     /// Evict every cache entry that depends on `redis_key`.
-    pub(crate) fn invalidate(&mut self, redis_key: &[u8]) {
+    #[doc(hidden)]
+    pub fn invalidate(&mut self, redis_key: &[u8]) {
         self.advance_key_epoch(redis_key);
         self.record_event(CacheEvent::Invalidation, 1);
         if let Some(cache_keys) = self.index.remove(redis_key) {
-            let count = cache_keys.len() as u64;
+            let mut count = 0;
             for ck in cache_keys {
-                self.entries.remove(&ck);
+                count += u64::from(self.remove_entry(&ck));
+            }
+            self.record_event(CacheEvent::Eviction, count);
+        }
+    }
+
+    /// Evict entries routed through `partition` and advance its generation.
+    ///
+    /// Advancing even when the partition currently has no entries rejects any
+    /// earlier in-flight response. Repeating this for each observed ownership
+    /// transition also protects an A -> B -> A cycle: a response issued during
+    /// either prior ownership generation cannot become current again.
+    #[doc(hidden)]
+    pub fn invalidate_partition(&mut self, partition: u16) {
+        self.advance_partition_generation(partition);
+        self.record_event(CacheEvent::Invalidation, 1);
+        if let Some(cache_keys) = self.partition_index.remove(&partition) {
+            let mut count = 0;
+            for cache_key in cache_keys {
+                count += u64::from(self.remove_entry(&cache_key));
             }
             self.record_event(CacheEvent::Eviction, count);
         }
     }
 
     /// Drop all cached entries and index links.
-    pub(crate) fn clear(&mut self) {
+    #[doc(hidden)]
+    pub fn clear(&mut self) {
         self.advance_generation();
         self.key_epochs.clear();
+        self.partition_generations.clear();
         self.next_key_epoch = 0;
         self.record_event(CacheEvent::Invalidation, 1);
         let evicted = self.entries.len() as u64;
         self.entries.clear();
         self.index.clear();
+        self.partition_index.clear();
         self.record_event(CacheEvent::Eviction, evicted);
     }
 
@@ -708,7 +829,8 @@ impl CacheState {
     /// write. Advancing the epoch twice is intentional: the first call removes
     /// values that predate the write, while the second rejects reads that raced
     /// the write window (including when `NOLOOP` suppresses server pushes).
-    pub(crate) fn invalidate_for_command(&mut self, request: &Frame) {
+    #[doc(hidden)]
+    pub fn invalidate_for_command(&mut self, request: &Frame) {
         match command_invalidation(request) {
             CommandInvalidation::None => {}
             CommandInvalidation::Keys(keys) => {
@@ -724,13 +846,35 @@ impl CacheState {
     /// entries and makes every read pass through to the server until
     /// [`enable`](Self::enable) is called. This is what prevents serving stale
     /// data after invalidations stop arriving.
-    pub(crate) fn disable(&mut self) {
+    #[doc(hidden)]
+    pub fn disable(&mut self) {
         self.enabled = false;
         self.clear();
     }
 
     /// Re-enable caching after the tracking connection is restored.
-    pub(crate) fn enable(&mut self) {
+    #[doc(hidden)]
+    pub fn enable(&mut self) {
+        self.resume();
+    }
+
+    /// Temporarily prevent cache hits and new fills without evicting entries.
+    ///
+    /// The global generation advances when the cache first becomes suspended,
+    /// so responses dispatched before suspension are rejected even if they
+    /// arrive after [`resume`](Self::resume). Callers may invalidate only the
+    /// affected partitions before resuming, preserving unrelated entries.
+    #[doc(hidden)]
+    pub fn suspend(&mut self) {
+        if self.enabled {
+            self.enabled = false;
+            self.advance_generation();
+        }
+    }
+
+    /// Resume cache hits and fills after a temporary suspension.
+    #[doc(hidden)]
+    pub fn resume(&mut self) {
         self.enabled = true;
     }
 
@@ -771,6 +915,14 @@ impl CacheState {
                 self.index.remove(&entry.redis_key);
             }
         }
+        if let Some(partition) = entry.partition.map(|partition| partition.partition)
+            && let Some(set) = self.partition_index.get_mut(&partition)
+        {
+            set.remove(cache_key);
+            if set.is_empty() {
+                self.partition_index.remove(&partition);
+            }
+        }
         true
     }
 
@@ -796,6 +948,27 @@ impl CacheState {
 
     fn advance_generation(&mut self) {
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    fn partition_epoch(&self, partition: u16) -> PartitionEpoch {
+        PartitionEpoch {
+            partition,
+            generation: self
+                .partition_generations
+                .get(&partition)
+                .copied()
+                .unwrap_or(0),
+        }
+    }
+
+    fn advance_partition_generation(&mut self, partition: u16) {
+        if self.partition_generations.get(&partition) == Some(&u64::MAX) {
+            // Global advancement makes every outstanding token stale before
+            // resetting bounded partition-generation bookkeeping.
+            self.advance_generation();
+            self.partition_generations.clear();
+        }
+        *self.partition_generations.entry(partition).or_default() += 1;
     }
 
     fn record_event(&self, event: CacheEvent, count: u64) {
@@ -1078,6 +1251,168 @@ mod tests {
             before_request,
         ));
         assert!(state.get(&cache_key).is_none());
+    }
+
+    #[test]
+    fn partition_invalidation_preserves_unrelated_entries() {
+        let mut state = CacheState::default();
+        let (a_cache_key, a_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let (b_cache_key, b_key) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
+        let a_epoch = state.snapshot_epoch_in_partition(&a_key, 1).unwrap();
+        let b_epoch = state.snapshot_epoch_in_partition(&b_key, 2).unwrap();
+        assert!(state.insert_if_current_in_partition(
+            a_cache_key.clone(),
+            a_key,
+            bulk("va"),
+            1,
+            a_epoch,
+        ));
+        assert!(state.insert_if_current_in_partition(
+            b_cache_key.clone(),
+            b_key,
+            bulk("vb"),
+            2,
+            b_epoch,
+        ));
+
+        state.invalidate_partition(1);
+
+        assert!(state.get_in_partition(&a_cache_key, 1).is_none());
+        assert!(state.get_in_partition(&b_cache_key, 2).is_some());
+        assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn partition_generation_rejects_racing_fills_across_owner_cycles() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "moved"])).unwrap();
+        let owner_a_first = state.snapshot_epoch_in_partition(&redis_key, 42).unwrap();
+
+        // Observe A -> B, then capture a request while B owns the slot.
+        state.invalidate_partition(42);
+        let owner_b = state.snapshot_epoch_in_partition(&redis_key, 42).unwrap();
+
+        // Observe B -> A. Neither response from a prior ownership generation
+        // may become valid merely because the original owner has returned.
+        state.invalidate_partition(42);
+        assert!(!state.insert_if_current_in_partition(
+            cache_key.clone(),
+            redis_key.clone(),
+            bulk("stale-a"),
+            42,
+            owner_a_first,
+        ));
+        assert!(!state.insert_if_current_in_partition(
+            cache_key.clone(),
+            redis_key.clone(),
+            bulk("stale-b"),
+            42,
+            owner_b,
+        ));
+
+        let owner_a_second = state.snapshot_epoch_in_partition(&redis_key, 42).unwrap();
+        assert!(state.insert_if_current_in_partition(
+            cache_key.clone(),
+            redis_key,
+            bulk("fresh-a"),
+            42,
+            owner_a_second,
+        ));
+        assert!(state.get_in_partition(&cache_key, 42).is_some());
+    }
+
+    #[test]
+    fn scoped_and_standalone_entries_cannot_cross_lookup_domains() {
+        let mut state = CacheState::default();
+        let (cache_key, redis_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let epoch = state.snapshot_epoch_in_partition(&redis_key, 7).unwrap();
+        assert!(state.insert_if_current_in_partition(
+            cache_key.clone(),
+            redis_key,
+            bulk("value"),
+            7,
+            epoch,
+        ));
+
+        assert!(state.get(&cache_key).is_none());
+        assert!(state.get_in_partition(&cache_key, 8).is_none());
+        assert!(state.get_in_partition(&cache_key, 7).is_some());
+    }
+
+    #[test]
+    fn suspension_rejects_hits_and_fills_but_preserves_existing_entries() {
+        let mut state = CacheState::default();
+        let (cached_key, cached_redis_key) =
+            extract_cache_entry(&frame(&["GET", "cached"])).unwrap();
+        let cached_epoch = state
+            .snapshot_epoch_in_partition(&cached_redis_key, 1)
+            .unwrap();
+        assert!(state.insert_if_current_in_partition(
+            cached_key.clone(),
+            cached_redis_key,
+            bulk("value"),
+            1,
+            cached_epoch,
+        ));
+
+        let (racing_key, racing_redis_key) =
+            extract_cache_entry(&frame(&["GET", "racing"])).unwrap();
+        let before_suspend = state
+            .snapshot_epoch_in_partition(&racing_redis_key, 2)
+            .unwrap();
+
+        state.suspend();
+        assert!(!state.is_enabled());
+        assert!(state.get_in_partition(&cached_key, 1).is_none());
+        assert!(
+            state
+                .snapshot_epoch_in_partition(&racing_redis_key, 2)
+                .is_none()
+        );
+        assert!(!state.insert_if_current_in_partition(
+            racing_key.clone(),
+            racing_redis_key.clone(),
+            bulk("stale"),
+            2,
+            before_suspend,
+        ));
+        assert_eq!(state.len(), 1, "suspension itself preserves entries");
+
+        state.resume();
+        assert!(state.is_enabled());
+        assert!(state.get_in_partition(&cached_key, 1).is_some());
+        assert!(!state.insert_if_current_in_partition(
+            racing_key,
+            racing_redis_key,
+            bulk("late"),
+            2,
+            before_suspend,
+        ));
+    }
+
+    #[test]
+    fn key_and_capacity_eviction_clean_the_partition_index() {
+        let mut state = CacheState::new(1, None);
+        let (a_cache_key, a_key) = extract_cache_entry(&frame(&["GET", "a"])).unwrap();
+        let a_epoch = state.snapshot_epoch_in_partition(&a_key, 1).unwrap();
+        assert!(state.insert_if_current_in_partition(
+            a_cache_key,
+            a_key.clone(),
+            bulk("a"),
+            1,
+            a_epoch,
+        ));
+        state.invalidate(&a_key);
+        assert!(!state.partition_index.contains_key(&1));
+
+        let (b_cache_key, b_key) = extract_cache_entry(&frame(&["GET", "b"])).unwrap();
+        let b_epoch = state.snapshot_epoch_in_partition(&b_key, 2).unwrap();
+        assert!(state.insert_if_current_in_partition(b_cache_key, b_key, bulk("b"), 2, b_epoch,));
+        let (c_cache_key, c_key) = extract_cache_entry(&frame(&["GET", "c"])).unwrap();
+        let c_epoch = state.snapshot_epoch_in_partition(&c_key, 3).unwrap();
+        assert!(state.insert_if_current_in_partition(c_cache_key, c_key, bulk("c"), 3, c_epoch,));
+        assert!(!state.partition_index.contains_key(&2));
+        assert!(state.partition_index.contains_key(&3));
     }
 
     #[test]

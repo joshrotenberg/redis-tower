@@ -740,10 +740,17 @@ impl RedisConnection {
     }
 
     /// Negotiate `version` on an already-connected connection.
-    async fn negotiate_protocol(&mut self, version: ProtocolVersion) -> Result<(), RedisError> {
+    ///
+    /// This is useful for connection setup that must run before protocol
+    /// negotiation, such as authenticating a protected Redis Cluster node.
+    /// Requesting RESP2 only sends `HELLO 2` when the connection is currently
+    /// in RESP3; a fresh RESP2 connection does not pay an extra round trip.
+    pub async fn negotiate_protocol(&mut self, version: ProtocolVersion) -> Result<(), RedisError> {
         match version {
             ProtocolVersion::Resp2 => {
-                self.resp3 = false;
+                if self.resp3 {
+                    self.hello(2).await?;
+                }
                 Ok(())
             }
             ProtocolVersion::Resp3 => {
@@ -1438,6 +1445,38 @@ mod tests {
 
         let framed = conn.into_framed().unwrap();
         assert_eq!(framed.codec().limits(), limits);
+    }
+
+    #[tokio::test]
+    async fn explicit_resp2_switches_an_existing_resp3_connection() {
+        let (client, server) = stream_pair().await;
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(server, RespCodec::new());
+            let hello3 = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello3, array(vec![bulk("HELLO"), bulk("3")]));
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+
+            let hello2 = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello2, array(vec![bulk("HELLO"), bulk("2")]));
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+        });
+
+        let mut conn = RedisConnection::from_stream(client);
+        conn.negotiate_protocol(ProtocolVersion::Resp3)
+            .await
+            .unwrap();
+        assert!(conn.is_resp3());
+        conn.negotiate_protocol(ProtocolVersion::Resp2)
+            .await
+            .unwrap();
+        assert!(!conn.is_resp3());
+        server_task.await.unwrap();
     }
 
     #[tokio::test]

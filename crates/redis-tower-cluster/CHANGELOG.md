@@ -21,9 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retries, and pinned-node execution for direct and multiplexed clients
 - multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
 - configurable RESP decode limits across cluster discovery, node connections, topology refreshes, and reconnects
+- full `ConnectionConfig` and explicit RESP2/RESP3 selection on both cluster
+  builders, retained across discovery, redirects, topology refreshes, and
+  reconnects
+- revisioned master/slot topology changes and slot-scoped cache epochs for
+  topology-aware client-side caching
 
 ### Fixed
 
+- authenticate protected cluster nodes before final RESP negotiation so Auto
+  and forced RESP3 do not silently remain on RESP2 after a pre-auth `NOAUTH`
 - count `max_redirects` as actual redirect/transient follow-ups after the
   initial attempt, including chained ASK/MOVED responses, without target setup
   or backoff after the budget is exhausted
