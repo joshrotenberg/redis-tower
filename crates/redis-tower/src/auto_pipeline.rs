@@ -768,9 +768,11 @@ impl AutoPipelineService {
 
     /// Return the worker's current data-connection health snapshot.
     ///
-    /// This is crate-visible for middleware that must fail closed when its
-    /// connection-local server state is lost.
-    pub(crate) fn is_connection_healthy(&self) -> bool {
+    /// This is public only so sibling workspace clients can fail closed when
+    /// connection-local server state is lost. In particular, a cluster cache
+    /// supervisor must not serve hits while any tracked node is disconnected.
+    #[doc(hidden)]
+    pub fn is_connection_healthy(&self) -> bool {
         *self.connection_health.borrow()
     }
 
@@ -779,8 +781,11 @@ impl AutoPipelineService {
     /// The initial value is `true`. Failures publish `false` before request
     /// responders or disconnect events are notified, and factory-backed
     /// reconnection publishes `true` only after a replacement connection is
-    /// installed. The channel closes when the worker terminates.
-    pub(crate) fn subscribe_connection_health(&self) -> watch::Receiver<bool> {
+    /// installed. The channel closes when the worker terminates. This is public
+    /// only for sibling workspace clients that own a coordinated lifecycle
+    /// across multiple data connections.
+    #[doc(hidden)]
+    pub fn subscribe_connection_health(&self) -> watch::Receiver<bool> {
         self.connection_health.clone()
     }
 }

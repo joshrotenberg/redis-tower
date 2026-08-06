@@ -73,12 +73,14 @@ impl CacheTrackingMode {
     }
 
     /// Whether cacheable reads need an atomic `CLIENT CACHING YES` prefix.
-    pub(crate) fn is_opt_in(&self) -> bool {
+    #[doc(hidden)]
+    pub fn is_opt_in(&self) -> bool {
         matches!(self, Self::OptIn)
     }
 
     /// Build the connection-local tracking command for a receiver connection.
-    pub(crate) fn tracking_command(&self, receiver_id: i64) -> ClientTracking {
+    #[doc(hidden)]
+    pub fn tracking_command(&self, receiver_id: i64) -> ClientTracking {
         let command = ClientTracking::on().redirect(receiver_id).noloop();
         match self {
             Self::Broadcast { prefixes } => prefixes
@@ -158,7 +160,11 @@ impl CachedClientConfig {
         self
     }
 
-    pub(crate) fn new_state(&self) -> CacheState {
+    /// Construct the shared cache state described by this configuration.
+    ///
+    /// This is public only for sibling workspace client implementations.
+    #[doc(hidden)]
+    pub fn new_state(&self) -> CacheState {
         CacheState::new_with_recorder(
             self.max_entries,
             self.client_ttl,
@@ -167,7 +173,8 @@ impl CachedClientConfig {
     }
 }
 
-pub(crate) fn validate_cached_user_command(frame: &Frame) -> Result<(), RedisError> {
+#[doc(hidden)]
+pub fn validate_cached_user_command(frame: &Frame) -> Result<(), RedisError> {
     let Some(command) = managed_cache_state_command(frame) else {
         return Ok(());
     };
