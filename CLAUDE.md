@@ -38,13 +38,14 @@ multiplexed clients (the only crate that sees all of them).
 | `ConnectionPool<S>` | `redis-tower/pool.rs` | Generic pool; works with any `RedisExecutor` impl |
 | `ClusterConnection` | `redis-tower-cluster/connection.rs` | Cluster-aware, MOVED/ASK redirect handling |
 | `MultiplexedClusterClient` | `redis-tower-cluster/multiplexed.rs` | Per-node auto-pipeline, no global mutex |
+| `CachedMultiplexedClusterClient` | `redis-tower-cluster/{caching,multiplexed}.rs` | Cloneable master-routed Cluster CSC with one shared cache and per-master invalidation coverage |
 | `SentinelConnection` | `redis-tower-sentinel/connection.rs` | Discovers master via sentinels, auto-rediscovers on failure |
 | `SentinelClient` | `redis-tower-sentinel/client.rs` | Arc<Mutex<SentinelConnection>>, cloneable |
 | `MultiplexedSentinelClient` | `redis-tower-sentinel/multiplexed.rs` | Auto-pipeline + sentinel discovery, both static and factory-reconnect ctors |
 | `SyncClient` | `redis-tower-sync/lib.rs` | Blocking wrapper, uses tokio Runtime internally |
 | `UniversalClient` | `redis-tower-client/lib.rs` | Enum over Standalone/Cluster/Sentinel multiplexed clients; `connect_url` picks the variant by scheme (`redis://`, `redis+cluster://`, `redis+sentinel://h1,h2/master`) |
 
-`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `MultiplexedClient`, `CachedMultiplexedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClusterClient`, and `UniversalClient`.
+`ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `MultiplexedClient`, `CachedMultiplexedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClusterClient`, `CachedMultiplexedClusterClient`, and `UniversalClient`.
 
 ### Cluster-wide SCAN (`redis-tower-cluster/scan_stream.rs`)
 
