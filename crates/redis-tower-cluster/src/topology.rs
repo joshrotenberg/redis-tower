@@ -232,6 +232,434 @@ impl ClusterTopology {
     }
 }
 
+/// Revisioned topology-change tracking used by cluster services that keep
+/// state derived from slot ownership (notably client-side caches).
+///
+/// This stays crate-private because it describes an internal coordination
+/// protocol, rather than adding a second public topology API alongside
+/// [`ClusterTopology`]. A tracker is intended to live beside a client's
+/// topology under the same lock. Record a change immediately after a MOVED
+/// patch or when committing a freshly discovered topology.
+#[allow(dead_code)]
+pub(crate) mod changes {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use tokio::sync::watch;
+
+    use super::{ClusterTopology, NodeAddr, SLOT_COUNT};
+
+    /// A monotonically increasing generation for master slot ownership.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub(crate) struct TopologyRevision(u64);
+
+    impl TopologyRevision {
+        /// The revision assigned before any ownership change has been seen.
+        pub(crate) const INITIAL: Self = Self(0);
+
+        /// Expose the generation for diagnostics and generation comparisons.
+        pub(crate) const fn get(self) -> u64 {
+            self.0
+        }
+
+        fn next(self) -> Self {
+            Self(
+                self.0
+                    .checked_add(1)
+                    .expect("cluster topology revision overflowed"),
+            )
+        }
+    }
+
+    /// A topology captured together with the revision at which it was read.
+    ///
+    /// Keeping the revision with the routing snapshot prevents an ABA change
+    /// (a slot moves A -> B -> A) from looking unchanged to a consumer that
+    /// missed both updates.
+    #[derive(Debug, Clone)]
+    pub(crate) struct TopologySnapshot {
+        revision: TopologyRevision,
+        topology: ClusterTopology,
+    }
+
+    impl TopologySnapshot {
+        pub(crate) fn revision(&self) -> TopologyRevision {
+            self.revision
+        }
+
+        pub(crate) fn topology(&self) -> &ClusterTopology {
+            &self.topology
+        }
+
+        pub(crate) fn into_topology(self) -> ClusterTopology {
+            self.topology
+        }
+    }
+
+    /// The owner transition for one hash slot.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct SlotOwnershipChange {
+        pub(crate) slot: u16,
+        pub(crate) old_owner: Option<NodeAddr>,
+        pub(crate) new_owner: Option<NodeAddr>,
+    }
+
+    /// The master-routing difference between two topology snapshots.
+    ///
+    /// Replica-only changes are intentionally omitted: client-side caching is
+    /// initially master-routed, and invalidation safety depends on master
+    /// membership and slot ownership. Slot changes are sorted by slot;
+    /// master lists are sorted by host and port, making the result stable for
+    /// tests and diagnostics regardless of CLUSTER SLOTS range order.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub(crate) struct TopologyDiff {
+        pub(crate) changed_slots: Vec<SlotOwnershipChange>,
+        pub(crate) added_masters: Vec<NodeAddr>,
+        pub(crate) removed_masters: Vec<NodeAddr>,
+    }
+
+    impl TopologyDiff {
+        pub(crate) fn is_empty(&self) -> bool {
+            self.changed_slots.is_empty()
+                && self.added_masters.is_empty()
+                && self.removed_masters.is_empty()
+        }
+    }
+
+    /// Compute the master-routing difference between two topologies without
+    /// mutating either one.
+    pub(crate) fn diff(previous: &ClusterTopology, current: &ClusterTopology) -> TopologyDiff {
+        let mut changed_slots = Vec::new();
+        for slot in 0..SLOT_COUNT as u16 {
+            let old_owner = previous.master_for_slot(slot);
+            let new_owner = current.master_for_slot(slot);
+            if old_owner != new_owner {
+                changed_slots.push(SlotOwnershipChange {
+                    slot,
+                    old_owner: old_owner.cloned(),
+                    new_owner: new_owner.cloned(),
+                });
+            }
+        }
+
+        let previous_masters: HashSet<NodeAddr> =
+            previous.master_addrs().into_iter().cloned().collect();
+        let current_masters: HashSet<NodeAddr> =
+            current.master_addrs().into_iter().cloned().collect();
+
+        let mut added_masters: Vec<NodeAddr> = current_masters
+            .difference(&previous_masters)
+            .cloned()
+            .collect();
+        let mut removed_masters: Vec<NodeAddr> = previous_masters
+            .difference(&current_masters)
+            .cloned()
+            .collect();
+        sort_nodes(&mut added_masters);
+        sort_nodes(&mut removed_masters);
+
+        TopologyDiff {
+            changed_slots,
+            added_masters,
+            removed_masters,
+        }
+    }
+
+    fn sort_nodes(nodes: &mut [NodeAddr]) {
+        nodes.sort_by(|left, right| {
+            left.host
+                .cmp(&right.host)
+                .then_with(|| left.port.cmp(&right.port))
+        });
+    }
+
+    /// One committed master-routing transition.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct TopologyChange {
+        pub(crate) previous_revision: TopologyRevision,
+        pub(crate) revision: TopologyRevision,
+        pub(crate) diff: TopologyDiff,
+    }
+
+    /// How a delivered change relates to the last revision a consumer applied.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ChangeContinuity {
+        /// This exact change was already applied.
+        AlreadyApplied,
+        /// This is the immediate next change and can be applied incrementally.
+        Contiguous,
+        /// One or more changes were missed; derived state must be rebuilt or
+        /// conservatively cleared before accepting the latest topology.
+        Gap,
+    }
+
+    impl TopologyChange {
+        pub(crate) fn continuity_after(
+            &self,
+            observed_revision: TopologyRevision,
+        ) -> ChangeContinuity {
+            if observed_revision == self.revision {
+                ChangeContinuity::AlreadyApplied
+            } else if observed_revision == self.previous_revision {
+                ChangeContinuity::Contiguous
+            } else {
+                ChangeContinuity::Gap
+            }
+        }
+    }
+
+    /// Revision source plus a latest-value notification channel.
+    ///
+    /// A Tokio watch channel deliberately coalesces rapid updates. Consumers
+    /// detect that coalescing by comparing their last applied revision with
+    /// [`TopologyChange::previous_revision`]; on a gap they must clear or
+    /// rebuild state instead of applying only the latest slot list.
+    pub(crate) struct TopologyChangeTracker {
+        revision: TopologyRevision,
+        changes: watch::Sender<Option<Arc<TopologyChange>>>,
+    }
+
+    impl Default for TopologyChangeTracker {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl TopologyChangeTracker {
+        pub(crate) fn new() -> Self {
+            let (changes, _) = watch::channel(None);
+            Self {
+                revision: TopologyRevision::INITIAL,
+                changes,
+            }
+        }
+
+        pub(crate) fn revision(&self) -> TopologyRevision {
+            self.revision
+        }
+
+        pub(crate) fn snapshot(&self, topology: &ClusterTopology) -> TopologySnapshot {
+            TopologySnapshot {
+                revision: self.revision,
+                topology: topology.clone(),
+            }
+        }
+
+        pub(crate) fn subscribe(&self) -> watch::Receiver<Option<Arc<TopologyChange>>> {
+            self.changes.subscribe()
+        }
+
+        /// Record a committed transition, advancing the revision only when
+        /// master membership or slot ownership changed.
+        pub(crate) fn record(
+            &mut self,
+            previous: &ClusterTopology,
+            current: &ClusterTopology,
+        ) -> Option<Arc<TopologyChange>> {
+            let diff = diff(previous, current);
+            if diff.is_empty() {
+                return None;
+            }
+
+            let previous_revision = self.revision;
+            self.revision = self.revision.next();
+            let change = Arc::new(TopologyChange {
+                previous_revision,
+                revision: self.revision,
+                diff,
+            });
+            self.changes.send_replace(Some(Arc::clone(&change)));
+            Some(change)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::topology::SlotRange;
+
+        fn node(host: &str, port: u16) -> NodeAddr {
+            NodeAddr {
+                host: host.to_string(),
+                port,
+            }
+        }
+
+        fn topology(ranges: &[(u16, u16, &str, u16)]) -> ClusterTopology {
+            ClusterTopology::new(
+                ranges
+                    .iter()
+                    .map(|&(start, end, host, port)| SlotRange {
+                        start,
+                        end,
+                        master: node(host, port),
+                        replicas: Vec::new(),
+                    })
+                    .collect(),
+            )
+        }
+
+        #[test]
+        fn diff_reports_each_changed_slot_and_master_membership() {
+            let previous = topology(&[(0, 9, "node-a", 7000), (10, 19, "node-b", 7001)]);
+            let current = topology(&[(0, 4, "node-a", 7000), (5, 19, "node-c", 7002)]);
+
+            let change = diff(&previous, &current);
+
+            assert_eq!(change.changed_slots.len(), 15);
+            assert_eq!(
+                change.changed_slots.first(),
+                Some(&SlotOwnershipChange {
+                    slot: 5,
+                    old_owner: Some(node("node-a", 7000)),
+                    new_owner: Some(node("node-c", 7002)),
+                })
+            );
+            assert_eq!(
+                change.changed_slots.last(),
+                Some(&SlotOwnershipChange {
+                    slot: 19,
+                    old_owner: Some(node("node-b", 7001)),
+                    new_owner: Some(node("node-c", 7002)),
+                })
+            );
+            assert_eq!(change.added_masters, vec![node("node-c", 7002)]);
+            assert_eq!(change.removed_masters, vec![node("node-b", 7001)]);
+        }
+
+        #[test]
+        fn diff_reports_mapped_and_unmapped_owner_transitions() {
+            let previous = topology(&[(0, 0, "node-a", 7000)]);
+            let current = topology(&[(1, 1, "node-a", 7000)]);
+
+            let change = diff(&previous, &current);
+
+            assert_eq!(
+                change.changed_slots,
+                vec![
+                    SlotOwnershipChange {
+                        slot: 0,
+                        old_owner: Some(node("node-a", 7000)),
+                        new_owner: None,
+                    },
+                    SlotOwnershipChange {
+                        slot: 1,
+                        old_owner: None,
+                        new_owner: Some(node("node-a", 7000)),
+                    },
+                ]
+            );
+            assert!(change.added_masters.is_empty());
+            assert!(change.removed_masters.is_empty());
+        }
+
+        #[test]
+        fn range_fragmentation_and_order_do_not_create_false_changes() {
+            let previous = topology(&[(0, 9, "node-a", 7000), (10, 19, "node-b", 7001)]);
+            let current = topology(&[
+                (15, 19, "node-b", 7001),
+                (0, 4, "node-a", 7000),
+                (5, 9, "node-a", 7000),
+                (10, 14, "node-b", 7001),
+            ]);
+
+            assert!(diff(&previous, &current).is_empty());
+        }
+
+        #[test]
+        fn tracker_skips_replica_only_and_equivalent_changes() {
+            let previous = ClusterTopology::new(vec![SlotRange {
+                start: 0,
+                end: 10,
+                master: node("node-a", 7000),
+                replicas: vec![node("replica-a", 7100)],
+            }]);
+            let current = ClusterTopology::new(vec![SlotRange {
+                start: 0,
+                end: 10,
+                master: node("node-a", 7000),
+                replicas: vec![node("replica-b", 7101)],
+            }]);
+            let mut tracker = TopologyChangeTracker::new();
+
+            assert!(tracker.record(&previous, &current).is_none());
+            assert_eq!(tracker.revision(), TopologyRevision::INITIAL);
+            assert!(tracker.subscribe().borrow().is_none());
+        }
+
+        #[test]
+        fn move_away_and_back_advances_revision_and_exposes_a_missed_change() {
+            let original = topology(&[(0, 16_383, "node-a", 7000)]);
+            let mut moved = original.clone();
+            moved.reassign_slot(42, node("node-b", 7001));
+            let mut returned = moved.clone();
+            returned.reassign_slot(42, node("node-a", 7000));
+
+            let mut tracker = TopologyChangeTracker::new();
+            let original_snapshot = tracker.snapshot(&original);
+            let receiver = tracker.subscribe();
+
+            let first = tracker.record(&original, &moved).unwrap();
+            assert_eq!(first.previous_revision.get(), 0);
+            assert_eq!(first.revision.get(), 1);
+            assert_eq!(
+                first.continuity_after(original_snapshot.revision()),
+                ChangeContinuity::Contiguous
+            );
+
+            let moved_snapshot = tracker.snapshot(&moved);
+            let second = tracker.record(&moved, &returned).unwrap();
+            assert_eq!(second.previous_revision.get(), 1);
+            assert_eq!(second.revision.get(), 2);
+
+            // Routing returned to its original owner, but the snapshot's
+            // revision proves that an A -> B -> A transition occurred.
+            let returned_snapshot = tracker.snapshot(&returned);
+            assert_eq!(
+                original_snapshot.topology().master_for_slot(42),
+                returned_snapshot.topology().master_for_slot(42)
+            );
+            assert_ne!(original_snapshot.revision(), returned_snapshot.revision());
+
+            // A watch receiver coalesces both writes to the latest one. A
+            // consumer still at revision zero detects the gap and must clear;
+            // one at revision one can apply the second change incrementally.
+            let latest = receiver.borrow().clone().unwrap();
+            assert_eq!(latest.revision, second.revision);
+            assert_eq!(
+                latest.continuity_after(original_snapshot.revision()),
+                ChangeContinuity::Gap
+            );
+            assert_eq!(
+                latest.continuity_after(moved_snapshot.revision()),
+                ChangeContinuity::Contiguous
+            );
+            assert_eq!(
+                latest.continuity_after(returned_snapshot.revision()),
+                ChangeContinuity::AlreadyApplied
+            );
+
+            let slot_change = &latest.diff.changed_slots[0];
+            assert_eq!(slot_change.slot, 42);
+            assert_eq!(slot_change.old_owner, Some(node("node-b", 7001)));
+            assert_eq!(slot_change.new_owner, Some(node("node-a", 7000)));
+        }
+
+        #[test]
+        fn snapshot_can_return_its_topology() {
+            let topology = topology(&[(0, 10, "node-a", 7000)]);
+            let tracker = TopologyChangeTracker::new();
+            let snapshot = tracker.snapshot(&topology);
+
+            assert_eq!(snapshot.revision().get(), 0);
+            assert_eq!(
+                snapshot.into_topology().master_for_slot(5),
+                Some(&node("node-a", 7000))
+            );
+        }
+    }
+}
+
 /// Discover the cluster topology by sending CLUSTER SLOTS to a node.
 pub async fn discover_topology(conn: &mut RedisConnection) -> Result<ClusterTopology, RedisError> {
     let frame = array(vec![bulk("CLUSTER"), bulk("SLOTS")]);

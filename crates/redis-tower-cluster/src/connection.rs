@@ -10,7 +10,8 @@ use std::task::{Context, Poll};
 use redis_tower::credentials::{CredentialProvider, StaticCredentials};
 use redis_tower_commands::Auth;
 use redis_tower_core::{
-    Command, ConnectionConfig, Frame, RedisConnection, RedisError, RespLimits, parse_redis_url,
+    Command, ConnectionConfig, Frame, ProtocolVersion, RedisConnection, RedisError, RespLimits,
+    parse_redis_url,
 };
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -192,8 +193,8 @@ pub struct ClusterConnection {
     max_redirects: usize,
     /// Credential provider for authenticating each node connection.
     credentials: Option<Arc<dyn CredentialProvider>>,
-    /// Decode limits applied to every cluster node connection.
-    resp_limits: RespLimits,
+    /// Transport, protocol, and decode settings for every node connection.
+    connection_config: ConnectionConfig,
     /// TLS configuration for node connections.
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
@@ -208,7 +209,7 @@ pub struct ClusterConnectionBuilder {
     read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     max_redirects: usize,
     credentials: Option<Arc<dyn CredentialProvider>>,
-    resp_limits: RespLimits,
+    connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
@@ -275,13 +276,30 @@ impl ClusterConnectionBuilder {
         self
     }
 
+    /// Set the connection settings used for every cluster node.
+    ///
+    /// The complete configuration is retained for seed discovery, masters,
+    /// replicas, redirect-created connections, topology refreshes, and
+    /// reconnects. Authentication is completed before the configured protocol
+    /// is negotiated, allowing RESP3 to work with protected clusters.
+    pub fn connection_config(mut self, config: ConnectionConfig) -> Self {
+        self.connection_config = config;
+        self
+    }
+
+    /// Set the RESP protocol negotiation policy for every cluster node.
+    pub fn protocol(mut self, protocol: ProtocolVersion) -> Self {
+        self.connection_config = self.connection_config.with_protocol(protocol);
+        self
+    }
+
     /// Set RESP decode limits for every cluster connection.
     ///
     /// The limits apply before any handshake or authentication frames are
     /// decoded and are retained for seed discovery, masters, replicas,
     /// redirect-created connections, and topology refreshes.
     pub fn resp_limits(mut self, limits: RespLimits) -> Self {
-        self.resp_limits = limits;
+        self.connection_config = self.connection_config.with_resp_limits(limits);
         self
     }
 
@@ -308,7 +326,7 @@ impl ClusterConnectionBuilder {
             self.read_routing,
             self.max_redirects,
             self.credentials,
-            self.resp_limits,
+            self.connection_config,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             self.tls,
         )
@@ -336,7 +354,7 @@ impl ClusterConnection {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -352,7 +370,7 @@ impl ClusterConnection {
             None,
             MAX_REDIRECTS,
             None,
-            RespLimits::default(),
+            ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -372,7 +390,7 @@ impl ClusterConnection {
             None,
             MAX_REDIRECTS,
             None,
-            RespLimits::default(),
+            ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
         )
@@ -430,7 +448,7 @@ impl ClusterConnection {
             read_routing: None,
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -445,19 +463,18 @@ impl ClusterConnection {
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
         max_redirects: usize,
         credentials: Option<Arc<dyn CredentialProvider>>,
-        resp_limits: RespLimits,
+        connection_config: ConnectionConfig,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
             Arc<redis_tower_core::tls::TlsConfig>,
         >,
     ) -> Result<Self, RedisError> {
-        let mut seed_conn = connect_node(
-            seed_addr,
-            credentials.as_ref(),
-            resp_limits,
+        let connector = ClusterNodeConnector::new(
+            connection_config.clone(),
+            credentials.clone(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            tls.as_deref(),
-        )
-        .await?;
+            tls.clone(),
+        );
+        let mut seed_conn = connector.connect(seed_addr, false).await?;
         let mut topology = discover_topology(&mut seed_conn).await?;
 
         if let Some(ref map) = address_map {
@@ -474,14 +491,7 @@ impl ClusterConnection {
         for addr in topology.master_addrs() {
             let addr_str = addr.addr_string();
             if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone()) {
-                let conn = connect_node(
-                    &addr_str,
-                    credentials.as_ref(),
-                    resp_limits,
-                    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                    tls.as_deref(),
-                )
-                .await?;
+                let conn = connector.connect(&addr_str, false).await?;
                 if default_node.is_empty() {
                     default_node.clone_from(&addr_str);
                 }
@@ -495,17 +505,7 @@ impl ClusterConnection {
                 let addr_str = addr.addr_string();
                 if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone())
                 {
-                    let mut conn = connect_node(
-                        &addr_str,
-                        credentials.as_ref(),
-                        resp_limits,
-                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                        tls.as_deref(),
-                    )
-                    .await?;
-                    // Send READONLY to enable reads on this replica.
-                    conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
-                        .await?;
+                    let conn = connector.connect(&addr_str, true).await?;
                     e.insert(conn);
                 }
             }
@@ -528,7 +528,7 @@ impl ClusterConnection {
             read_routing,
             max_redirects,
             credentials,
-            resp_limits,
+            connection_config,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
@@ -785,14 +785,13 @@ impl ClusterConnection {
     /// Ensure we have a connection to the given address.
     async fn ensure_connection(&mut self, addr: &str) -> Result<(), RedisError> {
         if !self.nodes.contains_key(addr) {
-            let conn = connect_node(
-                addr,
-                self.credentials.as_ref(),
-                self.resp_limits,
+            let connector = ClusterNodeConnector::new(
+                self.connection_config.clone(),
+                self.credentials.clone(),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                self.tls.as_deref(),
-            )
-            .await?;
+                self.tls.clone(),
+            );
+            let conn = connector.connect(addr, false).await?;
             self.nodes.insert(addr.to_string(), conn);
         }
         Ok(())
@@ -854,18 +853,18 @@ impl ClusterConnection {
             remap_topology(&mut topology, host);
         }
 
+        let connector = ClusterNodeConnector::new(
+            self.connection_config.clone(),
+            self.credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            self.tls.clone(),
+        );
+
         for addr in topology.master_addrs() {
             let addr_str = addr.addr_string();
             if let std::collections::hash_map::Entry::Vacant(e) = self.nodes.entry(addr_str.clone())
             {
-                let conn = connect_node(
-                    &addr_str,
-                    self.credentials.as_ref(),
-                    self.resp_limits,
-                    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                    self.tls.as_deref(),
-                )
-                .await?;
+                let conn = connector.connect(&addr_str, false).await?;
                 e.insert(conn);
             }
         }
@@ -876,16 +875,7 @@ impl ClusterConnection {
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     self.nodes.entry(addr_str.clone())
                 {
-                    let mut conn = connect_node(
-                        &addr_str,
-                        self.credentials.as_ref(),
-                        self.resp_limits,
-                        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                        self.tls.as_deref(),
-                    )
-                    .await?;
-                    conn.execute_pipeline(vec![array(vec![bulk("READONLY")])])
-                        .await?;
+                    let conn = connector.connect(&addr_str, true).await?;
                     e.insert(conn);
                 }
             }
@@ -1047,36 +1037,92 @@ impl TransientError {
     }
 }
 
-/// Connect to a single cluster node, using TLS if configured.
-async fn connect_node(
-    addr: &str,
-    credentials: Option<&Arc<dyn CredentialProvider>>,
-    resp_limits: RespLimits,
-    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
-        &redis_tower_core::tls::TlsConfig,
-    >,
-) -> Result<RedisConnection, RedisError> {
-    let connection_config = ConnectionConfig::new().with_resp_limits(resp_limits);
+/// Shared setup for every Redis Cluster node connection.
+///
+/// A fresh transport starts in RESP2 so an ACL-protected node can authenticate
+/// before the requested protocol is negotiated. The same value is cloned into
+/// multiplexed reconnect factories, keeping transport settings, credentials,
+/// protocol selection, and replica setup identical on every connection path.
+#[derive(Clone)]
+pub(crate) struct ClusterNodeConnector {
+    connection_config: ConnectionConfig,
+    credentials: Option<Arc<dyn CredentialProvider>>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-    let mut conn = match tls {
-        Some(tls) => {
-            let hostname = addr
-                .rsplit_once(':')
-                .map(|(h, _)| h)
-                .unwrap_or(addr)
-                .to_string();
-            RedisConnection::connect_tls_with_config(addr, &hostname, tls, &connection_config)
-                .await?
-        }
-        None => RedisConnection::connect_with_config(addr, &connection_config).await?,
-    };
-    #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
-    let mut conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
+    tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
+}
 
-    if let Some(provider) = credentials {
-        authenticate(&mut conn, provider.as_ref()).await?;
+impl ClusterNodeConnector {
+    pub(crate) fn new(
+        connection_config: ConnectionConfig,
+        credentials: Option<Arc<dyn CredentialProvider>>,
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<
+            Arc<redis_tower_core::tls::TlsConfig>,
+        >,
+    ) -> Self {
+        Self {
+            connection_config,
+            credentials,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls,
+        }
     }
-    Ok(conn)
+
+    /// Open and initialize one master or replica connection.
+    ///
+    /// Setup order is transport/CLIENT SETINFO, AUTH, protocol negotiation,
+    /// then READONLY for replica connections.
+    pub(crate) async fn connect(
+        &self,
+        addr: &str,
+        readonly: bool,
+    ) -> Result<RedisConnection, RedisError> {
+        // Connections begin in RESP2. Deferring the requested negotiation until
+        // after AUTH prevents Auto from mistaking NOAUTH for an unsupported
+        // HELLO and silently leaving protected cluster nodes in RESP2.
+        let bootstrap_config = self
+            .connection_config
+            .clone()
+            .with_protocol(ProtocolVersion::Resp2);
+
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let conn = match self.tls.as_deref() {
+            Some(tls) => {
+                let hostname = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+                RedisConnection::connect_tls_with_config(addr, hostname, tls, &bootstrap_config)
+                    .await?
+            }
+            None => RedisConnection::connect_with_config(addr, &bootstrap_config).await?,
+        };
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+        let conn = RedisConnection::connect_with_config(addr, &bootstrap_config).await?;
+
+        self.finish_setup(conn, readonly).await
+    }
+
+    async fn finish_setup(
+        &self,
+        mut conn: RedisConnection,
+        readonly: bool,
+    ) -> Result<RedisConnection, RedisError> {
+        if let Some(provider) = self.credentials.as_deref() {
+            authenticate(&mut conn, provider).await?;
+        }
+        conn.negotiate_protocol(self.connection_config.protocol())
+            .await?;
+
+        if readonly {
+            let responses = conn
+                .execute_pipeline(vec![array(vec![bulk("READONLY")])])
+                .await?;
+            if let Some(Frame::Error(ref error)) = responses.into_iter().next() {
+                return Err(RedisError::Redis(
+                    String::from_utf8_lossy(error).into_owned(),
+                ));
+            }
+        }
+
+        Ok(conn)
+    }
 }
 
 /// Authenticate a freshly opened node connection using the credential provider.
@@ -1197,11 +1243,28 @@ mod tests {
     use super::*;
     use crate::topology::SlotRange;
     use bytes::Bytes;
+    #[cfg(unix)]
+    use futures::{SinkExt, StreamExt};
     use redis_tower_commands::{Get, Ping};
     use redis_tower_core::{RedisStream, WithDeadline};
+    #[cfg(unix)]
+    use redis_tower_protocol::RespCodec;
     use tokio::io::AsyncReadExt;
     #[cfg(unix)]
     use tokio::io::AsyncWriteExt;
+    #[cfg(unix)]
+    use tokio_util::codec::Framed;
+
+    #[cfg(unix)]
+    fn command_name(frame: &Frame) -> &[u8] {
+        let Frame::Array(Some(parts)) = frame else {
+            panic!("expected command array, got {frame:?}");
+        };
+        let Some(Frame::BulkString(Some(command))) = parts.first() else {
+            panic!("expected bulk-string command name, got {frame:?}");
+        };
+        command.as_ref()
+    }
 
     #[cfg(unix)]
     fn topology_for_addr(addr: &str, start: u16, end: u16) -> ClusterTopology {
@@ -1785,7 +1848,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1804,7 +1867,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1833,7 +1896,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1863,7 +1926,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1953,7 +2016,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -1979,7 +2042,7 @@ mod tests {
             read_routing: Arc::new(RoundRobinRouting::new()),
             max_redirects: MAX_REDIRECTS,
             credentials: None,
-            resp_limits: RespLimits::default(),
+            connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         };
@@ -2009,7 +2072,11 @@ mod tests {
     #[test]
     fn builder_defaults_resp_limits() {
         let builder = ClusterConnection::builder("127.0.0.1:7000");
-        assert_eq!(builder.resp_limits, RespLimits::default());
+        assert_eq!(
+            builder.connection_config.resp_limits(),
+            RespLimits::default()
+        );
+        assert_eq!(builder.connection_config.protocol(), ProtocolVersion::Auto);
     }
 
     #[test]
@@ -2019,7 +2086,148 @@ mod tests {
             max_depth: 8,
         };
         let builder = ClusterConnection::builder("127.0.0.1:7000").resp_limits(limits);
-        assert_eq!(builder.resp_limits, limits);
+        assert_eq!(builder.connection_config.resp_limits(), limits);
+    }
+
+    #[test]
+    fn builder_retains_full_connection_config_and_composable_overrides() {
+        let limits = RespLimits {
+            max_frame_size: 2048,
+            max_depth: 7,
+        };
+        let config = ConnectionConfig::new()
+            .with_connect_timeout(Some(std::time::Duration::from_secs(3)))
+            .with_protocol(ProtocolVersion::Resp2)
+            .with_resp_limits(limits);
+
+        let builder = ClusterConnection::builder("127.0.0.1:7000")
+            .connection_config(config)
+            .protocol(ProtocolVersion::Resp3);
+
+        assert_eq!(
+            builder.connection_config.connect_timeout(),
+            Some(std::time::Duration::from_secs(3))
+        );
+        assert_eq!(builder.connection_config.protocol(), ProtocolVersion::Resp3);
+        assert_eq!(builder.connection_config.resp_limits(), limits);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn node_setup_authenticates_before_hello_and_configures_replica_last() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+            Some(Arc::new(StaticCredentials::new("alice", "secret"))),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        );
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            for expected in [b"AUTH".as_slice(), b"HELLO", b"READONLY"] {
+                let frame = framed.next().await.unwrap().unwrap();
+                assert_eq!(command_name(&frame), expected);
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let conn = RedisConnection::from_stream(RedisStream::Unix(client));
+        let conn = connector.finish_setup(conn, true).await.unwrap();
+        assert!(conn.is_resp3());
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn failed_auth_stops_before_protocol_negotiation() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+            Some(Arc::new(StaticCredentials::password("wrong"))),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        );
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            let frame = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&frame), b"AUTH");
+            framed
+                .send(Frame::Error(b"WRONGPASS invalid credentials"[..].into()))
+                .await
+                .unwrap();
+            assert!(
+                framed.next().await.is_none(),
+                "HELLO must not be sent after AUTH fails"
+            );
+        });
+
+        let conn = RedisConnection::from_stream(RedisStream::Unix(client));
+        let error = match connector.finish_setup(conn, false).await {
+            Ok(_) => panic!("authentication unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, RedisError::Redis(message) if message.contains("WRONGPASS")));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn forced_resp3_surfaces_hello_rejection() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        );
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            let frame = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&frame), b"HELLO");
+            framed
+                .send(Frame::Error(b"ERR unknown command 'HELLO'"[..].into()))
+                .await
+                .unwrap();
+        });
+
+        let conn = RedisConnection::from_stream(RedisStream::Unix(client));
+        let error = match connector.finish_setup(conn, false).await {
+            Ok(_) => panic!("forced RESP3 unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, RedisError::Redis(message) if message.contains("unknown command")));
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn explicit_resp2_does_not_send_hello_on_fresh_connection() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2),
+            None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        );
+
+        let conn = RedisConnection::from_stream(RedisStream::Unix(client));
+        let conn = connector.finish_setup(conn, false).await.unwrap();
+        assert!(!conn.is_resp3());
+
+        let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), framed.next())
+                .await
+                .is_err(),
+            "fresh RESP2 setup unexpectedly wrote HELLO"
+        );
+        drop(conn);
     }
 
     // -- connect_url parsing --

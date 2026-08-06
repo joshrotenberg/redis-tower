@@ -379,9 +379,9 @@ runtime, use `redis_tower_client::UniversalClient`. Its URL schemes are
 same typed `execute` method.
 
 Read the [feature matrix](FEATURE-MATRIX.md) before assuming exact parity.
-In particular, RESP3 negotiation is currently standalone-only, and some Fred
-features such as dynamic pools or alternate async runtimes do not have direct
-redis-tower equivalents.
+RESP3 negotiation is available on standalone and cluster clients, while
+Sentinel support remains in progress. Some Fred features such as dynamic pools
+or alternate async runtimes do not have direct redis-tower equivalents.
 
 ## Pub/sub
 
