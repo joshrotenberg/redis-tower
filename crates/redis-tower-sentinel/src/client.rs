@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use redis_tower::credentials::CredentialProvider;
+use redis_tower::{ReadPreference, ReadRoutingStrategy};
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
 use redis_tower_protocol::RespLimits;
@@ -90,6 +91,23 @@ impl SentinelClientBuilder {
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     pub fn tls(mut self, tls: redis_tower_core::tls::TlsConfig) -> Self {
         self.inner = self.inner.tls(tls);
+        self
+    }
+
+    /// Set the read preference for routing read-only commands.
+    ///
+    /// See [`SentinelConnectionBuilder::read_preference`] for the full
+    /// semantics, including the no-usable-replica fallback.
+    pub fn read_preference(mut self, pref: ReadPreference) -> Self {
+        self.inner = self.inner.read_preference(pref);
+        self
+    }
+
+    /// Set a custom read routing strategy for replica selection.
+    ///
+    /// See [`SentinelConnectionBuilder::read_routing`].
+    pub fn read_routing(mut self, strategy: impl ReadRoutingStrategy) -> Self {
+        self.inner = self.inner.read_routing(strategy);
         self
     }
 
@@ -203,6 +221,21 @@ impl SentinelClient {
         let mut conn = self.inner.lock().await;
         conn.execute(Ping::new()).await?;
         Ok(())
+    }
+
+    /// Get the configured read preference.
+    pub async fn read_preference(&self) -> ReadPreference {
+        self.inner.lock().await.read_preference()
+    }
+
+    /// Address of the replica that served the most recent read-only command,
+    /// or `None` if the most recent command went to the master.
+    pub async fn last_replica_read(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .await
+            .last_replica_read()
+            .map(str::to_string)
     }
 }
 

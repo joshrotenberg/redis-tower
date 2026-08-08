@@ -1,11 +1,15 @@
 //! Sentinel-managed Redis connection with automatic failover.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use redis_tower::credentials::CredentialProvider;
+use redis_tower::{
+    NodeAddr, ReadPreference, ReadRoutingStrategy, RoundRobinRouting, is_readonly_command,
+};
 use redis_tower_core::{Command, RedisConnection, RedisError};
 use redis_tower_protocol::RespLimits;
 
@@ -38,6 +42,8 @@ pub struct SentinelConnectionBuilder {
     sentinel_addrs: Vec<String>,
     master_name: String,
     pub(crate) config: SentinelConfig,
+    read_preference: ReadPreference,
+    read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
 }
 
 impl SentinelConnectionBuilder {
@@ -107,10 +113,48 @@ impl SentinelConnectionBuilder {
         self
     }
 
+    /// Set the read preference for routing read-only commands.
+    ///
+    /// Defaults to [`ReadPreference::Master`]. When set to
+    /// [`ReadPreference::Replica`] or [`ReadPreference::PreferReplica`], the
+    /// connection additionally discovers the monitored replicas via
+    /// sentinel and connects to each one so read-only commands (as
+    /// classified by [`redis_tower::is_readonly_command`]) can be routed to
+    /// them.
+    ///
+    /// The two non-default variants differ on what happens when no replica
+    /// is connected (none discovered, or all unreachable):
+    /// [`ReadPreference::Replica`] returns an error for the read rather than
+    /// silently serving it from the master, while
+    /// [`ReadPreference::PreferReplica`] falls back to the master. Writes are
+    /// unaffected either way and always go to the master.
+    pub fn read_preference(mut self, pref: ReadPreference) -> Self {
+        self.read_preference = pref;
+        self
+    }
+
+    /// Set a custom read routing strategy for replica selection.
+    ///
+    /// Used only when [`read_preference`](Self::read_preference) is
+    /// [`ReadPreference::Replica`] or [`ReadPreference::PreferReplica`]. If
+    /// not set, defaults to [`RoundRobinRouting`]. The `slot` argument the
+    /// strategy receives is always `0` -- sentinel monitors one shard, not a
+    /// cluster's 16384 hash slots.
+    pub fn read_routing(mut self, strategy: impl ReadRoutingStrategy) -> Self {
+        self.read_routing = Some(Arc::new(strategy));
+        self
+    }
+
     /// Connect to the Redis master discovered via sentinel.
     pub async fn connect(self) -> Result<SentinelConnection, RedisError> {
-        SentinelConnection::connect_with_config(self.sentinel_addrs, self.master_name, self.config)
-            .await
+        SentinelConnection::connect_with_config(
+            self.sentinel_addrs,
+            self.master_name,
+            self.config,
+            self.read_preference,
+            self.read_routing,
+        )
+        .await
     }
 }
 
@@ -160,6 +204,24 @@ pub struct SentinelConnection {
     needs_rediscovery: bool,
     /// Sentinel and node configuration (credentials, TLS, RESP limits).
     config: SentinelConfig,
+    /// Read routing preference.
+    read_preference: ReadPreference,
+    /// Strategy for selecting which replica to read from.
+    read_routing: Arc<dyn ReadRoutingStrategy>,
+    /// Connections to currently known replicas, keyed by `"host:port"`.
+    ///
+    /// Populated at connect time (and refreshed on rediscovery) when
+    /// `read_preference != Master`. Empty whenever no replica is monitored,
+    /// reachable, or configured; the preference determines whether reads then
+    /// fall back to the master or return an error.
+    replicas: HashMap<String, RedisConnection>,
+    /// Addresses of `replicas`, kept alongside it so [`ReadRoutingStrategy`]
+    /// can select over a `&[NodeAddr]` without rebuilding the list per read.
+    replica_addrs: Vec<NodeAddr>,
+    /// Address of the replica that served the most recent read-only
+    /// command, or `None` if the most recent command went to the master
+    /// (including every command when `read_preference` is `Master`).
+    last_replica_read: Option<String>,
 }
 
 impl SentinelConnection {
@@ -194,6 +256,8 @@ impl SentinelConnection {
                 .collect(),
             master_name: master_name.to_string(),
             config: SentinelConfig::default(),
+            read_preference: ReadPreference::Master,
+            read_routing: None,
         }
     }
 
@@ -209,7 +273,14 @@ impl SentinelConnection {
             .iter()
             .map(|a| a.as_ref().to_string())
             .collect();
-        Self::connect_with_config(addrs, master_name.to_string(), SentinelConfig::default()).await
+        Self::connect_with_config(
+            addrs,
+            master_name.to_string(),
+            SentinelConfig::default(),
+            ReadPreference::Master,
+            None,
+        )
+        .await
     }
 
     /// Internal: connect using explicit config.
@@ -217,6 +288,8 @@ impl SentinelConnection {
         addrs: Vec<String>,
         master_name: String,
         config: SentinelConfig,
+        read_preference: ReadPreference,
+        read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     ) -> Result<Self, RedisError> {
         let master_addr =
             discovery::discover_master_with_config(&addrs, &master_name, &config).await?;
@@ -229,6 +302,12 @@ impl SentinelConnection {
         )
         .await?;
 
+        let (replicas, replica_addrs) = if read_preference == ReadPreference::Master {
+            (HashMap::new(), Vec::new())
+        } else {
+            discovery::connect_replicas(&addrs, &master_name, &config).await
+        };
+
         Ok(Self {
             conn,
             sentinel_addrs: addrs,
@@ -236,24 +315,66 @@ impl SentinelConnection {
             current_addr: master_addr,
             needs_rediscovery: false,
             config,
+            read_preference,
+            read_routing: read_routing.unwrap_or_else(|| Arc::new(RoundRobinRouting::new())),
+            replicas,
+            replica_addrs,
+            last_replica_read: None,
         })
     }
 
-    /// Execute a command against the current master.
+    /// Execute a command, routing read-only commands to a replica when
+    /// [`read_preference`](Self::read_preference) allows it.
     ///
     /// If the connection was marked as needing rediscovery (after a
     /// previous connection error), rediscovers the master first.
     ///
-    /// On a connection error during execution (which may indicate a
-    /// failover), the master is rediscovered eagerly so that the next
-    /// `execute()` call connects to the new master without an additional
-    /// rediscovery round-trip. The current command cannot be retried here
-    /// because it has already been consumed; the caller should retry if
-    /// appropriate.
+    /// Writes and (with `ReadPreference::Master`, the default) reads always
+    /// go to the master. With `Replica` or `PreferReplica`, a command
+    /// [`redis_tower::is_readonly_command`] accepts is routed to a replica
+    /// selected by the configured [`ReadRoutingStrategy`] -- if a replica is
+    /// connected. With no connected replica (none discovered, or all
+    /// unreachable at connect/rediscover time), `Replica` returns an error
+    /// for the read rather than silently serving it from the master;
+    /// `PreferReplica` falls back to the master, exactly like
+    /// `ReadPreference::Master`. A failed replica read (the connection is
+    /// dead, as opposed to none being connected) is returned to the caller
+    /// as-is either way -- there is no same-command retry against the
+    /// master, since `cmd` has already been consumed. Call
+    /// [`Self::rediscover`] to refresh the replica set.
     pub async fn execute<Cmd: Command>(&mut self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         if self.needs_rediscovery {
             self.rediscover().await?;
         }
+
+        if self.read_preference != ReadPreference::Master && is_readonly_command(&cmd.to_frame()) {
+            match self.pick_replica_addr() {
+                Some(addr) => {
+                    self.last_replica_read = None;
+                    let conn = self
+                        .replicas
+                        .get_mut(&addr)
+                        .expect("pick_replica_addr only returns addresses present in `replicas`");
+                    let result = conn.execute(cmd).await;
+                    if result.is_ok() {
+                        self.last_replica_read = Some(addr);
+                    }
+                    return result;
+                }
+                None if self.read_preference == ReadPreference::Replica => {
+                    self.last_replica_read = None;
+                    return Err(RedisError::Redis(format!(
+                        "sentinel: ReadPreference::Replica requires a connected replica for '{}', \
+                         but none is available",
+                        self.master_name
+                    )));
+                }
+                None => {
+                    // PreferReplica: fall through to the master below.
+                }
+            }
+        }
+        self.last_replica_read = None;
 
         let result = self.conn.execute(cmd).await;
         if let Err(ref e) = result
@@ -279,6 +400,16 @@ impl SentinelConnection {
         result
     }
 
+    /// Select a replica to read from, using the configured routing strategy.
+    ///
+    /// `slot` is always `0`: sentinel monitors one shard, not a cluster's
+    /// hash-sloted keyspace, so every [`ReadRoutingStrategy`] call shares it.
+    fn pick_replica_addr(&self) -> Option<String> {
+        let selected = self.read_routing.select_replica(0, &self.replica_addrs)?;
+        let addr = selected.addr_string();
+        self.replicas.contains_key(&addr).then_some(addr)
+    }
+
     /// Force rediscovery of the master and reconnect.
     ///
     /// Sentinel's view of the master can lag a failover, so each candidate is
@@ -289,6 +420,12 @@ impl SentinelConnection {
     ///
     /// The reconnected master connection respects the node credentials and TLS
     /// settings configured via [`SentinelConnection::builder`].
+    ///
+    /// When [`read_preference`](Self::read_preference) is not `Master`, this
+    /// also refreshes the replica set from sentinel -- the failover that
+    /// prompted rediscovery may have changed who the replicas are. The
+    /// refresh is best-effort: a failure is logged and produces an empty set,
+    /// so stale connections are never retained across a master failover.
     pub async fn rediscover(&mut self) -> Result<(), RedisError> {
         match discovery::connect_verified_master_with_config(
             &self.sentinel_addrs,
@@ -307,6 +444,17 @@ impl SentinelConnection {
                 self.conn = conn;
                 self.current_addr = master_addr;
                 self.needs_rediscovery = false;
+                if self.read_preference != ReadPreference::Master {
+                    let (replicas, replica_addrs) = discovery::connect_replicas(
+                        &self.sentinel_addrs,
+                        &self.master_name,
+                        &self.config,
+                    )
+                    .await;
+                    self.replicas = replicas;
+                    self.replica_addrs = replica_addrs;
+                    self.last_replica_read = None;
+                }
                 Ok(())
             }
             Err(e) => {
@@ -334,6 +482,25 @@ impl SentinelConnection {
             &self.config,
         )
         .await
+    }
+
+    /// Get the configured read preference.
+    pub fn read_preference(&self) -> ReadPreference {
+        self.read_preference
+    }
+
+    /// Addresses of the replicas currently connected for reads.
+    ///
+    /// Empty when `read_preference()` is [`ReadPreference::Master`], or when
+    /// no monitored replica was reachable at the last connect/rediscover.
+    pub fn connected_replicas(&self) -> &[NodeAddr] {
+        &self.replica_addrs
+    }
+
+    /// Address of the replica that served the most recent read-only command,
+    /// or `None` if the most recent command went to the master.
+    pub fn last_replica_read(&self) -> Option<&str> {
+        self.last_replica_read.as_deref()
     }
 }
 
@@ -370,6 +537,40 @@ mod tests {
     fn builder_defaults_to_standard_resp_limits() {
         let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster");
         assert_eq!(builder.config.resp_limits, RespLimits::default());
+    }
+
+    #[test]
+    fn builder_defaults_read_preference_to_master() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster");
+        assert_eq!(builder.read_preference, ReadPreference::Master);
+        assert!(builder.read_routing.is_none());
+    }
+
+    #[test]
+    fn builder_sets_read_preference() {
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster")
+            .read_preference(ReadPreference::PreferReplica);
+        assert_eq!(builder.read_preference, ReadPreference::PreferReplica);
+    }
+
+    #[test]
+    fn builder_accepts_custom_read_routing() {
+        struct AlwaysFirst;
+        impl ReadRoutingStrategy for AlwaysFirst {
+            fn select_replica<'a>(
+                &self,
+                _slot: u16,
+                replicas: &'a [NodeAddr],
+            ) -> Option<&'a NodeAddr> {
+                replicas.first()
+            }
+        }
+
+        let builder = SentinelConnection::builder(&["127.0.0.1:26379"], "mymaster")
+            .read_preference(ReadPreference::Replica)
+            .read_routing(AlwaysFirst);
+        assert!(builder.read_routing.is_some());
+        assert_eq!(builder.read_preference, ReadPreference::Replica);
     }
 
     #[test]

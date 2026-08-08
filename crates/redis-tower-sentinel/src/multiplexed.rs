@@ -40,6 +40,7 @@
 //! # }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use redis_tower::auto_pipeline::{
@@ -47,7 +48,10 @@ use redis_tower::auto_pipeline::{
 };
 use redis_tower::command_adapter::CommandAdapter;
 use redis_tower::credentials::CredentialProvider;
-use redis_tower::{ConnectionEvent, ConnectionEventBus};
+use redis_tower::{
+    ConnectionEvent, ConnectionEventBus, NodeAddr, ReadPreference, ReadRoutingStrategy,
+    RoundRobinRouting, is_readonly_command,
+};
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::RespLimits;
 use tower_service::Service;
@@ -82,6 +86,8 @@ pub struct MultiplexedSentinelClientBuilder {
     master_name: String,
     config: SentinelConfig,
     connection_events: Option<ConnectionEventBus>,
+    read_preference: ReadPreference,
+    read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
 }
 
 impl MultiplexedSentinelClientBuilder {
@@ -128,6 +134,42 @@ impl MultiplexedSentinelClientBuilder {
     /// a node behind the same endpoint does not emit `Failover`.
     pub fn connection_events(mut self, events: ConnectionEventBus) -> Self {
         self.connection_events = Some(events);
+        self
+    }
+
+    /// Set the read preference for routing read-only commands.
+    ///
+    /// Defaults to [`ReadPreference::Master`]. When set to
+    /// [`ReadPreference::Replica`] or [`ReadPreference::PreferReplica`],
+    /// `connect`/`connect_with_reconnect` additionally discover the
+    /// monitored replicas via sentinel and open one shared, automatically
+    /// pipelined connection to each reachable replica. Read-only commands (as
+    /// classified by [`redis_tower::is_readonly_command`]) select among those
+    /// connections with [`read_routing`](Self::read_routing) on every call.
+    ///
+    /// The two non-default variants differ on what happens when no replica
+    /// is connected (none discovered, or every discovered replica refused the
+    /// connection): [`ReadPreference::Replica`] returns an error for the
+    /// read rather than silently serving it from the master, while
+    /// [`ReadPreference::PreferReplica`] falls back to the master. Writes
+    /// are unaffected either way and always go to the master.
+    ///
+    /// Replica connections do not currently participate in
+    /// `connect_with_reconnect`'s Sentinel-failover reconnect loop: it is
+    /// discovered and connected once at construction. If one drops, reads
+    /// routed to it return an error rather than falling back to the master or
+    /// reconnecting; reconstructing the client refreshes the replica set.
+    pub fn read_preference(mut self, pref: ReadPreference) -> Self {
+        self.read_preference = pref;
+        self
+    }
+
+    /// Set a custom read routing strategy for replica selection.
+    ///
+    /// See [`read_preference`](Self::read_preference). If not set, defaults
+    /// to [`RoundRobinRouting`].
+    pub fn read_routing(mut self, strategy: impl ReadRoutingStrategy) -> Self {
+        self.read_routing = Some(Arc::new(strategy));
         self
     }
 
@@ -197,6 +239,34 @@ impl MultiplexedSentinelClientBuilder {
                 return Err(error);
             }
         };
+        let read_preference = self.read_preference;
+        let read_routing = self
+            .read_routing
+            .clone()
+            .unwrap_or_else(|| Arc::new(RoundRobinRouting::new()));
+        let (replicas, replica_addrs) = if read_preference == ReadPreference::Master {
+            (HashMap::new(), Vec::new())
+        } else {
+            let (mut connections, replica_addrs) =
+                discovery::connect_replicas(&self.sentinel_addrs, &self.master_name, &self.config)
+                    .await;
+            let replicas = replica_addrs
+                .iter()
+                .filter_map(|addr| {
+                    let key = addr.addr_string();
+                    connections.remove(&key).map(|conn| {
+                        (
+                            key,
+                            CommandAdapter::new(AutoPipelineService::new(
+                                conn,
+                                AutoPipelineConfig::default(),
+                            )),
+                        )
+                    })
+                })
+                .collect();
+            (replicas, replica_addrs)
+        };
         let pipeline = match self.connection_events {
             Some(events) => {
                 AutoPipelineService::new_with_events(conn, AutoPipelineConfig::default(), events)
@@ -205,6 +275,10 @@ impl MultiplexedSentinelClientBuilder {
         };
         Ok(MultiplexedSentinelClient {
             inner: CommandAdapter::new(pipeline),
+            replicas,
+            replica_addrs,
+            read_preference,
+            read_routing,
         })
     }
 
@@ -224,6 +298,37 @@ impl MultiplexedSentinelClientBuilder {
         let master_tracker = events
             .as_ref()
             .map(|events| VerifiedMasterTracker::new(events.clone()));
+
+        let read_preference = self.read_preference;
+        let read_routing = self
+            .read_routing
+            .clone()
+            .unwrap_or_else(|| Arc::new(RoundRobinRouting::new()));
+        // Discover and connect before `addrs`/`name`/`config` are moved into
+        // the reconnect factory below. See `read_preference`'s doc comment:
+        // replica connections do not participate in that factory's loop.
+        let (replicas, replica_addrs) = if read_preference == ReadPreference::Master {
+            (HashMap::new(), Vec::new())
+        } else {
+            let (mut connections, replica_addrs) =
+                discovery::connect_replicas(&addrs, &name, &config).await;
+            let replicas = replica_addrs
+                .iter()
+                .filter_map(|addr| {
+                    let key = addr.addr_string();
+                    connections.remove(&key).map(|conn| {
+                        (
+                            key,
+                            CommandAdapter::new(AutoPipelineService::new(
+                                conn,
+                                AutoPipelineConfig::default(),
+                            )),
+                        )
+                    })
+                })
+                .collect();
+            (replicas, replica_addrs)
+        };
 
         let factory = move || {
             let addrs = addrs.clone();
@@ -264,6 +369,10 @@ impl MultiplexedSentinelClientBuilder {
         };
         Ok(MultiplexedSentinelClient {
             inner: CommandAdapter::new(svc),
+            replicas,
+            replica_addrs,
+            read_preference,
+            read_routing,
         })
     }
 }
@@ -352,9 +461,24 @@ impl VerifiedMasterTracker {
 /// [`AutoPipelineService`]. Use [`from_layered`](Self::from_layered) to wrap the
 /// sentinel-managed client in a Tower middleware stack (circuit breaker,
 /// timeout, retry).
+///
+/// # Read Preference
+///
+/// [`ReadPreference`] (set via the builder's `read_preference`) routes
+/// read-only commands to shared background connections to sentinel-monitored
+/// replicas instead of the master. See
+/// [`MultiplexedSentinelClientBuilder::read_preference`] for how replica
+/// selection and fallback work, and how this differs from
+/// [`SentinelConnection`](crate::SentinelConnection)'s per-read strategy.
 #[derive(Clone)]
 pub struct MultiplexedSentinelClient<S = AutoPipelineService> {
     inner: CommandAdapter<S>,
+    /// Shared background connections to reachable replicas, keyed by address.
+    replicas: HashMap<String, CommandAdapter<AutoPipelineService>>,
+    /// Stable selection input matching the keys in `replicas`.
+    replica_addrs: Vec<NodeAddr>,
+    read_preference: ReadPreference,
+    read_routing: Arc<dyn ReadRoutingStrategy>,
 }
 
 impl MultiplexedSentinelClient<AutoPipelineService> {
@@ -375,6 +499,8 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
             master_name: master_name.to_string(),
             config: SentinelConfig::default(),
             connection_events: None,
+            read_preference: ReadPreference::Master,
+            read_routing: None,
         }
     }
 
@@ -383,7 +509,9 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
     /// Does not reconnect automatically on connection failure. For
     /// production use with failover support, use [`Self::connect_with_reconnect`].
     ///
-    /// Uses plain TCP without auth. For auth or TLS, use [`Self::builder`].
+    /// Uses plain TCP without auth, and always routes every command to the
+    /// master (`ReadPreference::Master`). For auth, TLS, or replica read
+    /// routing, use [`Self::builder`].
     pub async fn connect(
         sentinel_addrs: &[impl AsRef<str>],
         master_name: &str,
@@ -408,6 +536,10 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
                 conn,
                 AutoPipelineConfig::default(),
             )),
+            replicas: HashMap::new(),
+            replica_addrs: Vec::new(),
+            read_preference: ReadPreference::Master,
+            read_routing: Arc::new(RoundRobinRouting::new()),
         })
     }
 
@@ -416,7 +548,9 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
     /// On connection failure, the factory re-queries sentinel to find
     /// the current master (which may have changed due to failover).
     ///
-    /// Uses plain TCP without auth. For auth or TLS, use [`Self::builder`].
+    /// Uses plain TCP without auth, and always routes every command to the
+    /// master (`ReadPreference::Master`). For auth, TLS, or replica read
+    /// routing, use [`Self::builder`].
     pub async fn connect_with_reconnect(
         sentinel_addrs: &[impl AsRef<str>],
         master_name: &str,
@@ -452,6 +586,10 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
         .await?;
         Ok(Self {
             inner: CommandAdapter::new(svc),
+            replicas: HashMap::new(),
+            replica_addrs: Vec::new(),
+            read_preference: ReadPreference::Master,
+            read_routing: Arc::new(RoundRobinRouting::new()),
         })
     }
 
@@ -485,7 +623,13 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
     /// For clean application shutdown, prefer calling `shutdown()` over
     /// simply dropping the client.
     pub async fn shutdown(self) {
-        self.inner.into_inner().shutdown().await;
+        let Self {
+            inner, replicas, ..
+        } = self;
+        for replica in replicas.into_values() {
+            replica.into_inner().shutdown().await;
+        }
+        inner.into_inner().shutdown().await;
     }
 }
 
@@ -503,13 +647,30 @@ where
     /// building the inner service; for the built-in discovery use
     /// [`connect`](Self::connect) or
     /// [`connect_with_reconnect`](Self::connect_with_reconnect).
+    ///
+    /// A client built this way always routes through `service`
+    /// (`ReadPreference::Master`) -- there are no replica connections to route
+    /// reads to, since the caller supplied the complete stack.
     pub fn from_layered(service: S) -> Self {
         Self {
             inner: CommandAdapter::new(service),
+            replicas: HashMap::new(),
+            replica_addrs: Vec::new(),
+            read_preference: ReadPreference::Master,
+            read_routing: Arc::new(RoundRobinRouting::new()),
         }
     }
 
-    /// Execute a command against the sentinel-managed master.
+    /// Execute a command against the sentinel-managed master, or, with
+    /// [`ReadPreference::Replica`]/[`ReadPreference::PreferReplica`] and a
+    /// connected replica, against that replica for commands
+    /// [`redis_tower::is_readonly_command`] accepts.
+    ///
+    /// `ReadPreference::Replica` returns an error for a read-only command
+    /// when no replica is connected, rather than silently serving it from
+    /// the master; `ReadPreference::PreferReplica` falls back to the master
+    /// in that case. Writes, and every command under the default
+    /// `ReadPreference::Master`, are unaffected and always go to the master.
     ///
     /// If other tasks are calling execute concurrently, their commands
     /// will be batched into a single Redis pipeline for efficiency.
@@ -517,21 +678,52 @@ where
     /// waiting for inner readiness and the dispatched call.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
         let deadline = cmd.deadline();
-        let mut svc = self.inner.clone();
-        let operation = async move {
-            std::future::poll_fn(|cx| {
-                <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx)
-            })
-            .await?;
-            Service::call(&mut svc, cmd).await
-        };
-
-        match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, operation)
-                .await
-                .map_err(|_elapsed| RedisError::CommandTimeout)?,
-            None => operation.await,
+        let wants_replica =
+            self.read_preference != ReadPreference::Master && is_readonly_command(&cmd.to_frame());
+        if wants_replica {
+            if let Some(selected) = self.read_routing.select_replica(0, &self.replica_addrs) {
+                let addr = selected.addr_string();
+                let svc = self
+                    .replicas
+                    .get(&addr)
+                    .expect("replica_addrs only contains keys present in replicas")
+                    .clone();
+                return execute_with_deadline(svc, cmd, deadline).await;
+            }
+            if self.read_preference == ReadPreference::Replica {
+                return Err(RedisError::Redis(
+                    "sentinel: ReadPreference::Replica requires a connected replica, but none is \
+                     available"
+                        .to_string(),
+                ));
+            }
         }
+
+        execute_with_deadline(self.inner.clone(), cmd, deadline).await
+    }
+}
+
+async fn execute_with_deadline<S, Cmd>(
+    mut svc: CommandAdapter<S>,
+    cmd: Cmd,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Cmd::Response, RedisError>
+where
+    S: Service<Frame, Response = Frame, Error = RedisError> + Clone,
+    S::Future: Send + 'static,
+    Cmd: Command,
+{
+    let operation = async move {
+        std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
+            .await?;
+        Service::call(&mut svc, cmd).await
+    };
+
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, operation)
+            .await
+            .map_err(|_elapsed| RedisError::CommandTimeout)?,
+        None => operation.await,
     }
 }
 
@@ -540,7 +732,7 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use redis_tower::credentials::StaticCredentials;
-    use redis_tower_commands::Get;
+    use redis_tower_commands::{Get, Set};
     use redis_tower_core::WithDeadline;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
@@ -568,6 +760,33 @@ mod tests {
         let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
             .connection_events(ConnectionEventBus::default());
         assert!(builder.connection_events.is_some());
+    }
+
+    #[test]
+    fn builder_defaults_read_preference_to_master() {
+        let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster");
+        assert_eq!(builder.read_preference, ReadPreference::Master);
+        assert!(builder.read_routing.is_none());
+    }
+
+    #[test]
+    fn builder_sets_read_preference_and_routing() {
+        struct AlwaysFirst;
+        impl ReadRoutingStrategy for AlwaysFirst {
+            fn select_replica<'a>(
+                &self,
+                _slot: u16,
+                replicas: &'a [redis_tower::NodeAddr],
+            ) -> Option<&'a redis_tower::NodeAddr> {
+                replicas.first()
+            }
+        }
+
+        let builder = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
+            .read_preference(ReadPreference::PreferReplica)
+            .read_routing(AlwaysFirst);
+        assert_eq!(builder.read_preference, ReadPreference::PreferReplica);
+        assert!(builder.read_routing.is_some());
     }
 
     #[tokio::test]
@@ -699,6 +918,45 @@ mod tests {
         let client2 = client.clone();
         let val: Option<Bytes> = client2.execute(Get::new("k")).await.unwrap();
         assert_eq!(val, Some(Bytes::from("layered")));
+    }
+
+    #[tokio::test]
+    async fn replica_preference_without_a_connected_replica_errors_reads_but_not_writes() {
+        // White-box: construct directly (bypassing discovery) to exercise the
+        // ReadPreference::Replica no-usable-replica path without a live
+        // sentinel. `redis_tower_commands::Set` and `Get` isolate this from
+        // is_readonly_command's own coverage, tested separately.
+        let client = MultiplexedSentinelClient {
+            inner: CommandAdapter::new(MockFrameService {
+                reply: Frame::SimpleString(Bytes::from("OK")),
+            }),
+            replicas: HashMap::new(),
+            replica_addrs: Vec::new(),
+            read_preference: ReadPreference::Replica,
+            read_routing: Arc::new(RoundRobinRouting::new()),
+        };
+
+        let err = client.execute(Get::new("k")).await.unwrap_err();
+        assert!(matches!(err, RedisError::Redis(_)));
+
+        // Writes never consult the replica, so they still reach `inner`.
+        client.execute(Set::new("k", "v")).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prefer_replica_without_a_connected_replica_falls_back_to_master() {
+        let client = MultiplexedSentinelClient {
+            inner: CommandAdapter::new(MockFrameService {
+                reply: Frame::BulkString(Some(Bytes::from("from-master"))),
+            }),
+            replicas: HashMap::new(),
+            replica_addrs: Vec::new(),
+            read_preference: ReadPreference::PreferReplica,
+            read_routing: Arc::new(RoundRobinRouting::new()),
+        };
+
+        let val: Option<Bytes> = client.execute(Get::new("k")).await.unwrap();
+        assert_eq!(val, Some(Bytes::from("from-master")));
     }
 
     #[tokio::test]

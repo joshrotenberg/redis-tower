@@ -384,6 +384,7 @@ pub mod multiplexed;
 pub mod pipeline;
 pub mod pool;
 pub mod pubsub;
+pub mod read_routing;
 pub mod reconnect;
 pub mod reconnect_layer;
 mod resilient;
@@ -439,6 +440,10 @@ pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
 pub use pubsub::{
     KeyspaceEvent, KeyspaceEventStream, MessageKind, NotificationKind, PubSubConnection,
     PubSubMessage,
+};
+pub use read_routing::{
+    FirstReplicaRouting, NodeAddr, RandomRouting, ReadPreference, ReadRoutingStrategy,
+    RoundRobinRouting, is_readonly_command,
 };
 pub use reconnect::{
     ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionEventRecvError,
