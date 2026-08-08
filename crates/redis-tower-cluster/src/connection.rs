@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 
 use redis_tower::credentials::{CredentialProvider, StaticCredentials};
@@ -23,98 +22,28 @@ use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
 /// Implement this trait to provide custom replica selection logic.
 /// Built-in implementations include [`RoundRobinRouting`], [`RandomRouting`],
 /// and [`FirstReplicaRouting`].
-pub trait ReadRoutingStrategy: Send + Sync + 'static {
-    /// Select a replica address for the given slot.
-    ///
-    /// `replicas` is the list of available replica addresses for the slot.
-    /// Return the selected address, or `None` to fall back to the master.
-    fn select_replica<'a>(&self, slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr>;
-}
+///
+/// Defined in `redis-tower` (shared with `redis-tower-sentinel`'s replica
+/// routing) and re-exported here under its original path.
+pub use redis_tower::ReadRoutingStrategy;
 
 /// Round-robin across replicas (default).
 ///
 /// Distributes reads evenly across all available replicas for a slot
 /// by cycling through them in order.
-pub struct RoundRobinRouting {
-    counter: AtomicUsize,
-}
-
-impl RoundRobinRouting {
-    /// Create a new round-robin routing strategy.
-    pub fn new() -> Self {
-        Self {
-            counter: AtomicUsize::new(0),
-        }
-    }
-}
-
-impl Default for RoundRobinRouting {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReadRoutingStrategy for RoundRobinRouting {
-    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
-        if replicas.is_empty() {
-            return None;
-        }
-        let idx = self.counter.fetch_add(1, Ordering::Relaxed) % replicas.len();
-        Some(&replicas[idx])
-    }
-}
+pub use redis_tower::RoundRobinRouting;
 
 /// Pseudo-random replica selection.
 ///
 /// Uses an atomic counter with a time-based seed to approximate random
 /// distribution without requiring an external RNG dependency.
-pub struct RandomRouting {
-    counter: AtomicUsize,
-}
-
-impl RandomRouting {
-    /// Create a new random routing strategy.
-    pub fn new() -> Self {
-        // Seed from the current time for a pseudo-random starting point.
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as usize)
-            .unwrap_or(0);
-        Self {
-            counter: AtomicUsize::new(seed),
-        }
-    }
-}
-
-impl Default for RandomRouting {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReadRoutingStrategy for RandomRouting {
-    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
-        if replicas.is_empty() {
-            return None;
-        }
-        // Mix the counter value to spread selections across replicas.
-        let val = self.counter.fetch_add(7919, Ordering::Relaxed);
-        let idx = val % replicas.len();
-        Some(&replicas[idx])
-    }
-}
+pub use redis_tower::RandomRouting;
 
 /// Always pick the first replica.
 ///
 /// Useful for testing or when replicas are ordered by preference
 /// (e.g., closest datacenter first).
-pub struct FirstReplicaRouting;
-
-impl ReadRoutingStrategy for FirstReplicaRouting {
-    fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
-        replicas.first()
-    }
-}
+pub use redis_tower::FirstReplicaRouting;
 
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
@@ -126,16 +55,10 @@ pub(crate) const TRANSIENT_RETRY_BACKOFF: std::time::Duration =
     std::time::Duration::from_millis(50);
 
 /// Read routing preference for cluster commands.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ReadPreference {
-    /// Always read from the master (default).
-    #[default]
-    Master,
-    /// Read from a replica if available.
-    Replica,
-    /// Prefer replica, fall back to master.
-    PreferReplica,
-}
+///
+/// Defined in `redis-tower` (shared with `redis-tower-sentinel`'s replica
+/// routing) and re-exported here under its original path.
+pub use redis_tower::ReadPreference;
 
 /// A Redis Cluster connection that routes commands to the correct node.
 ///
@@ -2092,14 +2015,12 @@ mod tests {
         assert!(parse_redirect(&frame).is_none());
     }
 
-    #[test]
-    fn read_preference_variants() {
-        assert_ne!(ReadPreference::Master, ReadPreference::Replica);
-        assert_ne!(ReadPreference::Replica, ReadPreference::PreferReplica);
-        assert_ne!(ReadPreference::Master, ReadPreference::PreferReplica);
-    }
-
     // -- ReadRoutingStrategy tests --
+    //
+    // Coverage for ReadPreference and the built-in strategies (RoundRobin,
+    // Random, FirstReplica) lives in `redis_tower::read_routing`, where
+    // those types are now defined. What's left here is cluster-specific:
+    // the builder wiring and a custom strategy implementation.
 
     fn make_replicas() -> Vec<NodeAddr> {
         vec![
@@ -2116,68 +2037,6 @@ mod tests {
                 port: 7003,
             },
         ]
-    }
-
-    #[test]
-    fn round_robin_distributes_across_replicas() {
-        let strategy = RoundRobinRouting::new();
-        let replicas = make_replicas();
-
-        let first = strategy.select_replica(0, &replicas).unwrap();
-        let second = strategy.select_replica(0, &replicas).unwrap();
-        let third = strategy.select_replica(0, &replicas).unwrap();
-        let fourth = strategy.select_replica(0, &replicas).unwrap();
-
-        assert_eq!(first.port, 7001);
-        assert_eq!(second.port, 7002);
-        assert_eq!(third.port, 7003);
-        // Wraps around.
-        assert_eq!(fourth.port, 7001);
-    }
-
-    #[test]
-    fn round_robin_returns_none_for_empty_replicas() {
-        let strategy = RoundRobinRouting::new();
-        assert!(strategy.select_replica(0, &[]).is_none());
-    }
-
-    #[test]
-    fn random_routing_returns_valid_replica() {
-        let strategy = RandomRouting::new();
-        let replicas = make_replicas();
-
-        // Call many times and verify all results are valid replicas.
-        for _ in 0..100 {
-            let selected = strategy.select_replica(0, &replicas).unwrap();
-            assert!(
-                replicas.contains(selected),
-                "selected replica not in list: {selected:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn random_routing_returns_none_for_empty_replicas() {
-        let strategy = RandomRouting::new();
-        assert!(strategy.select_replica(0, &[]).is_none());
-    }
-
-    #[test]
-    fn first_replica_always_returns_first() {
-        let strategy = FirstReplicaRouting;
-        let replicas = make_replicas();
-
-        for _ in 0..10 {
-            let selected = strategy.select_replica(0, &replicas).unwrap();
-            assert_eq!(selected.port, 7001);
-            assert_eq!(selected.host, "10.0.0.1");
-        }
-    }
-
-    #[test]
-    fn first_replica_returns_none_for_empty_replicas() {
-        let strategy = FirstReplicaRouting;
-        assert!(strategy.select_replica(0, &[]).is_none());
     }
 
     #[test]

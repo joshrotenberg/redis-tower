@@ -1,8 +1,10 @@
 //! Sentinel discovery: find the current master and replicas.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use redis_tower::NodeAddr;
 use redis_tower::credentials::{CredentialProvider, Credentials};
 use redis_tower_commands::Auth;
 use redis_tower_core::{Command, ConnectionConfig, Frame, RedisConnection, RedisError};
@@ -225,6 +227,66 @@ pub(crate) async fn discover_replicas_with_config(
     Err(RedisError::Redis(format!(
         "no sentinel responded for replicas of '{master_name}'"
     )))
+}
+
+/// Discover replicas via sentinel and connect to each one.
+///
+/// Best-effort on both axes: a sentinel discovery failure is treated the
+/// same as an empty replica list, and a replica that refuses the connection
+/// is logged and skipped rather than failing the whole call. Callers apply
+/// their configured read preference when this returns an empty result.
+///
+/// Uses `config.node_credentials` and `config.node_tls`, matching the master
+/// (node) hop, since sentinel-monitored replicas commonly share the master's
+/// data-plane credentials.
+pub(crate) async fn connect_replicas(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+) -> (HashMap<String, RedisConnection>, Vec<NodeAddr>) {
+    let addrs = match discover_replicas_with_config(sentinel_addrs, master_name, config).await {
+        Ok(addrs) => addrs,
+        Err(error) => {
+            tracing::warn!(
+                master_name,
+                error = %error,
+                "sentinel: replica discovery failed, no replica is available"
+            );
+            return (HashMap::new(), Vec::new());
+        }
+    };
+
+    let mut connections = HashMap::new();
+    let mut resolved = Vec::new();
+    for addr in addrs {
+        let Some(node) = NodeAddr::parse(&addr) else {
+            tracing::warn!(addr, "sentinel: replica address is not host:port, skipping");
+            continue;
+        };
+        match connect_hop(
+            &addr,
+            config.node_credentials.as_ref(),
+            config.resp_limits,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            config.node_tls.as_ref(),
+        )
+        .await
+        {
+            Ok(conn) => {
+                if connections.insert(node.addr_string(), conn).is_none() {
+                    resolved.push(node);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    addr,
+                    error = %error,
+                    "sentinel: failed to connect to replica, skipping"
+                );
+            }
+        }
+    }
+    (connections, resolved)
 }
 
 /// Query a single sentinel for the master address.

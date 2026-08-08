@@ -6,7 +6,9 @@ use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
 use redis_tower::pool::ConnectionPool;
 use redis_tower_commands::*;
-use redis_tower_sentinel::{MultiplexedSentinelClient, SentinelClient, SentinelConnection};
+use redis_tower_sentinel::{
+    MultiplexedSentinelClient, ReadPreference, SentinelClient, SentinelConnection,
+};
 use tokio::sync::OnceCell;
 
 static SENTINEL: OnceCell<RedisSentinelHandle> = OnceCell::const_new();
@@ -48,6 +50,15 @@ async fn mux_sentinel_conn() -> MultiplexedSentinelClient {
 
 fn key(test: &str, name: &str) -> String {
     format!("sentinel_test:{test}:{name}")
+}
+
+fn info_tcp_port(info: &str) -> u16 {
+    info.lines()
+        .find_map(|line| line.strip_prefix("tcp_port:"))
+        .expect("INFO server response did not contain tcp_port")
+        .trim()
+        .parse()
+        .expect("INFO tcp_port was not a u16")
 }
 
 // Generate shared command tests for sentinel topology.
@@ -119,6 +130,61 @@ async fn sentinel_rediscover() {
     conn.rediscover().await.unwrap();
     let pong = conn.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
+}
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_read_preference_defaults_to_master() {
+    let addrs = sentinel_addrs().await;
+    let mut conn = SentinelConnection::builder(&addrs, "mymaster")
+        .connect()
+        .await
+        .unwrap();
+
+    let info = conn.execute(Info::new().section("server")).await.unwrap();
+    assert_eq!(info_tcp_port(&info), 6390);
+    assert!(conn.last_replica_read().is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_connection_round_robins_reads_across_replicas() {
+    let addrs = sentinel_addrs().await;
+    let mut conn = SentinelConnection::builder(&addrs, "mymaster")
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .unwrap();
+
+    assert_eq!(conn.connected_replicas().len(), 2);
+    let first = conn.execute(Info::new().section("server")).await.unwrap();
+    let first_port = info_tcp_port(&first);
+    let second = conn.execute(Info::new().section("server")).await.unwrap();
+    let second_port = info_tcp_port(&second);
+
+    assert!([6391, 6392].contains(&first_port));
+    assert!([6391, 6392].contains(&second_port));
+    assert_ne!(first_port, second_port);
+}
+
+#[tokio::test]
+#[ignore]
+async fn sentinel_client_routes_reads_to_replicas() {
+    let addrs = sentinel_addrs().await;
+    let client = SentinelClient::builder(&addrs, "mymaster")
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .unwrap();
+
+    let first = client.execute(Info::new().section("server")).await.unwrap();
+    let first_port = info_tcp_port(&first);
+    let second = client.execute(Info::new().section("server")).await.unwrap();
+    let second_port = info_tcp_port(&second);
+
+    assert!([6391, 6392].contains(&first_port));
+    assert!([6391, 6392].contains(&second_port));
+    assert_ne!(first_port, second_port);
 }
 
 // -- MultiplexedSentinelClient tests --
@@ -196,6 +262,26 @@ async fn multiplexed_sentinel_connect_with_reconnect() {
     let val: Option<Bytes> = client.execute(Get::new(&k)).await.unwrap();
     assert_eq!(val, Some(Bytes::from("resilient")));
     client.execute(Del::new(&k)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn multiplexed_sentinel_round_robins_reads_across_replicas() {
+    let addrs = sentinel_addrs().await;
+    let client = MultiplexedSentinelClient::builder(&addrs, "mymaster")
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .unwrap();
+
+    let first = client.execute(Info::new().section("server")).await.unwrap();
+    let first_port = info_tcp_port(&first);
+    let second = client.execute(Info::new().section("server")).await.unwrap();
+    let second_port = info_tcp_port(&second);
+
+    assert!([6391, 6392].contains(&first_port));
+    assert!([6391, 6392].contains(&second_port));
+    assert_ne!(first_port, second_port);
 }
 
 // -- ConnectionPool<SentinelConnection> tests --

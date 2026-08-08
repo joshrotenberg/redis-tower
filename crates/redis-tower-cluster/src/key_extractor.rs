@@ -1006,95 +1006,9 @@ fn migrate_key(items: &[Frame]) -> Option<&[u8]> {
 /// Returns true if the command is read-only, and so safe to route to a replica
 /// under [`ReadPreference::Replica`](crate::ReadPreference).
 ///
-/// Routing happens on the serialized frame -- the auto-pipeline batches frames,
-/// not typed commands -- so this matches the command name rather than a
-/// `Command` trait flag. The name is uppercased into a stack buffer to avoid a
-/// heap allocation on every replica-routed command.
-///
-/// Coverage follows the Redis command `readonly` flag across the core types and
-/// the common Redis Stack reads. Commands that can mutate -- even conditionally,
-/// like `GETEX` (may change a TTL), `GEORADIUS`/`SORT` (have a `STORE` option),
-/// or `XREADGROUP` (advances a consumer group) -- are treated as writes and
-/// routed to the master; their dedicated `_RO` variants are read-only.
-pub fn is_readonly_command(frame: &Frame) -> bool {
-    let items = match frame {
-        Frame::Array(Some(items)) if !items.is_empty() => items,
-        _ => return false,
-    };
-
-    let cmd_name = match &items[0] {
-        Frame::BulkString(Some(b)) => b.as_ref(),
-        _ => return false,
-    };
-
-    // Uppercase into a stack buffer. No read-only command name is longer than
-    // this, so anything that overflows it cannot be read-only.
-    let mut buf = [0u8; 24];
-    if cmd_name.len() > buf.len() {
-        return false;
-    }
-    for (i, b) in cmd_name.iter().enumerate() {
-        buf[i] = b.to_ascii_uppercase();
-    }
-
-    matches!(
-        &buf[..cmd_name.len()],
-        // strings / bitmaps
-        b"GET" | b"GETRANGE" | b"SUBSTR" | b"MGET" | b"STRLEN" | b"LCS" | b"DIGEST"
-        | b"GETBIT" | b"BITCOUNT" | b"BITPOS" | b"BITFIELD_RO"
-        // generic keyspace
-        | b"EXISTS" | b"TYPE" | b"TTL" | b"PTTL" | b"EXPIRETIME" | b"PEXPIRETIME"
-        | b"DUMP" | b"OBJECT" | b"MEMORY" | b"SORT_RO"
-        // hashes
-        | b"HGET" | b"HGETALL" | b"HKEYS" | b"HVALS" | b"HLEN" | b"HEXISTS"
-        | b"HMGET" | b"HSTRLEN" | b"HRANDFIELD" | b"HSCAN"
-        // lists
-        | b"LRANGE" | b"LLEN" | b"LINDEX" | b"LPOS"
-        // sets
-        | b"SMEMBERS" | b"SISMEMBER" | b"SMISMEMBER" | b"SCARD" | b"SINTER"
-        | b"SINTERCARD" | b"SUNION" | b"SDIFF" | b"SRANDMEMBER" | b"SSCAN"
-        // sorted sets
-        | b"ZRANGE" | b"ZRANGEBYSCORE" | b"ZRANGEBYLEX" | b"ZREVRANGE"
-        | b"ZREVRANGEBYSCORE" | b"ZREVRANGEBYLEX" | b"ZSCORE" | b"ZMSCORE"
-        | b"ZCARD" | b"ZRANK" | b"ZREVRANK" | b"ZCOUNT" | b"ZLEXCOUNT"
-        | b"ZRANDMEMBER" | b"ZSCAN" | b"ZDIFF" | b"ZINTER" | b"ZUNION"
-        | b"ZINTERCARD"
-        // streams (XREADGROUP mutates a consumer group -- excluded)
-        | b"XLEN" | b"XRANGE" | b"XREVRANGE" | b"XREAD" | b"XINFO" | b"XPENDING"
-        // arrays (Redis 8.8; mutation commands are excluded)
-        | b"ARCOUNT" | b"ARGET" | b"ARGETRANGE" | b"ARGREP" | b"ARINFO"
-        | b"ARLASTITEMS" | b"ARLEN" | b"ARMGET" | b"ARNEXT" | b"AROP" | b"ARSCAN"
-        // geo (read-only; STORE-capable GEORADIUS routes to master)
-        | b"GEOPOS" | b"GEODIST" | b"GEOHASH" | b"GEOSEARCH"
-        | b"GEORADIUS_RO" | b"GEORADIUSBYMEMBER_RO"
-        // hyperloglog (PFADD/PFMERGE mutate -- excluded)
-        | b"PFCOUNT"
-        // scripting (read-only variants only)
-        | b"EVAL_RO" | b"EVALSHA_RO" | b"FCALL_RO"
-        // server
-        | b"DBSIZE" | b"PING" | b"ECHO" | b"INFO"
-        // Redis Stack: JSON
-        | b"JSON.GET" | b"JSON.MGET" | b"JSON.TYPE" | b"JSON.STRLEN"
-        | b"JSON.ARRLEN" | b"JSON.ARRINDEX" | b"JSON.OBJLEN" | b"JSON.OBJKEYS"
-        | b"JSON.RESP"
-        // Redis Stack: Search
-        | b"FT.SEARCH" | b"FT.AGGREGATE" | b"FT.INFO" | b"FT.PROFILE"
-        | b"FT.EXPLAIN" | b"FT.EXPLAINCLI" | b"FT.HYBRID" | b"FT.TAGVALS"
-        // Redis Stack: TimeSeries
-        | b"TS.GET" | b"TS.MGET" | b"TS.RANGE" | b"TS.REVRANGE" | b"TS.MRANGE"
-        | b"TS.MREVRANGE" | b"TS.INFO" | b"TS.QUERYINDEX"
-        // Redis Stack: probabilistic
-        | b"BF.EXISTS" | b"BF.MEXISTS" | b"BF.INFO" | b"BF.CARD"
-        | b"CF.EXISTS" | b"CF.COUNT" | b"CF.INFO"
-        | b"CMS.QUERY" | b"CMS.INFO"
-        | b"TOPK.QUERY" | b"TOPK.COUNT" | b"TOPK.LIST" | b"TOPK.INFO"
-        | b"TDIGEST.MIN" | b"TDIGEST.MAX" | b"TDIGEST.QUANTILE"
-        | b"TDIGEST.CDF" | b"TDIGEST.RANK" | b"TDIGEST.INFO"
-        // Redis Stack: vector sets
-        | b"VSIM" | b"VCARD" | b"VDIM" | b"VEMB" | b"VGETATTR" | b"VLINKS"
-        | b"VINFO" | b"VISMEMBER" | b"VRANGE"
-    )
-}
+/// Defined in `redis-tower` (shared with `redis-tower-sentinel`'s replica
+/// routing) and re-exported here under its original path.
+pub use redis_tower::is_readonly_command;
 
 #[cfg(test)]
 mod tests {

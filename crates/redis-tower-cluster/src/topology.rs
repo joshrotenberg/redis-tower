@@ -25,23 +25,10 @@ pub struct SlotRange {
 }
 
 /// Address of a cluster node.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct NodeAddr {
-    pub host: String,
-    pub port: u16,
-}
-
-impl NodeAddr {
-    pub fn addr_string(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-impl std::fmt::Display for NodeAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
-    }
-}
+///
+/// Defined in `redis-tower` (shared with `redis-tower-sentinel`'s replica
+/// routing) and re-exported here under its original path.
+pub use redis_tower::NodeAddr;
 
 /// The full cluster topology: a list of slot ranges with their owners.
 ///
@@ -442,34 +429,6 @@ mod tests {
         ]))]));
         let result = parse_cluster_slots(&frame);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn node_addr_display() {
-        let addr = NodeAddr {
-            host: "127.0.0.1".to_string(),
-            port: 7000,
-        };
-        assert_eq!(addr.to_string(), "127.0.0.1:7000");
-        assert_eq!(addr.addr_string(), "127.0.0.1:7000");
-    }
-
-    #[test]
-    fn node_addr_equality() {
-        let a = NodeAddr {
-            host: "127.0.0.1".to_string(),
-            port: 7000,
-        };
-        let b = NodeAddr {
-            host: "127.0.0.1".to_string(),
-            port: 7000,
-        };
-        let c = NodeAddr {
-            host: "127.0.0.1".to_string(),
-            port: 7001,
-        };
-        assert_eq!(a, b);
-        assert_ne!(a, c);
     }
 
     #[test]

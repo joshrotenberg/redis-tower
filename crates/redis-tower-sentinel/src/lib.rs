@@ -18,6 +18,30 @@
 //! (which may have changed due to a failover event). The connection is
 //! then transparently re-established to the promoted master.
 //!
+//! # Replica Reads
+//!
+//! The builders for [`SentinelConnection`], [`SentinelClient`], and
+//! [`MultiplexedSentinelClient`] accept a [`ReadPreference`] and optional
+//! [`ReadRoutingStrategy`]. The default remains [`ReadPreference::Master`].
+//! Opting into replica reads affects only commands classified as read-only;
+//! writes continue to use the Sentinel-discovered master.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_sentinel::{ReadPreference, SentinelConnection};
+//!
+//! let mut connection = SentinelConnection::builder(
+//!     &["127.0.0.1:26379", "127.0.0.1:26380"],
+//!     "mymaster",
+//! )
+//! .read_preference(ReadPreference::PreferReplica)
+//! .connect()
+//! .await?;
+//! # let _ = &mut connection;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Auth and TLS
 //!
 //! Use the builder APIs to configure credentials and TLS independently for the
@@ -61,3 +85,7 @@ pub use client::{SentinelClient, SentinelClientBuilder};
 pub use connection::{SentinelConnection, SentinelConnectionBuilder};
 pub use discovery::SentinelConfig;
 pub use multiplexed::{MultiplexedSentinelClient, MultiplexedSentinelClientBuilder};
+pub use redis_tower::{
+    FirstReplicaRouting, NodeAddr, RandomRouting, ReadPreference, ReadRoutingStrategy,
+    RoundRobinRouting,
+};

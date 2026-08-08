@@ -432,15 +432,23 @@ concrete addresses per client plus `_OTHER`; additional addresses use the
 ## Sentinel
 
 ```rust,ignore
-use redis_tower_sentinel::SentinelConnection;
+use redis_tower_sentinel::{ReadPreference, SentinelConnection};
 
-let mut conn = SentinelConnection::connect(
+let mut conn = SentinelConnection::builder(
     &["127.0.0.1:26379", "127.0.0.1:26380", "127.0.0.1:26381"],
     "mymaster",
-).await?;
+)
+.read_preference(ReadPreference::PreferReplica)
+.connect()
+.await?;
 ```
 
-Automatic master rediscovery on failover.
+The default read preference is `Master`. `Replica` requires a reachable
+replica for read-only commands, while `PreferReplica` falls back to the master
+when none is reachable. Writes always use the Sentinel-discovered master.
+`SentinelClient` and `MultiplexedSentinelClient` expose the same builder
+options. The multiplexed client keeps an automatically pipelined connection to
+each reachable replica and applies its routing strategy per read.
 
 ## Resilience
 
