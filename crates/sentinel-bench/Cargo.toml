@@ -13,6 +13,7 @@ redis-tower = { path = "../redis-tower", default-features = false }
 redis-tower-commands = { path = "../redis-tower-commands", default-features = false }
 redis-tower-core = { path = "../redis-tower-core" }
 redis-tower-sentinel = { path = "../redis-tower-sentinel" }
+redis-tower-test = { path = "../redis-test-harness" }
 redis-server-wrapper = { workspace = true }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }

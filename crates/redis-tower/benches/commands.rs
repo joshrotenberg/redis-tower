@@ -13,8 +13,9 @@ use std::sync::OnceLock;
 /// Deliberately not 6379: a bench run writes and deletes `bench:*` keys, so it
 /// must not land on whatever a developer has running there. 6399 (standalone
 /// integration tests) and 6480 (standalone-bench) are taken as well, so all
-/// three can run side by side.
-const BENCH_PORT: u16 = 6482;
+/// three can run side by side. Sourced from the workspace's fixed-port
+/// registry (`redis_tower_test::ports`).
+const BENCH_PORT: u16 = redis_tower_test::ports::CRITERION_BENCH_PORT;
 
 static ADDR: OnceLock<String> = OnceLock::new();
 

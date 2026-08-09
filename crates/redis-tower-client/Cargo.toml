@@ -22,6 +22,7 @@ redis-tower-sentinel = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 redis-tower-commands = { workspace = true }
 redis-server-wrapper = { workspace = true }
+redis-tower-test = { path = "../redis-test-harness" }
 bytes = { workspace = true }
 
 [package.metadata.docs.rs]

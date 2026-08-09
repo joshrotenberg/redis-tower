@@ -31,7 +31,7 @@ async fn redis_addr() -> &'static str {
             }
 
             let handle = RedisServer::new()
-                .port(6399)
+                .port(redis_tower_test::ports::STANDALONE_COMMON_PORT)
                 .start()
                 .await
                 .expect("failed to start Redis server");
@@ -3052,7 +3052,7 @@ async fn multiplexed_client_reconnects_after_server_restart() {
     // Dedicated standalone on a non-default port so we don't interfere
     // with the shared REDIS instance used by the rest of the suite.
     let server = RedisServer::new()
-        .port(6401)
+        .port(redis_tower_test::ports::STANDALONE_RECONNECT_PORT)
         .start()
         .await
         .expect("start standalone");
@@ -3091,7 +3091,7 @@ async fn multiplexed_client_reconnects_after_server_restart() {
 
     // Bring the server back up on the same port.
     let _restarted = RedisServer::new()
-        .port(6401)
+        .port(redis_tower_test::ports::STANDALONE_RECONNECT_PORT)
         .start()
         .await
         .expect("restart standalone");

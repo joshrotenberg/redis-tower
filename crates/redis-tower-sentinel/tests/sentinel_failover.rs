@@ -23,6 +23,10 @@ use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
 use redis_tower_commands::*;
 use redis_tower_sentinel::{SentinelClient, SentinelConnection};
+use redis_tower_test::ports::{
+    SENTINEL_FAILOVER_MASTER_PORT, SENTINEL_FAILOVER_REPLICAS,
+    SENTINEL_FAILOVER_SENTINEL_BASE_PORT, SENTINEL_FAILOVER_SENTINELS,
+};
 
 /// Format the `ip:port` pair from a sentinel `poke()` response.
 fn master_addr(info: &std::collections::HashMap<String, String>) -> String {
@@ -40,11 +44,11 @@ fn master_addr(info: &std::collections::HashMap<String, String>) -> String {
 #[ignore]
 async fn sentinel_failover_sequence() {
     let handle: RedisSentinelHandle = RedisSentinel::builder()
-        .master_port(6393)
-        .replica_base_port(6394)
-        .sentinel_base_port(26392)
-        .replicas(2)
-        .sentinels(3)
+        .master_port(SENTINEL_FAILOVER_MASTER_PORT)
+        .replica_base_port(SENTINEL_FAILOVER_MASTER_PORT + 1)
+        .sentinel_base_port(SENTINEL_FAILOVER_SENTINEL_BASE_PORT)
+        .replicas(SENTINEL_FAILOVER_REPLICAS)
+        .sentinels(SENTINEL_FAILOVER_SENTINELS)
         .quorum(2)
         .start()
         .await
@@ -72,8 +76,13 @@ async fn sentinel_failover_sequence() {
     let addr = redis_tower_sentinel::discovery::discover_master(&addrs, "mymaster")
         .await
         .expect("discovery should succeed with 2/3 sentinels alive");
+    let known_ports: Vec<u16> = (SENTINEL_FAILOVER_MASTER_PORT
+        ..=SENTINEL_FAILOVER_MASTER_PORT + SENTINEL_FAILOVER_REPLICAS)
+        .collect();
     assert!(
-        addr.contains("6393") || addr.contains("6394") || addr.contains("6395"),
+        known_ports
+            .iter()
+            .any(|port| addr.contains(&port.to_string())),
         "discovered address should be a known redis port, got: {addr}"
     );
 

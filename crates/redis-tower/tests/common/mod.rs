@@ -17,7 +17,7 @@ pub async fn redis_addr() -> &'static str {
             }
 
             let handle = RedisServer::new()
-                .port(6399)
+                .port(redis_tower_test::ports::STANDALONE_COMMON_PORT)
                 .start()
                 .await
                 .expect("failed to start Redis server");

@@ -75,7 +75,7 @@ async fn main() {
     let port: u16 = std::env::var("BENCH_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(6480);
+        .unwrap_or(redis_tower_test::ports::STANDALONE_BENCH_DEFAULT_PORT);
 
     // Diagnostics go to stderr so `--json` keeps stdout machine-parseable.
     eprintln!("starting redis server on port {port}");

@@ -16,7 +16,7 @@ async fn standalone_connect_url_executes_commands() {
         Ok(url) => (None, url),
         Err(_) => {
             let handle = RedisServer::new()
-                .port(6402)
+                .port(redis_tower_test::ports::CLIENT_STANDALONE_PORT)
                 .start()
                 .await
                 .expect("failed to start redis-server");

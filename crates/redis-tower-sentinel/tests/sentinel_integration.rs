@@ -9,6 +9,10 @@ use redis_tower_commands::*;
 use redis_tower_sentinel::{
     MultiplexedSentinelClient, ReadPreference, SentinelClient, SentinelConnection,
 };
+use redis_tower_test::ports::{
+    SENTINEL_HEALTHY_MASTER_PORT, SENTINEL_HEALTHY_REPLICAS, SENTINEL_HEALTHY_SENTINEL_BASE_PORT,
+    SENTINEL_HEALTHY_SENTINELS,
+};
 use tokio::sync::OnceCell;
 
 static SENTINEL: OnceCell<RedisSentinelHandle> = OnceCell::const_new();
@@ -17,11 +21,11 @@ async fn ensure_sentinel() -> &'static RedisSentinelHandle {
     SENTINEL
         .get_or_init(|| async {
             RedisSentinel::builder()
-                .master_port(6390)
-                .replica_base_port(6391)
-                .sentinel_base_port(26389)
-                .replicas(2)
-                .sentinels(3)
+                .master_port(SENTINEL_HEALTHY_MASTER_PORT)
+                .replica_base_port(SENTINEL_HEALTHY_MASTER_PORT + 1)
+                .sentinel_base_port(SENTINEL_HEALTHY_SENTINEL_BASE_PORT)
+                .replicas(SENTINEL_HEALTHY_REPLICAS)
+                .sentinels(SENTINEL_HEALTHY_SENTINELS)
                 .quorum(2)
                 .start()
                 .await
@@ -61,6 +65,13 @@ fn info_tcp_port(info: &str) -> u16 {
         .expect("INFO tcp_port was not a u16")
 }
 
+/// The healthy topology's two replica ports, derived from the same registry
+/// constants the fixture is started with -- not an independent literal copy.
+const REPLICA_PORTS: [u16; 2] = [
+    SENTINEL_HEALTHY_MASTER_PORT + 1,
+    SENTINEL_HEALTHY_MASTER_PORT + 2,
+];
+
 // Generate shared command tests for sentinel topology.
 redis_tower_test::command_tests!(sentinel_conn, "sentinel_cmd", ignored);
 
@@ -80,8 +91,8 @@ async fn sentinel_discovers_master() {
         .await
         .unwrap();
     assert!(
-        addr.contains("6390"),
-        "expected master on port 6390, got {addr}"
+        addr.contains(&SENTINEL_HEALTHY_MASTER_PORT.to_string()),
+        "expected master on port {SENTINEL_HEALTHY_MASTER_PORT}, got {addr}"
     );
 }
 
@@ -92,7 +103,11 @@ async fn sentinel_discovers_replicas() {
     let replicas = redis_tower_sentinel::discovery::discover_replicas(&addrs, "mymaster")
         .await
         .unwrap();
-    assert_eq!(replicas.len(), 2, "expected 2 replicas, got {replicas:?}");
+    assert_eq!(
+        replicas.len(),
+        SENTINEL_HEALTHY_REPLICAS as usize,
+        "expected {SENTINEL_HEALTHY_REPLICAS} replicas, got {replicas:?}"
+    );
 }
 
 #[tokio::test]
@@ -142,7 +157,7 @@ async fn sentinel_read_preference_defaults_to_master() {
         .unwrap();
 
     let info = conn.execute(Info::new().section("server")).await.unwrap();
-    assert_eq!(info_tcp_port(&info), 6390);
+    assert_eq!(info_tcp_port(&info), SENTINEL_HEALTHY_MASTER_PORT);
     assert!(conn.last_replica_read().is_none());
 }
 
@@ -156,14 +171,17 @@ async fn sentinel_connection_round_robins_reads_across_replicas() {
         .await
         .unwrap();
 
-    assert_eq!(conn.connected_replicas().len(), 2);
+    assert_eq!(
+        conn.connected_replicas().len(),
+        SENTINEL_HEALTHY_REPLICAS as usize
+    );
     let first = conn.execute(Info::new().section("server")).await.unwrap();
     let first_port = info_tcp_port(&first);
     let second = conn.execute(Info::new().section("server")).await.unwrap();
     let second_port = info_tcp_port(&second);
 
-    assert!([6391, 6392].contains(&first_port));
-    assert!([6391, 6392].contains(&second_port));
+    assert!(REPLICA_PORTS.contains(&first_port));
+    assert!(REPLICA_PORTS.contains(&second_port));
     assert_ne!(first_port, second_port);
 }
 
@@ -182,8 +200,8 @@ async fn sentinel_client_routes_reads_to_replicas() {
     let second = client.execute(Info::new().section("server")).await.unwrap();
     let second_port = info_tcp_port(&second);
 
-    assert!([6391, 6392].contains(&first_port));
-    assert!([6391, 6392].contains(&second_port));
+    assert!(REPLICA_PORTS.contains(&first_port));
+    assert!(REPLICA_PORTS.contains(&second_port));
     assert_ne!(first_port, second_port);
 }
 
@@ -279,8 +297,8 @@ async fn multiplexed_sentinel_round_robins_reads_across_replicas() {
     let second = client.execute(Info::new().section("server")).await.unwrap();
     let second_port = info_tcp_port(&second);
 
-    assert!([6391, 6392].contains(&first_port));
-    assert!([6391, 6392].contains(&second_port));
+    assert!(REPLICA_PORTS.contains(&first_port));
+    assert!(REPLICA_PORTS.contains(&second_port));
     assert_ne!(first_port, second_port);
 }
 

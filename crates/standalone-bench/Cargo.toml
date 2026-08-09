@@ -12,6 +12,7 @@ path = "src/main.rs"
 redis-tower = { path = "../redis-tower", default-features = false }
 redis-tower-commands = { path = "../redis-tower-commands", default-features = false }
 redis-tower-core = { path = "../redis-tower-core" }
+redis-tower-test = { path = "../redis-test-harness" }
 redis-server-wrapper = { workspace = true }
 
 redis = { version = "1.2", features = ["tokio-comp"] }

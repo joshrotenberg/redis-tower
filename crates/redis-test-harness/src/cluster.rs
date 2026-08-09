@@ -33,7 +33,10 @@ const DEFAULT_READINESS_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const DEFAULT_CLUSTER_NODE_TIMEOUT_MS: u64 = 1_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const CLUSTER_BUS_PORT_OFFSET: u16 = 10_000;
+/// Offset from a node's client port to its cluster-bus port. Public so
+/// [`crate::ports`] can compute bus-port ranges from the same value the
+/// fixture itself uses to start nodes, instead of a second hardcoded copy.
+pub const CLUSTER_BUS_PORT_OFFSET: u16 = 10_000;
 const AUTO_PORT_START: u16 = 18_000;
 const AUTO_PORT_SPAN: u16 = 24_000;
 const STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);

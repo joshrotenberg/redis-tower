@@ -94,6 +94,13 @@ The old `Json<>` and `Search` prototypes in `redis-tower` are deprecated aliases
 
 ## Test Infrastructure
 
+Every fixed (non-ephemeral) port any fixture or bench below binds to is
+defined once in `redis_test_harness::ports` (`crates/redis-test-harness/src/ports.rs`)
+and imported at the call site, rather than hardcoded again -- that module's
+`fixture_port_blocks_do_not_overlap` test is the single place that checks all
+of them pairwise. The port numbers below are illustrative; the registry is
+authoritative.
+
 ### Standalone tests (`crates/redis-tower/tests/`)
 
 `common/mod.rs` starts `redis-server` on port **6399** via `redis-server-wrapper`. Set `REDIS_URL` env var to use an external server instead.
@@ -113,7 +120,7 @@ primary and replica processes to exercise `REPLICAOF` and coordinated
 
 ### Cluster tests (`crates/redis-tower-cluster/tests/`)
 
-Starts a 3-master cluster. **Ports 17200-17202** (plain), **17300-17302** (auth), **17400-17402** (TLS). Avoids 7000 which conflicts with macOS Control Center.
+Starts a 3-master cluster. **Ports 17200-17202** (plain), **17300-17302** (auth), **17400-17402** (TLS), plus **17500-17502** (failover), **17600-17602** (connection auth), and **17700-17702** (reshard). Avoids 7000 which conflicts with macOS Control Center. `cluster-bench` (manual, not CI) uses its own blocks at **17000** and **17800** -- see the port registry for the full list.
 
 ```bash
 cargo test -p redis-tower-cluster --test cluster_integration -- --ignored
@@ -130,6 +137,10 @@ cargo test -p redis-tower-sentinel --test 'sentinel_*' -- --ignored
 ```
 
 Also single-threaded. The healthy suite shares a topology via `OnceCell` but never kills it, so its tests are robust to reordering and parallel execution. The destructive phases (kill a sentinel, fail the master over, reconnect afterward) live in `sentinel_failover.rs` as a single orchestrating `sentinel_failover_sequence` test on the separate port block, so they no longer degrade the healthy topology and their internal order is fixed regardless of how the runner schedules tests (#509).
+
+### Sync tests (`crates/redis-tower-sync/tests/`)
+
+`sync_integration.rs` starts one `redis-server` per test on ports **6403-6408** (`redis_tower_test::ports::SYNC_PORT_BASE`), a block dedicated to this fixture and checked against every other registered block by the port registry's `fixture_port_blocks_do_not_overlap` test. It previously reused **6390-6395**, the same range as the Sentinel healthy and failover suites; running the ignored Sentinel suite first left the healthy topology's `OnceCell`-held processes still listening, so sync clients could connect to a Sentinel-managed read-only replica and fail writes with `READONLY` (#655).
 
 ### Criterion benches (`crates/redis-tower/benches/`)
 

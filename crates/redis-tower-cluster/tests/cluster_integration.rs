@@ -16,6 +16,10 @@ use redis_tower_cluster::{
 };
 use redis_tower_commands::*;
 use redis_tower_test::cluster::{ClusterFixture, ClusterNodeRole, key_for_slot};
+use redis_tower_test::ports::{
+    CLUSTER_AUTH_CONN_BASE_PORT, CLUSTER_AUTH_MUX_BASE_PORT, CLUSTER_FAILOVER_BASE_PORT,
+    CLUSTER_PLAIN_BASE_PORT, CLUSTER_RESHARD_BASE_PORT, CLUSTER_TLS_BASE_PORT,
+};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -32,7 +36,7 @@ async fn ensure_cluster() -> &'static RedisClusterHandle {
             RedisCluster::builder()
                 .masters(3)
                 .replicas_per_master(0)
-                .base_port(17200)
+                .base_port(CLUSTER_PLAIN_BASE_PORT)
                 .start()
                 .await
                 .expect("failed to start Redis cluster")
@@ -843,7 +847,7 @@ async fn cluster_transactions_are_slot_pinned_and_watch_safe() {
 #[ignore = "live: starts a dedicated 3-master/3-replica cluster and reshards a slot"]
 async fn mux_cluster_handles_ask_then_moved_during_live_reshard() {
     let fixture = ClusterFixture::builder()
-        .base_port(17700)
+        .base_port(CLUSTER_RESHARD_BASE_PORT)
         .start()
         .await
         .expect("failed to start reshard fixture");
@@ -956,7 +960,7 @@ async fn mux_cluster_handles_ask_then_moved_during_live_reshard() {
 #[ignore = "destructive: starts a dedicated 3-master/3-replica cluster and kills a master"]
 async fn mux_cluster_replaces_killed_master_after_replica_promotion() {
     let fixture = ClusterFixture::builder()
-        .base_port(17500)
+        .base_port(CLUSTER_FAILOVER_BASE_PORT)
         .cluster_node_timeout(2000)
         .start()
         .await
@@ -1104,7 +1108,7 @@ async fn mux_cluster_credentials_authenticate_on_connect() {
     let cluster = RedisCluster::builder()
         .masters(3)
         .replicas_per_master(0)
-        .base_port(17300)
+        .base_port(CLUSTER_AUTH_MUX_BASE_PORT)
         .password("cluster-secret")
         .start()
         .await
@@ -1146,7 +1150,7 @@ async fn cluster_connection_credentials_and_connect_url() {
     let cluster = RedisCluster::builder()
         .masters(3)
         .replicas_per_master(0)
-        .base_port(17600)
+        .base_port(CLUSTER_AUTH_CONN_BASE_PORT)
         .password("cluster-secret")
         .start()
         .await
@@ -1224,8 +1228,8 @@ async fn ensure_tls_cluster() -> Option<&'static RedisClusterHandle> {
             match RedisCluster::builder()
                 .masters(3)
                 .replicas_per_master(0)
-                .base_port(17400)
-                .tls_port(17400)
+                .base_port(CLUSTER_TLS_BASE_PORT)
+                .tls_port(CLUSTER_TLS_BASE_PORT)
                 .tls_cert_file(&certs.cert_file)
                 .tls_key_file(&certs.key_file)
                 .tls_ca_cert_file(&certs.ca_cert_file)

@@ -61,9 +61,11 @@ async fn main() {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_else(|| vec![1, 8, 32, 128]);
-    let master_port: u16 = env_parse("BENCH_MASTER_PORT").unwrap_or(6490);
-    let replica_base: u16 = env_parse("BENCH_REPLICA_BASE").unwrap_or(6491);
-    let sentinel_base: u16 = env_parse("BENCH_SENTINEL_BASE").unwrap_or(26490);
+    let master_port: u16 = env_parse("BENCH_MASTER_PORT")
+        .unwrap_or(redis_tower_test::ports::SENTINEL_BENCH_DEFAULT_MASTER_PORT);
+    let replica_base: u16 = env_parse("BENCH_REPLICA_BASE").unwrap_or(master_port + 1);
+    let sentinel_base: u16 = env_parse("BENCH_SENTINEL_BASE")
+        .unwrap_or(redis_tower_test::ports::SENTINEL_BENCH_DEFAULT_SENTINEL_BASE_PORT);
 
     // Diagnostics go to stderr so `--json` keeps stdout machine-parseable.
     eprintln!(
@@ -73,8 +75,8 @@ async fn main() {
         .master_port(master_port)
         .replica_base_port(replica_base)
         .sentinel_base_port(sentinel_base)
-        .replicas(2)
-        .sentinels(3)
+        .replicas(redis_tower_test::ports::SENTINEL_BENCH_DEFAULT_REPLICAS)
+        .sentinels(redis_tower_test::ports::SENTINEL_BENCH_DEFAULT_SENTINELS)
         .quorum(2)
         .start()
         .await

@@ -30,7 +30,8 @@ use tokio::sync::OnceCell;
 /// Password the dedicated auth server requires (`requirepass`).
 const PASSWORD: &str = "s3cr3t";
 /// Port for the dedicated auth server. Distinct from `common`'s 6399.
-const AUTH_PORT: u16 = 6398;
+/// Sourced from the workspace's fixed-port registry (`redis_tower_test::ports`).
+const AUTH_PORT: u16 = redis_tower_test::ports::STANDALONE_AUTH_PORT;
 
 static AUTH_REDIS: OnceCell<redis_server_wrapper::RedisServerHandle> = OnceCell::const_new();
 static AUTH_ADDR: OnceCell<String> = OnceCell::const_new();

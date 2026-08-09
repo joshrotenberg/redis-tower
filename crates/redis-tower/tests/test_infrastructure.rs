@@ -33,8 +33,11 @@ mod tls {
     use tokio::sync::OnceCell;
 
     // Dedicated TLS port for this fixture; isolated from the shared 6399
-    // default instance and the LFU fixture on 6388.
-    const TLS_PORT: u16 = 6387;
+    // default instance and the LFU fixture on 6388. Sourced from the
+    // workspace's fixed-port registry (`redis_tower_test::ports`) so a
+    // future collision with another fixture fails that registry's pairwise
+    // overlap test instead of silently drifting (#655).
+    const TLS_PORT: u16 = redis_tower_test::ports::STANDALONE_TLS_PORT;
 
     static TLS_SERVER: OnceCell<Option<RedisServerHandle>> = OnceCell::const_new();
 

@@ -102,9 +102,10 @@ async fn cover_object_help() {
 #[tokio::test]
 async fn cover_object_freq() {
     // A dedicated LFU server on its own port; do not disturb the shared 6399
-    // default-policy instance. Port 6388 is reserved for this fixture.
+    // default-policy instance. Sourced from the workspace's fixed-port
+    // registry (`redis_tower_test::ports`), not a second hardcoded literal.
     let server = RedisServer::new()
-        .port(6388)
+        .port(redis_tower_test::ports::STANDALONE_LFU_PORT)
         .maxmemory_policy("allkeys-lfu")
         .start()
         .await
