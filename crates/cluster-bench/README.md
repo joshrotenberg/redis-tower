@@ -1,11 +1,12 @@
 # cluster-bench
 
-Throughput benchmark comparing four Redis Cluster clients side-by-side:
+Throughput benchmark comparing five Redis Cluster clients side-by-side:
 
 - `redis_tower_cluster::ClusterClient` (mutex-based baseline)
 - `redis_tower_cluster::MultiplexedClusterClient` (per-node auto-pipeline)
 - `redis::cluster::ClusterClient` (redis-rs sync)
 - `redis::cluster_async::ClusterConnection` (redis-rs async)
+- `fred::clients::Client` (fred async cluster client)
 
 ## Running
 
@@ -16,8 +17,8 @@ via `redis-test-harness`:
 cargo run -p cluster-bench --release
 ```
 
-The default remains the stable throughput matrix. Topology-churn workloads
-are opt-in, so existing weekly runs and their JSON schema do not change.
+The default stable matrix covers GET and SET with 64 B, 1 KiB, and 16 KiB
+values. Replica reads and topology-churn workloads are opt-in scenarios.
 
 ### Environment variables
 
@@ -27,10 +28,45 @@ are opt-in, so existing weekly runs and their JSON schema do not change.
 | `BENCH_WARMUP` | `2` | Unmeasured warmup per run in seconds |
 | `BENCH_RUNS` | `3` | Repeated runs per throughput cell |
 | `BENCH_CONCURRENCY` | `1,8,32,128` | Comma-separated concurrency levels |
+| `BENCH_PAYLOAD_SIZES` | `64,1024,16384` | Comma-separated value sizes; `K`/`KiB` and `M`/`MiB` suffixes are accepted |
+| `BENCH_CLIENTS` | all five clients | Comma-separated client aliases (`redis-tower`, `redis-tower-mux`, `redis-rs-sync`, `redis-rs-async`, `fred`) |
 | `BENCH_BASE_PORT` | `17000` | Starting port for the throwaway cluster |
 
-Add `--json` for machine-readable output. Throughput JSON remains the
-historical array of throughput cells.
+The matrix axes also have CLI forms, for example:
+
+```bash
+cargo run -p cluster-bench --release -- \
+  --payload-sizes 64,1K,16K \
+  --concurrency 1,32,128 \
+  --clients redis-tower-mux,redis-rs-async,fred \
+  --json
+```
+
+JSON output contains one object per cell with the payload size, successful
+command count, error count, commands/s mean and standard deviation, and HDR
+p50/p90/p99/p999/max latency. A missing GET or a value of the wrong size is an
+error, not a successful operation. Failed seed writes, worker connection/setup
+errors, and worker panics abort the benchmark with a non-zero exit status.
+Each record declares `schema_version: 2` and adds a stable kebab-case
+`client_id`. The historical `client` variant name and `total_ops` /
+`ops_per_sec_*` fields remain available; `total_batches` / `batches_per_sec_*`
+and `total_commands` / `commands_per_sec_*` make their units explicit.
+
+## Replica-read scenario
+
+The replica scenario starts the managed three-master/three-replica
+`redis_tower_test::ClusterFixture`. It seeds each key directly through its slot
+owner, requires `WAIT 1` on every master, and verifies every key through a
+strict `ReadPreference::Replica` client before collecting measurements. The
+default comparison is the multiplexed master route versus the same client with
+strict replica routing.
+
+```bash
+cargo run -p cluster-bench --release -- --scenario replica --json
+```
+
+Set `BENCH_REPLICA_BASE_PORT`, or pass `--replica-base-port`, only when a fixed
+six-port range is required. Otherwise the fixture leases an available range.
 
 ## Reshard and failover churn
 
@@ -54,7 +90,7 @@ Churn-specific configuration:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BENCH_SCENARIO` | `throughput` | `throughput`, `reshard`, or `failover` |
+| `BENCH_SCENARIO` | `throughput` | `throughput`, `replica`, `reshard`, or `failover` |
 | `BENCH_CHURN_RUNS` | `1` | Fresh six-node fixture runs per scenario |
 | `BENCH_CHURN_CONCURRENCY` | `16` | Workers per client under the same event |
 | `BENCH_BASELINE_SECS` | `3` | Stable pre-event measurement window |
@@ -101,20 +137,8 @@ against absolute numbers from another machine.
 
 ## Results
 
-Measured on Apple M3 Max, 3-master local cluster, 10s per run.
-Last updated: 2026-04-12.
-
-### c=128 (high concurrency)
-
-| Client | SET ops/s | GET ops/s | GET p99 (us) |
-|--------|----------:|----------:|-------------:|
-| ClusterClient (baseline) | 13,786 | 13,944 | 9,955 |
-| redis-rs cluster sync | 170,762 | 171,524 | 1,147 |
-| redis-rs cluster_async | 448,851 | 448,206 | 537 |
-| MultiplexedClusterClient | 502,306 | 522,441 | 383 |
-
-`MultiplexedClusterClient` delivers ~35x the throughput of `ClusterClient`
-and outperforms redis-rs `cluster_async` by ~12% with lower tail latency.
-
-These numbers are a relative comparison, not absolute guarantees -- your
-hardware, network, and payload size will shift the raw figures.
+The weekly workflow uploads the complete stable and replica JSON matrices for
+90 days. Static headline numbers are intentionally kept out of this runner's
+README: CPU policy, Redis version, payload size, concurrency, and client version
+all materially affect them. Record those inputs alongside any published result
+and compare clients from the same invocation.
