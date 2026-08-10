@@ -16,6 +16,7 @@ members = [
     "crates/standalone-bench",
     "crates/sentinel-bench",
     "crates/soak-bench",
+    "crates/resource-bench",
     "examples",
 ]
 

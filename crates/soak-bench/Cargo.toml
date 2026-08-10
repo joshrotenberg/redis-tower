@@ -23,4 +23,4 @@ redis-tower-commands = { path = "../redis-tower-commands", default-features = fa
 redis-tower-test = { path = "../redis-test-harness" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "sync", "test-util", "time"] }
