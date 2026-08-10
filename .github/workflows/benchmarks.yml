@@ -82,3 +82,84 @@ jobs:
           name: ${{ matrix.package }}-${{ github.run_id }}
           path: benchmark-results
           retention-days: 90
+
+  resource-footprint:
+    name: resource-footprint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REDIS_URL: redis://127.0.0.1:6481/
+      RESOURCE_CONNECTIONS: "16"
+      RESOURCE_TARGET_OPS_PER_SEC: "500"
+      RESOURCE_WARMUP_SECS: "1"
+      RESOURCE_DURATION_SECS: "2"
+      RESOURCE_PAYLOAD_BYTES: "1024"
+      RESOURCE_BUILD_RUNS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: weekly-resource-footprint
+
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: benchmark-redis-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build Redis
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/${REDIS_VERSION}.tar.gz | tar xz
+            cd redis-${REDIS_VERSION}
+            make -j$(nproc)
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> $GITHUB_PATH
+
+      - name: Run isolated resource probes
+        run: |
+          mkdir -p resource-results
+          redis-server --port 6481 --save '' --appendonly no --daemonize yes
+          cleanup() { redis-cli -p 6481 shutdown nosave >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 50); do
+            if redis-cli -p 6481 ping >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          redis-cli -p 6481 ping >/dev/null
+          redis-server --version > resource-results/redis-version.txt
+          rustc -Vv > resource-results/rust-version.txt
+
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-redis-tower \
+            --bin resource-redis-tower -- --json \
+            > resource-results/redis-tower.json
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-redis-rs \
+            --bin resource-redis-rs -- --json \
+            > resource-results/redis-rs.json
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-fred \
+            --bin resource-fred -- --json \
+            > resource-results/fred.json
+          cargo run -p resource-bench --release \
+            --bin resource-build-measure -- --json \
+            > resource-results/build-footprint.json
+
+      - name: Upload resource probe results
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-footprint-${{ github.run_id }}
+          path: resource-results
+          retention-days: 90

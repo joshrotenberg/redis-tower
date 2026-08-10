@@ -684,10 +684,10 @@ branch. A check fails when mean time regresses by more than 10% and the two
 confidence intervals do not overlap; the full `critcmp` report is attached to
 the workflow run.
 
-The `Weekly Benchmarks` workflow runs both comparison binaries plus the replica
-scenario and retains their JSON output for 90 days. These GitHub-hosted results
-are useful for trends. Run headline measurements on dedicated, otherwise-idle
-hardware:
+The `Weekly Benchmarks` workflow runs both comparison binaries, the replica
+scenario, and the process-isolated resource probes, retaining their JSON output
+for 90 days. These GitHub-hosted results are useful for trends. Run headline
+measurements on dedicated, otherwise-idle hardware:
 
 ```bash
 BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
