@@ -15,10 +15,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   REDIS_VERSION: "8.0.6"
-  BENCH_SECS: "5"
-  BENCH_WARMUP: "2"
+  # 3 payloads x 3 concurrency levels x 5-6 clients, plus setup, stays well
+  # inside each job's 45-minute budget while preserving three repeated runs.
+  BENCH_SECS: "3"
+  BENCH_WARMUP: "1"
   BENCH_RUNS: "3"
-  BENCH_CONCURRENCY: "1,8,32,128"
+  BENCH_CONCURRENCY: "1,32,128"
+  BENCH_PAYLOAD_SIZES: "64,1024,16384"
 
 jobs:
   comparison:
@@ -68,10 +71,123 @@ jobs:
           rustc -Vv > benchmark-results/rust-version.txt
           cargo run -p ${{ matrix.package }} --release -- --json \
             > benchmark-results/${{ matrix.package }}.json
+          if [ "${{ matrix.package }}" = "cluster-bench" ]; then
+            BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json \
+              > benchmark-results/cluster-bench-replica.json
+          fi
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}-${{ github.run_id }}
           path: benchmark-results
+          retention-days: 90
+
+  resource-footprint:
+    name: resource-footprint
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REDIS_URL: redis://127.0.0.1:6481/
+      RESOURCE_CONNECTIONS: "16"
+      RESOURCE_TARGET_OPS_PER_SEC: "500"
+      RESOURCE_WARMUP_SECS: "1"
+      RESOURCE_DURATION_SECS: "2"
+      RESOURCE_DRAIN_TIMEOUT_MS: "1000"
+      RESOURCE_PAYLOAD_BYTES: "1024"
+      RESOURCE_BUILD_RUNS: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: weekly-resource-footprint
+
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: benchmark-redis-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build Redis
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/${REDIS_VERSION}.tar.gz | tar xz
+            cd redis-${REDIS_VERSION}
+            make -j$(nproc)
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> $GITHUB_PATH
+
+      - name: Run isolated resource probes
+        run: |
+          results_dir="$RUNNER_TEMP/resource-results"
+          mkdir -p "$results_dir"
+          redis-server --port 6481 --save '' --appendonly no --daemonize yes
+          cleanup() { redis-cli -p 6481 shutdown nosave >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in $(seq 1 50); do
+            if redis-cli -p 6481 ping >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+          redis-cli -p 6481 ping >/dev/null
+          redis-server --version > "$results_dir/redis-version.txt"
+          rustc -Vv > "$results_dir/rust-version.txt"
+
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-redis-tower \
+            --bin resource-redis-tower -- --json \
+            > "$results_dir/redis-tower.json"
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-redis-rs \
+            --bin resource-redis-rs -- --json \
+            > "$results_dir/redis-rs.json"
+          cargo run -p resource-bench --release \
+            --no-default-features --features client-fred \
+            --bin resource-fred -- --json \
+            > "$results_dir/fred.json"
+          cargo run -p resource-bench --release \
+            --no-default-features --features build-measure \
+            --bin resource-build-measure -- --json \
+            > "$results_dir/build-footprint.json"
+          cp Cargo.lock "$results_dir/Cargo.lock"
+
+      - name: Validate resource probe correctness
+        run: |
+          results_dir="$RUNNER_TEMP/resource-results"
+          probe_filter=crates/resource-bench/validate-probe-result.jq
+          jq -e -f "$probe_filter" \
+            crates/resource-bench/tests/fixtures/probe-valid.json >/dev/null
+          if jq -e -f "$probe_filter" \
+            crates/resource-bench/tests/fixtures/probe-invalid-errors.json >/dev/null; then
+            echo "invalid resource fixture unexpectedly passed validation" >&2
+            exit 1
+          fi
+          for result in \
+            "$results_dir/redis-tower.json" \
+            "$results_dir/redis-rs.json" \
+            "$results_dir/fred.json"; do
+            jq -e -f "$probe_filter" "$result" >/dev/null
+          done
+          jq -e -f crates/resource-bench/validate-build-result.jq \
+            "$results_dir/build-footprint.json" >/dev/null
+          lock_sha256=$(sha256sum "$results_dir/Cargo.lock" | awk '{print $1}')
+          jq -e --arg lock_sha256 "$lock_sha256" \
+            '.cargo_lock_sha256 == $lock_sha256' \
+            "$results_dir/build-footprint.json" >/dev/null
+
+      - name: Upload resource probe results
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-footprint-${{ github.run_id }}
+          path: ${{ runner.temp }}/resource-results
           retention-days: 90

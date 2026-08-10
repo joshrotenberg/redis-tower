@@ -645,16 +645,12 @@ client.execute(Set::new("key", "hello"))?;
 
 ## Benchmarks
 
-Cluster throughput at c=128 on a local 3-master cluster (Apple M3 Max):
-
-| Client | SET ops/s | GET ops/s | GET p99 (us) |
-|--------|----------:|----------:|-------------:|
-| ClusterClient (baseline) | 13,786 | 13,944 | 9,955 |
-| redis-rs cluster_async | 448,851 | 448,206 | 537 |
-| MultiplexedClusterClient | 502,306 | 522,441 | 383 |
-
-See [`crates/cluster-bench`](crates/cluster-bench/) for full results and
-how to reproduce.
+The comparison runners cover redis-tower, redis-rs, and fred across 64 B,
+1 KiB, and 16 KiB values, configurable concurrency, repeated HDR latency
+samples, and machine-readable output. See
+[`crates/cluster-bench`](crates/cluster-bench/) and
+[`crates/standalone-bench`](crates/standalone-bench/) for the exact matrix and
+reproduction controls.
 
 The cluster benchmark also has opt-in live topology-churn modes. They compare
 `MultiplexedClusterClient` with redis-rs under the same held reshard or master
@@ -664,6 +660,14 @@ timing, topology convergence, and redis-tower redirect/refresh counters:
 ```bash
 BENCH_SCENARIO=reshard cargo run -p cluster-bench --release -- --json
 BENCH_SCENARIO=failover cargo run -p cluster-bench --release -- --json
+```
+
+The cluster runner also has a six-node replica-read scenario. It proves each
+seed write was acknowledged and verifies the keyspace through a strict replica
+client before measuring master versus replica routing:
+
+```bash
+BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json
 ```
 
 The single-node command benches start their own `redis-server` on port 6482
@@ -680,14 +684,16 @@ branch. A check fails when mean time regresses by more than 10% and the two
 confidence intervals do not overlap; the full `critcmp` report is attached to
 the workflow run.
 
-The `Weekly Benchmarks` workflow runs both comparison binaries with five-second
-measurement windows and retains their JSON output for 90 days. These
-GitHub-hosted results are useful for trends. Run headline measurements on
-dedicated, otherwise-idle hardware:
+The `Weekly Benchmarks` workflow runs both comparison binaries, the replica
+scenario, and the process-isolated resource probes, retaining their JSON output
+for 90 days. These GitHub-hosted results are useful for trends. Run headline
+measurements on dedicated, otherwise-idle hardware:
 
 ```bash
-BENCH_SECS=5 cargo run -p standalone-bench --release -- --json
-BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
+BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
+  cargo run -p standalone-bench --release -- --json
+BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
+  cargo run -p cluster-bench --release -- --json
 ```
 
 For hours-long stability and recovery evidence, [`crates/soak-bench`](crates/soak-bench/)
@@ -695,6 +701,13 @@ keeps per-worker HDR histograms at constant memory, emits per-minute human or
 JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current
 owner of a key's slot in a managed six-node cluster. Its README documents the
 reconnect and recovery accounting and reproducible four-hour commands.
+
+Resource-cost comparisons against redis-rs and Fred use separate subject
+processes for RSS per connection and CPU at a fixed offered rate, plus isolated
+cold builds for compile time and stripped binary size. See
+[`crates/resource-bench`](crates/resource-bench/) for the methodology and
+machine-readable commands. Treat hosted-runner results as probe smoke tests;
+publish comparisons only from an otherwise-idle dedicated host.
 
 ## Workspace
 
@@ -711,6 +724,7 @@ redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 soak-bench               Hours-long constant-memory stability and chaos harness
+resource-bench           Process-isolated RSS, CPU, compile-time, and binary-size comparisons
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
