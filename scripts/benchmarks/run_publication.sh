@@ -55,10 +55,14 @@ concurrencies="1,8,32,128"
 
 cargo metadata --format-version 1 --locked > "$result_dir/cargo-metadata.json"
 cp Cargo.lock "$result_dir/cargo-lock.txt"
-shasum -a 256 Cargo.lock > "$result_dir/cargo-lock.sha256"
+if command -v shasum >/dev/null; then
+  shasum -a 256 Cargo.lock > "$result_dir/cargo-lock.sha256"
+else
+  sha256sum Cargo.lock > "$result_dir/cargo-lock.sha256"
+fi
 
 {
-  echo "cargo build --release -p standalone-bench -p cluster-bench -p soak-bench"
+  echo "cargo build --release --locked -p standalone-bench -p cluster-bench -p soak-bench"
   echo "target/release/standalone-bench --secs 10 --warmup 2 --runs 3 --payload-sizes $payloads --concurrency $concurrencies --workloads set,get --json"
   for depth in 10 100 1000; do
     echo "target/release/standalone-bench --secs 10 --warmup 2 --runs 3 --payload-sizes $payloads --pipeline-concurrency 1 --pipeline-commands $depth --workloads pipeline --json"
@@ -68,7 +72,7 @@ shasum -a 256 Cargo.lock > "$result_dir/cargo-lock.sha256"
 } > "$result_dir/commands.txt"
 
 # Compile before measurements so build work is outside all timed windows.
-cargo build --release -p standalone-bench -p cluster-bench -p soak-bench
+cargo build --release --locked -p standalone-bench -p cluster-bench -p soak-bench
 
 target/release/standalone-bench \
   --secs 10 --warmup 2 --runs 3 \
