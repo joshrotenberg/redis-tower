@@ -97,7 +97,8 @@ impl CacheTrackingMode {
 pub struct CachedClientConfig {
     /// Maximum number of local entries (`0` means unbounded).
     pub max_entries: usize,
-    /// Client-side freshness deadline. `None` disables the TTL backstop.
+    /// Client-side freshness deadline. `None` disables the TTL backstop for
+    /// standalone clients; the cached Cluster client rejects `None`.
     pub client_ttl: Option<Duration>,
     /// Redis server-assisted tracking mode.
     pub tracking_mode: CacheTrackingMode,
@@ -143,6 +144,9 @@ impl CachedClientConfig {
     }
 
     /// Set the client-side freshness deadline.
+    ///
+    /// Standalone cached clients accept `None`. The cached Cluster client
+    /// requires `Some` so unobserved slot-owner changes remain time-bounded.
     pub fn client_ttl(mut self, client_ttl: Option<Duration>) -> Self {
         self.client_ttl = client_ttl;
         self

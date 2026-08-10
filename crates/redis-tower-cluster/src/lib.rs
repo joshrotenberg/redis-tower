@@ -73,6 +73,8 @@
 //! cache and a RESP3 invalidation receiver for every current master. Cache use
 //! fails closed during node loss, redirects, and topology/coverage rebuilds.
 //! This initial surface is master-only and rejects replica read preferences.
+//! It also requires a finite `CachedClientConfig::client_ttl` so an unobserved
+//! slot-owner change cannot leave an old cache entry unbounded.
 //!
 //! # Slot Routing
 //!

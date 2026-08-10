@@ -347,8 +347,10 @@ Redis Cluster uses the same cache configuration through
 ```rust,ignore
 use redis_tower::{CacheTrackingMode, CachedClientConfig, commands::Get};
 use redis_tower_cluster::CachedMultiplexedClusterClient;
+use std::time::Duration;
 
 let config = CachedClientConfig::new()
+    .client_ttl(Some(Duration::from_secs(30)))
     .tracking_mode(CacheTrackingMode::OptIn);
 let cluster = CachedMultiplexedClusterClient::builder("127.0.0.1:7000")
     .cache_config(config)
@@ -386,7 +388,10 @@ and `CLIENT CACHING YES` flags cannot prefix the same command, so an ASK closes
 the cache gate and retries as `[ASKING, command]` without caching that response.
 The initial cluster cache is intentionally master-only: configuring `Replica`
 or `PreferReplica` read preference is rejected rather than promising
-invalidations the client cannot prove complete.
+invalidations the client cannot prove complete. It also requires a finite
+`client_ttl`: a slot can change owners without this client seeing the handoff,
+so Redis invalidations alone cannot bound the lifetime of every old-owner
+entry. Standalone cached clients may still explicitly choose `None`.
 
 See the [client-side caching guide](docs/CLIENT-SIDE-CACHING.md) for failure
 semantics, bounds, and metrics.

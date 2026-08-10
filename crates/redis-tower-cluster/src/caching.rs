@@ -6,6 +6,9 @@
 //! `CLIENT TRACKING ... REDIRECT` installed on that data connection. Any loss
 //! closes the synchronous safety gate before recovery starts and clears the
 //! shared cache.
+//! Cluster caching requires a finite [`CachedClientConfig::client_ttl`] as a
+//! freshness backstop for slot ownership changes that this client has not yet
+//! observed.
 //!
 //! The module deliberately talks to [`MultiplexedClusterClient`] through the
 //! crate-private [`ClusterCacheBackend`] seam. The router owns redirect wire
@@ -52,6 +55,15 @@ type TrackingStream = Pin<
 
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_millis(100);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+const FINITE_CLIENT_TTL_REQUIRED: &str =
+    "ERR cluster client-side caching requires a finite client_ttl";
+
+fn validate_cluster_cache_config(config: &CachedClientConfig) -> Result<(), RedisError> {
+    if config.client_ttl.is_none() {
+        return Err(RedisError::Redis(FINITE_CLIENT_TTL_REQUIRED.to_string()));
+    }
+    Ok(())
+}
 
 /// Metadata the cache wrapper preserves when handing a raw frame to the
 /// private cluster router.
@@ -178,6 +190,10 @@ impl CachedMultiplexedClusterClientBuilder {
     }
 
     /// Configure local cache bounds, freshness, tracking mode, and metrics.
+    ///
+    /// Unlike standalone cached clients, Cluster requires a finite
+    /// [`CachedClientConfig::client_ttl`]. [`Self::connect`] rejects `None`
+    /// before opening the seed connection.
     pub fn cache_config(mut self, config: CachedClientConfig) -> Self {
         self.cache_config = config;
         self
@@ -272,6 +288,8 @@ impl CachedMultiplexedClusterClientBuilder {
     /// Connect every data node, install per-master invalidation coverage, and
     /// enable the shared cache only after coverage is complete.
     pub async fn connect(self) -> Result<CachedMultiplexedClusterClient, RedisError> {
+        validate_cluster_cache_config(&self.cache_config)?;
+
         if let Some(preference) = self.unsupported_read_preference {
             return Err(RedisError::Redis(format!(
                 "ERR cluster client-side caching requires ReadPreference::Master; got {preference:?}"
@@ -376,6 +394,9 @@ impl CachedMultiplexedClusterClient {
     }
 
     /// Connect with explicit cache configuration.
+    ///
+    /// Cluster caching rejects a configuration whose `client_ttl` is `None`;
+    /// a finite TTL bounds stale entries after unobserved slot-owner changes.
     pub async fn connect_with_config(
         seed_addr: &str,
         config: CachedClientConfig,
@@ -390,6 +411,10 @@ impl CachedMultiplexedClusterClient {
         inner: MultiplexedClusterClient,
         config: CachedClientConfig,
     ) -> Result<Self, RedisError> {
+        // Keep this validation at the runtime boundary as well as the public
+        // builder so future internal constructors cannot bypass the invariant.
+        validate_cluster_cache_config(&config)?;
+
         if inner.read_preference().await != ReadPreference::Master {
             return Err(RedisError::Redis(
                 "ERR cluster client-side caching requires ReadPreference::Master".to_string(),
@@ -1755,6 +1780,25 @@ mod tests {
         }
 
         assert_service::<CachedMultiplexedClusterClient, redis_tower_commands::Get>();
+    }
+
+    #[tokio::test]
+    async fn builder_rejects_missing_client_ttl_before_trying_seed() {
+        let result = CachedMultiplexedClusterClient::builder("not a valid seed address")
+            .cache_config(CachedClientConfig::new().client_ttl(None))
+            .connect()
+            .await;
+        let Err(error) = result else {
+            panic!("a cluster cache without a finite client TTL was accepted");
+        };
+
+        assert!(
+            matches!(
+                error,
+                RedisError::Redis(ref message) if message == FINITE_CLIENT_TTL_REQUIRED
+            ),
+            "configuration validation should run before seed parsing or connection: {error}"
+        );
     }
 
     type RuntimeParts = (

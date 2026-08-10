@@ -385,7 +385,7 @@ async fn cached_cluster_opt_in_keeps_setup_atomic_under_concurrency() {
 
     let config = CachedClientConfig::new()
         .tracking_mode(CacheTrackingMode::OptIn)
-        .client_ttl(None);
+        .client_ttl(Some(Duration::from_secs(300)));
     let cached = CachedMultiplexedClusterClient::builder(cluster.addr())
         .cache_config(config)
         .connect()
@@ -428,7 +428,8 @@ async fn cached_cluster_opt_in_keeps_setup_atomic_under_concurrency() {
 
     // If CLIENT CACHING YES interleaves with another caller's command, at
     // least one populated key will not be tracked and will remain stale here
-    // because this test deliberately disables the TTL backstop.
+    // throughout this test's five-second assertion window; its five-minute
+    // TTL is only the required Cluster safety backstop.
     for key in &keys {
         writer
             .execute(Set::new(key, "v2"))
@@ -495,7 +496,7 @@ async fn cached_cluster_opt_in_follows_live_ask_without_conflicting_one_shot_fla
     let metrics = Arc::new(RefreshMetrics::default());
     let config = CachedClientConfig::new()
         .tracking_mode(CacheTrackingMode::OptIn)
-        .client_ttl(None);
+        .client_ttl(Some(Duration::from_secs(300)));
     let cached = CachedMultiplexedClusterClient::builder(fixture.seed_addr())
         .cache_config(config)
         .metrics_recorder(metrics.clone())
@@ -590,7 +591,9 @@ async fn cached_cluster_moved_invalidates_a_preexisting_slot_entry() {
     let metrics = Arc::new(RefreshMetrics::default());
     let config = CachedClientConfig::new()
         .tracking_mode(CacheTrackingMode::ServerDefault)
-        .client_ttl(None);
+        // Keep the entry alive well beyond the test deadline so MOVED, rather
+        // than TTL expiry, remains the mechanism under test.
+        .client_ttl(Some(Duration::from_secs(300)));
     let cached = CachedMultiplexedClusterClient::builder(fixture.seed_addr())
         .cache_config(config)
         .metrics_recorder(metrics.clone())

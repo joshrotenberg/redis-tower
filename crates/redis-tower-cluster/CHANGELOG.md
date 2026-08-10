@@ -37,6 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- require a finite client-side cache TTL for Cluster before connecting, so an
+  unobserved empty-slot ownership change cannot leave an old-owner cached miss
+  stale indefinitely; standalone cached clients still permit disabling TTL
 - authenticate protected cluster nodes before final RESP negotiation so Auto
   and forced RESP3 do not silently remain on RESP2 after a pre-auth `NOAUTH`
 - count `max_redirects` as actual redirect/transient follow-ups after the

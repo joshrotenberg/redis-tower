@@ -95,8 +95,9 @@ The local cache has two independent safety bounds:
 - Redis invalidation pushes remove all cached command variants that depend on
   a changed key.
 - `client_ttl` caps how long any entry can be served even when no invalidation
-  arrives. The safe default is 30 seconds; pass `None` only when the deployment
-  can tolerate relying exclusively on tracking.
+  arrives. The safe default is 30 seconds. Standalone clients may pass `None`
+  only when the deployment can tolerate relying exclusively on tracking;
+  Cluster clients reject `None`.
 
 Each cache miss snapshots a per-key invalidation epoch and a global generation.
 If an invalidation, explicit clear, or local write happens while Redis is
@@ -132,8 +133,10 @@ data nodes, redirects, topology refreshes, receivers, and reconnects.
 ```rust,ignore
 use redis_tower::{CacheTrackingMode, CachedClientConfig, commands::Get};
 use redis_tower_cluster::CachedMultiplexedClusterClient;
+use std::time::Duration;
 
 let config = CachedClientConfig::new()
+    .client_ttl(Some(Duration::from_secs(30)))
     .tracking_mode(CacheTrackingMode::OptIn);
 let client = CachedMultiplexedClusterClient::builder("127.0.0.1:7000")
     .cache_config(config)
@@ -159,6 +162,11 @@ retries as `[ASKING, command]`; that migrated response is not cached.
 The initial Cluster implementation intentionally supports
 `ReadPreference::Master` only. Replica and prefer-replica policies are rejected
 until equivalent invalidation coverage can be proven for replica reads.
+Cluster caching also requires a finite `client_ttl`. An empty slot can move
+without producing a redirect or invalidation visible to this client, leaving
+an old-owner cached miss that only the TTL can eventually expire. This
+Cluster-specific check runs before the seed connection is opened; standalone
+cached clients continue to permit `client_ttl(None)`.
 
 ## Capacity and observability
 
