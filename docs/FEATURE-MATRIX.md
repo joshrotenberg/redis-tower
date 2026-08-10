@@ -39,7 +39,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | partial (connection-level) | yes |
 | Reconnect with backoff + jitter | yes -- [`reconnect.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/reconnect.rs) | partial | yes |
 | Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | no | partial (tracing feature) |
-| RESP3 protocol | standalone (cluster/sentinel in progress) -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs) | yes | yes |
+| RESP3 protocol | standalone and cluster; Sentinel in progress -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes |
 | TLS (rustls + native-tls, mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes |
 | Pub/sub | yes -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs) | yes | yes |
 | Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | partial (raw commands) | partial |
@@ -67,7 +67,7 @@ comparison is about capability parity across languages, not API shape.
 | Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no (external) | no (external) | no (external) | no (external) |
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | yes | yes (context) | yes | yes |
 | Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
-| RESP3 protocol | standalone (cluster/sentinel in progress) -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs) | yes | yes | partial | yes |
+| RESP3 protocol | standalone and cluster; Sentinel in progress -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes | partial | yes |
 | TLS (incl. mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes | yes | yes |
 | Pub/sub | yes -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs) | yes | yes | yes | yes |
 | Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | yes | partial | partial | partial |
@@ -80,10 +80,10 @@ comparison is about capability parity across languages, not API shape.
 
 These are stated explicitly so the page does not drift back into overclaiming:
 
-1. **RESP3 is standalone-only today.** The RESP3 codec and `HELLO 3` negotiation
-   ship on the standalone clients. The cluster and sentinel clients do not yet
-   negotiate RESP3; that work is in progress. The matrix reads "standalone
-   (cluster/sentinel in progress)" until it lands everywhere.
+1. **RESP3 is available on standalone and cluster clients.** Both cluster
+   builders preserve an explicit protocol policy across authenticated
+   discovery, node creation, redirects, topology refreshes, and reconnects.
+   Sentinel protocol negotiation remains in progress.
 2. **Observability includes tracing and metrics.** redis-tower ships a
    `TracingLayer` with OpenTelemetry database semantic conventions and a
    `MetricsRecorder` integration backed by the `metrics` facade. The built-in

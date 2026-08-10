@@ -124,6 +124,15 @@
 //! initial connect and on every reconnect, so credential rotation flows
 //! through automatically.
 //!
+//! # Protocol configuration
+//!
+//! Both cluster builders accept a complete
+//! [`ConnectionConfig`](redis_tower_core::ConnectionConfig) and an explicit
+//! `.protocol(...)` override. Protected nodes authenticate while still in
+//! RESP2, then negotiate the requested protocol before role-specific setup;
+//! the same ordering is replayed for discovery, redirects, refreshes, and
+//! reconnects.
+//!
 //! # TLS
 //!
 //! [`MultiplexedClusterClient`] supports TLS behind the `tls-rustls` or

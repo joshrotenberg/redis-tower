@@ -396,6 +396,20 @@ pub mod script;
 pub mod tracing_layer;
 pub mod transaction;
 
+/// Internal cache-coordination hooks shared with sibling workspace crates.
+///
+/// These are not part of the stable user-facing API. They are public because
+/// Rust crate boundaries otherwise prevent the cluster client from reusing the
+/// standalone cache's key extraction, invalidation, and race-safety logic.
+#[doc(hidden)]
+pub mod cache_support {
+    pub use crate::cache_state::{
+        CacheEpoch, command_may_mutate, extract_cache_entry, managed_cache_state_command,
+        parse_invalidation,
+    };
+    pub use crate::caching::validate_cached_user_command;
+}
+
 #[cfg(feature = "serde")]
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod json_api;
