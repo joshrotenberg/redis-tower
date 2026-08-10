@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use fred::prelude::*;
-use resource_bench::{FIXTURE_KEY, ProbeConnection, run_client};
+use resource_bench::{FIXTURE_KEY, FRED_FEATURES, ProbeConnection, run_client};
 
 struct FredConnection(Client);
 
@@ -42,7 +42,7 @@ impl ProbeConnection for FredConnection {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    if let Err(error) = run_client::<FredConnection>("fred").await {
+    if let Err(error) = run_client::<FredConnection>("fred", FRED_FEATURES).await {
         eprintln!("resource probe failed: {error}");
         std::process::exit(1);
     }

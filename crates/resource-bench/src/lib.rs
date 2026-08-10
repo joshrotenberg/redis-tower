@@ -13,10 +13,42 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use serde::Serialize;
 use tokio::task::JoinHandle;
-use tokio::time::{MissedTickBehavior, interval_at};
+use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
 /// Key used by every client implementation during the fixed-rate workload.
 pub const FIXTURE_KEY: &str = "resource-bench:payload";
+
+/// Exact Cargo feature selection used to compile one subject client.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ClientFeatureSet {
+    /// Feature on `resource-bench` that selects the subject dependency.
+    pub harness_feature: &'static str,
+    /// Whether the subject dependency enables its default features.
+    pub dependency_default_features: bool,
+    /// Explicit features enabled on the subject dependency.
+    pub dependency_features: &'static [&'static str],
+}
+
+/// Feature selection for the redis-tower subject.
+pub const REDIS_TOWER_FEATURES: ClientFeatureSet = ClientFeatureSet {
+    harness_feature: "client-redis-tower",
+    dependency_default_features: false,
+    dependency_features: &[],
+};
+
+/// Feature selection for the redis-rs subject.
+pub const REDIS_RS_FEATURES: ClientFeatureSet = ClientFeatureSet {
+    harness_feature: "client-redis-rs",
+    dependency_default_features: false,
+    dependency_features: &["tokio-comp"],
+};
+
+/// Feature selection for the Fred subject.
+pub const FRED_FEATURES: ClientFeatureSet = ClientFeatureSet {
+    harness_feature: "client-fred",
+    dependency_default_features: false,
+    dependency_features: &["i-keys"],
+};
 
 /// Client operations needed by the common measurement harness.
 #[async_trait]
@@ -32,10 +64,14 @@ pub trait ProbeConnection: Send + Sized + 'static {
 }
 
 /// Environment-driven probe configuration.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ProbeConfig {
-    /// Redis URL used by the subject client.
-    pub redis_url: String,
+    /// Redis URL used by the subject client. Never include it in artifacts,
+    /// because it may contain a username or password.
+    #[serde(skip_serializing)]
+    redis_url: String,
+    /// Credential-free endpoint identifying the measured Redis server.
+    pub redis_endpoint: String,
     /// Number of independent live connections retained during the probe.
     pub connections: usize,
     /// Aggregate GET rate offered across all connections.
@@ -51,9 +87,11 @@ pub struct ProbeConfig {
 impl ProbeConfig {
     /// Read configuration from the `RESOURCE_*` environment variables.
     pub fn from_env() -> Result<Self, String> {
+        let redis_url =
+            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned());
         let config = Self {
-            redis_url: env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://127.0.0.1:6379/".to_owned()),
+            redis_endpoint: safe_redis_endpoint(&redis_url),
+            redis_url,
             connections: positive_env("RESOURCE_CONNECTIONS", 100)?,
             target_ops_per_sec: positive_env("RESOURCE_TARGET_OPS_PER_SEC", 5_000)?,
             warmup_secs: env_number("RESOURCE_WARMUP_SECS", 2)?,
@@ -66,6 +104,23 @@ impl ProbeConfig {
         }
         Ok(config)
     }
+}
+
+fn safe_redis_endpoint(raw: &str) -> String {
+    let Some((scheme, remainder)) = raw.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, endpoint)| endpoint);
+    let path_and_query = &remainder[authority_end..];
+    let path_end = path_and_query
+        .find(['?', '#'])
+        .unwrap_or(path_and_query.len());
+    let path = &path_and_query[..path_end];
+    format!("{scheme}://{authority}{path}")
 }
 
 fn env_number<T>(name: &str, default: T) -> Result<T, String>
@@ -95,12 +150,14 @@ where
 }
 
 /// Complete machine-readable result from one client process.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct ProbeReport {
     /// Artifact schema version.
     pub schema_version: u32,
     /// Subject client name.
     pub client: &'static str,
+    /// Exact subject dependency feature configuration.
+    pub client_features: ClientFeatureSet,
     /// Operating-system identifier.
     pub os: &'static str,
     /// CPU architecture identifier.
@@ -174,10 +231,13 @@ impl WindowStats {
 
 /// Run one isolated client probe and print either JSON (`--json`) or a concise
 /// human-readable summary.
-pub async fn run_client<C: ProbeConnection>(client: &'static str) -> Result<(), String> {
+pub async fn run_client<C: ProbeConnection>(
+    client: &'static str,
+    client_features: ClientFeatureSet,
+) -> Result<(), String> {
     let config = ProbeConfig::from_env()?;
     let json = env::args().any(|arg| arg == "--json");
-    let report = measure::<C>(client, config).await?;
+    let report = measure::<C>(client, client_features, config).await?;
 
     if json {
         println!(
@@ -193,6 +253,7 @@ pub async fn run_client<C: ProbeConnection>(client: &'static str) -> Result<(), 
 
 async fn measure<C: ProbeConnection>(
     client: &'static str,
+    client_features: ClientFeatureSet,
     config: ProbeConfig,
 ) -> Result<ProbeReport, String> {
     // Allocate and touch the fixture before the RSS baseline so its bytes are
@@ -257,8 +318,9 @@ async fn measure<C: ProbeConnection>(
     let _connections = connections;
 
     Ok(ProbeReport {
-        schema_version: 1,
+        schema_version: 2,
         client,
+        client_features,
         os: env::consts::OS,
         arch: env::consts::ARCH,
         config,
@@ -290,26 +352,41 @@ async fn run_window<C: ProbeConnection>(
     expected: Arc<[u8]>,
 ) -> Result<(Vec<C>, WindowStats), String> {
     let worker_count = connections.len();
-    let per_worker_rate = target_ops_per_sec as f64 / worker_count as f64;
-    let period = Duration::from_secs_f64((1.0 / per_worker_rate).max(0.000_001));
-    let deadline = tokio::time::Instant::now() + duration;
+    let start = TokioInstant::now();
+    let deadline = start
+        .checked_add(duration)
+        .ok_or_else(|| "resource window duration exceeds the clock range".to_owned())?;
 
     let mut handles: Vec<JoinHandle<(C, WindowStats)>> = Vec::with_capacity(worker_count);
-    for mut connection in connections {
+    for (worker_index, mut connection) in connections.into_iter().enumerate() {
         let expected = expected.clone();
         handles.push(tokio::spawn(async move {
             let mut stats = WindowStats::default();
-            let mut ticker = interval_at(tokio::time::Instant::now() + period, period);
-            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-            loop {
-                ticker.tick().await;
-                if tokio::time::Instant::now() >= deadline {
+            let mut ordinal = worker_index;
+            while let Some(offset) = aggregate_schedule_offset(ordinal, target_ops_per_sec) {
+                let Some(scheduled_at) = start.checked_add(offset) else {
+                    break;
+                };
+                if scheduled_at >= deadline {
                     break;
                 }
+
+                sleep_until(scheduled_at).await;
+                if TokioInstant::now() >= deadline {
+                    break;
+                }
+
                 stats.attempted += 1;
-                match connection.get_fixture(&expected).await {
-                    Ok(()) => stats.successful += 1,
-                    Err(_) => stats.errors += 1,
+                match timeout_at(deadline, connection.get_fixture(&expected)).await {
+                    Ok(Ok(())) => stats.successful += 1,
+                    Ok(Err(_)) | Err(_) => stats.errors += 1,
+                }
+                let Some(next) = ordinal.checked_add(worker_count) else {
+                    break;
+                };
+                ordinal = next;
+                if TokioInstant::now() >= deadline {
+                    break;
                 }
             }
             (connection, stats)
@@ -325,7 +402,31 @@ async fn run_window<C: ProbeConnection>(
         returned.push(connection);
         aggregate.add(stats);
     }
+    // Preserve the requested wall window even when the final centered slot is
+    // before the deadline (most visible at very low aggregate rates).
+    sleep_until(deadline).await;
+    if aggregate.attempted != aggregate.successful + aggregate.errors {
+        return Err("resource worker accounting invariant violated".to_owned());
+    }
     Ok((returned, aggregate))
+}
+
+/// Center each operation in its aggregate-rate time slice. Workers take every
+/// Nth slice, where N is the connection count, so low rates do not make every
+/// connection wake at the same instant or wait for a whole per-worker period.
+fn aggregate_schedule_offset(ordinal: usize, target_ops_per_sec: u64) -> Option<Duration> {
+    let numerator = (ordinal as u128)
+        .checked_mul(2)?
+        .checked_add(1)?
+        .checked_mul(1_000_000_000)?;
+    let denominator = u128::from(target_ops_per_sec).checked_mul(2)?;
+    if denominator == 0 {
+        return None;
+    }
+    let nanoseconds = numerator / denominator;
+    let seconds = nanoseconds / 1_000_000_000;
+    let subsec_nanos = (nanoseconds % 1_000_000_000) as u32;
+    Some(Duration::new(u64::try_from(seconds).ok()?, subsec_nanos))
 }
 
 #[cfg(unix)]
@@ -386,6 +487,23 @@ fn print_human(report: &ProbeReport) {
 mod tests {
     use super::*;
 
+    struct FakeConnection;
+
+    #[async_trait]
+    impl ProbeConnection for FakeConnection {
+        async fn connect(_url: &str) -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        async fn set_fixture(&mut self, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_fixture(&mut self, _expected: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn window_stats_adds_every_counter() {
         let mut left = WindowStats {
@@ -407,5 +525,47 @@ mod tests {
     fn usage_snapshot_has_nonzero_cpu_or_rss() {
         let usage = usage_snapshot().expect("getrusage should work on the test host");
         assert!(usage.peak_rss_bytes > 0 || usage.cpu_seconds > 0.0);
+    }
+
+    #[test]
+    fn report_serialization_never_exposes_redis_credentials() {
+        let raw = "redis://user:secret@host:6379/2";
+        let config = ProbeConfig {
+            redis_url: raw.to_owned(),
+            redis_endpoint: safe_redis_endpoint(raw),
+            connections: 1,
+            target_ops_per_sec: 1,
+            warmup_secs: 0,
+            duration_secs: 1,
+            payload_bytes: 1,
+        };
+
+        let json = serde_json::to_string(&config).expect("serialize probe configuration");
+        assert_eq!(config.redis_endpoint, "redis://host:6379/2");
+        assert!(!json.contains(raw));
+        assert!(!json.contains("user"));
+        assert!(!json.contains("secret"));
+        assert!(json.contains("redis://host:6379/2"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn aggregate_schedule_handles_rates_below_connection_count() {
+        let connections = (0..100).map(|_| FakeConnection).collect();
+        let started = TokioInstant::now();
+        let (_, stats) = run_window(
+            connections,
+            Duration::from_secs(10),
+            1,
+            Arc::from(&b"x"[..]),
+        )
+        .await
+        .expect("run fake resource window");
+
+        assert_eq!(stats.attempted, 10);
+        assert_eq!(stats.successful, 10);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.attempted, stats.successful + stats.errors);
+        assert!(started.elapsed() >= Duration::from_secs(9));
+        assert!(started.elapsed() <= Duration::from_secs(10));
     }
 }

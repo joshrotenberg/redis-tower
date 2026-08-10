@@ -1,0 +1,23 @@
+. as $report
+| (.schema_version == 2)
+and ((.git_sha | type) == "string")
+and (.git_sha | test("^[0-9a-f]{40}([0-9a-f]{24})?$"))
+and ((.git_dirty | type) == "boolean")
+and ((.cargo_lock_sha256 | type) == "string")
+and (.cargo_lock_sha256 | test("^[0-9a-f]{64}$"))
+and (.runs_per_client > 0)
+and ((.resolved_dependency_versions | has("redis-tower")) == true)
+and ((.resolved_dependency_versions | has("redis")) == true)
+and ((.resolved_dependency_versions | has("fred")) == true)
+and ((.artifacts | length) == 3)
+and all(
+  .artifacts[];
+  (.client_features.dependency_default_features == false)
+  and ((.client_features.harness_feature | type) == "string")
+  and ((.client_features.dependency_features | type) == "array")
+  and ((.resolved_dependency_graph | type) == "string")
+  and ((.resolved_dependency_graph | length) > 0)
+  and ((.clean_build_seconds | length) == $report.runs_per_client)
+  and (.unstripped_binary_bytes > 0)
+  and (.stripped_binary_bytes > 0)
+)

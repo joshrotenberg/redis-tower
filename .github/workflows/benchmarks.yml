@@ -154,8 +154,29 @@ jobs:
             --bin resource-fred -- --json \
             > resource-results/fred.json
           cargo run -p resource-bench --release \
+            --no-default-features --features build-measure \
             --bin resource-build-measure -- --json \
             > resource-results/build-footprint.json
+          cp Cargo.lock resource-results/Cargo.lock
+
+      - name: Validate resource probe correctness
+        run: |
+          probe_filter=crates/resource-bench/validate-probe-result.jq
+          jq -e -f "$probe_filter" \
+            crates/resource-bench/tests/fixtures/probe-valid.json >/dev/null
+          if jq -e -f "$probe_filter" \
+            crates/resource-bench/tests/fixtures/probe-invalid-errors.json >/dev/null; then
+            echo "invalid resource fixture unexpectedly passed validation" >&2
+            exit 1
+          fi
+          for result in \
+            resource-results/redis-tower.json \
+            resource-results/redis-rs.json \
+            resource-results/fred.json; do
+            jq -e -f "$probe_filter" "$result" >/dev/null
+          done
+          jq -e -f crates/resource-bench/validate-build-result.jq \
+            resource-results/build-footprint.json >/dev/null
 
       - name: Upload resource probe results
         uses: actions/upload-artifact@v4

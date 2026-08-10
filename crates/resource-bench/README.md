@@ -43,6 +43,10 @@ measurement. The fixed-rate workload records attempts, successful GETs,
 misses/payload mismatches, and command errors. `attempted_ops_per_sec` shows
 whether the host delivered the requested schedule;
 `achieved_ops_per_sec` includes only payload-validated responses.
+Operations are phase-staggered across one aggregate schedule and bounded by the
+measurement deadline, including when the requested rate is lower than the
+connection count. Reports include a credential-free `redis_endpoint`; the raw
+`REDIS_URL` is never serialized.
 
 RSS comes from `getrusage(RUSAGE_SELF).ru_maxrss`. It is a process high-water
 mark, not a live heap gauge. The reported connection delta subtracts a baseline
@@ -62,16 +66,28 @@ client versions alongside the toolchain and repository SHA:
 ```bash
 # Three cold builds per client by default. This is intentionally slow.
 RESOURCE_BUILD_RUNS=3 cargo run -p resource-bench --release \
+  --no-default-features --features build-measure \
   --bin resource-build-measure -- --json
 ```
 
-The redis-tower subject uses the public facade with default Redis Stack modules
-disabled, redis-rs enables its Tokio compatibility feature, and Fred uses its
-default features. These exact feature selections are part of the comparison and
-should be preserved when results are compared. Record the host, Rust toolchain,
-repository SHA, power state, and background workload with published results.
-Run on an otherwise-idle dedicated host; GitHub-hosted smoke artifacts are
-useful for detecting broken probes, not for declaring small winners.
+Every subject dependency disables default features. The exact selections are:
+
+| subject | dependency defaults | explicit dependency features |
+| --- | --- | --- |
+| redis-tower | disabled | none |
+| redis-rs | disabled | `tokio-comp` |
+| Fred | disabled | `i-keys` |
+
+The live and build JSON both record these selections. The build report also
+records the workspace-relative Git SHA and dirty state, SHA-256 of the exact
+generated `Cargo.lock`, and the full feature-aware `cargo tree` for each
+subject. The weekly artifact retains that lockfile next to the JSON, since this
+workspace does not commit `Cargo.lock`.
+
+Preserve these selections when comparing results. Record the host, Rust
+toolchain, repository SHA, power state, and background workload with published
+results. Run on an otherwise-idle dedicated host; GitHub-hosted smoke artifacts
+are useful for detecting broken probes, not for declaring small winners.
 
 ## Short smoke
 
@@ -85,6 +101,7 @@ cargo run -p resource-bench --release \
   --bin resource-redis-tower -- --json
 
 RESOURCE_BUILD_RUNS=1 cargo run -p resource-bench --release \
+  --no-default-features --features build-measure \
   --bin resource-build-measure -- --json
 ```
 

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use redis_tower::RedisConnection;
 use redis_tower::commands::{Get, Set};
-use resource_bench::{FIXTURE_KEY, ProbeConnection, run_client};
+use resource_bench::{FIXTURE_KEY, ProbeConnection, REDIS_TOWER_FEATURES, run_client};
 
 struct TowerConnection(RedisConnection);
 
@@ -38,7 +38,7 @@ impl ProbeConnection for TowerConnection {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    if let Err(error) = run_client::<TowerConnection>("redis-tower").await {
+    if let Err(error) = run_client::<TowerConnection>("redis-tower", REDIS_TOWER_FEATURES).await {
         eprintln!("resource probe failed: {error}");
         std::process::exit(1);
     }

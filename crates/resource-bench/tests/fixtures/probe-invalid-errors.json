@@ -1,0 +1,27 @@
+{
+  "schema_version": 2,
+  "client": "redis-tower",
+  "client_features": {
+    "harness_feature": "client-redis-tower",
+    "dependency_default_features": false,
+    "dependency_features": []
+  },
+  "config": {
+    "redis_endpoint": "redis://127.0.0.1:6379/",
+    "connections": 1,
+    "target_ops_per_sec": 1,
+    "duration_secs": 1,
+    "payload_bytes": 1
+  },
+  "rss": {
+    "baseline_peak_bytes": 1,
+    "connected_peak_bytes": 1,
+    "post_workload_peak_bytes": 1
+  },
+  "cpu": {
+    "attempted_ops": 1,
+    "successful_ops": 0,
+    "errors": 1,
+    "wall_seconds": 1.0
+  }
+}

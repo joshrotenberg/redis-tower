@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use redis::AsyncCommands;
-use resource_bench::{FIXTURE_KEY, ProbeConnection, run_client};
+use resource_bench::{FIXTURE_KEY, ProbeConnection, REDIS_RS_FEATURES, run_client};
 
 struct RedisRsConnection(redis::aio::MultiplexedConnection);
 
@@ -42,7 +42,7 @@ impl ProbeConnection for RedisRsConnection {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
-    if let Err(error) = run_client::<RedisRsConnection>("redis-rs").await {
+    if let Err(error) = run_client::<RedisRsConnection>("redis-rs", REDIS_RS_FEATURES).await {
         eprintln!("resource probe failed: {error}");
         std::process::exit(1);
     }

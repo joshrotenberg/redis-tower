@@ -2,34 +2,38 @@
 
 use std::collections::BTreeMap;
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use resource_bench::{ClientFeatureSet, FRED_FEATURES, REDIS_RS_FEATURES, REDIS_TOWER_FEATURES};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy)]
 struct Subject {
     client: &'static str,
-    feature: &'static str,
+    features: ClientFeatureSet,
     binary: &'static str,
 }
 
 const SUBJECTS: [Subject; 3] = [
     Subject {
         client: "redis-tower",
-        feature: "client-redis-tower",
+        features: REDIS_TOWER_FEATURES,
         binary: "resource-redis-tower",
     },
     Subject {
         client: "redis-rs",
-        feature: "client-redis-rs",
+        features: REDIS_RS_FEATURES,
         binary: "resource-redis-rs",
     },
     Subject {
         client: "fred",
-        feature: "client-fred",
+        features: FRED_FEATURES,
         binary: "resource-fred",
     },
 ];
@@ -37,6 +41,8 @@ const SUBJECTS: [Subject; 3] = [
 #[derive(Serialize)]
 struct BuildArtifact {
     client: &'static str,
+    client_features: ClientFeatureSet,
+    resolved_dependency_graph: String,
     clean_build_seconds: Vec<f64>,
     mean_clean_build_seconds: f64,
     stddev_clean_build_seconds: f64,
@@ -52,6 +58,8 @@ struct BuildReport {
     cargo_version: String,
     rustc_version: String,
     git_sha: String,
+    git_dirty: bool,
+    cargo_lock_sha256: String,
     resolved_dependency_versions: BTreeMap<String, String>,
     runs_per_client: usize,
     artifacts: Vec<BuildArtifact>,
@@ -86,13 +94,14 @@ fn run() -> Result<(), String> {
     }
 
     let report = BuildReport {
-        schema_version: 1,
+        schema_version: 2,
         os: env::consts::OS,
         arch: env::consts::ARCH,
-        cargo_version: command_text("cargo", &["--version"])?,
-        rustc_version: command_text("rustc", &["-Vv"])?,
-        git_sha: command_text("git", &["rev-parse", "HEAD"])
-            .unwrap_or_else(|_| "unknown".to_owned()),
+        cargo_version: command_text_in(&workspace, "cargo", &["--version"])?,
+        rustc_version: command_text_in(&workspace, "rustc", &["-Vv"])?,
+        git_sha: git_sha(&workspace)?,
+        git_dirty: git_is_dirty(&workspace)?,
+        cargo_lock_sha256: sha256_file(&workspace.join("Cargo.lock"))?,
         resolved_dependency_versions: resolved_dependency_versions(&workspace)?,
         runs_per_client: runs,
         artifacts,
@@ -195,16 +204,15 @@ fn measure_subject(
                 subject.binary,
                 "--no-default-features",
                 "--features",
-                subject.feature,
+                subject.features.harness_feature,
                 "--target-dir",
             ])
-            .arg(&target)
+            .arg(target.path())
             .stdout(Stdio::null())
             .status()
             .map_err(|error| format!("start cargo for {}: {error}", subject.client))?;
         let elapsed = started.elapsed().as_secs_f64();
         if !status.success() {
-            cleanup(&target);
             return Err(format!(
                 "clean build for {} exited with {status}",
                 subject.client
@@ -212,31 +220,14 @@ fn measure_subject(
         }
         samples.push(elapsed);
 
-        let binary =
-            target
-                .join("release")
-                .join(format!("{}{}", subject.binary, env::consts::EXE_SUFFIX));
-        unstripped_binary_bytes = file_size(&binary)?;
-        let stripped = target.join(format!("{}.stripped", subject.binary));
-        fs::copy(&binary, &stripped)
-            .map_err(|error| format!("copy {} for stripping: {error}", binary.display()))?;
-        let strip_status = Command::new("strip")
-            .arg(&stripped)
-            .status()
-            .map_err(|error| format!("start strip for {}: {error}", subject.client))?;
-        if !strip_status.success() {
-            cleanup(&target);
-            return Err(format!(
-                "strip for {} exited with {strip_status}",
-                subject.client
-            ));
-        }
-        stripped_binary_bytes = file_size(&stripped)?;
-        cleanup(&target);
+        (unstripped_binary_bytes, stripped_binary_bytes) =
+            measure_artifact(target, subject.binary, OsStr::new("strip"))?;
     }
 
     Ok(BuildArtifact {
         client: subject.client,
+        client_features: subject.features,
+        resolved_dependency_graph: resolved_dependency_graph(workspace, subject)?,
         mean_clean_build_seconds: mean(&samples),
         stddev_clean_build_seconds: stddev(&samples),
         clean_build_seconds: samples,
@@ -245,20 +236,87 @@ fn measure_subject(
     })
 }
 
-fn temporary_target(client: &str, run: usize) -> Result<PathBuf, String> {
-    let path = env::temp_dir().join(format!(
-        "redis-tower-resource-build-{}-{client}-{run}",
+fn resolved_dependency_graph(workspace: &Path, subject: Subject) -> Result<String, String> {
+    command_text_in(
+        workspace,
+        "cargo",
+        &[
+            "tree",
+            "--color",
+            "never",
+            "--locked",
+            "--package",
+            "resource-bench",
+            "--no-default-features",
+            "--features",
+            subject.features.harness_feature,
+            "--edges",
+            "normal,features",
+            "--no-dedupe",
+        ],
+    )
+    .map_err(|error| format!("resolve dependency graph for {}: {error}", subject.client))
+}
+
+static TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+struct IsolatedTarget {
+    path: PathBuf,
+}
+
+impl IsolatedTarget {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for IsolatedTarget {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.path) {
+            eprintln!("warning: could not remove {}: {error}", self.path.display());
+        }
+    }
+}
+
+fn temporary_target(client: &str, run: usize) -> Result<IsolatedTarget, String> {
+    temporary_target_in(&env::temp_dir(), client, run)
+}
+
+fn temporary_target_in(base: &Path, client: &str, run: usize) -> Result<IsolatedTarget, String> {
+    let sequence = TARGET_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = base.join(format!(
+        "redis-tower-resource-build-{}-{sequence}-{client}-{run}",
         std::process::id()
     ));
     fs::create_dir(&path)
         .map_err(|error| format!("create isolated target {}: {error}", path.display()))?;
-    Ok(path)
+    Ok(IsolatedTarget { path })
 }
 
-fn cleanup(path: &Path) {
-    if let Err(error) = fs::remove_dir_all(path) {
-        eprintln!("warning: could not remove {}: {error}", path.display());
+fn measure_artifact(
+    target: IsolatedTarget,
+    binary_name: &str,
+    strip_program: &OsStr,
+) -> Result<(u64, u64), String> {
+    let binary = target
+        .path()
+        .join("release")
+        .join(format!("{binary_name}{}", env::consts::EXE_SUFFIX));
+    let unstripped_binary_bytes = file_size(&binary)?;
+    let stripped = target.path().join(format!("{binary_name}.stripped"));
+    fs::copy(&binary, &stripped)
+        .map_err(|error| format!("copy {} for stripping: {error}", binary.display()))?;
+    let strip_status = Command::new(strip_program)
+        .arg(&stripped)
+        .status()
+        .map_err(|error| format!("start strip for {binary_name}: {error}"))?;
+    if !strip_status.success() {
+        return Err(format!(
+            "strip for {binary_name} exited with {strip_status}"
+        ));
     }
+    let stripped_binary_bytes = file_size(&stripped)?;
+    Ok((unstripped_binary_bytes, stripped_binary_bytes))
 }
 
 fn file_size(path: &Path) -> Result<u64, String> {
@@ -267,8 +325,9 @@ fn file_size(path: &Path) -> Result<u64, String> {
         .map_err(|error| format!("stat {}: {error}", path.display()))
 }
 
-fn command_text(command: &str, args: &[&str]) -> Result<String, String> {
+fn command_text_in(directory: &Path, command: &str, args: &[&str]) -> Result<String, String> {
     let output = Command::new(command)
+        .current_dir(directory)
         .args(args)
         .output()
         .map_err(|error| format!("run {command}: {error}"))?;
@@ -276,6 +335,24 @@ fn command_text(command: &str, args: &[&str]) -> Result<String, String> {
         return Err(format!("{command} exited with {}", output.status));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn git_sha(workspace: &Path) -> Result<String, String> {
+    command_text_in(workspace, "git", &["rev-parse", "HEAD"])
+}
+
+fn git_is_dirty(workspace: &Path) -> Result<bool, String> {
+    command_text_in(
+        workspace,
+        "git",
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )
+    .map(|status| !status.is_empty())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn mean(values: &[f64]) -> f64 {
@@ -305,5 +382,51 @@ mod tests {
         assert_eq!(mean(&samples), 2.0);
         assert!((stddev(&samples) - (2.0_f64 / 3.0).sqrt()).abs() < 1e-12);
         assert_eq!(stddev(&[2.0]), 0.0);
+    }
+
+    #[test]
+    fn isolated_target_is_removed_after_stat_and_strip_errors() {
+        let base = env::temp_dir();
+
+        let missing = temporary_target_in(&base, "missing", 0).expect("create missing target");
+        let missing_path = missing.path().to_owned();
+        let error = measure_artifact(missing, "not-built", OsStr::new("strip"))
+            .expect_err("missing binary should fail stat");
+        assert!(error.contains("stat"));
+        assert!(!missing_path.exists());
+
+        let strip = temporary_target_in(&base, "strip", 0).expect("create strip target");
+        let strip_path = strip.path().to_owned();
+        let release = strip.path().join("release");
+        fs::create_dir(&release).expect("create release directory");
+        fs::write(
+            release.join(format!("built{}", env::consts::EXE_SUFFIX)),
+            b"not an executable",
+        )
+        .expect("create pretend binary");
+        let error = measure_artifact(
+            strip,
+            "built",
+            OsStr::new("resource-bench-command-that-does-not-exist"),
+        )
+        .expect_err("missing strip program should fail");
+        assert!(error.contains("start strip"));
+        assert!(!strip_path.exists());
+    }
+
+    #[test]
+    fn git_sha_is_resolved_from_workspace_outside_the_caller_cwd() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("locate workspace");
+        let expected =
+            command_text_in(&workspace, "git", &["rev-parse", "HEAD"]).expect("read expected SHA");
+        let original = env::current_dir().expect("read current directory");
+        env::set_current_dir(env::temp_dir()).expect("move to unrelated directory");
+        let actual = git_sha(&workspace);
+        env::set_current_dir(original).expect("restore current directory");
+
+        assert_eq!(actual.expect("read SHA outside workspace"), expected);
     }
 }
