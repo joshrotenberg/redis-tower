@@ -1,15 +1,19 @@
 //! Live-server integration tests for SyncClient.
 //!
 //! Each test spins up a dedicated Redis instance on a distinct port so the
-//! tests can run in parallel without port collisions.  Ports chosen are in
-//! the 6390..6396 range (non-default, away from the port 6399 used by the
-//! redis-tower integration suite).
+//! tests can run in parallel without port collisions. `PORT_BASE` comes from
+//! the shared [`redis_tower_test::port_ranges`] registry: this fixture used
+//! to hardcode 6390..6396, which silently overlapped the Sentinel fixtures'
+//! 6390..6396 block and let sync tests connect to a Sentinel-managed
+//! read-only replica depending on run order (#655). Importing the constant
+//! keeps this fixture's block registered so `fixture_port_ranges_do_not_overlap`
+//! catches the next collision instead of a `READONLY` error at run time.
 
 use redis_server_wrapper::RedisServer;
 use redis_tower_sync::commands::{Del, Get, Incr, Ping, Set};
 use redis_tower_sync::{Pipeline, SyncClient, Transaction};
 
-const PORT_BASE: u16 = 6390;
+const PORT_BASE: u16 = redis_tower_test::port_ranges::SYNC_PORT_BASE;
 
 // -- sync_connect_and_set_get --
 

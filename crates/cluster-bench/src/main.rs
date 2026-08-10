@@ -282,7 +282,7 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
     let topology_timeout = Duration::from_secs(env_parse("BENCH_TOPOLOGY_TIMEOUT_SECS", 15_u64));
     let concurrency = env_parse("BENCH_CHURN_CONCURRENCY", 16_usize).max(1);
     let runs = env_parse("BENCH_CHURN_RUNS", 1_usize).max(1);
-    let base_port = env_parse("BENCH_CHURN_BASE_PORT", 17_500_u16);
+    let base_port = env_parse("BENCH_CHURN_BASE_PORT", 17_800_u16);
     let cluster_node_timeout = env_parse("BENCH_CLUSTER_NODE_TIMEOUT_MS", 1_000_u64);
     let slot = env_parse("BENCH_CHURN_SLOT", 42_u16);
     if slot >= 16_384 {
