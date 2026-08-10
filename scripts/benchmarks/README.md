@@ -4,10 +4,17 @@
 evidence used for a release. Run it on dedicated, otherwise-idle hardware with
 at least 16 GiB of RAM, Redis CLI/server binaries, Rust, and Python 3 available.
 
-Publication mode always runs the soak; there is no opt-out:
+Publication mode always runs the soak; there is no opt-out. After this change
+is merged, run the exact release command from a normal host terminal, outside
+any filesystem or hardware sandbox, in a clean `main` checkout:
 
 ```bash
-bash scripts/benchmarks/run_publication.sh ../redis-tower-publication-results
+cd /absolute/path/to/redis-tower
+git switch main
+git pull --ff-only
+test -z "$(git status --porcelain --untracked-files=all)"
+bash "$PWD/scripts/benchmarks/run_publication.sh" \
+  "$PWD/../redis-tower-publication-results"
 ```
 
 For development-only checks, spell out `--matrix-only`:
@@ -58,14 +65,35 @@ Environment evidence intentionally omits hostnames, hardware serials, raw
 `uname -a`, local paths, and environment values. It retains hostname-free
 OS/kernel details, `rustc -vV`, `cargo -vV`, Redis versions, the lockfile, and a
 sanitized dependency graph containing only package name, version, normalized
-source, and resolved features.
+source, and resolved features. CPU model/count and RAM size must be available
+and numeric; if sandbox restrictions hide them, preflight fails with an
+explicit instruction to rerun outside the sandbox.
 
 Every long matrix unit writes into a `.partial` checkpoint directory and is
-atomically renamed only after success. Re-running the same command reuses
-successful checkpoints when source SHA, lockfile hash, mode, and configuration
-all match. A mismatch or an unowned non-empty result directory is refused. The
-final manifest records that provenance, the complete configuration, completion
-state, and SHA-256/size for every artifact.
+atomically renamed only after semantic validation and creation of a checkpoint
+record containing command, configuration, provenance, and content hashes.
+Re-running the same command reuses a checkpoint only after repeating those
+checks. The canonical execution fingerprint binds CPU, RAM, OS/kernel,
+Rust/Cargo/Python/Redis versions, source SHA, lockfile, mode, and the complete
+configuration; any host or tool mismatch refuses resumption. Finalization
+rejects missing, unexpected, partial, non-regular, or symlinked artifacts,
+regenerates the rendered summary and charts from raw checkpoints byte for byte,
+and only then writes the hashed exact-inventory manifest.
 
 The runner uses fixed ports 6480 (standalone matrix), 6481 (soak), and
 17000-17002 (cluster matrix); keep those ports free.
+
+## Disk budget
+
+The retained evidence is small even with raw samples: the matrix contains 548
+aggregate rows and 1,644 per-run samples, so JSON, JSONL, logs, charts, and
+manifests are conservatively below 100 MiB. The isolated release Cargo target
+is budgeted at up to 6 GiB, while the largest temporary Redis dataset and its
+replicas are budgeted below 1 GiB. Allowing another GiB for filesystem and
+build variance keeps the expected peak below roughly 8 GiB.
+
+Before creating state or compiling, the runner requires at least 10 GiB free
+on the workspace/build filesystem, 2 GiB on the temporary filesystem, and 1
+GiB on the result filesystem. When those paths share a volume, the 10-GiB
+guard covers their combined peak. A host with 16 GiB free therefore retains
+roughly 8 GiB of conservative headroom at peak.

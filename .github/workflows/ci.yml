@@ -85,6 +85,37 @@ jobs:
       - name: Check generated report
         run: python3 scripts/generate_command_coverage.py --check
 
+  benchmark-evidence-contract:
+    name: Benchmark Evidence Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: benchmark-evidence-contract
+
+      - name: Check runner Bash syntax
+        run: bash -n scripts/benchmarks/run_publication.sh
+
+      - name: ShellCheck benchmark runner (action 2.0.0)
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38
+        with:
+          scandir: scripts/benchmarks
+
+      - name: Test evidence validation and resumability
+        run: python3 -m unittest scripts/benchmarks/test_render_results.py -v
+
+      - name: Test benchmark binary contracts
+        run: |
+          cargo test -p standalone-bench --bin standalone-bench
+          cargo test -p cluster-bench --bin cluster-bench
+          cargo test -p soak-bench --lib --bin soak-bench
+
   fuzz:
     name: Fuzz Targets
     runs-on: ubuntu-latest

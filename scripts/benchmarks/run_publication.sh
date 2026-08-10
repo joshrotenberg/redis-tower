@@ -86,15 +86,19 @@ allowed_result_prefix=""
 if [[ "$result_dir" == "$workspace_root/"* ]]; then
   allowed_result_prefix="${result_dir#"$workspace_root/"}"
 fi
-while IFS= read -r -d '' untracked_path; do
-  if [[ -n "$allowed_result_prefix" ]] \
-    && { [[ "$untracked_path" == "$allowed_result_prefix" ]] \
-      || [[ "$untracked_path" == "$allowed_result_prefix/"* ]]; }; then
-    continue
-  fi
-  echo "publication benchmarks refuse untracked source input: $untracked_path" >&2
-  exit 2
-done < <(git ls-files --others --exclude-standard -z)
+reject_untracked_source_inputs() {
+  local untracked_path
+  while IFS= read -r -d '' untracked_path; do
+    if [[ -n "$allowed_result_prefix" ]] \
+      && { [[ "$untracked_path" == "$allowed_result_prefix" ]] \
+        || [[ "$untracked_path" == "$allowed_result_prefix/"* ]]; }; then
+      continue
+    fi
+    echo "publication benchmarks refuse untracked source input: $untracked_path" >&2
+    exit 2
+  done < <(git ls-files --others --exclude-standard -z)
+}
+reject_untracked_source_inputs
 if ! command -v redis-server >/dev/null 2>&1 || ! command -v redis-cli >/dev/null 2>&1; then
   echo "redis-server and redis-cli must be available on PATH" >&2
   exit 2
@@ -103,6 +107,39 @@ if ! command -v python3 >/dev/null 2>&1; then
   echo "python3 must be available on PATH" >&2
   exit 2
 fi
+
+nearest_existing_path() {
+  local probe="$1"
+  while [[ ! -e "$probe" && ! -L "$probe" && "$probe" != "/" ]]; do
+    probe="$(dirname "$probe")"
+  done
+  printf '%s\n' "$probe"
+}
+
+require_free_kib() {
+  local label="$1"
+  local path="$2"
+  local required_kib="$3"
+  local available_kib
+  available_kib="$(df -Pk "$(nearest_existing_path "$path")" \
+    | awk 'NR == 2 { print $4 }')"
+  if [[ ! "$available_kib" =~ ^[0-9]+$ ]]; then
+    echo "cannot determine free disk space for $label; refusing a long benchmark run" >&2
+    exit 2
+  fi
+  if (( available_kib < required_kib )); then
+    echo "$label has insufficient free disk space for publication evidence" >&2
+    echo "need at least $((required_kib / 1024 / 1024)) GiB free before starting" >&2
+    exit 2
+  fi
+}
+
+# The isolated release target dominates disk use (conservatively <= 6 GiB).
+# Redis fixtures peak below 1 GiB and retained raw evidence is below 100 MiB.
+# These guards leave additional headroom for Cargo and filesystem variance.
+require_free_kib "workspace/build filesystem" "$workspace_root" $((10 * 1024 * 1024))
+require_free_kib "temporary filesystem" "${TMPDIR:-/tmp}" $((2 * 1024 * 1024))
+require_free_kib "result filesystem" "$result_dir" $((1 * 1024 * 1024))
 
 base_env=(
   env -i
@@ -118,6 +155,7 @@ fi
 if [[ -n ${RUSTUP_HOME:-} ]]; then
   base_env+=("RUSTUP_HOME=$RUSTUP_HOME")
 fi
+python_clean=("${base_env[@]}" python3)
 
 if [[ ! -f Cargo.lock ]]; then
   echo "Cargo.lock is absent; generating the ignored benchmark lockfile" >&2
@@ -139,21 +177,104 @@ target_dir="$workspace_root/target/publication-$source_sha"
 manifest_tool="$script_dir/artifact_manifest.py"
 renderer="$script_dir/render_results.py"
 metadata_sanitizer="$script_dir/sanitize_metadata.py"
+fingerprint_tool="$script_dir/execution_fingerprint.py"
 
-python3 "$manifest_tool" init \
+fingerprint_tmp="$(mktemp "${TMPDIR:-/tmp}/redis-tower-fingerprint.XXXXXX")"
+trap 'rm -f "$fingerprint_tmp"' EXIT
+"${python_clean[@]}" "$fingerprint_tool" collect \
+  --source-sha "$source_sha" \
+  --lock-sha256 "$lock_sha256" \
+  --mode "$run_mode" > "$fingerprint_tmp"
+fingerprint_sha256="$("${python_clean[@]}" "$manifest_tool" fingerprint-digest \
+  --fingerprint-file "$fingerprint_tmp")"
+
+verify_execution_provenance() {
+  local current_fingerprint
+  current_fingerprint="$(mktemp "${TMPDIR:-/tmp}/redis-tower-fingerprint-check.XXXXXX")"
+  if ! "${python_clean[@]}" "$fingerprint_tool" collect \
+    --source-sha "$source_sha" \
+    --lock-sha256 "$lock_sha256" \
+    --mode "$run_mode" > "$current_fingerprint"; then
+    rm -f "$current_fingerprint"
+    return 1
+  fi
+  if ! cmp -s "$current_fingerprint" "$fingerprint_tmp"; then
+    echo "execution host or tool versions changed during the benchmark run" >&2
+    rm -f "$current_fingerprint"
+    return 1
+  fi
+  rm -f "$current_fingerprint"
+}
+
+verify_source_provenance() {
+  if [[ "$(git rev-parse HEAD)" != "$source_sha" ]]; then
+    echo "source HEAD changed during the benchmark run" >&2
+    exit 2
+  fi
+  if ! git diff --quiet --ignore-submodules -- \
+    || ! git diff --cached --quiet --ignore-submodules --; then
+    echo "tracked source changed during the benchmark run" >&2
+    exit 2
+  fi
+  reject_untracked_source_inputs
+  if [[ "$(sha256_file Cargo.lock)" != "$lock_sha256" ]]; then
+    echo "Cargo.lock changed during the benchmark run" >&2
+    exit 2
+  fi
+}
+
+"${python_clean[@]}" "$manifest_tool" init \
   --result-dir "$result_dir" \
   --source-sha "$source_sha" \
   --lock-sha256 "$lock_sha256" \
-  --mode "$run_mode"
+  --mode "$run_mode" \
+  --fingerprint-file "$fingerprint_tmp"
+
+install_generated() {
+  local final="$1"
+  local candidate="$2"
+  if [[ -L "$final" ]] || [[ -e "$final" && ! -f "$final" ]]; then
+    echo "evidence path is not a regular file: $final" >&2
+    exit 2
+  fi
+  if [[ -L "$candidate" || ! -f "$candidate" ]]; then
+    echo "generated evidence is not a regular file: $candidate" >&2
+    exit 2
+  fi
+  if [[ -f "$final" ]]; then
+    if ! cmp -s "$candidate" "$final"; then
+      echo "existing evidence differs from the current execution contract: $final" >&2
+      exit 2
+    fi
+    rm -f "$candidate"
+  else
+    mv "$candidate" "$final"
+  fi
+}
+
+if [[ -L "$result_dir/manifest.json" ]] \
+  || [[ -e "$result_dir/manifest.json" && ! -f "$result_dir/manifest.json" ]]; then
+  echo "completed manifest path is not a regular file" >&2
+  exit 2
+fi
 if [[ -f "$result_dir/manifest.json" ]]; then
-  python3 "$manifest_tool" verify \
+  "${python_clean[@]}" "$manifest_tool" verify \
     --result-dir "$result_dir" \
     --source-sha "$source_sha" \
     --lock-sha256 "$lock_sha256" \
-    --mode "$run_mode"
+    --mode "$run_mode" \
+    --fingerprint-file "$fingerprint_tmp"
   echo "verified existing completed benchmark artifact set: $result_dir"
   exit 0
 fi
+
+fingerprint_candidate="$result_dir/execution-fingerprint.json.partial"
+if [[ -e "$fingerprint_candidate" || -L "$fingerprint_candidate" ]]; then
+  echo "incomplete execution fingerprint remains: $fingerprint_candidate" >&2
+  exit 2
+fi
+cp "$fingerprint_tmp" "$fingerprint_candidate"
+install_generated "$result_dir/execution-fingerprint.json" "$fingerprint_candidate"
 
 build_env=(
   "${base_env[@]}"
@@ -175,45 +296,22 @@ runtime_env=(
 write_environment() {
   local final="$result_dir/environment.txt"
   local partial="$final.partial"
-  [[ -f "$final" ]] && return
-  {
-    echo "captured_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    echo "git_sha=$source_sha"
-    echo "git_describe=$(git describe --always --tags)"
-    echo "source_date_epoch=$source_date_epoch"
-    echo "os_name=$(uname -s)"
-    echo "kernel_release=$(uname -r)"
-    echo "architecture=$(uname -m)"
-    echo "rustc_begin"
-    "${base_env[@]}" rustc -vV
-    echo "rustc_end"
-    echo "cargo_begin"
-    "${base_env[@]}" cargo -vV
-    echo "cargo_end"
-    echo "redis_server=$(redis-server --version)"
-    echo "redis_cli=$(redis-cli --version)"
-    if [[ "$host_os" == "Darwin" ]]; then
-      echo "cpu_model=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo unknown)"
-      echo "logical_cpu=$(sysctl -n hw.logicalcpu 2>/dev/null || echo unknown)"
-      echo "physical_cpu=$(sysctl -n hw.physicalcpu 2>/dev/null || echo unknown)"
-      echo "memory_bytes=$(sysctl -n hw.memsize 2>/dev/null || echo unknown)"
-      echo "os_product=$(sw_vers -productName 2>/dev/null || echo unknown)"
-      echo "os_version=$(sw_vers -productVersion 2>/dev/null || echo unknown)"
-      echo "os_build=$(sw_vers -buildVersion 2>/dev/null || echo unknown)"
-    else
-      echo "cpu_model=$(awk -F ': *' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null || echo unknown)"
-      echo "logical_cpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
-      echo "memory_kib=$(awk '/^MemTotal:/{print $2; exit}' /proc/meminfo 2>/dev/null || echo unknown)"
-      echo "os_release=$(sed -n 's/^PRETTY_NAME=//p' /etc/os-release 2>/dev/null | tr -d '"' | head -1)"
-    fi
-  } > "$partial"
-  mv "$partial" "$final"
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    echo "incomplete environment evidence remains: $partial" >&2
+    exit 2
+  fi
+  "${python_clean[@]}" "$fingerprint_tool" describe \
+    --fingerprint-file "$fingerprint_tmp" > "$partial"
+  install_generated "$final" "$partial"
 }
 
 write_build_environment() {
   local final="$result_dir/build-environment.json"
   local partial="$final.partial"
-  [[ -f "$final" ]] && return
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    echo "incomplete build environment evidence remains: $partial" >&2
+    exit 2
+  fi
   printf '%s\n' \
     '{' \
     '  "schema_version": 1,' \
@@ -229,19 +327,23 @@ write_build_environment() {
     '    "SOURCE_DATE_EPOCH": "git commit timestamp"' \
     '  }' \
     '}' > "$partial"
-  mv "$partial" "$final"
+  install_generated "$final" "$partial"
 }
 
 write_lock_artifacts() {
-  if [[ ! -f "$result_dir/cargo-lock.txt" ]]; then
-    cp Cargo.lock "$result_dir/cargo-lock.txt.partial"
-    mv "$result_dir/cargo-lock.txt.partial" "$result_dir/cargo-lock.txt"
+  local lock_final="$result_dir/cargo-lock.txt"
+  local lock_partial="$lock_final.partial"
+  local digest_final="$result_dir/cargo-lock.sha256"
+  local digest_partial="$digest_final.partial"
+  if [[ -e "$lock_partial" || -L "$lock_partial" \
+    || -e "$digest_partial" || -L "$digest_partial" ]]; then
+    echo "incomplete Cargo.lock evidence remains" >&2
+    exit 2
   fi
-  if [[ ! -f "$result_dir/cargo-lock.sha256" ]]; then
-    printf '%s  %s\n' "$lock_sha256" "cargo-lock.txt" \
-      > "$result_dir/cargo-lock.sha256.partial"
-    mv "$result_dir/cargo-lock.sha256.partial" "$result_dir/cargo-lock.sha256"
-  fi
+  cp Cargo.lock "$lock_partial"
+  install_generated "$lock_final" "$lock_partial"
+  printf '%s  %s\n' "$lock_sha256" "cargo-lock.txt" > "$digest_partial"
+  install_generated "$digest_final" "$digest_partial"
   if [[ "$(sha256_file "$result_dir/cargo-lock.txt")" != "$lock_sha256" ]]; then
     echo "recorded Cargo.lock does not match the provenance state" >&2
     exit 2
@@ -255,49 +357,24 @@ write_lock_artifacts() {
 write_dependency_graph() {
   local final="$result_dir/dependency-graph.json"
   local partial="$final.partial"
-  [[ -f "$final" ]] && return
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    echo "incomplete dependency graph evidence remains: $partial" >&2
+    exit 2
+  fi
   "${build_env[@]}" cargo metadata --format-version 1 --locked \
-    | python3 "$metadata_sanitizer" > "$partial"
-  mv "$partial" "$final"
+    | "${python_clean[@]}" "$metadata_sanitizer" > "$partial"
+  install_generated "$final" "$partial"
 }
 
 write_commands() {
   local final="$result_dir/commands.txt"
   local partial="$final.partial"
-  [[ -f "$final" ]] && return
-  {
-    echo '# Environment is cleared, then only the names in build-environment.json are supplied.'
-    echo 'cargo fetch --locked'
-    echo "CARGO_TARGET_DIR=\$ISOLATED_TARGET cargo build --profile release --locked -p standalone-bench -p cluster-bench -p soak-bench"
-    for payload in 16 64 1024 16384 102400; do
-      for concurrency in 1 8 32 128; do
-        echo "\$CARGO_TARGET_DIR/release/standalone-bench --secs 10 --warmup 2 --runs 3 --payload-sizes $payload --concurrency $concurrency --pipeline-concurrency 1 --pipeline-commands 100 --clients redis-tower,redis-tower-mux,redis-rs-sync,redis-rs-async,redis-rs-manager,fred --workloads set,get --port 6480 --include-samples --json"
-      done
-    done
-    for depth in 10 100 1000; do
-      for payload in 16 64 1024 16384 102400; do
-        echo "\$CARGO_TARGET_DIR/release/standalone-bench --secs 10 --warmup 2 --runs 3 --payload-sizes $payload --concurrency 1 --pipeline-concurrency 1 --pipeline-commands $depth --clients redis-tower,redis-tower-mux,redis-rs-sync,redis-rs-async,redis-rs-manager,fred --workloads pipeline --port 6480 --include-samples --json"
-      done
-    done
-    for concurrency in 1 8 32 128; do
-      if [[ $concurrency -eq 1 ]]; then
-        echo '# Pipeline depth and concurrency sweeps share their identical depth=100,payload=1024,concurrency=1 cell.'
-      else
-        echo "\$CARGO_TARGET_DIR/release/standalone-bench --secs 10 --warmup 2 --runs 3 --payload-sizes 1024 --concurrency 1 --pipeline-concurrency $concurrency --pipeline-commands 100 --clients redis-tower,redis-tower-mux,redis-rs-sync,redis-rs-async,redis-rs-manager,fred --workloads pipeline --port 6480 --include-samples --json"
-      fi
-    done
-    for payload in 16 64 1024 16384 102400; do
-      for concurrency in 1 8 32 128; do
-        echo "\$CARGO_TARGET_DIR/release/cluster-bench --secs 10 --warmup 2 --runs 3 --payload-sizes $payload --concurrency $concurrency --clients redis-tower,redis-tower-mux,redis-rs-sync,redis-rs-async,fred --base-port 17000 --scenario throughput --include-samples --json"
-      done
-    done
-    if [[ "$run_mode" == "publication" ]]; then
-      echo "SOAK_MODE=standalone SOAK_CHAOS=standalone-sigkill SOAK_DURATION_SECS=14400 SOAK_WARMUP_SECS=60 SOAK_REPORT_INTERVAL_SECS=60 SOAK_CHAOS_AFTER_SECS=7200 SOAK_CONCURRENCY=32 SOAK_OPERATION_TIMEOUT_MS=2000 SOAK_ERROR_BACKOFF_MS=1 SOAK_STARTUP_TIMEOUT_SECS=30 SOAK_RECOVERY_TIMEOUT_SECS=30 SOAK_PAYLOAD_BYTES=1024 SOAK_CLUSTER_SLOT=42 SOAK_CLUSTER_NODE_TIMEOUT_MS=1000 SOAK_STANDALONE_PORT=6481 \$CARGO_TARGET_DIR/release/soak-bench --jsonl"
-    else
-      echo '# INCOMPLETE DEVELOPMENT MODE: the mandatory four-hour soak was not run.'
-    fi
-  } > "$partial"
-  mv "$partial" "$final"
+  if [[ -e "$partial" || -L "$partial" ]]; then
+    echo "incomplete command evidence remains: $partial" >&2
+    exit 2
+  fi
+  "${python_clean[@]}" "$manifest_tool" commands --mode "$run_mode" > "$partial"
+  install_generated "$final" "$partial"
 }
 
 write_environment
@@ -342,30 +419,44 @@ partial_has_unexpected_entries() {
 
 run_json_checkpoint() {
   local name="$1"
-  shift
+  local binary="$2"
+  shift 2
   local final="$checkpoints/$name"
   local partial="$final.partial"
+  local actual_command=("$target_dir/release/$binary" "$@")
+  local logical_command=("\$CARGO_TARGET_DIR/release/$binary" "$@")
   if [[ -d "$final" ]]; then
-    if [[ ! -f "$final/result.json" || ! -f "$final/stderr.log" ]] \
-      || partial_has_unexpected_entries "$final" result.json stderr.log; then
-      echo "checkpoint $name is incomplete but lacks a .partial suffix; refusing overwrite" >&2
-      exit 2
-    fi
+    "${python_clean[@]}" "$manifest_tool" checkpoint-verify \
+      --checkpoint-dir "$final" \
+      --name "$name" \
+      --mode "$run_mode" \
+      --fingerprint-sha256 "$fingerprint_sha256"
     echo "reusing completed checkpoint $name" >&2
     return
   fi
-  if [[ -e "$final" ]]; then
+  if [[ -e "$final" || -L "$final" ]]; then
     echo "checkpoint path is not a directory: $name" >&2
     exit 2
   fi
+  if [[ -e "$partial" && ! -d "$partial" || -L "$partial" ]]; then
+    echo "checkpoint partial path is not a regular directory: $name" >&2
+    exit 2
+  fi
   mkdir -p "$partial"
-  if partial_has_unexpected_entries "$partial" result.json stderr.log; then
+  if partial_has_unexpected_entries "$partial" \
+      result.json stderr.log checkpoint.json.partial; then
     echo "checkpoint partial contains an unexpected file: $name" >&2
     exit 2
   fi
   echo "running checkpoint $name" >&2
-  "$@" > "$partial/result.json" 2> "$partial/stderr.log"
-  python3 -m json.tool "$partial/result.json" >/dev/null
+  "${runtime_env[@]}" "${actual_command[@]}" \
+    > "$partial/result.json" 2> "$partial/stderr.log"
+  "${python_clean[@]}" "$manifest_tool" checkpoint-finalize \
+    --checkpoint-dir "$partial" \
+    --name "$name" \
+    --mode "$run_mode" \
+    --fingerprint-sha256 "$fingerprint_sha256" \
+    -- "${logical_command[@]}"
   mv "$partial" "$final"
 }
 
@@ -379,8 +470,7 @@ standalone_paths=()
 for payload in "${payloads[@]}"; do
   for concurrency in "${concurrencies[@]}"; do
     name="standalone-throughput-p$payload-c$concurrency"
-    run_json_checkpoint "$name" "${runtime_env[@]}" \
-      "$target_dir/release/standalone-bench" \
+    run_json_checkpoint "$name" standalone-bench \
       --secs 10 --warmup 2 --runs 3 \
       --payload-sizes "$payload" --concurrency "$concurrency" \
       --pipeline-concurrency 1 --pipeline-commands 100 \
@@ -394,8 +484,7 @@ pipeline_depth_args=()
 for depth in "${depths[@]}"; do
   for payload in "${payloads[@]}"; do
     name="standalone-pipeline-d$depth-p$payload-c1"
-    run_json_checkpoint "$name" "${runtime_env[@]}" \
-      "$target_dir/release/standalone-bench" \
+    run_json_checkpoint "$name" standalone-bench \
       --secs 10 --warmup 2 --runs 3 \
       --payload-sizes "$payload" --concurrency 1 \
       --pipeline-concurrency 1 --pipeline-commands "$depth" \
@@ -412,8 +501,7 @@ for concurrency in "${concurrencies[@]}"; do
     pipeline_concurrency_paths+=("$checkpoints/$name/result.json")
     continue
   fi
-  run_json_checkpoint "$name" "${runtime_env[@]}" \
-    "$target_dir/release/standalone-bench" \
+  run_json_checkpoint "$name" standalone-bench \
     --secs 10 --warmup 2 --runs 3 \
     --payload-sizes 1024 --concurrency 1 \
     --pipeline-concurrency "$concurrency" --pipeline-commands 100 \
@@ -426,8 +514,7 @@ cluster_paths=()
 for payload in "${payloads[@]}"; do
   for concurrency in "${concurrencies[@]}"; do
     name="cluster-throughput-p$payload-c$concurrency"
-    run_json_checkpoint "$name" "${runtime_env[@]}" \
-      "$target_dir/release/cluster-bench" \
+    run_json_checkpoint "$name" cluster-bench \
       --secs 10 --warmup 2 --runs 3 \
       --payload-sizes "$payload" --concurrency "$concurrency" \
       --clients "$cluster_clients" --base-port 17000 --scenario throughput \
@@ -441,43 +528,60 @@ if [[ "$run_mode" == "publication" ]]; then
   name="standalone-soak-4h"
   final="$checkpoints/$name"
   partial="$final.partial"
+  soak_env=(
+    SOAK_MODE=standalone
+    SOAK_CHAOS=standalone-sigkill
+    SOAK_DURATION_SECS=14400
+    SOAK_WARMUP_SECS=60
+    SOAK_REPORT_INTERVAL_SECS=60
+    SOAK_CHAOS_AFTER_SECS=7200
+    SOAK_CONCURRENCY=32
+    SOAK_OPERATION_TIMEOUT_MS=2000
+    SOAK_ERROR_BACKOFF_MS=1
+    SOAK_STARTUP_TIMEOUT_SECS=30
+    SOAK_RECOVERY_TIMEOUT_SECS=30
+    SOAK_PAYLOAD_BYTES=1024
+    SOAK_CLUSTER_SLOT=42
+    SOAK_CLUSTER_NODE_TIMEOUT_MS=1000
+    SOAK_STANDALONE_PORT=6481
+  )
+  soak_logical_command=(
+    "${soak_env[@]}"
+    "\$CARGO_TARGET_DIR/release/soak-bench"
+    --jsonl
+  )
   if [[ -d "$final" ]]; then
-    if [[ ! -f "$final/result.jsonl" || ! -f "$final/stderr.log" ]] \
-      || partial_has_unexpected_entries "$final" result.jsonl stderr.log; then
-      echo "four-hour soak checkpoint is incomplete without a .partial suffix" >&2
-      exit 2
-    fi
+    "${python_clean[@]}" "$manifest_tool" checkpoint-verify \
+      --checkpoint-dir "$final" \
+      --name "$name" \
+      --mode "$run_mode" \
+      --fingerprint-sha256 "$fingerprint_sha256"
     echo "reusing completed checkpoint $name" >&2
   else
-    if [[ -e "$final" ]]; then
+    if [[ -e "$final" || -L "$final" ]]; then
       echo "four-hour soak checkpoint path is not a directory" >&2
       exit 2
     fi
+    if [[ -e "$partial" && ! -d "$partial" || -L "$partial" ]]; then
+      echo "soak checkpoint partial path is not a regular directory" >&2
+      exit 2
+    fi
     mkdir -p "$partial"
-    if partial_has_unexpected_entries "$partial" result.jsonl stderr.log; then
+    if partial_has_unexpected_entries "$partial" \
+        result.jsonl stderr.log checkpoint.json.partial; then
       echo "soak checkpoint partial contains an unexpected file" >&2
       exit 2
     fi
     echo "running mandatory four-hour standalone chaos soak" >&2
-    "${runtime_env[@]}" \
-      SOAK_MODE=standalone \
-      SOAK_CHAOS=standalone-sigkill \
-      SOAK_DURATION_SECS=14400 \
-      SOAK_WARMUP_SECS=60 \
-      SOAK_REPORT_INTERVAL_SECS=60 \
-      SOAK_CHAOS_AFTER_SECS=7200 \
-      SOAK_CONCURRENCY=32 \
-      SOAK_OPERATION_TIMEOUT_MS=2000 \
-      SOAK_ERROR_BACKOFF_MS=1 \
-      SOAK_STARTUP_TIMEOUT_SECS=30 \
-      SOAK_RECOVERY_TIMEOUT_SECS=30 \
-      SOAK_PAYLOAD_BYTES=1024 \
-      SOAK_CLUSTER_SLOT=42 \
-      SOAK_CLUSTER_NODE_TIMEOUT_MS=1000 \
-      SOAK_STANDALONE_PORT=6481 \
+    "${runtime_env[@]}" "${soak_env[@]}" \
       "$target_dir/release/soak-bench" --jsonl \
       > "$partial/result.jsonl" 2> "$partial/stderr.log"
-    python3 "$renderer" --validate-soak-only --soak "$partial/result.jsonl"
+    "${python_clean[@]}" "$manifest_tool" checkpoint-finalize \
+      --checkpoint-dir "$partial" \
+      --name "$name" \
+      --mode "$run_mode" \
+      --fingerprint-sha256 "$fingerprint_sha256" \
+      -- "${soak_logical_command[@]}"
     mv "$partial" "$final"
   fi
   soak_path="$final/result.jsonl"
@@ -511,8 +615,12 @@ if [[ "$run_mode" == "matrix-only" ]]; then
   forbidden_summary="summary.json"
 fi
 if [[ ! -d "$rendered" ]]; then
-  if [[ -e "$rendered" ]]; then
+  if [[ -e "$rendered" || -L "$rendered" ]]; then
     echo "rendered artifact path is not a directory" >&2
+    exit 2
+  fi
+  if [[ -e "$rendered_partial" && ! -d "$rendered_partial" || -L "$rendered_partial" ]]; then
+    echo "rendered partial path is not a regular directory" >&2
     exit 2
   fi
   mkdir -p "$rendered_partial"
@@ -523,7 +631,7 @@ if [[ ! -d "$rendered" ]]; then
     echo "rendered partial contains an unexpected file" >&2
     exit 2
   fi
-  python3 "$renderer" "${render_args[@]}" --output-dir "$rendered_partial"
+  "${python_clean[@]}" "$renderer" "${render_args[@]}" --output-dir "$rendered_partial"
   if [[ ! -f "$rendered_partial/$expected_summary" \
     || -e "$rendered_partial/$forbidden_summary" ]]; then
     echo "renderer produced a summary inconsistent with run mode $run_mode" >&2
@@ -538,12 +646,15 @@ elif [[ ! -f "$rendered/$expected_summary" \
   exit 2
 fi
 
-python3 "$manifest_tool" finalize --result-dir "$result_dir"
-python3 "$manifest_tool" verify \
+verify_source_provenance
+verify_execution_provenance
+"${python_clean[@]}" "$manifest_tool" finalize --result-dir "$result_dir"
+"${python_clean[@]}" "$manifest_tool" verify \
   --result-dir "$result_dir" \
   --source-sha "$source_sha" \
   --lock-sha256 "$lock_sha256" \
-  --mode "$run_mode"
+  --mode "$run_mode" \
+  --fingerprint-file "$fingerprint_tmp"
 
 if [[ "$run_mode" == "publication" ]]; then
   echo "publication benchmark evidence completed and verified: $result_dir"

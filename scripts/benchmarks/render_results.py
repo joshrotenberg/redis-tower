@@ -548,12 +548,22 @@ def validate_soak(path: Path) -> dict[str, Any]:
     if len(lifecycle_events["recoveries"]) != 1:
         raise ResultError("soak must contain exactly one recovery")
     chaos_index = lifecycle_events["chaos_injections"][0]
+    if chaos_index not in (120, 121):
+        raise ResultError("soak chaos must be recorded in interval 120 or 121")
     if float(intervals[chaos_index - 1]["elapsed_secs"]) < 7_195.0:
         raise ResultError("soak chaos was recorded before the configured injection time")
-    if lifecycle_events["reconnects"][0] < chaos_index:
+    reconnect_index = lifecycle_events["reconnects"][0]
+    recovery_index = lifecycle_events["recoveries"][0]
+    if reconnect_index < chaos_index:
         raise ResultError("soak reconnect was recorded before chaos")
-    if lifecycle_events["recoveries"][0] < chaos_index:
+    if recovery_index < chaos_index:
         raise ResultError("soak recovery was recorded before chaos")
+    if reconnect_index > chaos_index + 1 or recovery_index > chaos_index + 1:
+        raise ResultError(
+            "soak reconnect/recovery was recorded too late for the 30-second recovery bound"
+        )
+    if reconnect_index != recovery_index:
+        raise ResultError("soak reconnect and recovery accounting is not paired")
 
     if summary.get("schema_version") != 1 or summary.get("record_type") != "summary":
         raise ResultError("soak artifact does not end with a schema-1 summary")
