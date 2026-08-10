@@ -696,6 +696,12 @@ BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
   cargo run -p cluster-bench --release -- --json
 ```
 
+For hours-long stability and recovery evidence, [`crates/soak-bench`](crates/soak-bench/)
+keeps per-worker HDR histograms at constant memory, emits per-minute human or
+JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current
+owner of a key's slot in a managed six-node cluster. Its README documents the
+reconnect and recovery accounting and reproducible four-hour commands.
+
 Resource-cost comparisons against redis-rs and Fred use separate subject
 processes for RSS per connection and CPU at a fixed offered rate, plus isolated
 cold builds for compile time and stripped binary size. See
@@ -717,6 +723,7 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
+soak-bench               Hours-long constant-memory stability and chaos harness
 resource-bench           Process-isolated RSS, CPU, compile-time, and binary-size comparisons
 ```
 
