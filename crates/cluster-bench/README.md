@@ -34,7 +34,7 @@ historical array of throughput cells.
 
 ## Reshard and failover churn
 
-The churn modes start a fresh 3-master + 3-replica fixture on ports 17500+
+The churn modes start a fresh 3-master + 3-replica fixture on ports 17800+
 and drive `MultiplexedClusterClient` and redis-rs `cluster_async` concurrently
 against one affected hash slot. This makes their error and recovery windows
 comparable under the same topology event.
@@ -62,7 +62,7 @@ Churn-specific configuration:
 | `BENCH_CHURN_HOLD_MS` | `1000` | Held ASK/post-convergence sampling windows |
 | `BENCH_CHURN_SLOT` | `42` | Exact Redis Cluster hash slot exercised |
 | `BENCH_CHURN_WORKLOAD` | `get` | Affected-slot `get` or `set` workload |
-| `BENCH_CHURN_BASE_PORT` | `17500` | First of six fixture client ports |
+| `BENCH_CHURN_BASE_PORT` | `17800` | First of six fixture client ports |
 | `BENCH_CLUSTER_NODE_TIMEOUT_MS` | `1000` | Redis failure-detection timeout |
 | `BENCH_TOPOLOGY_TIMEOUT_SECS` | `15` | Bound for owner-change convergence |
 

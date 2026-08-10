@@ -23,6 +23,10 @@ use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
 use redis_tower_commands::*;
 use redis_tower_sentinel::{SentinelClient, SentinelConnection};
+use redis_tower_test::port_ranges::{
+    SENTINEL_FAILOVER_MASTER_PORT, SENTINEL_FAILOVER_REPLICA_BASE_PORT,
+    SENTINEL_FAILOVER_SENTINEL_BASE_PORT,
+};
 
 /// Format the `ip:port` pair from a sentinel `poke()` response.
 fn master_addr(info: &std::collections::HashMap<String, String>) -> String {
@@ -40,9 +44,9 @@ fn master_addr(info: &std::collections::HashMap<String, String>) -> String {
 #[ignore]
 async fn sentinel_failover_sequence() {
     let handle: RedisSentinelHandle = RedisSentinel::builder()
-        .master_port(6393)
-        .replica_base_port(6394)
-        .sentinel_base_port(26392)
+        .master_port(SENTINEL_FAILOVER_MASTER_PORT)
+        .replica_base_port(SENTINEL_FAILOVER_REPLICA_BASE_PORT)
+        .sentinel_base_port(SENTINEL_FAILOVER_SENTINEL_BASE_PORT)
         .replicas(2)
         .sentinels(3)
         .quorum(2)

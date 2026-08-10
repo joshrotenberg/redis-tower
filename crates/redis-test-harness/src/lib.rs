@@ -4,6 +4,9 @@
 //! - [`command_tests!`] -- macro for generating async command integration tests
 //! - [`cluster::ClusterFixture`] -- managed six-node Redis Cluster for live tests
 //!   and benchmarks
+//! - [`port_ranges`] -- registry of the fixed ports live-server fixtures reserve,
+//!   with a regression test guarding against a new fixture colliding with one
+//!   that already exists
 
 #![forbid(unsafe_code)]
 
@@ -11,3 +14,4 @@
 pub mod command_tests;
 pub mod cluster;
 pub mod mock;
+pub mod port_ranges;

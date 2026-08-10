@@ -9,6 +9,10 @@ use redis_tower_commands::*;
 use redis_tower_sentinel::{
     MultiplexedSentinelClient, ReadPreference, SentinelClient, SentinelConnection,
 };
+use redis_tower_test::port_ranges::{
+    SENTINEL_HEALTHY_MASTER_PORT, SENTINEL_HEALTHY_REPLICA_BASE_PORT,
+    SENTINEL_HEALTHY_SENTINEL_BASE_PORT,
+};
 use tokio::sync::OnceCell;
 
 static SENTINEL: OnceCell<RedisSentinelHandle> = OnceCell::const_new();
@@ -17,9 +21,9 @@ async fn ensure_sentinel() -> &'static RedisSentinelHandle {
     SENTINEL
         .get_or_init(|| async {
             RedisSentinel::builder()
-                .master_port(6390)
-                .replica_base_port(6391)
-                .sentinel_base_port(26389)
+                .master_port(SENTINEL_HEALTHY_MASTER_PORT)
+                .replica_base_port(SENTINEL_HEALTHY_REPLICA_BASE_PORT)
+                .sentinel_base_port(SENTINEL_HEALTHY_SENTINEL_BASE_PORT)
                 .replicas(2)
                 .sentinels(3)
                 .quorum(2)
