@@ -690,6 +690,13 @@ BENCH_SECS=5 cargo run -p standalone-bench --release -- --json
 BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
 ```
 
+Resource-cost comparisons against redis-rs and Fred use separate subject
+processes for RSS per connection and CPU at a fixed offered rate, plus isolated
+cold builds for compile time and stripped binary size. See
+[`crates/resource-bench`](crates/resource-bench/) for the methodology and
+machine-readable commands. Treat hosted-runner results as probe smoke tests;
+publish comparisons only from an otherwise-idle dedicated host.
+
 ## Workspace
 
 ```
@@ -704,6 +711,7 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
+resource-bench           Process-isolated RSS, CPU, compile-time, and binary-size comparisons
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
