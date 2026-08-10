@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "client": "redis-tower",
   "client_features": {
     "harness_feature": "client-redis-tower",
@@ -14,6 +14,7 @@
     "target_ops_per_sec": 1,
     "warmup_secs": 0,
     "duration_secs": 1,
+    "drain_timeout_ms": 1000,
     "payload_bytes": 1
   },
   "rss": {
@@ -30,6 +31,9 @@
     "attempted_ops": 1,
     "successful_ops": 1,
     "errors": 0,
+    "cutoff_ops": 0,
+    "launch_window_seconds": 1.0,
+    "drain_seconds": 0.0,
     "wall_seconds": 1.0,
     "process_cpu_seconds": 0.01,
     "process_cpu_percent": 1.0

@@ -25,6 +25,7 @@ export RESOURCE_CONNECTIONS=100
 export RESOURCE_TARGET_OPS_PER_SEC=5000
 export RESOURCE_WARMUP_SECS=2
 export RESOURCE_DURATION_SECS=10
+export RESOURCE_DRAIN_TIMEOUT_MS=1000
 export RESOURCE_PAYLOAD_BYTES=1024
 
 cargo run -p resource-bench --release \
@@ -43,10 +44,20 @@ measurement. The fixed-rate workload records attempts, successful GETs,
 misses/payload mismatches, and command errors. `attempted_ops_per_sec` shows
 whether the host delivered the requested schedule;
 `achieved_ops_per_sec` includes only payload-validated responses.
-Operations are phase-staggered across one aggregate schedule and bounded by the
-measurement deadline, including when the requested rate is lower than the
-connection count. Reports include a credential-free `redis_endpoint`; the raw
-`REDIS_URL` is never serialized.
+Operations are phase-staggered across one aggregate schedule, including when
+the requested rate is lower than the connection count. The duration is a launch
+deadline: an in-flight tail GET may finish during the separate bounded drain.
+Only a request still incomplete at the drain deadline is canceled and counted
+in `cutoff_ops`, never as a client error. A canceled warmup connection is
+dropped, and every warmup connection is revalidated or re-established before
+CPU measurement.
+
+The raw `REDIS_URL` is never serialized. `redis_endpoint` also masks the
+hostname and omits usernames, passwords, query strings, and fragments by
+default; it retains only an unambiguous Redis scheme, explicit port, and numeric
+database. Ambiguous credentials, Unix socket paths, malformed URLs, and unknown
+schemes are reported as `<redacted>`. This makes artifacts safer to publish
+without silently treating URL delimiters inside a password as endpoint data.
 
 RSS comes from `getrusage(RUSAGE_SELF).ru_maxrss`. It is a process high-water
 mark, not a live heap gauge. The reported connection delta subtracts a baseline
@@ -80,9 +91,20 @@ Every subject dependency disables default features. The exact selections are:
 
 The live and build JSON both record these selections. The build report also
 records the workspace-relative Git SHA and dirty state, SHA-256 of the exact
-generated `Cargo.lock`, and the full feature-aware `cargo tree` for each
-subject. The weekly artifact retains that lockfile next to the JSON, since this
-workspace does not commit `Cargo.lock`.
+generated `Cargo.lock`, and a normalized, bounded `cargo tree` containing
+normal, build, and feature edges for each subject. Workspace paths are written
+as `$WORKSPACE`, so equivalent checkouts produce the same graph. The weekly
+artifact retains the lockfile next to the JSON, since this workspace does not
+commit `Cargo.lock`.
+
+Clean-build target directories are registered before creation and removed by
+RAII on ordinary errors. The build-only signal handler also removes every
+registered directory on SIGINT or termination signals, after stopping and
+draining the active compiler or strip process group. SIGKILL cannot be handled;
+after a killed run, inspect and remove only stale
+`redis-tower-resource-build-*` directories whose owning process is gone.
+When capturing JSON manually, redirect stdout outside the checkout if
+`git_dirty` must describe only source changes.
 
 Preserve these selections when comparing results. Record the host, Rust
 toolchain, repository SHA, power state, and background workload with published

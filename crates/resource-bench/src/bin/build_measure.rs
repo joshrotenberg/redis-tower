@@ -1,13 +1,18 @@
 //! Measure clean compile time and stripped binary size for each subject.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use resource_bench::{ClientFeatureSet, FRED_FEATURES, REDIS_RS_FEATURES, REDIS_TOWER_FEATURES};
 use serde::Serialize;
@@ -16,6 +21,7 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Copy)]
 struct Subject {
     client: &'static str,
+    dependency: &'static str,
     features: ClientFeatureSet,
     binary: &'static str,
 }
@@ -23,16 +29,19 @@ struct Subject {
 const SUBJECTS: [Subject; 3] = [
     Subject {
         client: "redis-tower",
+        dependency: "redis-tower",
         features: REDIS_TOWER_FEATURES,
         binary: "resource-redis-tower",
     },
     Subject {
         client: "redis-rs",
+        dependency: "redis",
         features: REDIS_RS_FEATURES,
         binary: "resource-redis-rs",
     },
     Subject {
         client: "fred",
+        dependency: "fred",
         features: FRED_FEATURES,
         binary: "resource-fred",
     },
@@ -41,6 +50,8 @@ const SUBJECTS: [Subject; 3] = [
 #[derive(Serialize)]
 struct BuildArtifact {
     client: &'static str,
+    dependency: &'static str,
+    dependency_version: String,
     client_features: ClientFeatureSet,
     resolved_dependency_graph: String,
     clean_build_seconds: Vec<f64>,
@@ -66,7 +77,19 @@ struct BuildReport {
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let result = install_cleanup_handler().and_then(|()| {
+        if let Some(target) = env::var_os("RESOURCE_BUILD_SIGNAL_WRITER_DIR") {
+            run_signal_test_writer(Path::new(&target))
+        } else if let Some(base) = env::var_os("RESOURCE_BUILD_SIGNAL_TEST_DIR") {
+            run_signal_test_helper(Path::new(&base))
+        } else {
+            run()
+        }
+    });
+    while TERMINATING.load(Ordering::SeqCst) {
+        std::thread::park();
+    }
+    if let Err(error) = result {
         eprintln!("build measurement failed: {error}");
         std::process::exit(1);
     }
@@ -88,13 +111,22 @@ fn run() -> Result<(), String> {
         .canonicalize()
         .map_err(|error| format!("locate workspace: {error}"))?;
     prepare_dependencies(&workspace)?;
+    let resolved_dependency_versions = resolved_dependency_versions(&workspace)?;
     let mut artifacts = Vec::with_capacity(SUBJECTS.len());
     for subject in SUBJECTS {
-        artifacts.push(measure_subject(&workspace, subject, runs)?);
+        let version = resolved_dependency_versions
+            .get(subject.dependency)
+            .ok_or_else(|| {
+                format!(
+                    "cargo metadata omitted {} for {}",
+                    subject.dependency, subject.client
+                )
+            })?;
+        artifacts.push(measure_subject(&workspace, subject, version, runs)?);
     }
 
     let report = BuildReport {
-        schema_version: 2,
+        schema_version: 3,
         os: env::consts::OS,
         arch: env::consts::ARCH,
         cargo_version: command_text_in(&workspace, "cargo", &["--version"])?,
@@ -102,7 +134,7 @@ fn run() -> Result<(), String> {
         git_sha: git_sha(&workspace)?,
         git_dirty: git_is_dirty(&workspace)?,
         cargo_lock_sha256: sha256_file(&workspace.join("Cargo.lock"))?,
-        resolved_dependency_versions: resolved_dependency_versions(&workspace)?,
+        resolved_dependency_versions,
         runs_per_client: runs,
         artifacts,
     };
@@ -183,6 +215,7 @@ fn resolved_dependency_versions(workspace: &Path) -> Result<BTreeMap<String, Str
 fn measure_subject(
     workspace: &Path,
     subject: Subject,
+    dependency_version: &str,
     runs: usize,
 ) -> Result<BuildArtifact, String> {
     let mut samples = Vec::with_capacity(runs);
@@ -192,24 +225,22 @@ fn measure_subject(
     for run in 0..runs {
         let target = temporary_target(subject.client, run)?;
         let started = Instant::now();
-        let status = Command::new("cargo")
-            .current_dir(workspace)
-            .args([
-                "build",
-                "--release",
-                "--locked",
-                "--package",
-                "resource-bench",
-                "--bin",
-                subject.binary,
-                "--no-default-features",
-                "--features",
-                subject.features.harness_feature,
-                "--target-dir",
-            ])
-            .arg(target.path())
-            .stdout(Stdio::null())
-            .status()
+        let mut command = Command::new("cargo");
+        command.current_dir(workspace).args([
+            "build",
+            "--release",
+            "--locked",
+            "--package",
+            "resource-bench",
+            "--bin",
+            subject.binary,
+            "--no-default-features",
+            "--features",
+            subject.features.harness_feature,
+            "--target-dir",
+        ]);
+        command.arg(target.path()).stdout(Stdio::null());
+        let status = command_status_with_cleanup(&mut command)
             .map_err(|error| format!("start cargo for {}: {error}", subject.client))?;
         let elapsed = started.elapsed().as_secs_f64();
         if !status.success() {
@@ -226,8 +257,14 @@ fn measure_subject(
 
     Ok(BuildArtifact {
         client: subject.client,
+        dependency: subject.dependency,
+        dependency_version: dependency_version.to_owned(),
         client_features: subject.features,
-        resolved_dependency_graph: resolved_dependency_graph(workspace, subject)?,
+        resolved_dependency_graph: resolved_dependency_graph(
+            workspace,
+            subject,
+            dependency_version,
+        )?,
         mean_clean_build_seconds: mean(&samples),
         stddev_clean_build_seconds: stddev(&samples),
         clean_build_seconds: samples,
@@ -236,8 +273,12 @@ fn measure_subject(
     })
 }
 
-fn resolved_dependency_graph(workspace: &Path, subject: Subject) -> Result<String, String> {
-    command_text_in(
+fn resolved_dependency_graph(
+    workspace: &Path,
+    subject: Subject,
+    dependency_version: &str,
+) -> Result<String, String> {
+    let graph = command_text_in(
         workspace,
         "cargo",
         &[
@@ -251,14 +292,193 @@ fn resolved_dependency_graph(workspace: &Path, subject: Subject) -> Result<Strin
             "--features",
             subject.features.harness_feature,
             "--edges",
-            "normal,features",
-            "--no-dedupe",
+            "normal,build,features",
         ],
     )
-    .map_err(|error| format!("resolve dependency graph for {}: {error}", subject.client))
+    .map_err(|error| format!("resolve dependency graph for {}: {error}", subject.client))?;
+    let graph = normalize_dependency_graph(&graph, workspace);
+    if graph.len() >= 1_000_000 {
+        return Err(format!(
+            "dependency graph for {} is unexpectedly large: {} bytes",
+            subject.client,
+            graph.len()
+        ));
+    }
+    if graph.contains("ctrlc v") {
+        return Err(format!(
+            "dependency graph for {} contains build-measure-only signal handling",
+            subject.client
+        ));
+    }
+    let dependency_marker = format!("{} v{dependency_version}", subject.dependency);
+    if !graph.contains(&dependency_marker) {
+        return Err(format!(
+            "dependency graph for {} omitted {dependency_marker}",
+            subject.client
+        ));
+    }
+    for feature in subject.features.dependency_features {
+        let feature_marker = format!("{} feature \"{feature}\"", subject.dependency);
+        if !graph.contains(&feature_marker) {
+            return Err(format!(
+                "dependency graph for {} omitted {feature_marker}",
+                subject.client
+            ));
+        }
+    }
+    Ok(graph)
+}
+
+fn normalize_dependency_graph(graph: &str, workspace: &Path) -> String {
+    let workspace = workspace.to_string_lossy();
+    graph.replace(workspace.as_ref(), "$WORKSPACE")
 }
 
 static TARGET_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static TERMINATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ACTIVE_TARGETS: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+static CLEANUP_HANDLER: OnceLock<Result<(), String>> = OnceLock::new();
+#[cfg(unix)]
+static ACTIVE_PROCESS_GROUPS: OnceLock<Mutex<BTreeSet<i32>>> = OnceLock::new();
+
+fn active_targets() -> &'static Mutex<BTreeSet<PathBuf>> {
+    ACTIVE_TARGETS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+fn lock_active_targets() -> std::sync::MutexGuard<'static, BTreeSet<PathBuf>> {
+    active_targets()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(unix)]
+fn active_process_groups() -> &'static Mutex<BTreeSet<i32>> {
+    ACTIVE_PROCESS_GROUPS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+#[cfg(unix)]
+fn lock_active_process_groups() -> std::sync::MutexGuard<'static, BTreeSet<i32>> {
+    active_process_groups()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(unix)]
+fn process_group_is_alive(group: i32) -> bool {
+    // SAFETY: signal 0 performs an existence/permission check and does not
+    // deliver a signal. The negated PID addresses the child's process group.
+    let result = unsafe { libc::kill(-group, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(unix)]
+fn signal_process_group(group: i32, signal: i32) {
+    // SAFETY: group is derived from a child PID created as a process-group
+    // leader. Failure is harmless here; the group may already have exited.
+    let _ = unsafe { libc::kill(-group, signal) };
+}
+
+#[cfg(unix)]
+fn terminate_active_process_groups() {
+    let groups = lock_active_process_groups();
+    for group in groups.iter().copied() {
+        signal_process_group(group, libc::SIGTERM);
+    }
+    let graceful_deadline = Instant::now() + Duration::from_secs(2);
+    while groups.iter().copied().any(process_group_is_alive) && Instant::now() < graceful_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for group in groups
+        .iter()
+        .copied()
+        .filter(|group| process_group_is_alive(*group))
+    {
+        signal_process_group(group, libc::SIGKILL);
+    }
+    let forced_deadline = Instant::now() + Duration::from_secs(2);
+    while groups.iter().copied().any(process_group_is_alive) && Instant::now() < forced_deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_active_process_groups() {}
+
+fn command_status_with_cleanup(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+        let mut groups = lock_active_process_groups();
+        let mut child = command.spawn()?;
+        let group = i32::try_from(child.id()).map_err(std::io::Error::other)?;
+        groups.insert(group);
+        drop(groups);
+        let status = child.wait();
+        lock_active_process_groups().remove(&group);
+        status
+    }
+    #[cfg(not(unix))]
+    {
+        command.status()
+    }
+}
+
+fn install_cleanup_handler() -> Result<(), String> {
+    CLEANUP_HANDLER
+        .get_or_init(|| {
+            let _ = active_targets();
+            ctrlc::set_handler(|| {
+                TERMINATING.store(true, Ordering::SeqCst);
+                terminate_active_process_groups();
+                cleanup_active_targets_for_signal();
+                std::process::exit(130);
+            })
+            .map_err(|error| format!("install build cleanup signal handler: {error}"))
+        })
+        .clone()
+}
+
+fn cleanup_active_targets_for_signal() {
+    let targets = lock_active_targets();
+    for path in targets.iter() {
+        if let Err(error) = fs::remove_dir_all(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "warning: could not remove {} during signal cleanup: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
+fn run_signal_test_helper(base: &Path) -> Result<(), String> {
+    let target = temporary_target_in(base, "signal-test", 0)?;
+    println!("{}", target.path().display());
+    std::io::stdout()
+        .flush()
+        .map_err(|error| format!("flush signal-test target path: {error}"))?;
+    let executable =
+        env::current_exe().map_err(|error| format!("locate signal-test executable: {error}"))?;
+    let mut writer = Command::new(executable);
+    writer
+        .env("RESOURCE_BUILD_SIGNAL_WRITER_DIR", target.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let status = command_status_with_cleanup(&mut writer)
+        .map_err(|error| format!("run signal-test writer: {error}"))?;
+    Err(format!(
+        "signal-test writer exited unexpectedly with {status}"
+    ))
+}
+
+fn run_signal_test_writer(target: &Path) -> Result<(), String> {
+    loop {
+        fs::write(target.join("writer-active"), b"active")
+            .map_err(|error| format!("write signal-test activity marker: {error}"))?;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 struct IsolatedTarget {
     path: PathBuf,
@@ -272,8 +492,19 @@ impl IsolatedTarget {
 
 impl Drop for IsolatedTarget {
     fn drop(&mut self) {
-        if let Err(error) = fs::remove_dir_all(&self.path) {
-            eprintln!("warning: could not remove {}: {error}", self.path.display());
+        let mut targets = lock_active_targets();
+        match fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                targets.remove(&self.path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                targets.remove(&self.path);
+            }
+            Err(error) => {
+                // Keep the path registered so a later termination signal gets
+                // one more cleanup attempt before the process exits.
+                eprintln!("warning: could not remove {}: {error}", self.path.display());
+            }
         }
     }
 }
@@ -288,8 +519,21 @@ fn temporary_target_in(base: &Path, client: &str, run: usize) -> Result<Isolated
         "redis-tower-resource-build-{}-{sequence}-{client}-{run}",
         std::process::id()
     ));
-    fs::create_dir(&path)
-        .map_err(|error| format!("create isolated target {}: {error}", path.display()))?;
+    let mut targets = lock_active_targets();
+    if !targets.insert(path.clone()) {
+        return Err(format!(
+            "isolated target {} is already active",
+            path.display()
+        ));
+    }
+    if let Err(error) = fs::create_dir(&path) {
+        targets.remove(&path);
+        return Err(format!(
+            "create isolated target {}: {error}",
+            path.display()
+        ));
+    }
+    drop(targets);
     Ok(IsolatedTarget { path })
 }
 
@@ -306,9 +550,9 @@ fn measure_artifact(
     let stripped = target.path().join(format!("{binary_name}.stripped"));
     fs::copy(&binary, &stripped)
         .map_err(|error| format!("copy {} for stripping: {error}", binary.display()))?;
-    let strip_status = Command::new(strip_program)
-        .arg(&stripped)
-        .status()
+    let mut strip = Command::new(strip_program);
+    strip.arg(&stripped);
+    let strip_status = command_status_with_cleanup(&mut strip)
         .map_err(|error| format!("start strip for {binary_name}: {error}"))?;
     if !strip_status.success() {
         return Err(format!(
@@ -376,6 +620,8 @@ fn stddev(values: &[f64]) -> f64 {
 mod tests {
     use super::*;
 
+    static CWD_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn aggregate_math_is_population_based() {
         let samples = [1.0, 2.0, 3.0];
@@ -416,6 +662,7 @@ mod tests {
 
     #[test]
     fn git_sha_is_resolved_from_workspace_outside_the_caller_cwd() {
+        let _lock = CWD_TEST_LOCK.lock().expect("lock caller-CWD test");
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -428,5 +675,105 @@ mod tests {
         env::set_current_dir(original).expect("restore current directory");
 
         assert_eq!(actual.expect("read SHA outside workspace"), expected);
+    }
+
+    #[test]
+    fn dependency_graphs_are_bounded_normalized_and_caller_cwd_independent() {
+        let _lock = CWD_TEST_LOCK.lock().expect("lock caller-CWD test");
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("locate workspace");
+        let versions = resolved_dependency_versions(&workspace).expect("resolve client versions");
+        let collect = || {
+            SUBJECTS
+                .iter()
+                .copied()
+                .map(|subject| {
+                    let version = versions
+                        .get(subject.dependency)
+                        .expect("subject version is present");
+                    resolved_dependency_graph(&workspace, subject, version)
+                        .expect("resolve subject graph")
+                })
+                .collect::<Vec<_>>()
+        };
+        let from_workspace = collect();
+        let original = env::current_dir().expect("read current directory");
+        env::set_current_dir(env::temp_dir()).expect("move to unrelated directory");
+        let from_unrelated = collect();
+        env::set_current_dir(original).expect("restore current directory");
+
+        assert_eq!(from_workspace, from_unrelated);
+        assert!(
+            from_workspace
+                .iter()
+                .any(|graph| graph.contains("[build-dependencies]"))
+        );
+        for graph in from_workspace {
+            assert!(graph.len() < 1_000_000);
+            assert!(graph.contains("$WORKSPACE/crates/resource-bench"));
+            assert!(!graph.contains(workspace.to_string_lossy().as_ref()));
+            assert!(!graph.contains("ctrlc v"));
+        }
+    }
+
+    #[test]
+    fn dependency_graph_normalization_is_stable_across_checkout_paths() {
+        let checkout_a = Path::new("/tmp/worker-a/redis-tower");
+        let checkout_b = Path::new("/opt/worker-b/redis-tower");
+        let graph_a = format!(
+            "resource-bench v0.0.0 ({}/crates/resource-bench)\n└── redis v1.5.0\n",
+            checkout_a.display()
+        );
+        let graph_b = format!(
+            "resource-bench v0.0.0 ({}/crates/resource-bench)\n└── redis v1.5.0\n",
+            checkout_b.display()
+        );
+
+        assert_eq!(
+            normalize_dependency_graph(&graph_a, checkout_a),
+            normalize_dependency_graph(&graph_b, checkout_b)
+        );
+    }
+
+    #[test]
+    fn runner_temp_output_does_not_hide_real_checkout_changes() {
+        let repo = temporary_target_in(&env::temp_dir(), "dirty-state-repo", 0)
+            .expect("create temporary repository");
+        command_text_in(repo.path(), "git", &["init", "--quiet"]).expect("initialize repository");
+        command_text_in(
+            repo.path(),
+            "git",
+            &["config", "user.email", "resource-bench@example.invalid"],
+        )
+        .expect("configure git email");
+        command_text_in(
+            repo.path(),
+            "git",
+            &["config", "user.name", "Resource Bench"],
+        )
+        .expect("configure git name");
+        let tracked = repo.path().join("tracked.txt");
+        fs::write(&tracked, "original\n").expect("write tracked fixture");
+        command_text_in(repo.path(), "git", &["add", "tracked.txt"]).expect("stage fixture");
+        command_text_in(repo.path(), "git", &["commit", "--quiet", "-m", "fixture"])
+            .expect("commit fixture");
+        assert!(!git_is_dirty(repo.path()).expect("inspect clean repository"));
+
+        let runner_temp = temporary_target_in(&env::temp_dir(), "runner-temp-output", 0)
+            .expect("create simulated runner temp");
+        fs::write(runner_temp.path().join("build-footprint.json"), "{}\n")
+            .expect("write workflow-equivalent redirected output");
+        assert!(!git_is_dirty(repo.path()).expect("runner temp must not dirty checkout"));
+
+        fs::write(&tracked, "changed\n").expect("modify tracked fixture");
+        assert!(git_is_dirty(repo.path()).expect("tracked change must be visible"));
+        fs::write(&tracked, "original\n").expect("restore tracked fixture");
+        assert!(!git_is_dirty(repo.path()).expect("repository should be clean again"));
+
+        fs::write(repo.path().join("unrelated.txt"), "untracked\n")
+            .expect("write unrelated untracked file");
+        assert!(git_is_dirty(repo.path()).expect("untracked change must be visible"));
     }
 }

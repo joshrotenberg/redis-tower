@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
+use url::Url;
 
 /// Key used by every client implementation during the fixed-rate workload.
 pub const FIXTURE_KEY: &str = "resource-bench:payload";
@@ -70,7 +71,7 @@ pub struct ProbeConfig {
     /// because it may contain a username or password.
     #[serde(skip_serializing)]
     redis_url: String,
-    /// Credential-free endpoint identifying the measured Redis server.
+    /// Privacy-preserving transport, port, and database summary.
     pub redis_endpoint: String,
     /// Number of independent live connections retained during the probe.
     pub connections: usize,
@@ -80,6 +81,8 @@ pub struct ProbeConfig {
     pub warmup_secs: u64,
     /// Measured CPU-workload duration.
     pub duration_secs: u64,
+    /// Maximum time to drain an operation launched before a window deadline.
+    pub drain_timeout_ms: u64,
     /// Expected value length for every successful GET.
     pub payload_bytes: usize,
 }
@@ -96,31 +99,74 @@ impl ProbeConfig {
             target_ops_per_sec: positive_env("RESOURCE_TARGET_OPS_PER_SEC", 5_000)?,
             warmup_secs: env_number("RESOURCE_WARMUP_SECS", 2)?,
             duration_secs: positive_env("RESOURCE_DURATION_SECS", 10)?,
+            drain_timeout_ms: positive_env("RESOURCE_DRAIN_TIMEOUT_MS", 1_000)?,
             payload_bytes: positive_env("RESOURCE_PAYLOAD_BYTES", 1_024)?,
         };
 
         if config.target_ops_per_sec > 1_000_000_000 {
             return Err("RESOURCE_TARGET_OPS_PER_SEC must not exceed 1000000000".to_owned());
         }
+        if config.drain_timeout_ms > 60_000 {
+            return Err("RESOURCE_DRAIN_TIMEOUT_MS must not exceed 60000".to_owned());
+        }
         Ok(config)
     }
 }
 
 fn safe_redis_endpoint(raw: &str) -> String {
-    let Some((scheme, remainder)) = raw.split_once("://") else {
-        return "<redacted>".to_owned();
+    const REDACTED: &str = "<redacted>";
+
+    let Some((_, remainder)) = raw.split_once("://") else {
+        return REDACTED.to_owned();
     };
-    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    let authority = &remainder[..authority_end];
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, endpoint)| endpoint);
-    let path_and_query = &remainder[authority_end..];
-    let path_end = path_and_query
-        .find(['?', '#'])
-        .unwrap_or(path_and_query.len());
-    let path = &path_and_query[..path_end];
-    format!("{scheme}://{authority}{path}")
+    if let Some(authority_end) = remainder.rfind('@') {
+        let user_info = &remainder[..authority_end];
+        // redis-tower deliberately accepts raw URL delimiters in passwords.
+        // A generic URL parser would reinterpret them as path/query/fragment
+        // data and could then emit credential bytes as an apparent endpoint.
+        if user_info.contains(['/', '?', '#', '@']) {
+            return REDACTED.to_owned();
+        }
+    }
+
+    let Ok(parsed) = Url::parse(raw) else {
+        return REDACTED.to_owned();
+    };
+    if !matches!(parsed.scheme(), "redis" | "rediss") || parsed.host().is_none() {
+        // Unix socket paths and unknown schemes can themselves contain
+        // sensitive deployment details, so do not expose them in artifacts.
+        return REDACTED.to_owned();
+    }
+    let path = parsed.path();
+    if path != "/"
+        && path.strip_prefix('/').is_none_or(|database| {
+            database.is_empty() || !database.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    {
+        return REDACTED.to_owned();
+    }
+    let port = parsed
+        .port()
+        .map_or_else(String::new, |port| format!(":{port}"));
+    // Hostnames, usernames, passwords, query strings, and fragments are all
+    // intentionally omitted. Scheme, explicit port, and numeric database are
+    // enough to distinguish benchmark topology without publishing endpoints.
+    format!("{}://<host>{port}{path}", parsed.scheme())
+}
+
+#[cfg(test)]
+fn serialized_config_for_url(raw: &str) -> String {
+    let config = ProbeConfig {
+        redis_url: raw.to_owned(),
+        redis_endpoint: safe_redis_endpoint(raw),
+        connections: 1,
+        target_ops_per_sec: 1,
+        warmup_secs: 0,
+        duration_secs: 1,
+        drain_timeout_ms: 100,
+        payload_bytes: 1,
+    };
+    serde_json::to_string(&config).expect("serialize probe configuration")
 }
 
 fn env_number<T>(name: &str, default: T) -> Result<T, String>
@@ -190,7 +236,7 @@ pub struct RssReport {
 pub struct CpuReport {
     /// Requested aggregate rate.
     pub target_ops_per_sec: u64,
-    /// Attempted operations divided by measured wall time.
+    /// Attempted operations divided by the operation-launch window.
     pub attempted_ops_per_sec: f64,
     /// Successful, payload-validated operations divided by wall time.
     pub achieved_ops_per_sec: f64,
@@ -200,7 +246,13 @@ pub struct CpuReport {
     pub successful_ops: u64,
     /// Command failures, misses, and payload mismatches.
     pub errors: u64,
-    /// Measured wall time.
+    /// Operations canceled only after the bounded post-window drain expired.
+    pub cutoff_ops: u64,
+    /// Intended operation-launch window.
+    pub launch_window_seconds: f64,
+    /// Time spent after the launch deadline draining an in-flight operation.
+    pub drain_seconds: f64,
+    /// Total measured wall time, including the bounded drain.
     pub wall_seconds: f64,
     /// User plus system CPU consumed in the measured window.
     pub process_cpu_seconds: f64,
@@ -219,6 +271,7 @@ struct WindowStats {
     attempted: u64,
     successful: u64,
     errors: u64,
+    cutoff: u64,
 }
 
 impl WindowStats {
@@ -226,7 +279,20 @@ impl WindowStats {
         self.attempted += other.attempted;
         self.successful += other.successful;
         self.errors += other.errors;
+        self.cutoff += other.cutoff;
     }
+}
+
+#[derive(Clone, Copy)]
+enum WindowErrorMode {
+    Fatal,
+    Count,
+}
+
+struct WorkerOutcome<C> {
+    connection: Option<C>,
+    stats: WindowStats,
+    fatal_error: Option<String>,
 }
 
 /// Run one isolated client probe and print either JSON (`--json`) or a concise
@@ -289,15 +355,19 @@ async fn measure<C: ProbeConnection>(
         .saturating_sub(baseline.peak_rss_bytes);
 
     let payload = Arc::<[u8]>::from(payload.into_bytes());
+    let drain_timeout = Duration::from_millis(config.drain_timeout_ms);
     if config.warmup_secs > 0 {
         let (returned, _) = run_window(
             connections,
             Duration::from_secs(config.warmup_secs),
+            drain_timeout,
             config.target_ops_per_sec,
             payload.clone(),
+            WindowErrorMode::Fatal,
         )
         .await?;
-        connections = returned;
+        connections =
+            restore_after_warmup(returned, &config.redis_url, &payload, drain_timeout).await?;
     }
 
     let cpu_before = usage_snapshot()?;
@@ -305,11 +375,15 @@ async fn measure<C: ProbeConnection>(
     let (connections, window) = run_window(
         connections,
         Duration::from_secs(config.duration_secs),
+        drain_timeout,
         config.target_ops_per_sec,
         payload,
+        WindowErrorMode::Count,
     )
     .await?;
     let wall_seconds = wall_start.elapsed().as_secs_f64();
+    let launch_window_seconds = config.duration_secs as f64;
+    let drain_seconds = (wall_seconds - launch_window_seconds).max(0.0);
     let cpu_after = usage_snapshot()?;
     let process_cpu_seconds = (cpu_after.cpu_seconds - cpu_before.cpu_seconds).max(0.0);
     let target_ops_per_sec = config.target_ops_per_sec;
@@ -318,7 +392,7 @@ async fn measure<C: ProbeConnection>(
     let _connections = connections;
 
     Ok(ProbeReport {
-        schema_version: 2,
+        schema_version: 3,
         client,
         client_features,
         os: env::consts::OS,
@@ -333,11 +407,14 @@ async fn measure<C: ProbeConnection>(
         },
         cpu: CpuReport {
             target_ops_per_sec,
-            attempted_ops_per_sec: window.attempted as f64 / wall_seconds,
+            attempted_ops_per_sec: window.attempted as f64 / launch_window_seconds,
             achieved_ops_per_sec: window.successful as f64 / wall_seconds,
             attempted_ops: window.attempted,
             successful_ops: window.successful,
             errors: window.errors,
+            cutoff_ops: window.cutoff,
+            launch_window_seconds,
+            drain_seconds,
             wall_seconds,
             process_cpu_seconds,
             process_cpu_percent: process_cpu_seconds / wall_seconds * 100.0,
@@ -345,68 +422,137 @@ async fn measure<C: ProbeConnection>(
     })
 }
 
+async fn restore_after_warmup<C: ProbeConnection>(
+    connections: Vec<Option<C>>,
+    redis_url: &str,
+    expected: &[u8],
+    operation_timeout: Duration,
+) -> Result<Vec<C>, String> {
+    let mut restored = Vec::with_capacity(connections.len());
+    for (index, connection) in connections.into_iter().enumerate() {
+        if let Some(mut connection) = connection
+            && matches!(
+                tokio::time::timeout(operation_timeout, connection.get_fixture(expected)).await,
+                Ok(Ok(()))
+            )
+        {
+            restored.push(connection);
+            continue;
+        }
+
+        let mut connection = tokio::time::timeout(operation_timeout, C::connect(redis_url))
+            .await
+            .map_err(|_| format!("replacement connection {index} timed out"))?
+            .map_err(|error| format!("replace warmup connection {index}: {error}"))?;
+        tokio::time::timeout(operation_timeout, connection.get_fixture(expected))
+            .await
+            .map_err(|_| format!("replacement connection {index} validation timed out"))?
+            .map_err(|error| format!("validate replacement connection {index}: {error}"))?;
+        restored.push(connection);
+    }
+    Ok(restored)
+}
+
 async fn run_window<C: ProbeConnection>(
     connections: Vec<C>,
     duration: Duration,
+    drain_timeout: Duration,
     target_ops_per_sec: u64,
     expected: Arc<[u8]>,
-) -> Result<(Vec<C>, WindowStats), String> {
+    error_mode: WindowErrorMode,
+) -> Result<(Vec<Option<C>>, WindowStats), String> {
     let worker_count = connections.len();
     let start = TokioInstant::now();
-    let deadline = start
+    let launch_deadline = start
         .checked_add(duration)
         .ok_or_else(|| "resource window duration exceeds the clock range".to_owned())?;
+    let drain_deadline = launch_deadline
+        .checked_add(drain_timeout)
+        .ok_or_else(|| "resource drain timeout exceeds the clock range".to_owned())?;
 
-    let mut handles: Vec<JoinHandle<(C, WindowStats)>> = Vec::with_capacity(worker_count);
+    let mut handles: Vec<JoinHandle<WorkerOutcome<C>>> = Vec::with_capacity(worker_count);
     for (worker_index, mut connection) in connections.into_iter().enumerate() {
         let expected = expected.clone();
         handles.push(tokio::spawn(async move {
             let mut stats = WindowStats::default();
+            let mut fatal_error = None;
             let mut ordinal = worker_index;
             while let Some(offset) = aggregate_schedule_offset(ordinal, target_ops_per_sec) {
                 let Some(scheduled_at) = start.checked_add(offset) else {
                     break;
                 };
-                if scheduled_at >= deadline {
+                if scheduled_at >= launch_deadline {
                     break;
                 }
 
                 sleep_until(scheduled_at).await;
-                if TokioInstant::now() >= deadline {
+                if TokioInstant::now() >= launch_deadline {
                     break;
                 }
 
                 stats.attempted += 1;
-                match timeout_at(deadline, connection.get_fixture(&expected)).await {
+                match timeout_at(drain_deadline, connection.get_fixture(&expected)).await {
                     Ok(Ok(())) => stats.successful += 1,
-                    Ok(Err(_)) | Err(_) => stats.errors += 1,
+                    Ok(Err(error)) => {
+                        stats.errors += 1;
+                        if matches!(error_mode, WindowErrorMode::Fatal) {
+                            fatal_error = Some(error);
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        stats.cutoff += 1;
+                        return WorkerOutcome {
+                            connection: None,
+                            stats,
+                            fatal_error,
+                        };
+                    }
                 }
                 let Some(next) = ordinal.checked_add(worker_count) else {
                     break;
                 };
                 ordinal = next;
-                if TokioInstant::now() >= deadline {
+                if TokioInstant::now() >= launch_deadline {
                     break;
                 }
             }
-            (connection, stats)
+            WorkerOutcome {
+                connection: Some(connection),
+                stats,
+                fatal_error,
+            }
         }));
     }
 
     let mut returned = Vec::with_capacity(worker_count);
     let mut aggregate = WindowStats::default();
-    for handle in handles {
-        let (connection, stats) = handle
-            .await
-            .map_err(|error| format!("resource worker failed: {error}"))?;
-        returned.push(connection);
-        aggregate.add(stats);
+    let mut first_error = None;
+    for (worker_index, handle) in handles.into_iter().enumerate() {
+        let outcome = match handle.await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                first_error.get_or_insert_with(|| {
+                    format!("resource worker {worker_index} failed: {error}")
+                });
+                continue;
+            }
+        };
+        returned.push(outcome.connection);
+        aggregate.add(outcome.stats);
+        if let Some(error) = outcome.fatal_error {
+            first_error.get_or_insert_with(|| {
+                format!("resource worker {worker_index} returned an error: {error}")
+            });
+        }
     }
-    // Preserve the requested wall window even when the final centered slot is
-    // before the deadline (most visible at very low aggregate rates).
-    sleep_until(deadline).await;
-    if aggregate.attempted != aggregate.successful + aggregate.errors {
+    // Preserve the launch window when the final centered slot is earlier.
+    sleep_until(launch_deadline).await;
+    if aggregate.attempted != aggregate.successful + aggregate.errors + aggregate.cutoff {
         return Err("resource worker accounting invariant violated".to_owned());
+    }
+    if let Some(error) = first_error {
+        return Err(error);
     }
     Ok((returned, aggregate))
 }
@@ -475,17 +621,19 @@ fn print_human(report: &ProbeReport) {
         report.rss.bytes_per_connection
     );
     println!(
-        "cpu: {:.1}% at {:.1} successful ops/s (target {}, {} errors)",
+        "cpu: {:.1}% at {:.1} successful ops/s (target {}, {} errors, {} cutoffs)",
         report.cpu.process_cpu_percent,
         report.cpu.achieved_ops_per_sec,
         report.cpu.target_ops_per_sec,
-        report.cpu.errors
+        report.cpu.errors,
+        report.cpu.cutoff_ops
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     struct FakeConnection;
 
@@ -504,17 +652,100 @@ mod tests {
         }
     }
 
+    struct DelayedConnection;
+
+    #[async_trait]
+    impl ProbeConnection for DelayedConnection {
+        async fn connect(_url: &str) -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        async fn set_fixture(&mut self, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_fixture(&mut self, _expected: &[u8]) -> Result<(), String> {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok(())
+        }
+    }
+
+    static REPLACEMENT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+    struct CancellationSensitiveConnection {
+        generation: u64,
+        canceled: Arc<AtomicBool>,
+    }
+
+    struct CancellationGuard {
+        canceled: Arc<AtomicBool>,
+        completed: bool,
+    }
+
+    impl Drop for CancellationGuard {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.canceled.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProbeConnection for CancellationSensitiveConnection {
+        async fn connect(_url: &str) -> Result<Self, String> {
+            Ok(Self {
+                generation: REPLACEMENT_GENERATION.fetch_add(1, Ordering::SeqCst),
+                canceled: Arc::new(AtomicBool::new(false)),
+            })
+        }
+
+        async fn set_fixture(&mut self, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_fixture(&mut self, _expected: &[u8]) -> Result<(), String> {
+            if self.generation == 0 {
+                let mut guard = CancellationGuard {
+                    canceled: self.canceled.clone(),
+                    completed: false,
+                };
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                guard.completed = true;
+            }
+            Ok(())
+        }
+    }
+
+    struct ErrorConnection;
+
+    #[async_trait]
+    impl ProbeConnection for ErrorConnection {
+        async fn connect(_url: &str) -> Result<Self, String> {
+            Ok(Self)
+        }
+
+        async fn set_fixture(&mut self, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn get_fixture(&mut self, _expected: &[u8]) -> Result<(), String> {
+            Err("warmup read failed".to_owned())
+        }
+    }
+
     #[test]
     fn window_stats_adds_every_counter() {
         let mut left = WindowStats {
             attempted: 3,
             successful: 2,
             errors: 1,
+            cutoff: 0,
         };
         left.add(WindowStats {
             attempted: 5,
             successful: 4,
             errors: 1,
+            cutoff: 0,
         });
         assert_eq!(left.attempted, 8);
         assert_eq!(left.successful, 6);
@@ -529,23 +760,42 @@ mod tests {
 
     #[test]
     fn report_serialization_never_exposes_redis_credentials() {
-        let raw = "redis://user:secret@host:6379/2";
-        let config = ProbeConfig {
-            redis_url: raw.to_owned(),
-            redis_endpoint: safe_redis_endpoint(raw),
-            connections: 1,
-            target_ops_per_sec: 1,
-            warmup_secs: 0,
-            duration_secs: 1,
-            payload_bytes: 1,
-        };
+        let cases = [
+            (
+                "redis://alice:ordinary-secret@private-host:6380/2?token=query-secret#fragment-secret",
+                "redis://<host>:6380/2",
+                ["ordinary-secret", "query-secret", "fragment-secret"],
+            ),
+            (
+                "rediss://alice:encoded%40secret@private-host:6381/3",
+                "rediss://<host>:6381/3",
+                ["encoded%40secret", "private-host", "alice"],
+            ),
+            (
+                "redis://alice:slash-secret/value@private-host:6380/2",
+                "<redacted>",
+                ["slash-secret", "private-host", "alice"],
+            ),
+            (
+                "redis://alice:question-secret?value@private-host:6380/2",
+                "<redacted>",
+                ["question-secret", "private-host", "alice"],
+            ),
+            (
+                "redis://alice:hash-secret#value@private-host:6380/2",
+                "<redacted>",
+                ["hash-secret", "private-host", "alice"],
+            ),
+        ];
 
-        let json = serde_json::to_string(&config).expect("serialize probe configuration");
-        assert_eq!(config.redis_endpoint, "redis://host:6379/2");
-        assert!(!json.contains(raw));
-        assert!(!json.contains("user"));
-        assert!(!json.contains("secret"));
-        assert!(json.contains("redis://host:6379/2"));
+        for (raw, endpoint, secrets) in cases {
+            let json = serialized_config_for_url(raw);
+            assert!(json.contains(endpoint), "{json}");
+            assert!(!json.contains(raw), "{json}");
+            for secret in secrets {
+                assert!(!json.contains(secret), "{json}");
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -555,8 +805,10 @@ mod tests {
         let (_, stats) = run_window(
             connections,
             Duration::from_secs(10),
+            Duration::from_secs(1),
             1,
             Arc::from(&b"x"[..]),
+            WindowErrorMode::Count,
         )
         .await
         .expect("run fake resource window");
@@ -564,8 +816,91 @@ mod tests {
         assert_eq!(stats.attempted, 10);
         assert_eq!(stats.successful, 10);
         assert_eq!(stats.errors, 0);
-        assert_eq!(stats.attempted, stats.successful + stats.errors);
+        assert_eq!(stats.cutoff, 0);
+        assert_eq!(
+            stats.attempted,
+            stats.successful + stats.errors + stats.cutoff
+        );
         assert!(started.elapsed() >= Duration::from_secs(9));
         assert!(started.elapsed() <= Duration::from_secs(10));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delayed_tail_operation_drains_without_becoming_a_client_error() {
+        let started = TokioInstant::now();
+        let (_, stats) = run_window(
+            vec![DelayedConnection],
+            Duration::from_millis(100),
+            Duration::from_millis(100),
+            100,
+            Arc::from(&b"x"[..]),
+            WindowErrorMode::Count,
+        )
+        .await
+        .expect("run delayed resource window");
+
+        assert_eq!(stats.attempted, 2);
+        assert_eq!(stats.successful, 2);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.cutoff, 0);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert!(started.elapsed() <= Duration::from_millis(200));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceled_warmup_connection_is_replaced_before_measurement() {
+        REPLACEMENT_GENERATION.store(1, Ordering::SeqCst);
+        let canceled = Arc::new(AtomicBool::new(false));
+        let initial = CancellationSensitiveConnection {
+            generation: 0,
+            canceled: canceled.clone(),
+        };
+        let (connections, stats) = run_window(
+            vec![initial],
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            1,
+            Arc::from(&b"x"[..]),
+            WindowErrorMode::Fatal,
+        )
+        .await
+        .expect("warmup cutoff is accounted separately");
+
+        assert_eq!(stats.attempted, 1);
+        assert_eq!(stats.successful, 0);
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.cutoff, 1);
+        assert!(connections[0].is_none());
+        assert!(canceled.load(Ordering::SeqCst));
+
+        let restored = restore_after_warmup(
+            connections,
+            "redis://unused/",
+            b"x",
+            Duration::from_millis(100),
+        )
+        .await
+        .expect("replace canceled warmup connection");
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].generation, 1);
+        assert!(!restored[0].canceled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_warmup_errors_are_fatal() {
+        let result = run_window(
+            vec![ErrorConnection],
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+            1,
+            Arc::from(&b"x"[..]),
+            WindowErrorMode::Fatal,
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("warmup client error must abort measurement"),
+        };
+        assert!(error.contains("warmup read failed"));
     }
 }

@@ -93,6 +93,7 @@ jobs:
       RESOURCE_TARGET_OPS_PER_SEC: "500"
       RESOURCE_WARMUP_SECS: "1"
       RESOURCE_DURATION_SECS: "2"
+      RESOURCE_DRAIN_TIMEOUT_MS: "1000"
       RESOURCE_PAYLOAD_BYTES: "1024"
       RESOURCE_BUILD_RUNS: "1"
 
@@ -127,7 +128,8 @@ jobs:
 
       - name: Run isolated resource probes
         run: |
-          mkdir -p resource-results
+          results_dir="$RUNNER_TEMP/resource-results"
+          mkdir -p "$results_dir"
           redis-server --port 6481 --save '' --appendonly no --daemonize yes
           cleanup() { redis-cli -p 6481 shutdown nosave >/dev/null 2>&1 || true; }
           trap cleanup EXIT
@@ -138,29 +140,30 @@ jobs:
             sleep 0.1
           done
           redis-cli -p 6481 ping >/dev/null
-          redis-server --version > resource-results/redis-version.txt
-          rustc -Vv > resource-results/rust-version.txt
+          redis-server --version > "$results_dir/redis-version.txt"
+          rustc -Vv > "$results_dir/rust-version.txt"
 
           cargo run -p resource-bench --release \
             --no-default-features --features client-redis-tower \
             --bin resource-redis-tower -- --json \
-            > resource-results/redis-tower.json
+            > "$results_dir/redis-tower.json"
           cargo run -p resource-bench --release \
             --no-default-features --features client-redis-rs \
             --bin resource-redis-rs -- --json \
-            > resource-results/redis-rs.json
+            > "$results_dir/redis-rs.json"
           cargo run -p resource-bench --release \
             --no-default-features --features client-fred \
             --bin resource-fred -- --json \
-            > resource-results/fred.json
+            > "$results_dir/fred.json"
           cargo run -p resource-bench --release \
             --no-default-features --features build-measure \
             --bin resource-build-measure -- --json \
-            > resource-results/build-footprint.json
-          cp Cargo.lock resource-results/Cargo.lock
+            > "$results_dir/build-footprint.json"
+          cp Cargo.lock "$results_dir/Cargo.lock"
 
       - name: Validate resource probe correctness
         run: |
+          results_dir="$RUNNER_TEMP/resource-results"
           probe_filter=crates/resource-bench/validate-probe-result.jq
           jq -e -f "$probe_filter" \
             crates/resource-bench/tests/fixtures/probe-valid.json >/dev/null
@@ -170,17 +173,21 @@ jobs:
             exit 1
           fi
           for result in \
-            resource-results/redis-tower.json \
-            resource-results/redis-rs.json \
-            resource-results/fred.json; do
+            "$results_dir/redis-tower.json" \
+            "$results_dir/redis-rs.json" \
+            "$results_dir/fred.json"; do
             jq -e -f "$probe_filter" "$result" >/dev/null
           done
           jq -e -f crates/resource-bench/validate-build-result.jq \
-            resource-results/build-footprint.json >/dev/null
+            "$results_dir/build-footprint.json" >/dev/null
+          lock_sha256=$(sha256sum "$results_dir/Cargo.lock" | awk '{print $1}')
+          jq -e --arg lock_sha256 "$lock_sha256" \
+            '.cargo_lock_sha256 == $lock_sha256' \
+            "$results_dir/build-footprint.json" >/dev/null
 
       - name: Upload resource probe results
         uses: actions/upload-artifact@v4
         with:
           name: resource-footprint-${{ github.run_id }}
-          path: resource-results
+          path: ${{ runner.temp }}/resource-results
           retention-days: 90
