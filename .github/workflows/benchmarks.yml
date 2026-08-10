@@ -15,10 +15,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   REDIS_VERSION: "8.0.6"
-  BENCH_SECS: "5"
-  BENCH_WARMUP: "2"
+  # 3 payloads x 3 concurrency levels x 5-6 clients, plus setup, stays well
+  # inside each job's 45-minute budget while preserving three repeated runs.
+  BENCH_SECS: "3"
+  BENCH_WARMUP: "1"
   BENCH_RUNS: "3"
-  BENCH_CONCURRENCY: "1,8,32,128"
+  BENCH_CONCURRENCY: "1,32,128"
+  BENCH_PAYLOAD_SIZES: "64,1024,16384"
 
 jobs:
   comparison:
@@ -68,6 +71,10 @@ jobs:
           rustc -Vv > benchmark-results/rust-version.txt
           cargo run -p ${{ matrix.package }} --release -- --json \
             > benchmark-results/${{ matrix.package }}.json
+          if [ "${{ matrix.package }}" = "cluster-bench" ]; then
+            BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json \
+              > benchmark-results/cluster-bench-replica.json
+          fi
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4

@@ -1,54 +1,86 @@
-//! Unified client adapter for the four cluster clients under test.
-//!
-//! Each client provides a `spawn_workers` method that creates N long-lived
-//! workers (tokio tasks for async clients, blocking threads for the sync one),
-//! each holding its own persistent connection / shared worker. Workers record
-//! post-warmup op latencies into a local HDR histogram and return it on `stop`.
-//!
-//! Clients under test:
-//!
-//! - `RedisTower` -- redis-tower-cluster ClusterClient (baseline: one
-//!   `Arc<Mutex<ClusterConnection>>` serializing all ops).
-//! - `RedisTowerMux` -- redis-tower-cluster MultiplexedClusterClient
-//!   (factory-backed AutoPipelineService per master).
-//! - `RedisRsSync` -- redis 1.2 cluster blocking client, one persistent
-//!   connection per worker thread.
-//! - `RedisRsAsync` -- redis 1.2 cluster_async ClusterConnection.
+//! Unified client adapters for the Redis Cluster comparison.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
+use fred::prelude::{Builder as FredBuilder, ClientLike, Config as FredConfig, KeysInterface};
 use hdrhistogram::Histogram;
+use redis_tower::{ReadPreference, RedisConnection};
 use redis_tower_cluster::{ClusterClient as TowerClusterClient, MultiplexedClusterClient};
-use redis_tower_commands::{Get as TGet, Set as TSet};
+use redis_tower_commands::{Get as TGet, Set as TSet, Wait as TWait};
+use redis_tower_test::cluster::{ClusterFixture, hash_slot};
 
-use crate::runner::{WorkerHandle, Workload, new_histogram};
+use crate::runner::{WorkerHandle, WorkerResult, Workload, new_histogram};
 
 #[allow(clippy::enum_variant_names)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClientKind {
     RedisTower,
     RedisTowerMux,
+    RedisTowerMuxReplica,
     RedisRsSync,
     RedisRsAsync,
+    Fred,
 }
 
-/// A client is just a factory that knows how to spin up N workers.
+impl ClientKind {
+    pub const THROUGHPUT_DEFAULTS: [Self; 5] = [
+        Self::RedisTower,
+        Self::RedisTowerMux,
+        Self::RedisRsSync,
+        Self::RedisRsAsync,
+        Self::Fred,
+    ];
+
+    pub const REPLICA_DEFAULTS: [Self; 2] = [Self::RedisTowerMux, Self::RedisTowerMuxReplica];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RedisTower => "redis-tower",
+            Self::RedisTowerMux => "redis-tower-mux",
+            Self::RedisTowerMuxReplica => "redis-tower-mux-replica",
+            Self::RedisRsSync => "redis-rs-sync",
+            Self::RedisRsAsync => "redis-rs-async",
+            Self::Fred => "fred",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "redis-tower" | "tower" => Some(Self::RedisTower),
+            "redis-tower-mux" | "tower-mux" | "mux" => Some(Self::RedisTowerMux),
+            "redis-tower-mux-replica" | "tower-replica" | "replica" => {
+                Some(Self::RedisTowerMuxReplica)
+            }
+            "redis-rs-sync" | "redis-sync" => Some(Self::RedisRsSync),
+            "redis-rs-async" | "redis-async" => Some(Self::RedisRsAsync),
+            "fred" => Some(Self::Fred),
+            _ => None,
+        }
+    }
+}
+
+/// A connected client factory that can spin up long-lived workers.
 pub enum Client {
     Tower(TowerClusterClient),
     TowerMux(MultiplexedClusterClient),
+    TowerMuxReplica(MultiplexedClusterClient),
     RedisRsSync(Arc<redis::cluster::ClusterClient>),
     RedisRsAsync(redis::cluster_async::ClusterConnection),
+    Fred(fred::clients::Client),
 }
 
 impl Client {
     pub fn kind(&self) -> ClientKind {
         match self {
-            Client::Tower(_) => ClientKind::RedisTower,
-            Client::TowerMux(_) => ClientKind::RedisTowerMux,
-            Client::RedisRsSync(_) => ClientKind::RedisRsSync,
-            Client::RedisRsAsync(_) => ClientKind::RedisRsAsync,
+            Self::Tower(_) => ClientKind::RedisTower,
+            Self::TowerMux(_) => ClientKind::RedisTowerMux,
+            Self::TowerMuxReplica(_) => ClientKind::RedisTowerMuxReplica,
+            Self::RedisRsSync(_) => ClientKind::RedisRsSync,
+            Self::RedisRsAsync(_) => ClientKind::RedisRsAsync,
+            Self::Fred(_) => ClientKind::Fred,
         }
     }
 
@@ -60,78 +92,142 @@ impl Client {
         match kind {
             ClientKind::RedisTower => TowerClusterClient::connect(seed)
                 .await
-                .map(Client::Tower)
-                .map_err(|e| e.to_string()),
+                .map(Self::Tower)
+                .map_err(|error| error.to_string()),
             ClientKind::RedisTowerMux => MultiplexedClusterClient::connect(seed)
                 .await
-                .map(Client::TowerMux)
-                .map_err(|e| e.to_string()),
+                .map(Self::TowerMux)
+                .map_err(|error| error.to_string()),
+            ClientKind::RedisTowerMuxReplica => MultiplexedClusterClient::builder(seed)
+                .read_preference(ReadPreference::Replica)
+                .connect()
+                .await
+                .map(Self::TowerMuxReplica)
+                .map_err(|error| error.to_string()),
             ClientKind::RedisRsSync => {
-                let c = redis::cluster::ClusterClient::new(seed_urls.to_vec())
-                    .map_err(|e| e.to_string())?;
-                Ok(Client::RedisRsSync(Arc::new(c)))
+                let client = redis::cluster::ClusterClient::new(seed_urls.to_vec())
+                    .map_err(|error| error.to_string())?;
+                Ok(Self::RedisRsSync(Arc::new(client)))
             }
             ClientKind::RedisRsAsync => {
-                let c = redis::cluster::ClusterClient::new(seed_urls.to_vec())
-                    .map_err(|e| e.to_string())?;
-                let conn = c.get_async_connection().await.map_err(|e| e.to_string())?;
-                Ok(Client::RedisRsAsync(conn))
+                let client = redis::cluster::ClusterClient::new(seed_urls.to_vec())
+                    .map_err(|error| error.to_string())?;
+                let connection = client
+                    .get_async_connection()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                Ok(Self::RedisRsAsync(connection))
+            }
+            ClientKind::Fred => {
+                let url = format!("redis-cluster://{seed}");
+                let config =
+                    FredConfig::from_url_clustered(&url).map_err(|error| error.to_string())?;
+                let client = FredBuilder::from_config(config)
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                client.init().await.map_err(|error| error.to_string())?;
+                Ok(Self::Fred(client))
             }
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_workers(
         &self,
         concurrency: usize,
         workload: Workload,
+        payload_bytes: usize,
         stop: Arc<AtomicBool>,
-        ops: Arc<AtomicU64>,
+        batches: Arc<AtomicU64>,
+        errors: Arc<AtomicU64>,
         warmup_deadline: Instant,
     ) -> Vec<WorkerHandle> {
         let mut handles = Vec::with_capacity(concurrency);
+        let payload: Arc<str> = Arc::from("x".repeat(payload_bytes));
         match self {
-            Client::Tower(c) => {
+            Self::Tower(client) => {
                 for worker_id in 0..concurrency {
-                    let c = c.clone();
-                    let stop = stop.clone();
-                    let ops = ops.clone();
+                    let client = client.clone();
+                    let context = WorkerContext::new(
+                        worker_id,
+                        workload,
+                        payload.clone(),
+                        stop.clone(),
+                        batches.clone(),
+                        errors.clone(),
+                        warmup_deadline,
+                    );
                     handles.push(WorkerHandle::Async(tokio::spawn(async move {
-                        tower_loop(c, worker_id, workload, stop, ops, warmup_deadline).await
+                        tower_loop(client, context).await
                     })));
                 }
             }
-            Client::TowerMux(c) => {
+            Self::TowerMux(client) | Self::TowerMuxReplica(client) => {
                 for worker_id in 0..concurrency {
-                    let c = c.clone();
-                    let stop = stop.clone();
-                    let ops = ops.clone();
+                    let client = client.clone();
+                    let context = WorkerContext::new(
+                        worker_id,
+                        workload,
+                        payload.clone(),
+                        stop.clone(),
+                        batches.clone(),
+                        errors.clone(),
+                        warmup_deadline,
+                    );
                     handles.push(WorkerHandle::Async(tokio::spawn(async move {
-                        tower_mux_loop(c, worker_id, workload, stop, ops, warmup_deadline).await
+                        tower_mux_loop(client, context).await
                     })));
                 }
             }
-            Client::RedisRsAsync(c) => {
+            Self::RedisRsAsync(client) => {
                 for worker_id in 0..concurrency {
-                    let c = c.clone();
-                    let stop = stop.clone();
-                    let ops = ops.clone();
+                    let client = client.clone();
+                    let context = WorkerContext::new(
+                        worker_id,
+                        workload,
+                        payload.clone(),
+                        stop.clone(),
+                        batches.clone(),
+                        errors.clone(),
+                        warmup_deadline,
+                    );
                     handles.push(WorkerHandle::Async(tokio::spawn(async move {
-                        redis_rs_async_loop(c, worker_id, workload, stop, ops, warmup_deadline)
-                            .await
+                        redis_rs_async_loop(client, context).await
                     })));
                 }
             }
-            Client::RedisRsSync(c) => {
-                // Each worker gets its own persistent blocking connection,
-                // running on a dedicated OS thread.
+            Self::RedisRsSync(client) => {
                 for worker_id in 0..concurrency {
-                    let c = c.clone();
-                    let stop = stop.clone();
-                    let ops = ops.clone();
-                    let jh = std::thread::spawn(move || {
-                        redis_rs_sync_loop(c, worker_id, workload, stop, ops, warmup_deadline)
-                    });
-                    handles.push(WorkerHandle::Thread(jh));
+                    let client = client.clone();
+                    let context = WorkerContext::new(
+                        worker_id,
+                        workload,
+                        payload.clone(),
+                        stop.clone(),
+                        batches.clone(),
+                        errors.clone(),
+                        warmup_deadline,
+                    );
+                    handles.push(WorkerHandle::Thread(std::thread::spawn(move || {
+                        redis_rs_sync_loop(client, context)
+                    })));
+                }
+            }
+            Self::Fred(client) => {
+                for worker_id in 0..concurrency {
+                    let client = client.clone();
+                    let context = WorkerContext::new(
+                        worker_id,
+                        workload,
+                        payload.clone(),
+                        stop.clone(),
+                        batches.clone(),
+                        errors.clone(),
+                        warmup_deadline,
+                    );
+                    handles.push(WorkerHandle::Async(tokio::spawn(async move {
+                        fred_loop(client, context).await
+                    })));
                 }
             }
         }
@@ -139,141 +235,298 @@ impl Client {
     }
 }
 
-fn next_key(seq: u64) -> String {
-    format!("bench:{}", seq % 1024)
-}
-
-async fn tower_loop(
-    c: TowerClusterClient,
+struct WorkerContext {
     worker_id: usize,
     workload: Workload,
+    payload: Arc<str>,
     stop: Arc<AtomicBool>,
-    ops: Arc<AtomicU64>,
+    batches: Arc<AtomicU64>,
+    errors: Arc<AtomicU64>,
     warmup_deadline: Instant,
-) -> Histogram<u64> {
-    let mut hist = new_histogram();
-    let mut seq = worker_id as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let key = next_key(seq);
-        seq = seq.wrapping_add(1);
-        let t0 = Instant::now();
-        let ok = match workload {
-            Workload::Set => c.execute(TSet::new(key, "value")).await.is_ok(),
-            Workload::Get => c.execute(TGet::new(key)).await.is_ok(),
-        };
-        if ok {
-            record(&mut hist, &ops, t0, warmup_deadline);
-        }
-    }
-    hist
 }
 
-async fn tower_mux_loop(
-    c: MultiplexedClusterClient,
-    worker_id: usize,
-    workload: Workload,
-    stop: Arc<AtomicBool>,
-    ops: Arc<AtomicU64>,
-    warmup_deadline: Instant,
-) -> Histogram<u64> {
-    let mut hist = new_histogram();
-    let mut seq = worker_id as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let key = next_key(seq);
-        seq = seq.wrapping_add(1);
-        let t0 = Instant::now();
-        let ok = match workload {
-            Workload::Set => c.execute(TSet::new(&key, "value")).await.is_ok(),
-            Workload::Get => c.execute(TGet::new(&key)).await.is_ok(),
-        };
-        if ok {
-            record(&mut hist, &ops, t0, warmup_deadline);
+impl WorkerContext {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        worker_id: usize,
+        workload: Workload,
+        payload: Arc<str>,
+        stop: Arc<AtomicBool>,
+        batches: Arc<AtomicU64>,
+        errors: Arc<AtomicU64>,
+        warmup_deadline: Instant,
+    ) -> Self {
+        Self {
+            worker_id,
+            workload,
+            payload,
+            stop,
+            batches,
+            errors,
+            warmup_deadline,
         }
     }
-    hist
+}
+
+fn next_key(sequence: u64) -> String {
+    format!("bench:{}", sequence % 1024)
+}
+
+async fn tower_loop(client: TowerClusterClient, context: WorkerContext) -> WorkerResult {
+    let mut histogram = new_histogram();
+    let mut sequence = context.worker_id as u64;
+    while !context.stop.load(Ordering::Relaxed) {
+        let key = next_key(sequence);
+        sequence = sequence.wrapping_add(1);
+        let started = Instant::now();
+        let succeeded = match context.workload {
+            Workload::Set => client
+                .execute(TSet::new(key, context.payload.as_ref()))
+                .await
+                .is_ok(),
+            Workload::Get => matches!(
+                client.execute(TGet::new(key)).await,
+                Ok(Some(value)) if value.len() == context.payload.len()
+            ),
+        };
+        record_outcome(&mut histogram, &context, started, succeeded);
+    }
+    Ok(histogram)
+}
+
+async fn tower_mux_loop(client: MultiplexedClusterClient, context: WorkerContext) -> WorkerResult {
+    let mut histogram = new_histogram();
+    let mut sequence = context.worker_id as u64;
+    while !context.stop.load(Ordering::Relaxed) {
+        let key = next_key(sequence);
+        sequence = sequence.wrapping_add(1);
+        let started = Instant::now();
+        let succeeded = match context.workload {
+            Workload::Set => client
+                .execute(TSet::new(&key, context.payload.as_ref()))
+                .await
+                .is_ok(),
+            Workload::Get => matches!(
+                client.execute(TGet::new(&key)).await,
+                Ok(Some(value)) if value.len() == context.payload.len()
+            ),
+        };
+        record_outcome(&mut histogram, &context, started, succeeded);
+    }
+    Ok(histogram)
 }
 
 async fn redis_rs_async_loop(
-    mut c: redis::cluster_async::ClusterConnection,
-    worker_id: usize,
-    workload: Workload,
-    stop: Arc<AtomicBool>,
-    ops: Arc<AtomicU64>,
-    warmup_deadline: Instant,
-) -> Histogram<u64> {
+    mut client: redis::cluster_async::ClusterConnection,
+    context: WorkerContext,
+) -> WorkerResult {
     use redis::AsyncCommands;
-    let mut hist = new_histogram();
-    let mut seq = worker_id as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let key = next_key(seq);
-        seq = seq.wrapping_add(1);
-        let t0 = Instant::now();
-        let ok = match workload {
-            Workload::Set => c.set::<_, _, ()>(&key, "value").await.is_ok(),
-            Workload::Get => {
-                let r: redis::RedisResult<Option<Vec<u8>>> = c.get(&key).await;
-                r.is_ok()
-            }
+
+    let mut histogram = new_histogram();
+    let mut sequence = context.worker_id as u64;
+    while !context.stop.load(Ordering::Relaxed) {
+        let key = next_key(sequence);
+        sequence = sequence.wrapping_add(1);
+        let started = Instant::now();
+        let succeeded = match context.workload {
+            Workload::Set => client
+                .set::<_, _, ()>(&key, context.payload.as_ref())
+                .await
+                .is_ok(),
+            Workload::Get => matches!(
+                client.get::<_, Option<Vec<u8>>>(&key).await,
+                Ok(Some(value)) if value.len() == context.payload.len()
+            ),
         };
-        if ok {
-            record(&mut hist, &ops, t0, warmup_deadline);
-        }
+        record_outcome(&mut histogram, &context, started, succeeded);
     }
-    hist
+    Ok(histogram)
 }
 
 fn redis_rs_sync_loop(
-    c: Arc<redis::cluster::ClusterClient>,
-    worker_id: usize,
-    workload: Workload,
-    stop: Arc<AtomicBool>,
-    ops: Arc<AtomicU64>,
-    warmup_deadline: Instant,
-) -> Histogram<u64> {
+    client: Arc<redis::cluster::ClusterClient>,
+    context: WorkerContext,
+) -> WorkerResult {
     use redis::Commands;
-    let mut hist = new_histogram();
-    let mut conn = match c.get_connection() {
-        Ok(c) => c,
-        Err(_) => return hist,
-    };
-    let mut seq = worker_id as u64;
-    while !stop.load(Ordering::Relaxed) {
-        let key = next_key(seq);
-        seq = seq.wrapping_add(1);
-        let t0 = Instant::now();
-        let ok = match workload {
-            Workload::Set => conn.set::<_, _, ()>(&key, "value").is_ok(),
-            Workload::Get => {
-                let r: redis::RedisResult<Option<Vec<u8>>> = conn.get(&key);
-                r.is_ok()
-            }
-        };
-        if ok {
-            record(&mut hist, &ops, t0, warmup_deadline);
+
+    let mut histogram = new_histogram();
+    let mut connection = match client.get_connection() {
+        Ok(connection) => connection,
+        Err(error) => {
+            return Err(format!(
+                "redis-rs sync worker {} failed to connect: {error}",
+                context.worker_id
+            ));
         }
+    };
+    let mut sequence = context.worker_id as u64;
+    while !context.stop.load(Ordering::Relaxed) {
+        let key = next_key(sequence);
+        sequence = sequence.wrapping_add(1);
+        let started = Instant::now();
+        let succeeded = match context.workload {
+            Workload::Set => connection
+                .set::<_, _, ()>(&key, context.payload.as_ref())
+                .is_ok(),
+            Workload::Get => matches!(
+                connection.get::<_, Option<Vec<u8>>>(&key),
+                Ok(Some(value)) if value.len() == context.payload.len()
+            ),
+        };
+        record_outcome(&mut histogram, &context, started, succeeded);
     }
-    hist
+    Ok(histogram)
 }
 
-/// Record one completed op. Ops that complete before `warmup_deadline` are
-/// discarded from both the latency histogram and the throughput counter.
-fn record(hist: &mut Histogram<u64>, ops: &AtomicU64, t0: Instant, warmup_deadline: Instant) {
-    if Instant::now() < warmup_deadline {
+async fn fred_loop(client: fred::clients::Client, context: WorkerContext) -> WorkerResult {
+    let mut histogram = new_histogram();
+    let mut sequence = context.worker_id as u64;
+    while !context.stop.load(Ordering::Relaxed) {
+        let key = next_key(sequence);
+        sequence = sequence.wrapping_add(1);
+        let started = Instant::now();
+        let succeeded = match context.workload {
+            Workload::Set => client
+                .set::<(), _, _>(&key, context.payload.as_ref(), None, None, false)
+                .await
+                .is_ok(),
+            Workload::Get => matches!(
+                client.get::<Option<String>, _>(&key).await,
+                Ok(Some(value)) if value.len() == context.payload.len()
+            ),
+        };
+        record_outcome(&mut histogram, &context, started, succeeded);
+    }
+    Ok(histogram)
+}
+
+fn record_outcome(
+    histogram: &mut Histogram<u64>,
+    context: &WorkerContext,
+    started: Instant,
+    succeeded: bool,
+) {
+    if Instant::now() < context.warmup_deadline {
         return;
     }
-    let us = t0.elapsed().as_micros() as u64;
-    hist.saturating_record(us);
-    ops.fetch_add(1, Ordering::Relaxed);
+    if succeeded {
+        histogram.saturating_record(started.elapsed().as_micros() as u64);
+        context.batches.fetch_add(1, Ordering::Relaxed);
+    } else {
+        context.errors.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
-/// Pre-populate the keyspace used by the GET workload so every read hits.
-/// Keys match the runner pattern `bench:{seq%1024}`.
-pub async fn prepopulate(seed: &str, _seed_urls: &[String]) {
+/// Populate every benchmark key and fail on the first rejected write.
+pub async fn prepopulate(seed: &str, payload: &str) -> Result<(), String> {
     let client = TowerClusterClient::connect(seed)
         .await
-        .expect("prepopulate connect");
-    for seq in 0..1024 {
-        let key = format!("bench:{}", seq);
-        let _ = client.execute(TSet::new(key, "value")).await;
+        .map_err(|error| format!("prepopulate connect failed: {error}"))?;
+    for sequence in 0..1024u64 {
+        let key = next_key(sequence);
+        client
+            .execute(TSet::new(&key, payload))
+            .await
+            .map_err(|error| format!("prepopulate SET {key} failed: {error}"))?;
+    }
+    Ok(())
+}
+
+/// Populate a six-node fixture directly through each slot owner, prove every
+/// owner's replica acknowledged the writes, then verify all reads through a
+/// strict replica-routed redis-tower client.
+pub async fn prepopulate_and_verify_replicas(
+    fixture: &ClusterFixture,
+    payload: &str,
+) -> Result<(), String> {
+    let topology = fixture
+        .topology()
+        .await
+        .map_err(|error| error.to_string())?;
+    let mut seeders = BTreeMap::new();
+    for master in topology.masters() {
+        let connection = RedisConnection::connect(&master.addr)
+            .await
+            .map_err(|error| format!("connect to master {} failed: {error}", master.addr))?;
+        seeders.insert(master.index, connection);
+    }
+
+    for sequence in 0..1024u64 {
+        let key = next_key(sequence);
+        let slot = hash_slot(key.as_bytes());
+        let owner = topology
+            .owner_of_slot(slot)
+            .ok_or_else(|| format!("slot {slot} has no owner"))?;
+        seeders
+            .get_mut(&owner.index)
+            .ok_or_else(|| format!("slot owner {} has no seeder", owner.addr))?
+            .execute(TSet::new(&key, payload))
+            .await
+            .map_err(|error| format!("prepopulate SET {key} failed: {error}"))?;
+    }
+
+    for (index, seeder) in &mut seeders {
+        let acknowledgements = seeder
+            .execute(TWait::new(1, 5_000))
+            .await
+            .map_err(|error| format!("WAIT on master {index} failed: {error}"))?;
+        if acknowledgements < 1 {
+            return Err(format!(
+                "master {index} did not receive a replica acknowledgement"
+            ));
+        }
+    }
+
+    let replica_client = MultiplexedClusterClient::builder(fixture.seed_addr())
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .map_err(|error| format!("replica verification connect failed: {error}"))?;
+    for sequence in 0..1024u64 {
+        let key = next_key(sequence);
+        match replica_client.execute(TGet::new(&key)).await {
+            Ok(Some(value)) if value.len() == payload.len() => {}
+            Ok(Some(value)) => {
+                return Err(format!(
+                    "replica GET {key} returned {} bytes, expected {}",
+                    value.len(),
+                    payload.len()
+                ));
+            }
+            Ok(None) => return Err(format!("replica GET {key} missed")),
+            Err(error) => return Err(format!("replica GET {key} failed: {error}")),
+        }
+    }
+    replica_client.shutdown().await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn client_aliases_parse() {
+        assert_eq!(ClientKind::parse("fred"), Some(ClientKind::Fred));
+        assert_eq!(
+            ClientKind::parse("tower-replica"),
+            Some(ClientKind::RedisTowerMuxReplica)
+        );
+        assert_eq!(ClientKind::parse("unknown"), None);
+    }
+
+    #[test]
+    fn stable_client_ids_round_trip() {
+        let kinds = [
+            ClientKind::RedisTower,
+            ClientKind::RedisTowerMux,
+            ClientKind::RedisTowerMuxReplica,
+            ClientKind::RedisRsSync,
+            ClientKind::RedisRsAsync,
+            ClientKind::Fred,
+        ];
+        for kind in kinds {
+            assert_eq!(ClientKind::parse(kind.as_str()), Some(kind));
+        }
     }
 }
