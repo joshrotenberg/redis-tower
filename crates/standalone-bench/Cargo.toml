@@ -14,7 +14,8 @@ redis-tower-commands = { path = "../redis-tower-commands", default-features = fa
 redis-tower-core = { path = "../redis-tower-core" }
 redis-server-wrapper = { workspace = true }
 
-redis = { version = "1.2", features = ["tokio-comp"] }
+redis = { version = "1.2", features = ["connection-manager", "tokio-comp"] }
+fred = { version = "10.1", default-features = false, features = ["i-keys"] }
 
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync"] }
 bytes = { workspace = true }

@@ -1,41 +1,9 @@
-//! Standalone throughput comparison: redis-tower vs redis-rs.
+//! Standalone Redis comparison across redis-tower, redis-rs, and fred.
 //!
-//! Spins up a Redis server via `redis-server-wrapper`, runs fixed-duration
-//! workloads across several concurrency levels, and prints a comparison table.
-//!
-//! Clients under test:
-//! - `RedisTower`    -- redis-tower `RedisClient` (`Arc<Mutex<RedisConnection>>`)
-//! - `RedisTowerMux` -- redis-tower `MultiplexedClient` (AutoPipeline)
-//! - `RedisRsSync`   -- redis-rs sync client (one conn per thread)
-//! - `RedisRsAsync`  -- redis-rs async `MultiplexedConnection`
-//!
-//! ## Env vars
-//!
-//! ```text
-//! BENCH_SECS=8               measured window per run, in seconds (default: 10)
-//! BENCH_WARMUP=2             warmup window discarded per run, in seconds (default: 2)
-//! BENCH_RUNS=3               repeats per cell; results report mean +/- stddev (default: 3)
-//! BENCH_CONCURRENCY=1,8,...  concurrency levels (default: 1,8,32,128)
-//! BENCH_PORT=6480            port for the throwaway server (default: 6480)
-//! ```
-//!
-//! ## Running
-//!
-//! ```bash
-//! cargo run -p standalone-bench --release            # human-readable table
-//! cargo run -p standalone-bench --release -- --json  # JSON array on stdout
-//! ```
-//!
-//! ## Interpreting results
-//!
-//! - `ops/s`: higher is better; `p50`/`p90`/`p99`/`p999`: lower latency is better.
-//! - `ops/s` is reported as a mean across `BENCH_RUNS` with the standard
-//!   deviation; latency percentiles are HDR-histogram values averaged across runs.
-//! - `RedisTowerMux` should outperform `RedisTower` at higher concurrency
-//!   due to auto-pipelining (concurrent ops batch into one round-trip).
-//! - Compare `RedisTowerMux` vs `RedisRsAsync` to see redis-tower's implicit
-//!   pipeline efficiency vs redis-rs's multiplexed connection.
-//! - The `Pipeline` workload measures explicit batching (100 SETs per call).
+//! The default matrix sweeps 64 B, 1 KiB, and 16 KiB values across GET, SET,
+//! and explicit pipeline workloads. Use the environment variables documented
+//! in `crates/standalone-bench/README.md`, or their CLI equivalents, to select
+//! smaller smoke matrices.
 
 mod clients;
 mod runner;
@@ -47,167 +15,378 @@ use redis_server_wrapper::RedisServer;
 use crate::clients::{Client, ClientKind};
 use crate::runner::{AggregatedReport, BenchConfig, BenchReport, Workload, aggregate};
 
+const THROUGHPUT_SCHEMA_VERSION: u64 = 2;
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 8)]
 async fn main() {
-    let json = std::env::args().any(|a| a == "--json");
+    let json = std::env::args().any(|argument| argument == "--json");
+    if let Err(error) = run(json).await {
+        eprintln!("standalone benchmark failed: {error}");
+        std::process::exit(1);
+    }
+    // Blocking comparison clients can retain runtime resources after output.
+    std::process::exit(0);
+}
 
-    let duration_secs: u64 = std::env::var("BENCH_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
-    let warmup_secs: u64 = std::env::var("BENCH_WARMUP")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2);
-    let runs: usize = std::env::var("BENCH_RUNS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(3);
-    let concurrencies: Vec<usize> = std::env::var("BENCH_CONCURRENCY")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .filter_map(|x| x.trim().parse().ok())
-                .collect::<Vec<_>>()
+struct MatrixConfig {
+    duration: Duration,
+    warmup: Duration,
+    runs: usize,
+    concurrencies: Vec<usize>,
+    pipeline_concurrency: Vec<usize>,
+    payload_sizes: Vec<usize>,
+    pipeline_commands: usize,
+    clients: Vec<ClientKind>,
+    workloads: Vec<Workload>,
+}
+
+impl MatrixConfig {
+    fn from_env() -> Result<Self, String> {
+        Ok(Self {
+            duration: Duration::from_secs(env_or_arg_parse("BENCH_SECS", "--secs", 10_u64)?),
+            warmup: Duration::from_secs(env_or_arg_parse("BENCH_WARMUP", "--warmup", 2_u64)?),
+            runs: env_or_arg_parse("BENCH_RUNS", "--runs", 3_usize)?.max(1),
+            concurrencies: parse_positive_list(
+                &env_or_arg("BENCH_CONCURRENCY", "--concurrency", "1,8,32,128"),
+                "concurrency",
+            )?,
+            pipeline_concurrency: parse_positive_list(
+                &env_or_arg("BENCH_PIPELINE_CONCURRENCY", "--pipeline-concurrency", "1"),
+                "pipeline concurrency",
+            )?,
+            payload_sizes: parse_size_list(&env_or_arg(
+                "BENCH_PAYLOAD_SIZES",
+                "--payload-sizes",
+                "64,1024,16384",
+            ))?,
+            pipeline_commands: env_or_arg_parse(
+                "BENCH_PIPELINE_COMMANDS",
+                "--pipeline-commands",
+                100_usize,
+            )?
+            .max(1),
+            clients: parse_clients(env_or_arg_optional("BENCH_CLIENTS", "--clients").as_deref())?,
+            workloads: parse_workloads(&env_or_arg(
+                "BENCH_WORKLOADS",
+                "--workloads",
+                "set,get,pipeline",
+            ))?,
         })
-        .unwrap_or_else(|| vec![1, 8, 32, 128]);
-    let port: u16 = std::env::var("BENCH_PORT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(6480);
+    }
+}
 
-    // Diagnostics go to stderr so `--json` keeps stdout machine-parseable.
+async fn run(json: bool) -> Result<(), String> {
+    let config = MatrixConfig::from_env()?;
+    let port = env_or_arg_parse("BENCH_PORT", "--port", 6480_u16)?;
     eprintln!("starting redis server on port {port}");
     let server = RedisServer::new()
         .port(port)
         .start()
         .await
-        .expect("failed to start redis server");
-    eprintln!("server ready at {}", server.addr());
-
+        .map_err(|error| format!("failed to start redis server: {error}"))?;
     let addr = server.addr();
+    eprintln!("server ready at {addr}");
 
-    eprintln!("pre-populating 1024 keys...");
-    clients::prepopulate(&addr).await;
-    eprintln!("pre-populate done");
+    let mut reports = Vec::<AggregatedReport>::new();
+    for &payload_bytes in &config.payload_sizes {
+        let payload = "x".repeat(payload_bytes);
+        eprintln!("pre-populating 1024 keys with {payload_bytes}-byte values...");
+        clients::prepopulate(&addr, &payload).await?;
 
-    let kinds = [
-        ClientKind::RedisTower,
-        ClientKind::RedisTowerMux,
-        ClientKind::RedisRsSync,
-        ClientKind::RedisRsAsync,
-    ];
-
-    let workloads = [Workload::Set, Workload::Get, Workload::Pipeline];
-
-    let mut reports: Vec<AggregatedReport> = Vec::new();
-
-    for wl in workloads {
-        // Pipeline workload: only run at concurrency 1 (each worker batches 100 ops).
-        let concs: &[usize] = if matches!(wl, Workload::Pipeline) {
-            &[1]
-        } else {
-            &concurrencies
-        };
-        for &concurrency in concs {
-            for kind in &kinds {
-                let cfg = BenchConfig {
-                    duration: Duration::from_secs(duration_secs),
-                    warmup: Duration::from_secs(warmup_secs),
-                    concurrency,
-                    workload: wl,
-                };
-                let mut cell: Vec<BenchReport> = Vec::with_capacity(runs);
-                for run_idx in 0..runs {
-                    eprintln!(
-                        "running {kind:?} workload={wl:?} concurrency={concurrency} run={}/{runs}",
-                        run_idx + 1
-                    );
-                    let client = match Client::connect(*kind, &addr).await {
-                        Ok(c) => c,
-                        Err(e) => {
-                            eprintln!("  connect failed: {e}");
-                            continue;
-                        }
+        for &workload in &config.workloads {
+            let concurrencies = if matches!(workload, Workload::Pipeline) {
+                &config.pipeline_concurrency
+            } else {
+                &config.concurrencies
+            };
+            for &concurrency in concurrencies {
+                for &kind in &config.clients {
+                    let bench = BenchConfig {
+                        duration: config.duration,
+                        warmup: config.warmup,
+                        concurrency,
+                        workload,
+                        payload_bytes,
+                        pipeline_commands: config.pipeline_commands,
                     };
-                    cell.push(runner::run(client, cfg).await);
-                }
-                if !cell.is_empty() {
+                    let mut cell = Vec::<BenchReport>::with_capacity(config.runs);
+                    for run_index in 0..config.runs {
+                        eprintln!(
+                            "running {} workload={workload:?} payload={payload_bytes} concurrency={concurrency} run={}/{}",
+                            kind.as_str(),
+                            run_index + 1,
+                            config.runs
+                        );
+                        let client = Client::connect(kind, &addr).await.map_err(|error| {
+                            format!("{} connect failed: {error}", kind.as_str())
+                        })?;
+                        cell.push(runner::run(client, bench).await.map_err(|error| {
+                            format!("{} worker failed: {error}", kind.as_str())
+                        })?);
+                    }
                     reports.push(aggregate(&cell));
                 }
             }
         }
     }
 
+    drop(server);
     if json {
         println!("{}", to_json(&reports));
     } else {
         println!();
         print_table(&reports);
     }
-
-    drop(server);
-    // Some sync client resources can keep the tokio runtime alive after the
-    // bench completes. Results are in stdout, so exit hard.
-    std::process::exit(0);
+    Ok(())
 }
 
 fn print_table(reports: &[AggregatedReport]) {
     println!(
-        "{:<22} {:<10} {:>6} {:>5} {:>12} {:>14} {:>10} {:>10} {:>10} {:>10} {:>10}",
+        "{:<20} {:<8} {:>7} {:>5} {:>5} {:>6} {:>11} {:>12} {:>12} {:>9} {:>9} {:>9} {:>7}",
         "client",
-        "workload",
+        "work",
+        "bytes",
         "conc",
         "runs",
-        "ops",
-        "ops/s (mean)",
-        "ops/s sd",
+        "cmd/b",
+        "batches/s",
+        "commands/s",
+        "cmd/s sd",
         "p50 (us)",
-        "p90 (us)",
         "p99 (us)",
         "p999 (us)",
+        "errors",
     );
-    println!("{}", "-".repeat(132));
-    for r in reports {
+    println!("{}", "-".repeat(143));
+    for report in reports {
         println!(
-            "{:<22} {:<10} {:>6} {:>5} {:>12} {:>14} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            format!("{:?}", r.client),
-            format!("{:?}", r.workload),
-            r.concurrency,
-            r.runs,
-            r.total_ops,
-            format!("{:.0}", r.ops_per_sec_mean),
-            format!("{:.0}", r.ops_per_sec_stddev),
-            format!("{:.0}", r.p50_us),
-            format!("{:.0}", r.p90_us),
-            format!("{:.0}", r.p99_us),
-            format!("{:.0}", r.p999_us),
+            "{:<20} {:<8} {:>7} {:>5} {:>5} {:>6} {:>11} {:>12} {:>12} {:>9} {:>9} {:>9} {:>7}",
+            report.client.as_str(),
+            format!("{:?}", report.workload),
+            report.payload_bytes,
+            report.concurrency,
+            report.runs,
+            report.commands_per_batch,
+            format!("{:.0}", report.batches_per_sec_mean),
+            format!("{:.0}", report.commands_per_sec_mean),
+            format!("{:.0}", report.commands_per_sec_stddev),
+            format!("{:.0}", report.p50_us),
+            format!("{:.0}", report.p99_us),
+            format!("{:.0}", report.p999_us),
+            report.errors,
         );
     }
+    println!("pipeline latency is measured per batch; GET/SET latency is per command");
 }
 
-/// Serialize the aggregated reports to a JSON array for mechanical diffing.
 fn to_json(reports: &[AggregatedReport]) -> String {
-    let arr: Vec<serde_json::Value> = reports
+    let reports = reports
         .iter()
-        .map(|r| {
+        .map(|report| {
             serde_json::json!({
-                "client": format!("{:?}", r.client),
-                "workload": format!("{:?}", r.workload),
-                "concurrency": r.concurrency,
-                "runs": r.runs,
-                "total_ops": r.total_ops,
-                "ops_per_sec_mean": r.ops_per_sec_mean,
-                "ops_per_sec_stddev": r.ops_per_sec_stddev,
-                "p50_us": r.p50_us,
-                "p90_us": r.p90_us,
-                "p99_us": r.p99_us,
-                "p999_us": r.p999_us,
-                "max_us": r.max_us,
+                "schema_version": THROUGHPUT_SCHEMA_VERSION,
+                "client": format!("{:?}", report.client),
+                "client_id": report.client.as_str(),
+                "workload": format!("{:?}", report.workload),
+                "payload_bytes": report.payload_bytes,
+                "concurrency": report.concurrency,
+                "runs": report.runs,
+                "commands_per_batch": report.commands_per_batch,
+                // Compatibility aliases retain v1's per-iteration semantics.
+                "total_ops": report.total_batches,
+                "ops_per_sec_mean": report.batches_per_sec_mean,
+                "ops_per_sec_stddev": report.batches_per_sec_stddev,
+                "total_batches": report.total_batches,
+                "total_commands": report.total_commands,
+                "errors": report.errors,
+                "batches_per_sec_mean": report.batches_per_sec_mean,
+                "batches_per_sec_stddev": report.batches_per_sec_stddev,
+                "commands_per_sec_mean": report.commands_per_sec_mean,
+                "commands_per_sec_stddev": report.commands_per_sec_stddev,
+                "latency_unit": if matches!(report.workload, Workload::Pipeline) { "batch" } else { "command" },
+                "p50_us": report.p50_us,
+                "p90_us": report.p90_us,
+                "p99_us": report.p99_us,
+                "p999_us": report.p999_us,
+                "max_us": report.max_us,
             })
         })
-        .collect();
-    serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-        .unwrap_or_else(|_| "[]".to_string())
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::Value::Array(reports))
+        .unwrap_or_else(|_| "[]".to_owned())
+}
+
+fn arg_value(name: &str) -> Option<String> {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let prefix = format!("{name}=");
+    for (index, value) in args.iter().enumerate() {
+        if let Some(value) = value.strip_prefix(&prefix) {
+            return Some(value.to_owned());
+        }
+        if value == name {
+            return args.get(index + 1).cloned();
+        }
+    }
+    None
+}
+
+fn env_or_arg_optional(env: &str, arg: &str) -> Option<String> {
+    arg_value(arg).or_else(|| std::env::var(env).ok())
+}
+
+fn env_or_arg(env: &str, arg: &str, default: &str) -> String {
+    env_or_arg_optional(env, arg).unwrap_or_else(|| default.to_owned())
+}
+
+fn env_or_arg_parse<T>(env: &str, arg: &str, default: T) -> Result<T, String>
+where
+    T: std::str::FromStr + Copy,
+{
+    let Some(value) = env_or_arg_optional(env, arg) else {
+        return Ok(default);
+    };
+    value
+        .parse()
+        .map_err(|_| format!("invalid value {value:?} for {arg}/{env}"))
+}
+
+fn parse_positive_list(value: &str, name: &str) -> Result<Vec<usize>, String> {
+    let values = value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| format!("invalid {name} value {value:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        return Err(format!("{name} list must not be empty"));
+    }
+    Ok(values)
+}
+
+fn parse_size_list(value: &str) -> Result<Vec<usize>, String> {
+    let values = value
+        .split(',')
+        .map(parse_size)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.is_empty() {
+        return Err("payload size list must not be empty".into());
+    }
+    Ok(values)
+}
+
+fn parse_size(value: &str) -> Result<usize, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    let (number, multiplier) = if let Some(number) = normalized.strip_suffix("kib") {
+        (number, 1024usize)
+    } else if let Some(number) = normalized.strip_suffix("kb") {
+        (number, 1024)
+    } else if let Some(number) = normalized.strip_suffix('k') {
+        (number, 1024)
+    } else if let Some(number) = normalized.strip_suffix("mib") {
+        (number, 1024 * 1024)
+    } else if let Some(number) = normalized.strip_suffix("mb") {
+        (number, 1024 * 1024)
+    } else if let Some(number) = normalized.strip_suffix('m') {
+        (number, 1024 * 1024)
+    } else if let Some(number) = normalized.strip_suffix('b') {
+        (number, 1)
+    } else {
+        (normalized.as_str(), 1)
+    };
+    let number = number
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid payload size {value:?}"))?;
+    number
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| format!("invalid payload size {value:?}"))
+}
+
+fn parse_clients(value: Option<&str>) -> Result<Vec<ClientKind>, String> {
+    let Some(value) = value else {
+        return Ok(ClientKind::DEFAULTS.to_vec());
+    };
+    let clients = value
+        .split(',')
+        .map(|value| {
+            ClientKind::parse(value).ok_or_else(|| format!("unknown benchmark client {value:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if clients.is_empty() {
+        return Err("client list must not be empty".into());
+    }
+    Ok(clients)
+}
+
+fn parse_workloads(value: &str) -> Result<Vec<Workload>, String> {
+    let workloads = value
+        .split(',')
+        .map(|value| match value.trim().to_ascii_lowercase().as_str() {
+            "set" => Ok(Workload::Set),
+            "get" => Ok(Workload::Get),
+            "pipeline" | "pipe" => Ok(Workload::Pipeline),
+            _ => Err(format!("unknown workload {value:?}")),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if workloads.is_empty() {
+        return Err("workload list must not be empty".into());
+    }
+    Ok(workloads)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_binary_size_suffixes() {
+        assert_eq!(parse_size("64B").unwrap(), 64);
+        assert_eq!(parse_size("1K").unwrap(), 1024);
+        assert_eq!(parse_size("16KiB").unwrap(), 16 * 1024);
+        assert!(parse_size("0").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_workloads() {
+        assert!(parse_workloads("get,wat").is_err());
+    }
+
+    #[test]
+    fn throughput_json_retains_v1_batch_aliases_and_adds_stable_ids() {
+        let report = AggregatedReport {
+            client: ClientKind::RedisTowerMux,
+            workload: Workload::Pipeline,
+            concurrency: 1,
+            payload_bytes: 64,
+            commands_per_batch: 100,
+            runs: 3,
+            total_batches: 7,
+            total_commands: 700,
+            errors: 0,
+            batches_per_sec_mean: 10.0,
+            batches_per_sec_stddev: 1.0,
+            commands_per_sec_mean: 1000.0,
+            commands_per_sec_stddev: 100.0,
+            p50_us: 10.0,
+            p90_us: 20.0,
+            p99_us: 30.0,
+            p999_us: 40.0,
+            max_us: 50.0,
+        };
+        let value: serde_json::Value = serde_json::from_str(&to_json(&[report])).unwrap();
+        let record = &value[0];
+        assert_eq!(record["schema_version"], 2);
+        assert_eq!(record["client"], "RedisTowerMux");
+        assert_eq!(record["client_id"], "redis-tower-mux");
+        assert_eq!(record["total_ops"], record["total_batches"]);
+        assert_eq!(record["ops_per_sec_mean"], record["batches_per_sec_mean"]);
+        assert_ne!(record["ops_per_sec_mean"], record["commands_per_sec_mean"]);
+    }
 }
