@@ -92,8 +92,14 @@ is budgeted at up to 6 GiB, while the largest temporary Redis dataset and its
 replicas are budgeted below 1 GiB. Allowing another GiB for filesystem and
 build variance keeps the expected peak below roughly 8 GiB.
 
-Before creating state or compiling, the runner requires at least 10 GiB free
+Before creating state or compiling, a fresh run requires at least 10 GiB free
 on the workspace/build filesystem, 2 GiB on the temporary filesystem, and 1
-GiB on the result filesystem. When those paths share a volume, the 10-GiB
-guard covers their combined peak. A host with 16 GiB free therefore retains
-roughly 8 GiB of conservative headroom at peak.
+GiB on the result filesystem. A fresh run never receives credit for an old
+target directory. After an existing run state passes exact provenance
+validation, resume preflight counts the allocated size of that run's isolated
+target and result directory when they share the workspace filesystem: current
+free space plus those owned bytes must still total at least 10 GiB. The 2-GiB
+temporary and 1-GiB result free-space floors always remain. Symlinked target or
+result roots are refused. A host with 16 GiB free therefore retains roughly 8
+GiB of conservative headroom at peak without blocking a legitimate resume once
+the isolated target has consumed part of that budget.

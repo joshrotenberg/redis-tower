@@ -32,6 +32,7 @@ def load_module(name: str):
 render_results = load_module("render_results")
 sanitize_metadata = load_module("sanitize_metadata")
 artifact_manifest = load_module("artifact_manifest")
+check_disk_budget = load_module("check_disk_budget")
 execution_fingerprint = load_module("execution_fingerprint")
 
 
@@ -660,6 +661,66 @@ class FingerprintTests(unittest.TestCase):
             )
 
 
+class DiskBudgetTests(unittest.TestCase):
+    def test_resume_credits_owned_bytes_but_fresh_run_never_does(self) -> None:
+        gib = check_disk_budget.GIB_KIB
+        self.assertEqual(
+            check_disk_budget.workspace_required_kib(
+                resume=False, owned_kib=6 * gib
+            ),
+            10 * gib,
+        )
+        self.assertEqual(
+            check_disk_budget.workspace_required_kib(
+                resume=True, owned_kib=6 * gib
+            ),
+            4 * gib,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            paths = {
+                "workspace": root / "workspace",
+                "temporary": root / "tmp",
+                "result": root / "results",
+                "target": root / "workspace" / "target",
+            }
+            for path in paths.values():
+                path.mkdir(parents=True, exist_ok=True)
+            with mock.patch.object(
+                check_disk_budget, "available_kib", return_value=6 * gib
+            ), mock.patch.object(
+                check_disk_budget, "owned_workspace_kib", return_value=6 * gib
+            ):
+                with self.assertRaisesRegex(
+                    check_disk_budget.DiskBudgetError, "workspace/build"
+                ):
+                    check_disk_budget.check_budget(mode="fresh", **paths)
+                result = check_disk_budget.check_budget(mode="resume", **paths)
+                self.assertEqual(result["workspace_owned_kib"], 6 * gib)
+                self.assertEqual(result["workspace_required_kib"], 4 * gib)
+
+    def test_disk_budget_rejects_symlinked_target_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / "workspace"
+            real_target = root / "real-target"
+            temporary_dir = root / "tmp"
+            result = root / "results"
+            for path in (workspace, real_target, temporary_dir, result):
+                path.mkdir()
+            target = workspace / "target"
+            os.symlink(real_target, target)
+            with self.assertRaisesRegex(check_disk_budget.DiskBudgetError, "symlink"):
+                check_disk_budget.check_budget(
+                    mode="fresh",
+                    workspace=workspace,
+                    temporary=temporary_dir,
+                    result=result,
+                    target=target,
+                )
+
+
 class ManifestTests(unittest.TestCase):
     def test_initialize_refuses_unowned_nonempty_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -712,6 +773,57 @@ class ManifestTests(unittest.TestCase):
                 {artifact["path"] for artifact in manifest["artifacts"]},
                 artifact_manifest.expected_artifact_paths("matrix-only"),
             )
+
+    def test_verify_rejects_extra_manifest_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            context = prepare_artifact_set(Path(temporary), finalize=True)
+            manifest_path = context["result_dir"] / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["sensitive_note"] = "must not be accepted"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                artifact_manifest.ManifestError, "missing or unexpected fields"
+            ):
+                artifact_manifest.verify(
+                    context["result_dir"],
+                    context["source_sha"],
+                    "matrix-only",
+                    context["lock_sha256"],
+                    context["fingerprint_path"],
+                )
+
+    def test_manifest_operations_reject_symlinked_result_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            context = prepare_artifact_set(root)
+            linked_result = root / "linked-results"
+            os.symlink(context["result_dir"], linked_result)
+            operations = (
+                lambda: artifact_manifest.initialize(
+                    linked_result,
+                    context["source_sha"],
+                    "matrix-only",
+                    context["lock_sha256"],
+                    context["fingerprint_path"],
+                ),
+                lambda: artifact_manifest.finalize(linked_result),
+            )
+            for operation in operations:
+                with self.subTest(operation=operation):
+                    with self.assertRaisesRegex(artifact_manifest.ManifestError, "root.*symlink"):
+                        operation()
+            artifact_manifest.finalize(context["result_dir"])
+            with self.assertRaisesRegex(artifact_manifest.ManifestError, "root.*symlink"):
+                artifact_manifest.verify(
+                    linked_result,
+                    context["source_sha"],
+                    "matrix-only",
+                    context["lock_sha256"],
+                    context["fingerprint_path"],
+                )
 
     def test_resume_refuses_execution_host_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -867,8 +979,12 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("fingerprint-digest", runner)
         self.assertIn("checkpoint-finalize", runner)
         self.assertIn("checkpoint-verify", runner)
-        self.assertIn('require_free_kib "workspace/build filesystem"', runner)
-        self.assertIn("10 * 1024 * 1024", runner)
+        self.assertIn('initial_disk_mode="fresh"', runner)
+        self.assertIn('initial_disk_mode="minima"', runner)
+        self.assertIn("--mode resume", runner)
+        self.assertEqual(
+            check_disk_budget.FRESH_WORKSPACE_KIB, 10 * check_disk_budget.GIB_KIB
+        )
         self.assertIn("--workloads", artifact_manifest.commands_text("publication"))
         self.assertIn("--workloads set,get", artifact_manifest.commands_text("publication"))
         self.assertIn('run_mode="publication"', runner)

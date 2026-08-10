@@ -27,6 +27,14 @@ result_dir="$1"
 if [[ "$result_dir" != /* ]]; then
   result_dir="$workspace_root/$result_dir"
 fi
+if [[ -L "$result_dir" ]]; then
+  echo "result directory root must not be a symlink" >&2
+  exit 2
+fi
+resume_candidate=0
+if [[ -f "$result_dir/.run-state.json" && ! -L "$result_dir/.run-state.json" ]]; then
+  resume_candidate=1
+fi
 
 # Ambient benchmark variables make a recorded command differ from the command
 # that actually ran. Refuse them by name without printing their possibly
@@ -108,39 +116,6 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 2
 fi
 
-nearest_existing_path() {
-  local probe="$1"
-  while [[ ! -e "$probe" && ! -L "$probe" && "$probe" != "/" ]]; do
-    probe="$(dirname "$probe")"
-  done
-  printf '%s\n' "$probe"
-}
-
-require_free_kib() {
-  local label="$1"
-  local path="$2"
-  local required_kib="$3"
-  local available_kib
-  available_kib="$(df -Pk "$(nearest_existing_path "$path")" \
-    | awk 'NR == 2 { print $4 }')"
-  if [[ ! "$available_kib" =~ ^[0-9]+$ ]]; then
-    echo "cannot determine free disk space for $label; refusing a long benchmark run" >&2
-    exit 2
-  fi
-  if (( available_kib < required_kib )); then
-    echo "$label has insufficient free disk space for publication evidence" >&2
-    echo "need at least $((required_kib / 1024 / 1024)) GiB free before starting" >&2
-    exit 2
-  fi
-}
-
-# The isolated release target dominates disk use (conservatively <= 6 GiB).
-# Redis fixtures peak below 1 GiB and retained raw evidence is below 100 MiB.
-# These guards leave additional headroom for Cargo and filesystem variance.
-require_free_kib "workspace/build filesystem" "$workspace_root" $((10 * 1024 * 1024))
-require_free_kib "temporary filesystem" "${TMPDIR:-/tmp}" $((2 * 1024 * 1024))
-require_free_kib "result filesystem" "$result_dir" $((1 * 1024 * 1024))
-
 base_env=(
   env -i
   "PATH=$PATH"
@@ -157,6 +132,22 @@ if [[ -n ${RUSTUP_HOME:-} ]]; then
 fi
 python_clean=("${base_env[@]}" python3)
 
+source_sha="$(git rev-parse HEAD)"
+target_dir="$workspace_root/target/publication-$source_sha"
+disk_budget_tool="$script_dir/check_disk_budget.py"
+initial_disk_mode="fresh"
+if [[ $resume_candidate -eq 1 ]]; then
+  initial_disk_mode="minima"
+fi
+# Fresh runs receive no credit for pre-existing files. A resume receives
+# owned-target/checkpoint credit only after its state passes exact validation.
+"${python_clean[@]}" "$disk_budget_tool" \
+  --mode "$initial_disk_mode" \
+  --workspace "$workspace_root" \
+  --temporary "${TMPDIR:-/tmp}" \
+  --result "$result_dir" \
+  --target "$target_dir"
+
 if [[ ! -f Cargo.lock ]]; then
   echo "Cargo.lock is absent; generating the ignored benchmark lockfile" >&2
   "${base_env[@]}" cargo generate-lockfile
@@ -170,10 +161,8 @@ sha256_file() {
   fi
 }
 
-source_sha="$(git rev-parse HEAD)"
 source_date_epoch="$(git show -s --format=%ct HEAD)"
 lock_sha256="$(sha256_file Cargo.lock)"
-target_dir="$workspace_root/target/publication-$source_sha"
 manifest_tool="$script_dir/artifact_manifest.py"
 renderer="$script_dir/render_results.py"
 metadata_sanitizer="$script_dir/sanitize_metadata.py"
@@ -229,6 +218,14 @@ verify_source_provenance() {
   --lock-sha256 "$lock_sha256" \
   --mode "$run_mode" \
   --fingerprint-file "$fingerprint_tmp"
+if [[ $resume_candidate -eq 1 ]]; then
+  "${python_clean[@]}" "$disk_budget_tool" \
+    --mode resume \
+    --workspace "$workspace_root" \
+    --temporary "${TMPDIR:-/tmp}" \
+    --result "$result_dir" \
+    --target "$target_dir"
+fi
 
 install_generated() {
   local final="$1"

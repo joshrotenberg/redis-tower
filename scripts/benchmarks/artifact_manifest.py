@@ -171,6 +171,20 @@ def _require_regular_file(path: Path) -> None:
         raise ManifestError(f"required regular file is missing: {path}")
 
 
+def _require_result_directory(result_dir: Path, *, create: bool = False) -> None:
+    if result_dir.is_symlink():
+        raise ManifestError("result directory root must not be a symlink")
+    if create:
+        try:
+            result_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            raise ManifestError(f"cannot create result directory: {error}") from error
+        if result_dir.is_symlink():
+            raise ManifestError("result directory root must not be a symlink")
+    if not result_dir.is_dir():
+        raise ManifestError("result directory root must be a regular directory")
+
+
 def _assert_path_free(value: Any) -> None:
     if isinstance(value, dict):
         for nested in value.values():
@@ -315,7 +329,7 @@ def initialize(
     fingerprint_path: Path,
 ) -> None:
     fingerprint = _load_fingerprint(fingerprint_path, source_sha, mode, lock_sha256)
-    result_dir.mkdir(parents=True, exist_ok=True)
+    _require_result_directory(result_dir, create=True)
     state_path = result_dir / STATE_NAME
     expected = expected_state(source_sha, mode, lock_sha256, fingerprint)
     if state_path.exists() or state_path.is_symlink():
@@ -912,6 +926,7 @@ def _validate_root_evidence(result_dir: Path, state: dict[str, Any]) -> None:
 
 
 def finalize(result_dir: Path) -> None:
+    _require_result_directory(result_dir)
     state = _read_json(result_dir / STATE_NAME)
     mode = state.get("mode")
     if mode not in ("publication", "matrix-only"):
@@ -954,6 +969,7 @@ def verify(
     lock_sha256: str,
     fingerprint_path: Path,
 ) -> None:
+    _require_result_directory(result_dir)
     fingerprint = _load_fingerprint(fingerprint_path, source_sha, mode, lock_sha256)
     expected = expected_state(source_sha, mode, lock_sha256, fingerprint)
     state = _read_json(result_dir / STATE_NAME)
@@ -961,6 +977,16 @@ def verify(
         raise ManifestError("run state does not match requested provenance and execution host")
     _validate_fingerprint_artifact(result_dir, state)
     manifest = _read_json(result_dir / MANIFEST_NAME)
+    expected_manifest_fields = {
+        *expected,
+        "run_complete",
+        "publication_complete",
+        "completion",
+        "artifact_inventory_sha256",
+        "artifacts",
+    }
+    if not isinstance(manifest, dict) or set(manifest) != expected_manifest_fields:
+        raise ManifestError("manifest has missing or unexpected fields")
     for field, value in expected.items():
         if manifest.get(field) != value:
             raise ManifestError(f"manifest {field} does not match requested provenance")
