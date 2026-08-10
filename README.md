@@ -684,10 +684,10 @@ branch. A check fails when mean time regresses by more than 10% and the two
 confidence intervals do not overlap; the full `critcmp` report is attached to
 the workflow run.
 
-The `Weekly Benchmarks` workflow runs both comparison binaries plus the replica
-scenario and retains their JSON output for 90 days. These GitHub-hosted results
-are useful for trends. Run headline measurements on dedicated, otherwise-idle
-hardware:
+The `Weekly Benchmarks` workflow runs both comparison binaries, the replica
+scenario, and the process-isolated resource probes, retaining their JSON output
+for 90 days. These GitHub-hosted results are useful for trends. Run headline
+measurements on dedicated, otherwise-idle hardware:
 
 ```bash
 BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
@@ -695,6 +695,13 @@ BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
 BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
   cargo run -p cluster-bench --release -- --json
 ```
+
+Resource-cost comparisons against redis-rs and Fred use separate subject
+processes for RSS per connection and CPU at a fixed offered rate, plus isolated
+cold builds for compile time and stripped binary size. See
+[`crates/resource-bench`](crates/resource-bench/) for the methodology and
+machine-readable commands. Treat hosted-runner results as probe smoke tests;
+publish comparisons only from an otherwise-idle dedicated host.
 
 ## Workspace
 
@@ -710,6 +717,7 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
+resource-bench           Process-isolated RSS, CPU, compile-time, and binary-size comparisons
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
