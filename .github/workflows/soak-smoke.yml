@@ -62,6 +62,11 @@ jobs:
           cargo test -p soak-bench --all-targets
           cargo clippy -p soak-bench --all-targets -- -D warnings
 
+      - name: Process cancellation and boundary regressions
+        run: |
+          cargo test -p soak-bench --lib live_ -- --ignored --test-threads=1
+          cargo test -p soak-bench --test signal_cleanup -- --ignored --test-threads=1
+
       - name: Run short standalone SIGKILL smoke
         env:
           SOAK_MODE: standalone

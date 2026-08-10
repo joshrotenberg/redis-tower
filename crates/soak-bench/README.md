@@ -8,7 +8,11 @@ Every worker owns two fixed-range HDR histograms: one for the current reporting
 interval and one for the complete measured run. Workers hand snapshots to the
 coordinator between commands; the hot path has no shared mutex and does not
 retain one allocation per operation. Warmup samples are reset at a barrier and
-never enter reported counts or latency distributions.
+never enter reported counts or latency distributions. Workers share absolute
+interval deadlines, stop starting work at each boundary, and exclude a command
+that completes after its interval deadline. Reported windows and the final
+duration therefore describe exactly the samples they bound rather than the time
+it happened to take the coordinator to collect them.
 
 ## Output semantics
 
@@ -24,6 +28,12 @@ GET completions only. `attempted_ops_per_sec` is also emitted so fail-fast
 errors cannot masquerade as useful throughput. Workers apply the configured
 one-millisecond default backoff after an error to avoid a tight retry loop. RSS
 excludes the managed Redis child processes.
+
+Lifecycle counters take their own baseline at the measurement barrier, so a
+warmup reconnect is discarded with the warmup latency samples. A requested
+fault must finish recovery before the measurement deadline while workload
+workers are still active. A late or failed recovery aborts the chaos task and
+fails the run without publishing a misleading summary.
 
 Reconnect and recovery fields are intentionally topology-specific:
 
@@ -43,9 +53,11 @@ subtracted from throughput.
 
 The standalone chaos mode sends a real SIGKILL through
 `redis_server_wrapper::chaos::kill_node`, consumes the killed handle so it
-cannot target a replacement during cleanup, starts a fresh process on the exact
-same port, reseeds the validation key, and requires the existing client to
-recover within the configured bound:
+cannot target a replacement during cleanup only after both its PID and listener
+are confirmed dead, starts a fresh process on the exact same port, reseeds the
+validation key, and requires the existing client to recover within the
+configured bound. Startup owns a unique PID-directory and port cleanup guard,
+including when its future is cancelled or times out:
 
 ```bash
 SOAK_MODE=standalone \
@@ -79,6 +91,8 @@ otherwise idle host, retain stderr with the JSONL artifact, and capture the
 Redis/Rust versions and git commit alongside the result. The short CI job is a
 functional smoke test and deliberately sets no performance threshold; a
 publishable four-hour result belongs in the benchmark evidence report.
+SIGINT and SIGTERM cancel abort-owned chaos work and synchronously clean the
+managed standalone or cluster processes before the CLI exits.
 
 ## Configuration
 
@@ -99,6 +113,11 @@ SOAK_CLUSTER_SLOT=42
 SOAK_CLUSTER_NODE_TIMEOUT_MS=500
 SOAK_STANDALONE_PORT=<dedicated port>
 ```
+
+`SOAK_ERROR_BACKOFF_MS` must be non-zero. `SOAK_OPERATION_TIMEOUT_MS` must be
+at most 60000 because the constant-size latency histogram has an explicit
+60-second upper bound; the harness rejects a larger value instead of silently
+clamping latency.
 
 When `SOAK_STANDALONE_PORT` is omitted, the harness briefly reserves an
 ephemeral loopback port and then starts Redis on it. An explicit port must be

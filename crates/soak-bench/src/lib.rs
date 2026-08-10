@@ -7,10 +7,14 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::fs;
 use std::io::{self, Write};
-use std::net::TcpListener;
-use std::sync::Arc;
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -30,18 +34,97 @@ use tokio::sync::{Barrier, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 
-#[cfg(target_os = "linux")]
-use std::fs;
-#[cfg(not(target_os = "linux"))]
-use std::process::Command as ProcessCommand;
-
 const HISTOGRAM_MAX_US: u64 = 60_000_000;
 const HISTOGRAM_SIGFIG: u8 = 3;
 const EVENT_CAPACITY: usize = 4096;
 const SCHEMA_VERSION: u8 = 1;
+const START_BARRIER_LEAD: Duration = Duration::from_millis(10);
+const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+const PROCESS_CLEANUP_POLL: Duration = Duration::from_millis(25);
+
+static STANDALONE_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
-type Result<T> = std::result::Result<T, BoxError>;
+/// Result returned by soak harness configuration and execution.
+pub type RunResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type Result<T> = RunResult<T>;
+
+/// Tokio tasks are detached when a bare `JoinHandle` is dropped. Destructive
+/// chaos work must instead be cancelled whenever its owner is cancelled.
+struct AbortOnDropTask<T> {
+    handle: Option<JoinHandle<T>>,
+}
+
+impl<T> AbortOnDropTask<T>
+where
+    T: Send + 'static,
+{
+    fn spawn(future: impl std::future::Future<Output = T> + Send + 'static) -> Self {
+        Self {
+            handle: Some(tokio::spawn(future)),
+        }
+    }
+
+    fn abort(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+
+    async fn join(mut self) -> std::result::Result<T, tokio::task::JoinError> {
+        let result = self
+            .handle
+            .as_mut()
+            .expect("abort-on-drop task is joined once")
+            .await;
+        self.handle.take();
+        result
+    }
+}
+
+impl<T> Drop for AbortOnDropTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
+struct ChaosRun {
+    task: AbortOnDropTask<Result<()>>,
+    completion: Option<oneshot::Receiver<std::result::Result<Instant, String>>>,
+    release: Option<oneshot::Sender<()>>,
+}
+
+impl ChaosRun {
+    fn take_completion(
+        &mut self,
+    ) -> Result<oneshot::Receiver<std::result::Result<Instant, String>>> {
+        self.completion
+            .take()
+            .ok_or_else(|| "chaos completion receiver was already consumed".into())
+    }
+
+    fn abort(&mut self) {
+        self.task.abort();
+    }
+
+    async fn finish(mut self) -> Result<()> {
+        if let Some(release) = self.release.take() {
+            let _ = release.send(());
+        }
+        self.task
+            .join()
+            .await
+            .map_err(|error| format!("chaos task panicked: {error}"))??;
+        Ok(())
+    }
+
+    async fn cancel(mut self) {
+        self.task.abort();
+        let _ = self.task.join().await;
+    }
+}
 
 /// Topology driven by the harness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -209,6 +292,15 @@ impl Config {
                 "operation, startup, and recovery timeouts must be greater than zero".into(),
             );
         }
+        if self.operation_timeout > Duration::from_secs(60) {
+            return Err(
+                "SOAK_OPERATION_TIMEOUT_MS must not exceed 60000; the fixed HDR histogram records up to 60 seconds"
+                    .into(),
+            );
+        }
+        if self.error_backoff.is_zero() {
+            return Err("SOAK_ERROR_BACKOFF_MS must be greater than zero".into());
+        }
         if self.payload_bytes == 0 {
             return Err("SOAK_PAYLOAD_BYTES must be greater than zero".into());
         }
@@ -256,8 +348,8 @@ Environment:\n\
   SOAK_REPORT_INTERVAL_SECS=60                 interval line cadence\n\
   SOAK_CHAOS_AFTER_SECS=7200                   offset into measured time\n\
   SOAK_CONCURRENCY=32                          async workers\n\
-  SOAK_OPERATION_TIMEOUT_MS=2000               bound for every GET\n\
-  SOAK_ERROR_BACKOFF_MS=1                      prevent fail-fast error spin\n\
+  SOAK_OPERATION_TIMEOUT_MS=2000               bound for every GET (max: 60000)\n\
+  SOAK_ERROR_BACKOFF_MS=1                      non-zero fail-fast error backoff\n\
   SOAK_STARTUP_TIMEOUT_SECS=30                 fixture/process startup bound\n\
   SOAK_RECOVERY_TIMEOUT_SECS=30                fault recovery bound\n\
   SOAK_PAYLOAD_BYTES=16                        validated GET payload\n\
@@ -333,8 +425,8 @@ impl SoakClient {
 
 #[derive(Default)]
 struct LifecycleCounters {
-    reconnects: AtomicU64,
-    recoveries: AtomicU64,
+    standalone_reconnect_recoveries: AtomicU64,
+    cluster_recoveries: AtomicU64,
     chaos_injections: AtomicU64,
     event_lagged: AtomicU64,
 }
@@ -347,10 +439,15 @@ struct CounterSnapshot {
 }
 
 impl LifecycleCounters {
-    fn snapshot(&self) -> CounterSnapshot {
+    fn snapshot(&self, reconnects_supported: bool) -> CounterSnapshot {
+        let paired = self.standalone_reconnect_recoveries.load(Ordering::Relaxed);
         CounterSnapshot {
-            reconnects: self.reconnects.load(Ordering::Relaxed),
-            recoveries: self.recoveries.load(Ordering::Relaxed),
+            reconnects: if reconnects_supported { paired } else { 0 },
+            recoveries: if reconnects_supported {
+                paired
+            } else {
+                self.cluster_recoveries.load(Ordering::Relaxed)
+            },
             chaos_injections: self.chaos_injections.load(Ordering::Relaxed),
         }
     }
@@ -391,8 +488,14 @@ impl Stats {
     fn record(&mut self, success: bool, elapsed: Duration) {
         if success {
             self.successes += 1;
-            let micros = elapsed.as_micros().clamp(1, u128::from(HISTOGRAM_MAX_US)) as u64;
-            self.latency.saturating_record(micros);
+            let micros = elapsed.as_micros().max(1);
+            assert!(
+                micros <= u128::from(HISTOGRAM_MAX_US),
+                "successful latency {micros}us exceeds the validated HDR range"
+            );
+            self.latency
+                .record(micros as u64)
+                .expect("validated latency fits the HDR histogram");
         } else {
             self.errors += 1;
         }
@@ -435,9 +538,23 @@ impl WorkerStats {
 }
 
 enum WorkerCommand {
-    Start { barrier: Arc<Barrier> },
-    Snapshot { reply: oneshot::Sender<Stats> },
-    Stop { reply: oneshot::Sender<WorkerStats> },
+    Start {
+        barrier: Arc<Barrier>,
+        schedule: Arc<OnceLock<MeasurementSchedule>>,
+    },
+    Snapshot {
+        next_deadline: Instant,
+        reply: oneshot::Sender<Stats>,
+    },
+    Stop {
+        reply: oneshot::Sender<WorkerStats>,
+    },
+}
+
+#[derive(Clone, Copy)]
+struct MeasurementSchedule {
+    started: Instant,
+    first_deadline: Instant,
 }
 
 struct WorkerGroup {
@@ -472,16 +589,22 @@ impl WorkerGroup {
         Self {
             controls,
             joins,
-            command_timeout: operation_timeout.saturating_add(Duration::from_secs(5)),
+            command_timeout: worker_control_timeout(operation_timeout, error_backoff),
         }
     }
 
-    async fn start_measurement(&self) -> Result<Instant> {
+    async fn start_measurement(
+        &self,
+        duration: Duration,
+        report_interval: Duration,
+    ) -> Result<Instant> {
         let barrier = Arc::new(Barrier::new(self.controls.len() + 1));
+        let schedule = Arc::new(OnceLock::new());
         for control in &self.controls {
             control
                 .send(WorkerCommand::Start {
                     barrier: Arc::clone(&barrier),
+                    schedule: Arc::clone(&schedule),
                 })
                 .await
                 .map_err(|_| "soak worker stopped before the measurement barrier")?;
@@ -489,15 +612,27 @@ impl WorkerGroup {
         timeout(self.command_timeout, barrier.wait())
             .await
             .map_err(|_| "timed out starting soak measurement")?;
-        Ok(Instant::now())
+        let started = Instant::now() + START_BARRIER_LEAD;
+        let finish = started + duration;
+        schedule
+            .set(MeasurementSchedule {
+                started,
+                first_deadline: (started + report_interval).min(finish),
+            })
+            .map_err(|_| "measurement schedule was initialized twice")?;
+        sleep_until(started).await;
+        Ok(started)
     }
 
-    async fn snapshot(&self) -> Result<Stats> {
+    async fn snapshot(&self, next_deadline: Instant) -> Result<Stats> {
         let mut replies = Vec::with_capacity(self.controls.len());
         for control in &self.controls {
             let (reply, receive) = oneshot::channel();
             control
-                .send(WorkerCommand::Snapshot { reply })
+                .send(WorkerCommand::Snapshot {
+                    next_deadline,
+                    reply,
+                })
                 .await
                 .map_err(|_| "soak worker stopped before an interval snapshot")?;
             replies.push(receive);
@@ -542,6 +677,12 @@ impl WorkerGroup {
     }
 }
 
+fn worker_control_timeout(operation_timeout: Duration, error_backoff: Duration) -> Duration {
+    operation_timeout
+        .saturating_add(error_backoff)
+        .saturating_add(Duration::from_secs(5))
+}
+
 impl Drop for WorkerGroup {
     fn drop(&mut self) {
         for join in &self.joins {
@@ -559,25 +700,50 @@ async fn worker_loop(
     mut commands: mpsc::Receiver<WorkerCommand>,
 ) {
     let mut measuring = false;
+    let mut interval_deadline = None;
     let mut stats = WorkerStats::new();
     loop {
-        match commands.try_recv() {
-            Ok(WorkerCommand::Start { barrier }) => {
+        let command = if interval_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            match commands.recv().await {
+                Some(command) => Some(command),
+                None => return,
+            }
+        } else {
+            match commands.try_recv() {
+                Ok(command) => Some(command),
+                Err(mpsc::error::TryRecvError::Disconnected) => return,
+                Err(mpsc::error::TryRecvError::Empty) => None,
+            }
+        };
+
+        match command {
+            Some(WorkerCommand::Start { barrier, schedule }) => {
                 stats = WorkerStats::new();
-                measuring = true;
                 barrier.wait().await;
+                let schedule = loop {
+                    if let Some(schedule) = schedule.get().copied() {
+                        break schedule;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                sleep_until(schedule.started).await;
+                measuring = true;
+                interval_deadline = Some(schedule.first_deadline);
                 continue;
             }
-            Ok(WorkerCommand::Snapshot { reply }) => {
+            Some(WorkerCommand::Snapshot {
+                next_deadline,
+                reply,
+            }) => {
                 let _ = reply.send(stats.take_interval());
+                interval_deadline = Some(next_deadline);
                 continue;
             }
-            Ok(WorkerCommand::Stop { reply }) => {
+            Some(WorkerCommand::Stop { reply }) => {
                 let _ = reply.send(stats);
                 return;
             }
-            Err(mpsc::error::TryRecvError::Disconnected) => return,
-            Err(mpsc::error::TryRecvError::Empty) => {}
+            None => {}
         }
 
         let started = Instant::now();
@@ -587,14 +753,22 @@ async fn worker_loop(
         )
         .await
         .unwrap_or(false);
+        let completed = Instant::now();
         let elapsed = started.elapsed();
-        if measuring {
+        if measuring
+            && interval_deadline
+                .is_some_and(|deadline| completion_is_in_window(completed, deadline))
+        {
             stats.record(success, elapsed);
         }
         if !success && !error_backoff.is_zero() {
             sleep(error_backoff).await;
         }
     }
+}
+
+fn completion_is_in_window(completed: Instant, deadline: Instant) -> bool {
+    completed <= deadline
 }
 
 #[derive(Serialize)]
@@ -909,17 +1083,30 @@ fn parse_linux_rss(status: &str) -> Option<u64> {
 struct Measurement {
     elapsed: Duration,
     stats: Stats,
+    counter_baseline: CounterSnapshot,
 }
 
-async fn measure(
-    config: &Config,
+struct MeasurementTarget {
     client: SoakClient,
     key: Arc<str>,
     expected: Arc<[u8]>,
     counters: Arc<LifecycleCounters>,
     reconnects_supported: bool,
+}
+
+async fn measure(
+    config: &Config,
+    target: MeasurementTarget,
     measurement_started: Option<oneshot::Sender<Instant>>,
+    mut chaos: Option<&mut ChaosRun>,
 ) -> Result<Measurement> {
+    let MeasurementTarget {
+        client,
+        key,
+        expected,
+        counters,
+        reconnects_supported,
+    } = target;
     let reporter = Reporter {
         output: config.output,
         reconnects_supported,
@@ -941,53 +1128,153 @@ async fn measure(
         );
         sleep(config.warmup).await;
     }
-    let started = workers.start_measurement().await?;
+    let started = workers
+        .start_measurement(config.duration, config.report_interval)
+        .await?;
+    let counter_baseline = counters.snapshot(reconnects_supported);
     if let Some(started_tx) = measurement_started {
         let _ = started_tx.send(started);
     }
 
     let finish = started + config.duration;
-    let mut next_report = (started + config.report_interval).min(finish);
-    let mut last_report = started;
-    let mut interval_index = 0_u64;
-    let mut previous_counters = CounterSnapshot::default();
+    let mut completion = match chaos.as_mut() {
+        Some(run) => Some(run.take_completion()?),
+        None => None,
+    };
+    let mut chaos_completed = completion.is_none();
 
-    while next_report < finish {
-        sleep_until(next_report).await;
-        let stats = workers.snapshot().await?;
-        let now = Instant::now();
-        interval_index += 1;
-        let counter_snapshot = counters.snapshot();
-        reporter.interval(
-            interval_index,
-            now.duration_since(started),
-            now.duration_since(last_report),
-            &stats,
-            counter_snapshot,
-            counter_snapshot.delta(previous_counters),
-        )?;
-        previous_counters = counter_snapshot;
-        last_report = now;
-        next_report = (next_report + config.report_interval).min(finish);
+    let interval_result: Result<(u64, Instant, CounterSnapshot)> = async {
+        let mut boundary = (started + config.report_interval).min(finish);
+        let mut previous_boundary = started;
+        let mut interval_index = 0_u64;
+        let mut previous_counters = CounterSnapshot::default();
+
+        while boundary < finish {
+            wait_for_boundary(boundary, finish, &mut completion, &mut chaos_completed).await?;
+            let counter_snapshot = counters
+                .snapshot(reconnects_supported)
+                .delta(counter_baseline);
+            let next_boundary = (boundary + config.report_interval).min(finish);
+            let stats = workers.snapshot(next_boundary).await?;
+            interval_index += 1;
+            reporter.interval(
+                interval_index,
+                boundary.duration_since(started),
+                boundary.duration_since(previous_boundary),
+                &stats,
+                counter_snapshot,
+                counter_snapshot.delta(previous_counters),
+            )?;
+            previous_counters = counter_snapshot;
+            previous_boundary = boundary;
+            boundary = next_boundary;
+        }
+
+        wait_for_boundary(finish, finish, &mut completion, &mut chaos_completed).await?;
+        require_chaos_completion_at_deadline(finish, &mut completion, &mut chaos_completed)?;
+        Ok((interval_index, previous_boundary, previous_counters))
     }
+    .await;
 
-    sleep_until(finish).await;
-    let (last_interval, aggregate) = workers.stop().await?;
-    let stopped = Instant::now();
-    interval_index += 1;
-    let counter_snapshot = counters.snapshot();
+    let (interval_index, previous_boundary, previous_counters) = match interval_result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Some(run) = chaos.as_mut() {
+                run.abort();
+            }
+            let _ = workers.stop().await;
+            return Err(error);
+        }
+    };
+
+    let (last_interval, aggregate) = match workers.stop().await {
+        Ok(stats) => stats,
+        Err(error) => {
+            if let Some(run) = chaos.as_mut() {
+                run.abort();
+            }
+            return Err(error);
+        }
+    };
+    let counter_snapshot = counters
+        .snapshot(reconnects_supported)
+        .delta(counter_baseline);
     reporter.interval(
-        interval_index,
-        stopped.duration_since(started),
-        stopped.duration_since(last_report),
+        interval_index + 1,
+        config.duration,
+        finish.duration_since(previous_boundary),
         &last_interval,
         counter_snapshot,
         counter_snapshot.delta(previous_counters),
     )?;
     Ok(Measurement {
-        elapsed: stopped.duration_since(started),
+        elapsed: config.duration,
         stats: aggregate,
+        counter_baseline,
     })
+}
+
+async fn wait_for_boundary(
+    boundary: Instant,
+    measurement_finish: Instant,
+    completion: &mut Option<oneshot::Receiver<std::result::Result<Instant, String>>>,
+    chaos_completed: &mut bool,
+) -> Result<()> {
+    loop {
+        if *chaos_completed {
+            sleep_until(boundary).await;
+            return Ok(());
+        }
+        let receiver = completion
+            .as_mut()
+            .ok_or("chaos completion receiver disappeared before completion")?;
+        tokio::select! {
+            _ = sleep_until(boundary) => return Ok(()),
+            result = receiver => {
+                match result {
+                    Ok(Ok(completed_at)) if completed_at <= measurement_finish => {
+                        *chaos_completed = true;
+                        *completion = None;
+                    }
+                    Ok(Ok(_)) => {
+                        return Err(
+                            "chaos recovery completed after the measurement deadline".into(),
+                        );
+                    }
+                    Ok(Err(error)) => return Err(format!("chaos recovery failed: {error}").into()),
+                    Err(_) => return Err("chaos task ended without reporting recovery".into()),
+                }
+            }
+        }
+    }
+}
+
+fn require_chaos_completion_at_deadline(
+    deadline: Instant,
+    completion: &mut Option<oneshot::Receiver<std::result::Result<Instant, String>>>,
+    chaos_completed: &mut bool,
+) -> Result<()> {
+    if *chaos_completed {
+        return Ok(());
+    }
+    let receiver = completion
+        .as_mut()
+        .ok_or("chaos completion receiver disappeared before the measurement deadline")?;
+    match receiver.try_recv() {
+        Ok(Ok(completed_at)) if completed_at <= deadline => {
+            *chaos_completed = true;
+            *completion = None;
+            Ok(())
+        }
+        Ok(Ok(_)) => Err("chaos recovery completed after the measurement deadline".into()),
+        Ok(Err(error)) => Err(format!("chaos recovery failed: {error}").into()),
+        Err(oneshot::error::TryRecvError::Empty) => {
+            Err("chaos recovery did not complete before the measurement deadline".into())
+        }
+        Err(oneshot::error::TryRecvError::Closed) => {
+            Err("chaos task ended without reporting recovery".into())
+        }
+    }
 }
 
 fn report_summary(
@@ -1000,7 +1287,13 @@ fn report_summary(
         output: config.output,
         reconnects_supported,
     }
-    .summary(measurement.elapsed, &measurement.stats, counters.snapshot())
+    .summary(
+        measurement.elapsed,
+        &measurement.stats,
+        counters
+            .snapshot(reconnects_supported)
+            .delta(measurement.counter_baseline),
+    )
 }
 
 async fn run_standalone(config: Config) -> Result<()> {
@@ -1041,13 +1334,13 @@ async fn run_standalone(config: Config) -> Result<()> {
 
     let (measurement_started_tx, measurement_started_rx) = oneshot::channel();
     let mut server_without_chaos = None;
-    let mut chaos_task = None;
+    let mut chaos_run = None;
     match config.chaos {
         ChaosMode::None => {
             server_without_chaos = Some(server);
         }
         ChaosMode::StandaloneSigkill => {
-            chaos_task = Some(spawn_standalone_chaos(
+            chaos_run = Some(spawn_standalone_chaos(
                 server,
                 client.clone(),
                 Arc::clone(&key),
@@ -1063,34 +1356,36 @@ async fn run_standalone(config: Config) -> Result<()> {
 
     let measurement = measure(
         &config,
-        client.clone(),
-        key,
-        expected,
-        Arc::clone(&counters),
-        true,
+        MeasurementTarget {
+            client: client.clone(),
+            key,
+            expected,
+            counters: Arc::clone(&counters),
+            reconnects_supported: true,
+        },
         (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
+        chaos_run.as_mut(),
     )
     .await;
 
-    let restarted_server = match (measurement.is_ok(), chaos_task) {
-        (true, Some(task)) => Some(
-            task.await
-                .map_err(|error| format!("standalone chaos task panicked: {error}"))??,
-        ),
-        (false, Some(task)) => {
-            task.abort();
-            let _ = task.await;
-            None
+    if measurement.is_err() {
+        if let Some(run) = chaos_run.take() {
+            run.cancel().await;
         }
-        (_, None) => None,
-    };
+        client.shutdown().await;
+        drop(server_without_chaos);
+        let _ = event_task.join().await;
+        return measurement.map(|_| ());
+    }
 
     client.shutdown().await;
-    let event_result = timeout(Duration::from_secs(3), event_task).await;
-    drop(restarted_server);
+    let event_result = timeout(Duration::from_secs(3), event_task.join()).await;
+    if let Some(run) = chaos_run.take() {
+        run.finish().await?;
+    }
     drop(server_without_chaos);
 
-    let measurement = measurement?;
+    let measurement = measurement.expect("measurement error returned above");
     match event_result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => return Err(format!("connection event task panicked: {error}").into()),
@@ -1103,7 +1398,7 @@ async fn run_standalone(config: Config) -> Result<()> {
         )
         .into());
     }
-    verify_requested_chaos(&config, &counters)?;
+    verify_requested_chaos(&config, &counters, measurement.counter_baseline)?;
     report_summary(&config, true, &measurement, &counters)
 }
 
@@ -1147,14 +1442,15 @@ async fn run_cluster(config: Config) -> Result<()> {
         .await?;
     let client = SoakClient::Cluster(cluster);
     if !client.get_matches(key.as_ref(), expected.as_ref()).await {
+        client.shutdown().await;
         return Err("cluster workload key failed validation before warmup".into());
     }
 
     let counters = Arc::new(LifecycleCounters::default());
     let (measurement_started_tx, measurement_started_rx) = oneshot::channel();
-    let mut chaos_task = None;
+    let mut chaos_run = None;
     if config.chaos == ChaosMode::ClusterMasterKill {
-        chaos_task = Some(spawn_cluster_chaos(
+        chaos_run = Some(spawn_cluster_chaos(
             Arc::clone(&fixture),
             client.clone(),
             Arc::clone(&key),
@@ -1167,31 +1463,150 @@ async fn run_cluster(config: Config) -> Result<()> {
 
     let measurement = measure(
         &config,
-        client.clone(),
-        key,
-        expected,
-        Arc::clone(&counters),
-        false,
+        MeasurementTarget {
+            client: client.clone(),
+            key,
+            expected,
+            counters: Arc::clone(&counters),
+            reconnects_supported: false,
+        },
         (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
+        chaos_run.as_mut(),
     )
     .await;
 
-    match (measurement.is_ok(), chaos_task) {
-        (true, Some(task)) => task
-            .await
-            .map_err(|error| format!("cluster chaos task panicked: {error}"))??,
-        (false, Some(task)) => {
-            task.abort();
-            let _ = task.await;
+    if measurement.is_err() {
+        if let Some(run) = chaos_run.take() {
+            run.cancel().await;
         }
-        (_, None) => {}
+        client.shutdown().await;
+        return measurement.map(|_| ());
     }
     client.shutdown().await;
-    let measurement = measurement?;
-    verify_requested_chaos(&config, &counters)?;
+    if let Some(run) = chaos_run.take() {
+        run.finish().await?;
+    }
+    let measurement = measurement.expect("measurement error returned above");
+    verify_requested_chaos(&config, &counters, measurement.counter_baseline)?;
     report_summary(&config, false, &measurement, &counters)?;
     drop(fixture);
     Ok(())
+}
+
+struct StandaloneCleanup {
+    base_dir: PathBuf,
+    pid_path: PathBuf,
+    port: u16,
+}
+
+impl StandaloneCleanup {
+    fn new(port: u16) -> Self {
+        let sequence = STANDALONE_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base_dir = std::env::temp_dir().join(format!(
+            "redis-tower-soak-{}-{port}-{sequence}",
+            std::process::id()
+        ));
+        let pid_path = base_dir.join(format!("node-{port}/redis.pid"));
+        Self {
+            base_dir,
+            pid_path,
+            port,
+        }
+    }
+
+    fn cleanup(&self) {
+        let deadline = std::time::Instant::now() + PROCESS_CLEANUP_TIMEOUT;
+        let mut quiet_since = None;
+        loop {
+            if let Some(pid) = read_pid(&self.pid_path)
+                && pid_alive(pid)
+            {
+                terminate_pid(pid);
+            }
+            if port_is_open(self.port) {
+                shutdown_redis_port(self.port);
+            }
+
+            let pid_is_alive = read_pid(&self.pid_path).is_some_and(pid_alive);
+            if !pid_is_alive && !port_is_open(self.port) {
+                let quiet = quiet_since.get_or_insert_with(std::time::Instant::now);
+                if quiet.elapsed() >= Duration::from_millis(150) {
+                    break;
+                }
+            } else {
+                quiet_since = None;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(PROCESS_CLEANUP_POLL);
+        }
+
+        if let Some(pid) = read_pid(&self.pid_path)
+            && pid_alive(pid)
+        {
+            force_kill_pid(pid);
+        }
+        if port_is_open(self.port) {
+            shutdown_redis_port(self.port);
+        }
+        let _ = fs::remove_dir_all(&self.base_dir);
+    }
+}
+
+impl Drop for StandaloneCleanup {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
+struct ManagedStandalone {
+    handle: Option<RedisServerHandle>,
+    _cleanup: StandaloneCleanup,
+}
+
+impl ManagedStandalone {
+    fn handle(&self) -> &RedisServerHandle {
+        self.handle
+            .as_ref()
+            .expect("managed standalone handle exists until drop")
+    }
+
+    fn addr(&self) -> String {
+        self.handle().addr()
+    }
+
+    fn port(&self) -> u16 {
+        self.handle().port()
+    }
+
+    fn pid(&self) -> u32 {
+        self.handle().pid()
+    }
+
+    async fn sigkill_and_confirm(mut self, wait: Duration) -> Result<(u16, u32)> {
+        let port = self.port();
+        let pid = self.pid();
+        chaos::kill_node(self.handle());
+        wait_for_process_death(pid, port, wait).await?;
+        self.handle
+            .take()
+            .expect("killed standalone handle remains owned")
+            .detach();
+        // Drop the old PID-scoped directory guard before a replacement binds
+        // the same port, so it can never target the replacement.
+        drop(self);
+        Ok((port, pid))
+    }
+}
+
+impl Drop for ManagedStandalone {
+    fn drop(&mut self) {
+        // RedisServerHandle performs its normal graceful/forced shutdown first;
+        // StandaloneCleanup then catches cancellation during startup and any
+        // residual PID or listener scoped to this run.
+        drop(self.handle.take());
+    }
 }
 
 fn reserve_ephemeral_port() -> Result<u16> {
@@ -1201,16 +1616,105 @@ fn reserve_ephemeral_port() -> Result<u16> {
     Ok(port)
 }
 
-async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<RedisServerHandle> {
+async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<ManagedStandalone> {
+    let cleanup = StandaloneCleanup::new(port);
     let start = RedisServer::new()
         .port(port)
+        .dir(&cleanup.base_dir)
         .save(false)
         .appendonly(false)
         .start();
-    timeout(startup_timeout, start)
+    let handle = timeout(startup_timeout, start)
         .await
         .map_err(|_| format!("timed out after {startup_timeout:?} starting Redis on port {port}"))?
-        .map_err(Into::into)
+        .map_err(BoxError::from)?;
+    Ok(ManagedStandalone {
+        handle: Some(handle),
+        _cleanup: cleanup,
+    })
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    ProcessCommand::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn signal_pid(pid: u32, signal: &str) {
+    let _ = ProcessCommand::new("kill")
+        .args([signal, &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(not(unix))]
+fn signal_pid(_pid: u32, _signal: &str) {}
+
+fn terminate_pid(pid: u32) {
+    signal_pid(pid, "-TERM");
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    while pid_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(PROCESS_CLEANUP_POLL);
+    }
+    if pid_alive(pid) {
+        force_kill_pid(pid);
+    }
+}
+
+fn force_kill_pid(pid: u32) {
+    signal_pid(pid, "-KILL");
+}
+
+fn port_is_open(port: u16) -> bool {
+    TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(20),
+    )
+    .is_ok()
+}
+
+fn shutdown_redis_port(port: u16) {
+    let _ = ProcessCommand::new("redis-cli")
+        .args([
+            "-h",
+            "127.0.0.1",
+            "-p",
+            &port.to_string(),
+            "SHUTDOWN",
+            "NOSAVE",
+        ])
+        .output();
+}
+
+async fn wait_for_process_death(pid: u32, port: u16, wait: Duration) -> Result<()> {
+    let deadline = Instant::now() + wait;
+    loop {
+        if !pid_alive(pid) && !port_is_open(port) {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "SIGKILL did not stop standalone Redis pid={pid} port={port} within {wait:?}"
+            )
+            .into());
+        }
+        sleep(PROCESS_CLEANUP_POLL).await;
+    }
 }
 
 async fn seed_standalone(
@@ -1262,13 +1766,14 @@ async fn seed_cluster(fixture: &ClusterFixture, slot: u16, key: &str, payload: &
 fn spawn_event_monitor(
     mut stream: redis_tower::ConnectionEventStream,
     counters: Arc<LifecycleCounters>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> AbortOnDropTask<()> {
+    AbortOnDropTask::spawn(async move {
         loop {
             match stream.recv().await {
                 Ok(ConnectionEvent::Reconnected { .. }) => {
-                    counters.reconnects.fetch_add(1, Ordering::Relaxed);
-                    counters.recoveries.fetch_add(1, Ordering::Relaxed);
+                    counters
+                        .standalone_reconnect_recoveries
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 Ok(_) => {}
                 Err(ConnectionEventRecvError::Lagged { skipped }) => {
@@ -1286,7 +1791,7 @@ fn spawn_event_monitor(
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_standalone_chaos(
-    server: RedisServerHandle,
+    server: ManagedStandalone,
     client: SoakClient,
     key: Arc<str>,
     payload: String,
@@ -1294,58 +1799,99 @@ fn spawn_standalone_chaos(
     counters: Arc<LifecycleCounters>,
     config: Config,
     measurement_started: oneshot::Receiver<Instant>,
-) -> JoinHandle<Result<RedisServerHandle>> {
-    tokio::spawn(async move {
-        let started = measurement_started
-            .await
-            .map_err(|_| "measurement stopped before standalone chaos could start")?;
-        sleep_until(started + config.chaos_after).await;
+) -> ChaosRun {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let task = AbortOnDropTask::spawn(async move {
+        let result: Result<ManagedStandalone> = async {
+            let started = measurement_started
+                .await
+                .map_err(|_| "measurement stopped before standalone chaos could start")?;
+            sleep_until(started + config.chaos_after).await;
 
-        let port = server.port();
-        let old_pid = server.pid();
-        eprintln!(
-            "soak-bench: SIGKILL standalone Redis pid={old_pid} port={port} at +{:.1}s",
-            config.chaos_after.as_secs_f64()
-        );
-        chaos::kill_node(&server);
-        counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
-        // The handle points at the killed PID. Detach it so its Drop cannot
-        // mistake the replacement on the same port for the old process.
-        server.detach();
-        sleep(Duration::from_millis(100)).await;
+            let recovery_deadline = Instant::now() + config.recovery_timeout;
+            let port = server.port();
+            let old_pid = server.pid();
+            let reconnect_before = counters
+                .standalone_reconnect_recoveries
+                .load(Ordering::Relaxed);
+            eprintln!(
+                "soak-bench: SIGKILL standalone Redis pid={old_pid} port={port} at +{:.1}s",
+                config.chaos_after.as_secs_f64()
+            );
+            let remaining = remaining_until(recovery_deadline, "confirming standalone SIGKILL")?;
+            let (confirmed_port, confirmed_pid) = server.sigkill_and_confirm(remaining).await?;
+            debug_assert_eq!(confirmed_port, port);
+            debug_assert_eq!(confirmed_pid, old_pid);
+            counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
 
-        let replacement = start_standalone(port, config.startup_timeout).await?;
-        if replacement.pid() == old_pid {
-            return Err("standalone replacement reused the killed process PID".into());
-        }
-        if replacement.port() != port {
-            return Err(format!(
-                "standalone replacement moved from port {port} to {}",
-                replacement.port()
+            let remaining = remaining_until(recovery_deadline, "restarting standalone Redis")?;
+            let replacement = start_standalone(port, config.startup_timeout.min(remaining)).await?;
+            if replacement.pid() == old_pid {
+                return Err("standalone replacement reused the killed process PID".into());
+            }
+            if replacement.port() != port {
+                return Err(format!(
+                    "standalone replacement moved from port {port} to {}",
+                    replacement.port()
+                )
+                .into());
+            }
+            let remaining = remaining_until(recovery_deadline, "seeding standalone replacement")?;
+            seed_standalone(
+                &replacement.addr(),
+                key.as_ref(),
+                &payload,
+                config.operation_timeout.min(remaining),
             )
-            .into());
+            .await?;
+            let remaining = remaining_until(recovery_deadline, "probing standalone recovery")?;
+            wait_for_client_recovery(
+                &client,
+                key.as_ref(),
+                expected.as_ref(),
+                config.operation_timeout.min(remaining),
+                remaining,
+            )
+            .await?;
+            let remaining = remaining_until(
+                recovery_deadline,
+                "observing the standalone reconnect event",
+            )?;
+            wait_for_counter_increment(
+                &counters.standalone_reconnect_recoveries,
+                reconnect_before,
+                remaining,
+            )
+            .await?;
+            eprintln!(
+                "soak-bench: standalone client recovered on port={port} replacement_pid={}",
+                replacement.pid()
+            );
+            Ok(replacement)
         }
-        seed_standalone(
-            &replacement.addr(),
-            key.as_ref(),
-            &payload,
-            config.operation_timeout,
-        )
-        .await?;
-        wait_for_client_recovery(
-            &client,
-            key.as_ref(),
-            expected.as_ref(),
-            config.operation_timeout,
-            config.recovery_timeout,
-        )
-        .await?;
-        eprintln!(
-            "soak-bench: standalone client recovered on port={port} replacement_pid={}",
-            replacement.pid()
-        );
-        Ok(replacement)
-    })
+        .await;
+
+        drop(client);
+        match result {
+            Ok(replacement) => {
+                let _ = completion_tx.send(Ok(Instant::now()));
+                let _ = release_rx.await;
+                drop(replacement);
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = completion_tx.send(Err(message));
+                Err(error)
+            }
+        }
+    });
+    ChaosRun {
+        task,
+        completion: Some(completion_rx),
+        release: Some(release_tx),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1357,48 +1903,69 @@ fn spawn_cluster_chaos(
     counters: Arc<LifecycleCounters>,
     config: Config,
     measurement_started: oneshot::Receiver<Instant>,
-) -> JoinHandle<Result<()>> {
-    tokio::spawn(async move {
-        let started = measurement_started
-            .await
-            .map_err(|_| "measurement stopped before cluster chaos could start")?;
-        sleep_until(started + config.chaos_after).await;
+) -> ChaosRun {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let task = AbortOnDropTask::spawn(async move {
+        let result: Result<()> = async {
+            let started = measurement_started
+                .await
+                .map_err(|_| "measurement stopped before cluster chaos could start")?;
+            sleep_until(started + config.chaos_after).await;
 
-        let old_owner = fixture.kill_slot_owner(config.cluster_slot).await?;
-        counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "soak-bench: SIGKILL cluster slot={} owner={} ({}) at +{:.1}s",
-            config.cluster_slot,
-            old_owner.id,
-            old_owner.addr,
-            config.chaos_after.as_secs_f64()
-        );
+            let old_owner = fixture.kill_slot_owner(config.cluster_slot).await?;
+            counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "soak-bench: SIGKILL cluster slot={} owner={} ({}) at +{:.1}s",
+                config.cluster_slot,
+                old_owner.id,
+                old_owner.addr,
+                config.chaos_after.as_secs_f64()
+            );
 
-        let recovery_deadline = Instant::now() + config.recovery_timeout;
-        let remaining = recovery_deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("cluster recovery timeout elapsed before topology polling")?;
-        let new_owner = fixture
-            .wait_for_slot_owner_change(config.cluster_slot, &old_owner.id, remaining)
+            let recovery_deadline = Instant::now() + config.recovery_timeout;
+            let remaining = remaining_until(recovery_deadline, "polling cluster topology")?;
+            let new_owner = fixture
+                .wait_for_slot_owner_change(config.cluster_slot, &old_owner.id, remaining)
+                .await?;
+            let remaining = remaining_until(recovery_deadline, "probing cluster recovery")?;
+            wait_for_client_recovery(
+                &client,
+                key.as_ref(),
+                expected.as_ref(),
+                config.operation_timeout.min(remaining),
+                remaining,
+            )
             .await?;
-        let remaining = recovery_deadline
-            .checked_duration_since(Instant::now())
-            .ok_or("cluster recovery timeout elapsed before the client probe")?;
-        wait_for_client_recovery(
-            &client,
-            key.as_ref(),
-            expected.as_ref(),
-            config.operation_timeout.min(remaining),
-            remaining,
-        )
-        .await?;
-        counters.recoveries.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "soak-bench: cluster harness observed slot={} owner change {} -> {} and a successful client GET",
-            config.cluster_slot, old_owner.id, new_owner.id
-        );
-        Ok(())
-    })
+            counters.cluster_recoveries.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "soak-bench: cluster harness observed slot={} owner change {} -> {} and a successful client GET",
+                config.cluster_slot, old_owner.id, new_owner.id
+            );
+            Ok(())
+        }
+        .await;
+
+        drop(client);
+        drop(fixture);
+        match result {
+            Ok(()) => {
+                let _ = completion_tx.send(Ok(Instant::now()));
+                let _ = release_rx.await;
+                Ok(())
+            }
+            Err(error) => {
+                let message = error.to_string();
+                let _ = completion_tx.send(Err(message));
+                Err(error)
+            }
+        }
+    });
+    ChaosRun {
+        task,
+        completion: Some(completion_rx),
+        release: Some(release_tx),
+    }
 }
 
 async fn wait_for_client_recovery(
@@ -1424,8 +1991,37 @@ async fn wait_for_client_recovery(
     Ok(())
 }
 
-fn verify_requested_chaos(config: &Config, counters: &LifecycleCounters) -> Result<()> {
-    let counters = counters.snapshot();
+fn remaining_until(deadline: Instant, operation: &str) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(|| format!("recovery deadline elapsed while {operation}").into())
+}
+
+async fn wait_for_counter_increment(
+    counter: &AtomicU64,
+    previous: u64,
+    wait: Duration,
+) -> Result<()> {
+    timeout(wait, async {
+        while counter.load(Ordering::Relaxed) <= previous {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(
+        |_| "client recovered but its ConnectionEvent::Reconnected was not observed in time",
+    )?;
+    Ok(())
+}
+
+fn verify_requested_chaos(
+    config: &Config,
+    counters: &LifecycleCounters,
+    baseline: CounterSnapshot,
+) -> Result<()> {
+    let counters = counters
+        .snapshot(config.mode == Mode::Standalone)
+        .delta(baseline);
     match config.chaos {
         ChaosMode::None => {
             if counters.chaos_injections != 0 {
@@ -1516,5 +2112,238 @@ mod tests {
             ..Config::default()
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_error_backoff_and_latency_above_histogram_range() {
+        let zero_backoff = Config {
+            error_backoff: Duration::ZERO,
+            ..Config::default()
+        };
+        assert!(zero_backoff.validate().is_err());
+
+        let excessive_timeout = Config {
+            operation_timeout: Duration::from_secs(61),
+            ..Config::default()
+        };
+        assert!(excessive_timeout.validate().is_err());
+
+        let maximum_timeout = Config {
+            operation_timeout: Duration::from_secs(60),
+            ..Config::default()
+        };
+        assert!(maximum_timeout.validate().is_ok());
+    }
+
+    #[test]
+    fn worker_control_timeout_includes_large_error_backoff() {
+        assert_eq!(
+            worker_control_timeout(Duration::from_secs(2), Duration::from_secs(90)),
+            Duration::from_secs(97)
+        );
+    }
+
+    #[test]
+    fn standalone_reconnect_and_recovery_are_one_atomic_snapshot() {
+        let counters = LifecycleCounters::default();
+        counters
+            .standalone_reconnect_recoveries
+            .store(7, Ordering::Relaxed);
+        let snapshot = counters.snapshot(true);
+        assert_eq!(snapshot.reconnects, 7);
+        assert_eq!(snapshot.recoveries, 7);
+    }
+
+    #[test]
+    fn lifecycle_baseline_discards_warmup_events() {
+        let counters = LifecycleCounters::default();
+        counters
+            .standalone_reconnect_recoveries
+            .store(2, Ordering::Relaxed);
+        let baseline = counters.snapshot(true);
+        counters
+            .standalone_reconnect_recoveries
+            .fetch_add(1, Ordering::Relaxed);
+        let measured = counters.snapshot(true).delta(baseline);
+        assert_eq!(measured.reconnects, 1);
+        assert_eq!(measured.recoveries, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completion_after_interval_deadline_is_not_recordable() {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(completion_is_in_window(Instant::now(), deadline));
+        tokio::time::advance(Duration::from_millis(2)).await;
+        assert!(!completion_is_in_window(Instant::now(), deadline));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cluster_recovery_after_measurement_deadline_is_rejected_and_cancelled() {
+        let recoveries = Arc::new(AtomicU64::new(0));
+        let delayed_recoveries = Arc::clone(&recoveries);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let task = AbortOnDropTask::spawn(async move {
+            sleep(Duration::from_secs(11)).await;
+            delayed_recoveries.fetch_add(1, Ordering::Relaxed);
+            let _ = completion_tx.send(Ok(Instant::now()));
+            let _ = release_rx.await;
+            Ok(())
+        });
+        let mut chaos = ChaosRun {
+            task,
+            completion: Some(completion_rx),
+            release: Some(release_tx),
+        };
+        let mut completion = Some(chaos.take_completion().unwrap());
+        let mut completed = false;
+        let deadline = Instant::now() + Duration::from_secs(10);
+
+        sleep(Duration::from_secs(10)).await;
+        let error = require_chaos_completion_at_deadline(deadline, &mut completion, &mut completed)
+            .expect_err("late cluster recovery must fail at the measurement boundary");
+        assert!(error.to_string().contains("measurement deadline"));
+        chaos.cancel().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(recoveries.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_recovery_with_post_deadline_timestamp_is_rejected() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        completion_tx
+            .send(Ok(deadline + Duration::from_nanos(1)))
+            .unwrap();
+        let mut completion = Some(completion_rx);
+        let mut completed = false;
+
+        let error = require_chaos_completion_at_deadline(deadline, &mut completion, &mut completed)
+            .expect_err("a queued post-deadline completion must remain late");
+        assert!(error.to_string().contains("after the measurement deadline"));
+        assert!(!completed);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropping_abort_owned_task_prevents_delayed_destructive_work() {
+        let injections = Arc::new(AtomicU64::new(0));
+        let delayed_injections = Arc::clone(&injections);
+        let task = AbortOnDropTask::spawn(async move {
+            sleep(Duration::from_secs(5)).await;
+            delayed_injections.fetch_add(1, Ordering::Relaxed);
+        });
+        drop(task);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        assert_eq!(injections.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_startup_cancellation_reaps_pid_and_port() {
+        let port = reserve_ephemeral_port().unwrap();
+        let (started_tx, started_rx) = oneshot::channel();
+        let task = AbortOnDropTask::spawn(async move {
+            let server = start_standalone(port, Duration::from_secs(20))
+                .await
+                .expect("start managed Redis");
+            let _ = started_tx.send(server.pid());
+            std::future::pending::<()>().await;
+            drop(server);
+        });
+        let pid = timeout(Duration::from_secs(20), started_rx)
+            .await
+            .expect("startup bound")
+            .expect("startup signal");
+        assert!(pid_alive(pid));
+        assert!(port_is_open(port));
+        drop(task);
+        wait_until_process_is_gone(pid, port).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_startup_timeout_leaves_no_orphan_listener() {
+        let port = reserve_ephemeral_port().unwrap();
+        let result = start_standalone(port, Duration::from_nanos(1)).await;
+        assert!(result.is_err());
+        timeout(Duration::from_secs(4), async {
+            while port_is_open(port) {
+                sleep(PROCESS_CLEANUP_POLL).await;
+            }
+        })
+        .await
+        .expect("startup timeout cleanup bound");
+        assert!(!port_is_open(port));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_sigkill_is_confirmed_before_same_port_restart() {
+        let port = reserve_ephemeral_port().unwrap();
+        let server = start_standalone(port, Duration::from_secs(20))
+            .await
+            .expect("start managed Redis");
+        let old_pid = server.pid();
+        let (confirmed_port, confirmed_pid) = server
+            .sigkill_and_confirm(Duration::from_secs(5))
+            .await
+            .expect("confirm SIGKILL");
+        assert_eq!(confirmed_port, port);
+        assert_eq!(confirmed_pid, old_pid);
+        assert!(!pid_alive(old_pid));
+        assert!(!port_is_open(port));
+
+        let replacement = start_standalone(port, Duration::from_secs(20))
+            .await
+            .expect("restart on the same port");
+        assert_ne!(replacement.pid(), old_pid);
+        drop(replacement);
+        assert!(!port_is_open(port));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_cluster_recovery_after_measurement_boundary_fails() {
+        let config = Config {
+            mode: Mode::Cluster,
+            chaos: ChaosMode::ClusterMasterKill,
+            duration: Duration::from_secs(1),
+            warmup: Duration::ZERO,
+            report_interval: Duration::from_millis(500),
+            chaos_after: Duration::from_millis(100),
+            concurrency: 2,
+            operation_timeout: Duration::from_millis(500),
+            error_backoff: Duration::from_millis(1),
+            startup_timeout: Duration::from_secs(30),
+            recovery_timeout: Duration::from_secs(10),
+            payload_bytes: 16,
+            cluster_slot: 42,
+            cluster_node_timeout_ms: 1_000,
+            standalone_port: None,
+            output: OutputFormat::JsonLines,
+        };
+        config.validate().unwrap();
+        let error = run(config)
+            .await
+            .expect_err("cluster recovery after the one-second run must fail");
+        assert!(error.to_string().contains("measurement deadline"));
+    }
+
+    #[cfg(unix)]
+    async fn wait_until_process_is_gone(pid: u32, port: u16) {
+        timeout(Duration::from_secs(5), async {
+            while pid_alive(pid) || port_is_open(port) {
+                sleep(PROCESS_CLEANUP_POLL).await;
+            }
+        })
+        .await
+        .expect("managed process cleanup bound");
+        assert!(!pid_alive(pid));
+        assert!(!port_is_open(port));
     }
 }
