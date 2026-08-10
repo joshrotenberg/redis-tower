@@ -9,7 +9,7 @@
   "os": "linux",
   "arch": "x86_64",
   "config": {
-    "redis_endpoint": "redis://127.0.0.1:6379/",
+    "redis_endpoint": "<redacted>",
     "connections": 1,
     "target_ops_per_sec": 1,
     "warmup_secs": 0,

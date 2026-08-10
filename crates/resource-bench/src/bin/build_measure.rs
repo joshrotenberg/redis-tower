@@ -6,7 +6,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -304,11 +304,13 @@ fn resolved_dependency_graph(
             graph.len()
         ));
     }
-    if graph.contains("ctrlc v") {
-        return Err(format!(
-            "dependency graph for {} contains build-measure-only signal handling",
-            subject.client
-        ));
+    for build_only_dependency in ["ctrlc", "sha2"] {
+        if graph.contains(&format!("{build_only_dependency} v")) {
+            return Err(format!(
+                "dependency graph for {} contains build-measure-only dependency {build_only_dependency}",
+                subject.client
+            ));
+        }
     }
     let dependency_marker = format!("{} v{dependency_version}", subject.dependency);
     if !graph.contains(&dependency_marker) {
@@ -363,7 +365,7 @@ fn lock_active_process_groups() -> std::sync::MutexGuard<'static, BTreeSet<i32>>
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 fn process_group_is_alive(group: i32) -> bool {
     // SAFETY: signal 0 performs an existence/permission check and does not
     // deliver a signal. The negated PID addresses the child's process group.
@@ -379,54 +381,204 @@ fn signal_process_group(group: i32, signal: i32) {
 }
 
 #[cfg(unix)]
-fn terminate_active_process_groups() {
+fn signal_active_process_groups(signal: i32) {
     let groups = lock_active_process_groups();
     for group in groups.iter().copied() {
-        signal_process_group(group, libc::SIGTERM);
+        signal_process_group(group, signal);
     }
-    let graceful_deadline = Instant::now() + Duration::from_secs(2);
-    while groups.iter().copied().any(process_group_is_alive) && Instant::now() < graceful_deadline {
+}
+
+#[cfg(unix)]
+fn wait_for_no_active_process_groups(deadline: Instant) -> bool {
+    loop {
+        // Re-read the registry on every iteration. In particular, do not keep
+        // process-group IDs across a sleep: the child waiter must be able to
+        // reap and unregister a group before its ID can be reused.
+        if lock_active_process_groups().is_empty() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(20));
     }
-    for group in groups
-        .iter()
-        .copied()
-        .filter(|group| process_group_is_alive(*group))
-    {
-        signal_process_group(group, libc::SIGKILL);
+}
+
+#[cfg(unix)]
+fn terminate_active_process_groups() {
+    signal_active_process_groups(libc::SIGTERM);
+    if wait_for_no_active_process_groups(Instant::now() + Duration::from_secs(2)) {
+        return;
     }
+
+    // Reacquire the registry before signaling again. A group reaped during the
+    // grace period is no longer eligible to receive SIGKILL.
+    signal_active_process_groups(libc::SIGKILL);
     let forced_deadline = Instant::now() + Duration::from_secs(2);
-    while groups.iter().copied().any(process_group_is_alive) && Instant::now() < forced_deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let _ = wait_for_no_active_process_groups(forced_deadline);
 }
 
 #[cfg(not(unix))]
 fn terminate_active_process_groups() {}
 
-fn command_status_with_cleanup(command: &mut Command) -> std::io::Result<std::process::ExitStatus> {
+struct RegisteredChild {
+    child: Option<Child>,
     #[cfg(unix)]
-    {
-        command.process_group(0);
-        let mut groups = lock_active_process_groups();
-        let mut child = command.spawn()?;
-        let group = i32::try_from(child.id()).map_err(std::io::Error::other)?;
-        groups.insert(group);
-        drop(groups);
-        let status = child.wait();
-        lock_active_process_groups().remove(&group);
-        status
+    process_group: Option<i32>,
+}
+
+impl RegisteredChild {
+    fn spawn(command: &mut Command) -> std::io::Result<Self> {
+        #[cfg(unix)]
+        {
+            // Holding the registry lock across spawn and insertion prevents a
+            // termination handler from observing an unregistered live child.
+            // The flag check prevents new children after termination begins.
+            let mut groups = lock_active_process_groups();
+            if TERMINATING.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "termination is already in progress",
+                ));
+            }
+
+            command.process_group(0);
+            let mut child = command.spawn()?;
+            let group = match i32::try_from(child.id()) {
+                Ok(group) => group,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(std::io::Error::other(error));
+                }
+            };
+            if !groups.insert(group) {
+                signal_process_group(group, libc::SIGKILL);
+                let _ = child.wait();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("process group {group} is already registered"),
+                ));
+            }
+
+            Ok(Self {
+                child: Some(child),
+                process_group: Some(group),
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            command.spawn().map(|child| Self { child: Some(child) })
+        }
     }
-    #[cfg(not(unix))]
-    {
-        command.status()
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("registered child is live").id()
     }
+
+    #[cfg(all(test, unix))]
+    fn process_group(&self) -> i32 {
+        self.process_group.expect("registered child has a group")
+    }
+
+    fn wait(mut self) -> std::io::Result<ExitStatus> {
+        #[cfg(unix)]
+        {
+            let group = self.process_group.expect("registered child has a group");
+            loop {
+                {
+                    let mut groups = lock_active_process_groups();
+                    match self
+                        .child
+                        .as_mut()
+                        .expect("registered child is live")
+                        .try_wait()
+                    {
+                        Ok(Some(status)) => {
+                            // A PID/PGID can only be reused after this reap.
+                            // Keep the registry locked until the now-stale ID
+                            // is removed so the signal handler cannot use it.
+                            let removed = groups.remove(&group);
+                            debug_assert!(removed, "reaped process group was not registered");
+                            self.process_group = None;
+                            self.child.take();
+                            return Ok(status);
+                        }
+                        Ok(None) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(error) => return Err(error),
+                    }
+                }
+                // Let the signal handler acquire the registry between polls.
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let status = self
+                .child
+                .as_mut()
+                .expect("registered child is live")
+                .wait();
+            if status.is_ok() {
+                self.child.take();
+            }
+            status
+        }
+    }
+}
+
+impl Drop for RegisteredChild {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            let Some(group) = self.process_group else {
+                return;
+            };
+            let Some(child) = self.child.as_mut() else {
+                return;
+            };
+
+            // Keep the group registered and the registry locked through the
+            // successful reap. This is the error-path counterpart to wait().
+            let mut groups = lock_active_process_groups();
+            signal_process_group(group, libc::SIGKILL);
+            loop {
+                match child.wait() {
+                    Ok(_) => {
+                        groups.remove(&group);
+                        self.process_group = None;
+                        self.child.take();
+                        break;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(error) => {
+                        // An unreaped child prevents PID reuse. Retaining the
+                        // registry entry is safer than exposing a stale ID.
+                        eprintln!("warning: could not reap process group {group}: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn command_status_with_cleanup(command: &mut Command) -> std::io::Result<ExitStatus> {
+    RegisteredChild::spawn(command)?.wait()
 }
 
 fn install_cleanup_handler() -> Result<(), String> {
     CLEANUP_HANDLER
         .get_or_init(|| {
             let _ = active_targets();
+            #[cfg(unix)]
+            let _ = active_process_groups();
             ctrlc::set_handler(|| {
                 TERMINATING.store(true, Ordering::SeqCst);
                 terminate_active_process_groups();
@@ -454,10 +606,6 @@ fn cleanup_active_targets_for_signal() {
 
 fn run_signal_test_helper(base: &Path) -> Result<(), String> {
     let target = temporary_target_in(base, "signal-test", 0)?;
-    println!("{}", target.path().display());
-    std::io::stdout()
-        .flush()
-        .map_err(|error| format!("flush signal-test target path: {error}"))?;
     let executable =
         env::current_exe().map_err(|error| format!("locate signal-test executable: {error}"))?;
     let mut writer = Command::new(executable);
@@ -465,7 +613,14 @@ fn run_signal_test_helper(base: &Path) -> Result<(), String> {
         .env("RESOURCE_BUILD_SIGNAL_WRITER_DIR", target.path())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let status = command_status_with_cleanup(&mut writer)
+    let writer = RegisteredChild::spawn(&mut writer)
+        .map_err(|error| format!("start signal-test writer: {error}"))?;
+    println!("{}\t{}", target.path().display(), writer.id());
+    std::io::stdout()
+        .flush()
+        .map_err(|error| format!("flush signal-test target and writer PID: {error}"))?;
+    let status = writer
+        .wait()
         .map_err(|error| format!("run signal-test writer: {error}"))?;
     Err(format!(
         "signal-test writer exited unexpectedly with {status}"
@@ -630,6 +785,21 @@ mod tests {
         assert_eq!(stddev(&[2.0]), 0.0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn normally_exited_child_is_reaped_and_unregistered_atomically() {
+        let mut command = Command::new("true");
+        let child = RegisteredChild::spawn(&mut command).expect("spawn registered child");
+        let group = child.process_group();
+        assert!(lock_active_process_groups().contains(&group));
+
+        let status = child.wait().expect("wait for registered child");
+
+        assert!(status.success());
+        assert!(!lock_active_process_groups().contains(&group));
+        assert!(!process_group_is_alive(group));
+    }
+
     #[test]
     fn isolated_target_is_removed_after_stat_and_strip_errors() {
         let base = env::temp_dir();
@@ -715,6 +885,7 @@ mod tests {
             assert!(graph.contains("$WORKSPACE/crates/resource-bench"));
             assert!(!graph.contains(workspace.to_string_lossy().as_ref()));
             assert!(!graph.contains("ctrlc v"));
+            assert!(!graph.contains("sha2 v"));
         }
     }
 

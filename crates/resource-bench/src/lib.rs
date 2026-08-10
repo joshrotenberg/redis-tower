@@ -14,7 +14,6 @@ use async_trait::async_trait;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
-use url::Url;
 
 /// Key used by every client implementation during the fixed-rate workload.
 pub const FIXTURE_KEY: &str = "resource-bench:payload";
@@ -71,7 +70,7 @@ pub struct ProbeConfig {
     /// because it may contain a username or password.
     #[serde(skip_serializing)]
     redis_url: String,
-    /// Privacy-preserving transport, port, and database summary.
+    /// Constant redaction marker; deployment endpoint details are never emitted.
     pub redis_endpoint: String,
     /// Number of independent live connections retained during the probe.
     pub connections: usize,
@@ -113,45 +112,11 @@ impl ProbeConfig {
     }
 }
 
-fn safe_redis_endpoint(raw: &str) -> String {
-    const REDACTED: &str = "<redacted>";
-
-    let Some((_, remainder)) = raw.split_once("://") else {
-        return REDACTED.to_owned();
-    };
-    if let Some(authority_end) = remainder.rfind('@') {
-        let user_info = &remainder[..authority_end];
-        // redis-tower deliberately accepts raw URL delimiters in passwords.
-        // A generic URL parser would reinterpret them as path/query/fragment
-        // data and could then emit credential bytes as an apparent endpoint.
-        if user_info.contains(['/', '?', '#', '@']) {
-            return REDACTED.to_owned();
-        }
-    }
-
-    let Ok(parsed) = Url::parse(raw) else {
-        return REDACTED.to_owned();
-    };
-    if !matches!(parsed.scheme(), "redis" | "rediss") || parsed.host().is_none() {
-        // Unix socket paths and unknown schemes can themselves contain
-        // sensitive deployment details, so do not expose them in artifacts.
-        return REDACTED.to_owned();
-    }
-    let path = parsed.path();
-    if path != "/"
-        && path.strip_prefix('/').is_none_or(|database| {
-            database.is_empty() || !database.bytes().all(|byte| byte.is_ascii_digit())
-        })
-    {
-        return REDACTED.to_owned();
-    }
-    let port = parsed
-        .port()
-        .map_or_else(String::new, |port| format!(":{port}"));
-    // Hostnames, usernames, passwords, query strings, and fragments are all
-    // intentionally omitted. Scheme, explicit port, and numeric database are
-    // enough to distinguish benchmark topology without publishing endpoints.
-    format!("{}://<host>{port}{path}", parsed.scheme())
+fn safe_redis_endpoint(_raw: &str) -> String {
+    // Even a scheme, port, or database number can disclose deployment details.
+    // Reports therefore carry only a stable marker, while the raw URL remains
+    // available privately to the selected client adapter.
+    "<redacted>".to_owned()
 }
 
 #[cfg(test)]
@@ -760,39 +725,46 @@ mod tests {
 
     #[test]
     fn report_serialization_never_exposes_redis_credentials() {
-        let cases = [
+        let cases: &[(&str, &[&str])] = &[
             (
                 "redis://alice:ordinary-secret@private-host:6380/2?token=query-secret#fragment-secret",
-                "redis://<host>:6380/2",
-                ["ordinary-secret", "query-secret", "fragment-secret"],
+                &[
+                    "alice",
+                    "ordinary-secret",
+                    "private-host",
+                    "6380",
+                    "query-secret",
+                    "fragment-secret",
+                ],
             ),
             (
                 "rediss://alice:encoded%40secret@private-host:6381/3",
-                "rediss://<host>:6381/3",
-                ["encoded%40secret", "private-host", "alice"],
+                &["encoded%40secret", "private-host", "alice", "6381"],
             ),
             (
                 "redis://alice:slash-secret/value@private-host:6380/2",
-                "<redacted>",
-                ["slash-secret", "private-host", "alice"],
+                &["slash-secret", "private-host", "alice"],
             ),
             (
                 "redis://alice:question-secret?value@private-host:6380/2",
-                "<redacted>",
-                ["question-secret", "private-host", "alice"],
+                &["question-secret", "private-host", "alice"],
             ),
             (
                 "redis://alice:hash-secret#value@private-host:6380/2",
-                "<redacted>",
-                ["hash-secret", "private-host", "alice"],
+                &["hash-secret", "private-host", "alice"],
+            ),
+            (
+                "redis://deployment.internal:6379/0",
+                &["deployment.internal", "6379"],
             ),
         ];
 
-        for (raw, endpoint, secrets) in cases {
+        for (raw, secrets) in cases {
             let json = serialized_config_for_url(raw);
-            assert!(json.contains(endpoint), "{json}");
+            let report: serde_json::Value = serde_json::from_str(&json).expect("parse report JSON");
+            assert_eq!(report["redis_endpoint"], "<redacted>", "{json}");
             assert!(!json.contains(raw), "{json}");
-            for secret in secrets {
+            for secret in *secrets {
                 assert!(!json.contains(secret), "{json}");
             }
         }

@@ -52,12 +52,10 @@ in `cutoff_ops`, never as a client error. A canceled warmup connection is
 dropped, and every warmup connection is revalidated or re-established before
 CPU measurement.
 
-The raw `REDIS_URL` is never serialized. `redis_endpoint` also masks the
-hostname and omits usernames, passwords, query strings, and fragments by
-default; it retains only an unambiguous Redis scheme, explicit port, and numeric
-database. Ambiguous credentials, Unix socket paths, malformed URLs, and unknown
-schemes are reported as `<redacted>`. This makes artifacts safer to publish
-without silently treating URL delimiters inside a password as endpoint data.
+The raw `REDIS_URL` is never serialized. `redis_endpoint` is always the literal
+`<redacted>` marker, including for ordinary TCP URLs. This keeps credentials,
+hostnames, ports, database numbers, Unix socket paths, and other deployment
+details out of artifacts without relying on URL parsing or delimiter handling.
 
 RSS comes from `getrusage(RUSAGE_SELF).ru_maxrss`. It is a process high-water
 mark, not a live heap gauge. The reported connection delta subtracts a baseline
