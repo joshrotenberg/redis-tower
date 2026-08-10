@@ -5,14 +5,14 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle};
-use redis_tower::Transaction;
 use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::pool::ConnectionPool;
+use redis_tower::{CacheTrackingMode, CachedClientConfig, Transaction};
 use redis_tower_cluster::{
-    ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan, ClusterScanItem,
-    MultiplexedClusterClient, ScanClusterStream,
+    CachedMultiplexedClusterClient, ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan,
+    ClusterScanItem, MultiplexedClusterClient, ScanClusterStream, slot_for_key,
 };
 use redis_tower_commands::*;
 use redis_tower_test::cluster::{ClusterFixture, ClusterNodeRole, key_for_slot};
@@ -282,6 +282,478 @@ async fn mux_cluster_refresh_topology() {
         *metrics.outcomes.lock().unwrap(),
         vec![ClusterTopologyRefreshOutcome::Success]
     );
+}
+
+// -- CachedMultiplexedClusterClient-specific tests --
+
+async fn wait_for_cached_value(
+    client: &CachedMultiplexedClusterClient,
+    key: &str,
+    expected: &[u8],
+    timeout: Duration,
+) -> Option<Bytes> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match client.execute(Get::new(key)).await {
+            Ok(Some(value)) if value.as_ref() == expected => return Some(value),
+            Ok(_) | Err(_) if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Ok(value) => return value,
+            Err(error) => {
+                panic!("cached GET for {key} did not recover before {timeout:?}: {error}")
+            }
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn cached_cluster_clones_share_hits_and_observe_external_invalidation() {
+    let cluster = ensure_cluster().await;
+    let writer = MultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect external cluster writer");
+    let key = "cached-cluster:shared-clone";
+    writer.execute(Del::new(key)).await.ok();
+    writer
+        .execute(Set::new(key, "before"))
+        .await
+        .expect("failed to seed cached-cluster key");
+
+    let cached = CachedMultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect cached cluster client");
+    assert!(cached.is_caching_healthy().await);
+    assert_eq!(
+        cached.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from_static(b"before"))
+    );
+    let clone = cached.clone();
+    assert_eq!(
+        clone.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from_static(b"before"))
+    );
+    let after_hit = cached.cache_statistics().await;
+    assert!(after_hit.misses >= 1, "first read should miss locally");
+    assert!(
+        after_hit.hits >= 1,
+        "a clone should share the populated entry"
+    );
+
+    writer
+        .execute(Set::new(key, "after"))
+        .await
+        .expect("failed to mutate key outside cached client");
+    assert_eq!(
+        wait_for_cached_value(&clone, key, b"after", Duration::from_secs(5)).await,
+        Some(Bytes::from_static(b"after")),
+        "external write must invalidate the shared entry"
+    );
+    assert!(
+        cached.cache_statistics().await.invalidations > after_hit.invalidations,
+        "receiver should record the external invalidation"
+    );
+
+    writer.execute(Del::new(key)).await.ok();
+    drop(clone);
+    tokio::time::timeout(Duration::from_secs(5), cached.shutdown())
+        .await
+        .expect("timed out shutting down cached cluster client");
+    tokio::time::timeout(Duration::from_secs(5), writer.shutdown())
+        .await
+        .expect("timed out shutting down external cluster writer");
+}
+
+#[tokio::test]
+#[ignore]
+async fn cached_cluster_opt_in_keeps_setup_atomic_under_concurrency() {
+    let cluster = ensure_cluster().await;
+    let writer = MultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect opt-in writer");
+    let keys = (0..24)
+        .map(|index| format!("cached-cluster:optin:{{{index}}}"))
+        .collect::<Vec<_>>();
+    for key in &keys {
+        writer.execute(Del::new(key)).await.ok();
+        writer
+            .execute(Set::new(key, "v1"))
+            .await
+            .expect("failed to seed opt-in key");
+    }
+
+    let config = CachedClientConfig::new()
+        .tracking_mode(CacheTrackingMode::OptIn)
+        .client_ttl(Some(Duration::from_secs(300)));
+    let cached = CachedMultiplexedClusterClient::builder(cluster.addr())
+        .cache_config(config)
+        .connect()
+        .await
+        .expect("failed to connect opt-in cached cluster client");
+    let barrier = Arc::new(tokio::sync::Barrier::new(keys.len() + 1));
+    let reads = keys
+        .iter()
+        .cloned()
+        .map(|key| {
+            let client = cached.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                let value = client.execute(Get::new(&key)).await.unwrap();
+                (key, value)
+            })
+        })
+        .collect::<Vec<_>>();
+    barrier.wait().await;
+    for read in reads {
+        let (key, value) = read.await.unwrap();
+        assert_eq!(
+            value,
+            Some(Bytes::from_static(b"v1")),
+            "wrong value for {key}"
+        );
+    }
+    assert_eq!(cached.cache_size().await, keys.len());
+
+    // Every second read is local, proving all concurrently configured reads
+    // populated the one shared cache.
+    for key in &keys {
+        assert_eq!(
+            cached.execute(Get::new(key)).await.unwrap(),
+            Some(Bytes::from_static(b"v1"))
+        );
+    }
+    assert!(cached.cache_statistics().await.hits >= keys.len() as u64);
+
+    // If CLIENT CACHING YES interleaves with another caller's command, at
+    // least one populated key will not be tracked and will remain stale here
+    // throughout this test's five-second assertion window; its five-minute
+    // TTL is only the required Cluster safety backstop.
+    for key in &keys {
+        writer
+            .execute(Set::new(key, "v2"))
+            .await
+            .expect("failed to externally update opt-in key");
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut all_fresh = true;
+        for key in &keys {
+            match cached.execute(Get::new(key)).await {
+                Ok(Some(value)) if value.as_ref() == b"v2" => {}
+                Ok(_) | Err(_) => all_fresh = false,
+            }
+        }
+        if all_fresh {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "an opt-in cache entry stayed stale; CLIENT CACHING YES may have interleaved"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    for key in &keys {
+        writer.execute(Del::new(key)).await.ok();
+    }
+    tokio::time::timeout(Duration::from_secs(5), cached.shutdown())
+        .await
+        .expect("timed out shutting down opt-in cached cluster client");
+    tokio::time::timeout(Duration::from_secs(5), writer.shutdown())
+        .await
+        .expect("timed out shutting down opt-in writer");
+}
+
+/// Redis clears both `ASKING` and `CLIENT CACHING YES` after the next command,
+/// so the two one-shot flags cannot prefix the same migrated read. The cached
+/// router must close its safety gate and follow ASK with only `ASKING` + GET.
+#[tokio::test]
+#[ignore = "live: starts a dedicated cluster and holds a slot migration open"]
+async fn cached_cluster_opt_in_follows_live_ask_without_conflicting_one_shot_flags() {
+    let fixture = ClusterFixture::builder()
+        .base_port(17800)
+        .start()
+        .await
+        .expect("failed to start cached reshard fixture");
+    let before = fixture
+        .topology()
+        .await
+        .expect("failed to inspect cached reshard topology");
+    let slot = 42;
+    let source = before
+        .owner_of_slot(slot)
+        .expect("slot should have an owner")
+        .clone();
+    let target = before
+        .nodes()
+        .iter()
+        .find(|node| matches!(&node.role, ClusterNodeRole::Master) && node.id != source.id)
+        .expect("fixture should have another master")
+        .clone();
+    let key = key_for_slot(slot);
+    let metrics = Arc::new(RefreshMetrics::default());
+    let config = CachedClientConfig::new()
+        .tracking_mode(CacheTrackingMode::OptIn)
+        .client_ttl(Some(Duration::from_secs(300)));
+    let cached = CachedMultiplexedClusterClient::builder(fixture.seed_addr())
+        .cache_config(config)
+        .metrics_recorder(metrics.clone())
+        .connect()
+        .await
+        .expect("failed to connect cached reshard client");
+
+    cached
+        .execute(redis_tower::WithDeadline::after(
+            Set::new(&key, "during-reshard"),
+            Duration::from_secs(5),
+        ))
+        .await
+        .expect("failed to seed cached reshard key");
+    cached.clear_cache().await;
+
+    let guard = fixture
+        .begin_reshard(slot, target.index)
+        .await
+        .expect("failed to open cached reshard window");
+    let moved = tokio::time::timeout(Duration::from_secs(5), guard.migrate_keys())
+        .await
+        .expect("timed out moving cached reshard key")
+        .expect("failed to move cached reshard key");
+    assert_eq!(moved, 1, "the held migration should move the seeded key");
+
+    // Complete the migration before asserting so fixture cleanup remains
+    // deterministic even if the ASK retry regresses.
+    let ask_result = cached
+        .execute(redis_tower::WithDeadline::after(
+            Get::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await;
+    let redirects_after_ask = metrics.redirects.lock().unwrap().clone();
+    let cache_size_after_ask = cached.cache_size().await;
+    tokio::time::timeout(Duration::from_secs(5), guard.complete())
+        .await
+        .expect("timed out completing cached slot handoff")
+        .expect("failed to complete cached slot handoff");
+
+    assert_eq!(
+        ask_result.expect("cached OptIn client should follow ASK with ASKING + GET"),
+        Some(Bytes::from_static(b"during-reshard"))
+    );
+    assert_eq!(redirects_after_ask, vec![ClusterRedirectKind::Ask]);
+    assert_eq!(
+        cache_size_after_ask, 0,
+        "an ASK response must not populate the local cache"
+    );
+
+    cached
+        .execute(redis_tower::WithDeadline::after(
+            Del::new(&key),
+            Duration::from_secs(5),
+        ))
+        .await
+        .ok();
+    tokio::time::timeout(Duration::from_secs(5), cached.shutdown())
+        .await
+        .expect("timed out shutting down cached reshard client");
+}
+
+/// A missing key tracked on the old owner is not tracked on the new owner.
+/// This leaves a cached nil that ordinary server-default invalidations cannot
+/// remove after an empty-slot handoff, so a separate same-slot EXISTS must
+/// follow MOVED and synchronously make that old slot entry unusable.
+#[tokio::test]
+#[ignore = "live: starts a dedicated cluster and moves an empty slot"]
+async fn cached_cluster_moved_invalidates_a_preexisting_slot_entry() {
+    let fixture = ClusterFixture::builder()
+        .base_port(17900)
+        .start()
+        .await
+        .expect("failed to start cached MOVED fixture");
+    let before = fixture
+        .topology()
+        .await
+        .expect("failed to inspect cached MOVED topology");
+    let slot = 42;
+    let source = before
+        .owner_of_slot(slot)
+        .expect("slot should have an owner")
+        .clone();
+    let target = before
+        .nodes()
+        .iter()
+        .find(|node| matches!(&node.role, ClusterNodeRole::Master) && node.id != source.id)
+        .expect("fixture should have another master")
+        .clone();
+    let key = key_for_slot(slot);
+    let metrics = Arc::new(RefreshMetrics::default());
+    let config = CachedClientConfig::new()
+        .tracking_mode(CacheTrackingMode::ServerDefault)
+        // Keep the entry alive well beyond the test deadline so MOVED, rather
+        // than TTL expiry, remains the mechanism under test.
+        .client_ttl(Some(Duration::from_secs(300)));
+    let cached = CachedMultiplexedClusterClient::builder(fixture.seed_addr())
+        .cache_config(config)
+        .metrics_recorder(metrics.clone())
+        .connect()
+        .await
+        .expect("failed to connect cached MOVED client");
+
+    assert_eq!(
+        cached.execute(Get::new(&key)).await.unwrap(),
+        None,
+        "the empty slot should begin with a missing key"
+    );
+    assert_eq!(
+        cached.cache_size().await,
+        1,
+        "nil response should be cached"
+    );
+
+    let moved = fixture
+        .reshard_slot(slot, target.index)
+        .await
+        .expect("failed to move empty cached slot");
+    assert_eq!(moved, 0, "the slot must stay empty during the handoff");
+    fixture
+        .wait_for_slot_owner(slot, &target.id, Duration::from_secs(5))
+        .await
+        .expect("target never became the advertised slot owner");
+    fixture
+        .run_node(target.index, &["SET", &key, "after-moved"])
+        .await
+        .expect("failed to create key on the new owner");
+    assert_eq!(
+        cached.cache_size().await,
+        1,
+        "server-default tracking on the old owner should leave the nil cached"
+    );
+
+    assert_eq!(
+        cached
+            .execute(redis_tower::WithDeadline::after(
+                Exists::new(&key),
+                Duration::from_secs(5),
+            ))
+            .await
+            .expect("same-slot EXISTS should follow MOVED"),
+        1
+    );
+    assert_eq!(
+        *metrics.redirects.lock().unwrap(),
+        vec![ClusterRedirectKind::Moved]
+    );
+    assert_eq!(
+        cached
+            .execute(redis_tower::WithDeadline::after(
+                Get::new(&key),
+                Duration::from_secs(5),
+            ))
+            .await
+            .expect("GET after MOVED must bypass the old slot entry"),
+        Some(Bytes::from_static(b"after-moved"))
+    );
+
+    cached.execute(Del::new(&key)).await.ok();
+    tokio::time::timeout(Duration::from_secs(5), cached.shutdown())
+        .await
+        .expect("timed out shutting down cached MOVED client");
+}
+
+#[tokio::test]
+#[ignore = "live: kills cached data and invalidation connections on one master"]
+async fn cached_cluster_fails_closed_and_recovers_after_master_connections_are_killed() {
+    let cluster = ensure_cluster().await;
+    let writer = MultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect failure-path writer");
+    let key = "cached-cluster:receiver-loss";
+    writer.execute(Del::new(key)).await.ok();
+    writer.execute(Set::new(key, "before")).await.unwrap();
+
+    let cached = CachedMultiplexedClusterClient::connect(&cluster.addr())
+        .await
+        .expect("failed to connect failure-path cached client");
+    assert_eq!(
+        cached.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from_static(b"before"))
+    );
+    assert_eq!(
+        cached.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from_static(b"before"))
+    );
+
+    let owner = cached
+        .topology()
+        .await
+        .master_for_slot(slot_for_key(key.as_bytes()))
+        .expect("test key slot should have a master")
+        .addr_string();
+    let owner_port = owner
+        .rsplit_once(':')
+        .map(|(_, port)| port)
+        .expect("master address should contain a port");
+    let owner_index = cluster
+        .node_addrs()
+        .iter()
+        .position(|addr| {
+            addr.rsplit_once(':')
+                .is_some_and(|(_, port)| port == owner_port)
+        })
+        .expect("cached topology master should belong to fixture");
+
+    // Repeating the deterministic server-side kill closes any connection that
+    // races a worker reconnect. Stop as soon as the cache safety gate reports
+    // the coverage loss.
+    let unhealthy_deadline = Instant::now() + Duration::from_secs(3);
+    while cached.is_caching_healthy().await {
+        cluster
+            .node(owner_index)
+            .run(&["CLIENT", "KILL", "TYPE", "NORMAL"])
+            .await
+            .expect("failed to kill normal clients on cached master");
+        assert!(
+            Instant::now() < unhealthy_deadline,
+            "cached client never failed closed after its data/receiver loss"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let clear_deadline = Instant::now() + Duration::from_secs(3);
+    while cached.cache_size().await != 0 {
+        assert!(
+            Instant::now() < clear_deadline,
+            "coverage loss did not clear the shared cache"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    writer
+        .execute(Set::new(key, "after"))
+        .await
+        .expect("failed to write while cached coverage was recovering");
+    assert_eq!(
+        wait_for_cached_value(&cached, key, b"after", Duration::from_secs(10)).await,
+        Some(Bytes::from_static(b"after")),
+        "a successful read after coverage loss must never return the old entry"
+    );
+    let healthy_deadline = Instant::now() + Duration::from_secs(10);
+    while !cached.is_caching_healthy().await {
+        assert!(
+            Instant::now() < healthy_deadline,
+            "per-master tracking coverage did not recover"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    writer.execute(Del::new(key)).await.ok();
+    tokio::time::timeout(Duration::from_secs(5), cached.shutdown())
+        .await
+        .expect("timed out shutting down recovered cached client");
+    tokio::time::timeout(Duration::from_secs(5), writer.shutdown())
+        .await
+        .expect("timed out shutting down failure-path writer");
 }
 
 /// A cluster-wide SCAN reaches every master, where a plain keyless `SCAN`

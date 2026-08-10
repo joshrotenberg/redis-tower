@@ -1,8 +1,9 @@
 //! Redis Cluster support for redis-tower.
 //!
 //! This crate provides cluster-aware routing that directs commands to the
-//! correct node based on the key's hash slot. It ships two client types
-//! with different concurrency models; pick one based on your workload.
+//! correct node based on the key's hash slot. It ships a serialized client, a
+//! high-concurrency client, and a cached high-concurrency wrapper; pick one
+//! based on your workload.
 //!
 //! # Which client to use
 //!
@@ -10,6 +11,7 @@
 //! |---|---|
 //! | Simple one-task-at-a-time usage, lowest moving parts | [`ClusterClient`] |
 //! | High-concurrency sharing across many tokio tasks | [`MultiplexedClusterClient`] |
+//! | High-concurrency reads with server-assisted local caching | [`CachedMultiplexedClusterClient`] |
 //! | Automatic per-node reconnect on failover | [`MultiplexedClusterClient`] |
 //! | Credential rotation across reconnects | [`MultiplexedClusterClient`] |
 //! | Per-node background auto-pipelining of concurrent requests | [`MultiplexedClusterClient`] |
@@ -65,19 +67,29 @@
 //! reaches ~500k ops/s, beating redis-rs `cluster_async` by ~12% with
 //! ~2x better p99 latency.
 //!
+//! ## [`CachedMultiplexedClusterClient`]
+//!
+//! Wraps [`MultiplexedClusterClient`] with one clone-shared, slot-aware local
+//! cache and a RESP3 invalidation receiver for every current master. Cache use
+//! fails closed during node loss, redirects, and topology/coverage rebuilds.
+//! This initial surface is master-only and rejects replica read preferences.
+//! It also requires a finite `CachedClientConfig::client_ttl` so an unobserved
+//! slot-owner change cannot leave an old cache entry unbounded.
+//!
 //! # Slot Routing
 //!
-//! Redis Cluster partitions the keyspace into 16384 hash slots. Both
-//! clients compute the slot for each command's key (respecting
+//! Redis Cluster partitions the keyspace into 16384 hash slots. All clients
+//! compute the slot for each command's key (respecting
 //! `{hash_tag}` notation) and route the command to the node that owns
 //! that slot. See [`slot`] for the hashing utilities.
 //!
 //! # Topology Discovery
 //!
-//! Both clients discover the cluster layout by issuing `CLUSTER SLOTS` to
-//! a seed node, then maintain connections to each master (and optionally
-//! replica) node. Topology is refreshed automatically on MOVED redirects.
-//! See [`topology`] for the discovery types.
+//! The ordinary clients discover the cluster layout by issuing `CLUSTER SLOTS`
+//! to a seed node, then maintain connections to each master (and optionally
+//! replica) node. The cached wrapper uses the same discovery and refresh path
+//! while requiring complete master coverage. Topology is refreshed
+//! automatically on MOVED redirects. See [`topology`] for the discovery types.
 //!
 //! # Redirect Handling
 //!
@@ -105,20 +117,22 @@
 //! # Read Preference
 //!
 //! [`ReadPreference`] controls whether read-only commands are routed to
-//! masters, replicas, or replicas with a master fallback. Both clients
-//! honor it.
+//! masters, replicas, or replicas with a master fallback. [`ClusterClient`]
+//! and [`MultiplexedClusterClient`] honor it. The cached client currently
+//! requires `Master` and rejects the replica variants.
 //!
 //! # Read Routing Strategy
 //!
 //! When reads are directed to replicas, the [`ReadRoutingStrategy`] trait
 //! determines which replica is selected. Built-in strategies include
 //! [`RoundRobinRouting`] (default), [`RandomRouting`], and
-//! [`FirstReplicaRouting`]. Custom strategies can be provided via either
-//! builder's `read_routing` method.
+//! [`FirstReplicaRouting`]. Custom strategies can be provided through the two
+//! ordinary clients' builders; the master-only cached builder does not expose
+//! replica routing.
 //!
 //! # Authentication
 //!
-//! [`MultiplexedClusterClient`] accepts a
+//! [`MultiplexedClusterClient`] and [`CachedMultiplexedClusterClient`] accept a
 //! [`CredentialProvider`](redis_tower::credentials::CredentialProvider) via
 //! `.credentials(provider)` on its builder. The provider is consulted on
 //! initial connect and on every reconnect, so credential rotation flows
@@ -126,17 +140,18 @@
 //!
 //! # Protocol configuration
 //!
-//! Both cluster builders accept a complete
+//! The ordinary cluster builders accept a complete
 //! [`ConnectionConfig`](redis_tower_core::ConnectionConfig) and an explicit
-//! `.protocol(...)` override. Protected nodes authenticate while still in
-//! RESP2, then negotiate the requested protocol before role-specific setup;
-//! the same ordering is replayed for discovery, redirects, refreshes, and
-//! reconnects.
+//! `.protocol(...)` override. The cached builder accepts the same connection
+//! config but forces RESP3 for invalidation pushes. Protected nodes
+//! authenticate while still in RESP2, then negotiate the requested protocol
+//! before role-specific setup; the same ordering is replayed for discovery,
+//! redirects, refreshes, and reconnects.
 //!
 //! # TLS
 //!
-//! [`MultiplexedClusterClient`] supports TLS behind the `tls-rustls` or
-//! `tls-native-tls` feature. Pass a `TlsConfig` (from
+//! [`MultiplexedClusterClient`] and [`CachedMultiplexedClusterClient`] support
+//! TLS behind the `tls-rustls` or `tls-native-tls` feature. Pass a `TlsConfig` (from
 //! `redis_tower_core::tls`) via `.tls(config)` on the builder -- the
 //! seed connection used for topology discovery as well as every per-node
 //! factory will speak TLS on each (re)connect. The SNI hostname is taken
@@ -146,6 +161,7 @@
 
 #![forbid(unsafe_code)]
 
+mod caching;
 mod client;
 mod connection;
 pub mod key_extractor;
@@ -155,6 +171,7 @@ pub mod scan_stream;
 pub mod slot;
 pub mod topology;
 
+pub use caching::{CachedMultiplexedClusterClient, CachedMultiplexedClusterClientBuilder};
 pub use client::ClusterClient;
 pub use connection::{
     ClusterConnection, ClusterConnectionBuilder, FirstReplicaRouting, RandomRouting,

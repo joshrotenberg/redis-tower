@@ -80,15 +80,20 @@ use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
+use redis_tower_commands::ClientCaching;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
 use redis_tower_core::{
     Command, ConnectionConfig, Frame, ProtocolVersion, RedisConnection, RedisError, RespLimits,
 };
 use redis_tower_protocol::helpers::{array, bulk};
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tower_service::Service;
 
+use crate::caching::{
+    CacheDispatchMode, ClusterCacheBackend, ClusterCacheHooks, ClusterCacheMaster,
+    ClusterCacheNodeSnapshot, ClusterCacheRequest,
+};
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
     RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError, parse_cluster_url, parse_redirect,
@@ -105,6 +110,7 @@ use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
 /// an overview.
 pub struct MultiplexedClusterClient {
     inner: Arc<RwLock<Inner>>,
+    cache_hooks: Arc<StdRwLock<Option<ClusterCacheHooks>>>,
     metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
     include_node_in_metrics: bool,
     node_metric_labels: Arc<BoundedNodeMetricLabels>,
@@ -118,6 +124,7 @@ impl Clone for MultiplexedClusterClient {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            cache_hooks: Arc::clone(&self.cache_hooks),
             metrics_recorder: self.metrics_recorder.clone(),
             include_node_in_metrics: self.include_node_in_metrics,
             node_metric_labels: Arc::clone(&self.node_metric_labels),
@@ -185,11 +192,41 @@ struct RefreshGate {
     in_flight: AtomicBool,
     last_start: Mutex<Option<Instant>>,
     min_interval: Duration,
+    idle: Notify,
 }
 
 /// Releases a claimed refresh gate even if its task is cancelled or unwinds.
 struct RefreshPermit {
     gate: Arc<RefreshGate>,
+}
+
+/// Owns a background refresh's internal client clone and gate permit in the
+/// shutdown-safe order, including task cancellation and panic unwinding.
+struct RefreshTaskGuard {
+    client: Option<MultiplexedClusterClient>,
+    permit: Option<RefreshPermit>,
+}
+
+impl RefreshTaskGuard {
+    fn new(client: MultiplexedClusterClient, permit: RefreshPermit) -> Self {
+        Self {
+            client: Some(client),
+            permit: Some(permit),
+        }
+    }
+
+    fn client(&self) -> &MultiplexedClusterClient {
+        self.client.as_ref().expect("refresh client is present")
+    }
+}
+
+impl Drop for RefreshTaskGuard {
+    fn drop(&mut self) {
+        // `RefreshPermit` publishes idle, so the Arc-owning client clone must
+        // disappear first. Option::take makes the order explicit.
+        drop(self.client.take());
+        drop(self.permit.take());
+    }
 }
 
 impl Drop for RefreshPermit {
@@ -204,6 +241,7 @@ impl RefreshGate {
             in_flight: AtomicBool::new(false),
             last_start: Mutex::new(None),
             min_interval,
+            idle: Notify::new(),
         }
     }
 
@@ -222,7 +260,7 @@ impl RefreshGate {
         if let Some(t) = *last
             && t.elapsed() < self.min_interval
         {
-            self.in_flight.store(false, Ordering::Release);
+            self.finish();
             return None;
         }
         *last = Some(Instant::now());
@@ -233,6 +271,19 @@ impl RefreshGate {
 
     fn finish(&self) {
         self.in_flight.store(false, Ordering::Release);
+        self.idle.notify_waiters();
+    }
+
+    async fn wait_until_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.in_flight.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
     }
 }
 
@@ -666,6 +717,7 @@ impl MultiplexedClusterClient {
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls,
             })),
+            cache_hooks: Arc::new(StdRwLock::new(None)),
             metrics_recorder,
             include_node_in_metrics,
             node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
@@ -682,6 +734,15 @@ impl MultiplexedClusterClient {
     /// [`redis_tower_core::WithDeadline`] bounds the complete routing,
     /// readiness, redirect, and retry operation.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        self.execute_with_dispatch(cmd, CacheDispatchMode::Plain)
+            .await
+    }
+
+    async fn execute_with_dispatch<Cmd: Command>(
+        &self,
+        cmd: Cmd,
+        dispatch_mode: CacheDispatchMode,
+    ) -> Result<Cmd::Response, RedisError> {
         let deadline = cmd.deadline();
         let observation = self
             .metrics_recorder
@@ -702,7 +763,13 @@ impl MultiplexedClusterClient {
         let cmd_frame = cmd.to_frame();
         let mut last_node = None;
 
-        let operation = self.execute_routed(cmd, cmd_frame, observe_metrics, &mut last_node);
+        let operation = self.execute_routed(
+            cmd,
+            cmd_frame,
+            dispatch_mode,
+            observe_metrics,
+            &mut last_node,
+        );
         let result = match deadline {
             Some(deadline) => match tokio::time::timeout_at(deadline, operation).await {
                 Ok(result) => result,
@@ -801,16 +868,20 @@ impl MultiplexedClusterClient {
         // Await every submitted node batch even if one fails. Returning early
         // would cancel sibling futures after some of them may already have
         // reached Redis, making the ambiguity wider and harder to reason about.
-        let batches = groups
-            .into_values()
-            .map(|(mut service, entries)| async move {
+        let batches = groups.into_iter().map(|(addr, (mut service, entries))| {
+            let client = self.clone();
+            async move {
                 let batch_frames = entries
                     .iter()
                     .map(|(_, frame)| frame.clone())
                     .collect::<Vec<_>>();
                 let response = service.call_pipeline(batch_frames).await;
+                if let Err(error) = &response {
+                    client.observe_node_error(&addr, error);
+                }
                 (entries, response)
-            });
+            }
+        });
         let batches = futures::future::join_all(batches).await;
 
         let mut ordered = vec![None; frames.len()];
@@ -914,6 +985,7 @@ impl MultiplexedClusterClient {
             let attempt = redirect_number.saturating_add(1);
             let response = match redirect {
                 Redirect::Moved { slot, addr } => {
+                    self.notify_cache_node_loss(&addr);
                     let addr = self.remap_addr(&addr).await;
                     tracing::warn!(
                         command = "PIPELINE",
@@ -927,17 +999,16 @@ impl MultiplexedClusterClient {
                     self.update_slot_owner(slot, &addr).await;
                     self.trigger_refresh();
                     let mut target = self.master_service(&addr).await?;
-                    match call_service(&mut target.svc, frame.clone()).await {
-                        Ok(response) => response,
-                        Err(error) => {
-                            if error.is_connection_error() {
-                                self.trigger_refresh();
-                            }
-                            return Err(error);
-                        }
-                    }
+                    self.dispatch_to_target(
+                        &mut target,
+                        frame.clone(),
+                        CacheDispatchMode::Plain,
+                        false,
+                    )
+                    .await?
                 }
                 Redirect::Ask { slot, addr } => {
+                    self.notify_cache_node_loss(&addr);
                     let addr = self.remap_addr(&addr).await;
                     tracing::warn!(
                         command = "PIPELINE",
@@ -949,14 +1020,13 @@ impl MultiplexedClusterClient {
                     );
                     self.ensure_master(&addr).await?;
                     let mut target = self.master_service(&addr).await?;
-                    let responses = target
-                        .svc
-                        .call_pipeline(vec![array(vec![bulk("ASKING")]), frame.clone()])
-                        .await?;
-                    responses
-                        .into_iter()
-                        .nth(1)
-                        .ok_or(RedisError::ConnectionClosed)?
+                    self.dispatch_to_target(
+                        &mut target,
+                        frame.clone(),
+                        CacheDispatchMode::Plain,
+                        true,
+                    )
+                    .await?
                 }
             };
 
@@ -974,10 +1044,58 @@ impl MultiplexedClusterClient {
         )))
     }
 
+    async fn dispatch_to_target(
+        &self,
+        target: &mut Target,
+        frame: Frame,
+        mode: CacheDispatchMode,
+        asking: bool,
+    ) -> Result<Frame, RedisError> {
+        let result = async {
+            match (asking, mode) {
+                (false, CacheDispatchMode::Plain) => call_service(&mut target.svc, frame).await,
+                (true, CacheDispatchMode::Plain) => {
+                    let responses = target
+                        .svc
+                        .call_pipeline(vec![array(vec![bulk("ASKING")]), frame])
+                        .await?;
+                    parse_prefixed_response(responses, true, false)
+                }
+                (false, CacheDispatchMode::OptIn) => {
+                    let caching = ClientCaching::new(true);
+                    let responses = target
+                        .svc
+                        .call_pipeline(vec![caching.to_frame(), frame])
+                        .await?;
+                    parse_prefixed_response(responses, false, true)
+                }
+                (true, CacheDispatchMode::OptIn) => {
+                    // ASKING and CLIENT CACHING YES are both one-shot flags.
+                    // Sending either setup command after the other consumes
+                    // the first flag before the keyed command runs. The ASK
+                    // hook has already closed the cache gate synchronously,
+                    // so bypass cache opt-in for this migrated read.
+                    let responses = target
+                        .svc
+                        .call_pipeline(vec![array(vec![bulk("ASKING")]), frame])
+                        .await?;
+                    parse_prefixed_response(responses, true, false)
+                }
+            }
+        }
+        .await;
+
+        if let Err(error) = &result {
+            self.observe_node_error(&target.addr, error);
+        }
+        result
+    }
+
     async fn execute_routed<Cmd: Command>(
         &self,
         cmd: Cmd,
         cmd_frame: Frame,
+        dispatch_mode: CacheDispatchMode,
         observe_metrics: bool,
         last_node: &mut Option<String>,
     ) -> Result<Cmd::Response, RedisError> {
@@ -985,49 +1103,30 @@ impl MultiplexedClusterClient {
         let mut target = self.route_command(&cmd_frame).await?;
         let max_redirects = self.inner.read().await.max_redirects;
         let mut send_asking = false;
+        let mut effective_dispatch_mode = dispatch_mode;
         let mut followups_used = 0usize;
 
         loop {
             if observe_metrics {
                 *last_node = Some(target.addr.clone());
             }
-            let response = if send_asking {
-                let responses = match target
-                    .svc
-                    .call_pipeline(vec![array(vec![bulk("ASKING")]), cmd_frame.clone()])
-                    .await
-                {
-                    Ok(responses) => responses,
-                    Err(error) => {
-                        if error.is_connection_error() {
-                            self.trigger_refresh();
-                        }
-                        return Err(error);
-                    }
-                };
-                responses
-                    .into_iter()
-                    .nth(1)
-                    .ok_or(RedisError::ConnectionClosed)?
-            } else {
-                match call_service(&mut target.svc, cmd_frame.clone()).await {
-                    Ok(response) => response,
-                    Err(error) => {
-                        // A node-level connection failure (e.g. its worker gave
-                        // up reconnecting to a dead address). Heal the topology
-                        // in the background so subsequent commands avoid it;
-                        // this command still returns its error to the caller.
-                        if error.is_connection_error() {
-                            self.trigger_refresh();
-                        }
-                        return Err(error);
-                    }
-                }
-            };
+            let response = self
+                .dispatch_to_target(
+                    &mut target,
+                    cmd_frame.clone(),
+                    effective_dispatch_mode,
+                    send_asking,
+                )
+                .await?;
             let attempt = followups_used.saturating_add(1);
 
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
+                    // A MOVED reply proves the routing snapshot is stale. Close
+                    // cache use synchronously before any address remapping or
+                    // node connection await can let another task serve a hit.
+                    self.notify_cache_node_loss(&target.addr);
+                    effective_dispatch_mode = CacheDispatchMode::Plain;
                     let addr = self.remap_addr(&addr).await;
                     tracing::warn!(
                         command = cmd.name(),
@@ -1054,6 +1153,11 @@ impl MultiplexedClusterClient {
                     continue;
                 }
                 Some(Redirect::Ask { slot, addr }) => {
+                    // ASK does not change the committed owner, but it still
+                    // marks an active migration window in which cached data is
+                    // unsafe until coverage is rebuilt.
+                    self.notify_cache_node_loss(&target.addr);
+                    effective_dispatch_mode = CacheDispatchMode::Plain;
                     let addr = self.remap_addr(&addr).await;
                     tracing::warn!(
                         command = cmd.name(),
@@ -1078,6 +1182,11 @@ impl MultiplexedClusterClient {
                     // Transient cluster errors: retry within the redirect
                     // budget rather than surfacing on first occurrence.
                     if let Some(transient) = TransientError::from_frame(&response) {
+                        // TRYAGAIN/CLUSTERDOWN/LOADING all mean the node or slot
+                        // is in a transitional state. A cached wrapper must
+                        // fail closed before any retry/backoff await.
+                        self.notify_cache_node_loss(&target.addr);
+                        effective_dispatch_mode = CacheDispatchMode::Plain;
                         if followups_used >= max_redirects {
                             break;
                         }
@@ -1127,6 +1236,24 @@ impl MultiplexedClusterClient {
             recorder.command_completed_on_node(command, duration, error, Some(node.as_str()));
         } else {
             recorder.command_completed_on_node(command, duration, error, None);
+        }
+    }
+
+    fn notify_cache_node_loss(&self, addr: &str) {
+        if let Some(hooks) = self.cache_hooks.read().unwrap().as_ref().cloned() {
+            hooks.node_connection_lost(addr.to_string());
+        }
+    }
+
+    fn observe_node_error(&self, addr: &str, error: &RedisError) {
+        // Admission failures happen before a wire write and do not disturb
+        // connection-local tracking. Other service/setup failures conservatively
+        // invalidate coverage, including malformed prefix responses.
+        if cache_error_requires_node_loss(error) {
+            self.notify_cache_node_loss(addr);
+        }
+        if error.is_connection_error() {
+            self.trigger_refresh();
         }
     }
 
@@ -1256,6 +1383,7 @@ impl MultiplexedClusterClient {
                     break;
                 }
                 Err(e) => {
+                    self.observe_node_error(seed, &e);
                     tracing::debug!(seed, error = %e, "cluster: seed unreachable during topology refresh");
                     last_err = e;
                 }
@@ -1307,6 +1435,17 @@ impl MultiplexedClusterClient {
             )
         };
 
+        // A dead/replaced master or a membership transition invalidates the
+        // data-connection-local TRACKING state. Close the synchronous cache
+        // gate as soon as refresh planning observes it, before network work.
+        for addr in master_diff
+            .to_build
+            .iter()
+            .chain(master_diff.to_prune.iter())
+        {
+            self.notify_cache_node_loss(addr);
+        }
+
         // Build (re)placement services without holding the write lock, with the
         // handshakes overlapping (bounded by MAX_CONCURRENT_CONNECTS). A node
         // that is unreachable right now (e.g. a master still listed by CLUSTER
@@ -1339,11 +1478,28 @@ impl MultiplexedClusterClient {
         let mut to_drain: Vec<AutoPipelineService> = Vec::new();
         {
             let mut inner = self.inner.write().await;
-            let previous_topology = std::mem::replace(&mut inner.topology, topology);
-            let current_topology = inner.topology.clone();
-            inner
+            let previous_topology = inner.topology.clone();
+            let current_topology = topology;
+            let change = inner
                 .topology_changes
                 .record(&previous_topology, &current_topology);
+            let hooks = self.cache_hooks.read().unwrap().as_ref().cloned();
+            if let (Some(hooks), Some(change)) = (&hooks, change) {
+                // The old topology and old services are still committed here.
+                hooks.topology_changing(change);
+            }
+            if let Some(hooks) = &hooks {
+                // Re-close immediately before every master service swap. This
+                // covers same-topology refreshes where the ownership diff is
+                // empty but a replacement worker has no TRACKING state yet.
+                for (addr, _) in &built_masters {
+                    hooks.node_connection_lost(addr.clone());
+                }
+                for addr in &master_diff.to_prune {
+                    hooks.node_connection_lost(addr.clone());
+                }
+            }
+            inner.topology = current_topology;
             for (addr, svc) in built_masters {
                 if let Some(old) = inner.masters.insert(addr, svc) {
                     to_drain.push(old);
@@ -1395,8 +1551,8 @@ impl MultiplexedClusterClient {
         };
         let client = self.clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            let _ = client.refresh_topology().await;
+            let guard = RefreshTaskGuard::new(client, permit);
+            let _ = guard.client().refresh_topology().await;
         });
     }
 
@@ -1508,9 +1664,7 @@ impl MultiplexedClusterClient {
         let response = match call_service(&mut target.svc, cmd.to_frame()).await {
             Ok(r) => r,
             Err(e) => {
-                if e.is_connection_error() {
-                    self.trigger_refresh();
-                }
+                self.observe_node_error(addr, &e);
                 return Err(e);
             }
         };
@@ -1552,6 +1706,10 @@ impl MultiplexedClusterClient {
     /// # }
     /// ```
     pub async fn shutdown(self) {
+        // A background refresh owns an internal client clone. Its guard drops
+        // that clone before publishing idle, so wait before deciding whether
+        // any remaining Arc owner is a real public clone.
+        self.refresh_gate.wait_until_idle().await;
         // Only the last clone owns the workers outright; earlier clones return
         // immediately so a shutdown from one task does not strand the others.
         if Arc::strong_count(&self.inner) > 1 {
@@ -1653,7 +1811,15 @@ impl MultiplexedClusterClient {
             tls,
         );
         let svc =
-            build_node_service(addr, false, pipeline_config, reconnect_config, connector).await?;
+            match build_node_service(addr, false, pipeline_config, reconnect_config, connector)
+                .await
+            {
+                Ok(service) => service,
+                Err(error) => {
+                    self.observe_node_error(addr, &error);
+                    return Err(error);
+                }
+            };
         let mut inner = self.inner.write().await;
         inner.masters.entry(addr.to_string()).or_insert(svc);
         Ok(())
@@ -1668,17 +1834,24 @@ impl MultiplexedClusterClient {
         {
             let mut inner = self.inner.write().await;
             let previous_topology = inner.topology.clone();
-            inner.topology.reassign_slot(
+            let mut current_topology = previous_topology.clone();
+            current_topology.reassign_slot(
                 slot,
                 NodeAddr {
                     host: host.to_string(),
                     port,
                 },
             );
-            let current_topology = inner.topology.clone();
-            inner
+            let change = inner
                 .topology_changes
                 .record(&previous_topology, &current_topology);
+            if let Some(change) = change
+                && let Some(hooks) = self.cache_hooks.read().unwrap().as_ref().cloned()
+            {
+                // Close cache use while the old owner is still committed.
+                hooks.topology_changing(change);
+            }
+            inner.topology = current_topology;
         }
     }
 
@@ -1696,6 +1869,13 @@ impl MultiplexedClusterClient {
         }
         addr.to_string()
     }
+}
+
+fn cache_error_requires_node_loss(error: &RedisError) -> bool {
+    !matches!(
+        error,
+        RedisError::QueueFull | RedisError::CircuitOpen | RedisError::PoolAcquisitionTimeout { .. }
+    )
 }
 
 /// Cluster-aware implementation of redis-tower's generic pipeline executor.
@@ -1720,9 +1900,158 @@ impl PipelineExecutor for MultiplexedClusterClient {
     }
 }
 
+struct ClusterCacheCommand {
+    request: ClusterCacheRequest,
+}
+
+impl Command for ClusterCacheCommand {
+    type Response = Frame;
+
+    fn to_frame(&self) -> Frame {
+        self.request.frame.clone()
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        Ok(frame)
+    }
+
+    fn name(&self) -> &str {
+        &self.request.command_name
+    }
+
+    fn idempotent(&self) -> bool {
+        self.request.idempotent
+    }
+
+    fn is_blocking(&self) -> bool {
+        self.request.is_blocking
+    }
+
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        self.request.deadline
+    }
+}
+
+impl ClusterCacheBackend for MultiplexedClusterClient {
+    fn cache_node_snapshot(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<ClusterCacheNodeSnapshot, RedisError>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let inner = self.inner.read().await;
+            let connector = ClusterNodeConnector::new(
+                inner.connection_config.clone(),
+                inner.credentials.clone(),
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                inner.tls.clone(),
+            );
+            let masters = dedup_addrs(inner.topology.master_addrs())
+                .into_iter()
+                .map(|addr| ClusterCacheMaster {
+                    data_health: inner
+                        .masters
+                        .get(&addr)
+                        .map(AutoPipelineService::subscribe_connection_health),
+                    connector: connector.clone(),
+                    addr,
+                })
+                .collect();
+            Ok(ClusterCacheNodeSnapshot {
+                revision: inner.topology_changes.revision(),
+                masters,
+            })
+        })
+    }
+
+    fn install_cache_hooks(
+        &self,
+        hooks: ClusterCacheHooks,
+    ) -> Pin<Box<dyn Future<Output = Result<(), RedisError>> + Send + '_>> {
+        Box::pin(async move {
+            // Serialize installation with topology commits so the following
+            // atomic snapshot cannot miss a transition between the two steps.
+            let _inner = self.inner.write().await;
+            *self.cache_hooks.write().unwrap() = Some(hooks);
+            Ok(())
+        })
+    }
+
+    fn execute_cache_request(
+        &self,
+        request: ClusterCacheRequest,
+        mode: CacheDispatchMode,
+    ) -> Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send + '_>> {
+        Box::pin(async move {
+            self.execute_with_dispatch(ClusterCacheCommand { request }, mode)
+                .await
+        })
+    }
+
+    fn execute_cache_node_pipeline(
+        &self,
+        addr: &str,
+        frames: Vec<Frame>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Frame>, RedisError>> + Send + '_>> {
+        let addr = addr.to_string();
+        Box::pin(async move {
+            let mut target = self.master_service(&addr).await?;
+            let result = target.svc.call_pipeline(frames).await;
+            if let Err(error) = &result {
+                self.observe_node_error(&addr, error);
+            }
+            result
+        })
+    }
+
+    fn execute_cache_pipeline(
+        &self,
+        frames: Vec<Frame>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<Frame>, RedisError>> + Send + '_>> {
+        Box::pin(async move { self.execute_cluster_pipeline(frames).await })
+    }
+}
+
 struct Target {
     svc: AutoPipelineService,
     addr: String,
+}
+
+fn parse_prefixed_response(
+    responses: Vec<Frame>,
+    asking: bool,
+    caching: bool,
+) -> Result<Frame, RedisError> {
+    let mut responses = responses.into_iter();
+    if asking {
+        parse_setup_ok(
+            responses.next().ok_or(RedisError::ConnectionClosed)?,
+            "ASKING OK response",
+        )?;
+    }
+    if caching {
+        let command = ClientCaching::new(true);
+        let response = responses.next().ok_or(RedisError::ConnectionClosed)?;
+        if let Frame::Error(error) = response {
+            return Err(RedisError::Redis(
+                String::from_utf8_lossy(&error).into_owned(),
+            ));
+        }
+        command.parse_response(response)?;
+    }
+    responses.next().ok_or(RedisError::ConnectionClosed)
+}
+
+fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError> {
+    match frame {
+        Frame::SimpleString(value) if value.as_ref() == b"OK" => Ok(()),
+        Frame::Error(error) => Err(RedisError::Redis(
+            String::from_utf8_lossy(&error).into_owned(),
+        )),
+        other => Err(RedisError::UnexpectedResponse {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
 }
 
 fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
@@ -2114,6 +2443,17 @@ mod diff_tests {
         // Not in flight, but within the min interval -> denied.
         assert!(gate.try_begin().is_none());
     }
+
+    #[tokio::test]
+    async fn refresh_gate_rejected_claim_leaves_idle_waiters_released() {
+        let gate = Arc::new(RefreshGate::new(Duration::from_secs(60)));
+        drop(gate.try_begin().unwrap());
+        assert!(gate.try_begin().is_none());
+
+        tokio::time::timeout(Duration::from_millis(50), gate.wait_until_idle())
+            .await
+            .expect("rate-limited claim left the refresh gate stuck in flight");
+    }
 }
 
 #[cfg(test)]
@@ -2465,11 +2805,14 @@ mod parallel_connect_tests {
 mod observability_tests {
     use super::*;
     use bytes::Bytes;
+    use futures::SinkExt;
     use redis_tower::metrics_layer::{ClusterRedirectKind, ErrorKind, MetricsRecorder};
     use redis_tower_commands::{Get, Set};
     use redis_tower_core::WithDeadline;
+    use redis_tower_protocol::RespCodec;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio_util::codec::Framed;
 
     #[derive(Debug, PartialEq, Eq)]
     struct CommandCompletion {
@@ -2585,6 +2928,43 @@ mod observability_tests {
         (addr.to_string(), service, server_task)
     }
 
+    async fn framed_service(
+        expected: Vec<Frame>,
+        responses: Vec<Frame>,
+    ) -> (String, AutoPipelineService, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        drop(listener);
+
+        let server_task = tokio::spawn(async move {
+            let mut framed =
+                Framed::new(redis_tower_core::RedisStream::Tcp(server), RespCodec::new());
+            for expected in expected {
+                let actual = framed.next().await.unwrap().unwrap();
+                assert_eq!(actual, expected);
+            }
+            for response in responses {
+                framed.send(response).await.unwrap();
+            }
+        });
+
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(client));
+        let service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        (addr.to_string(), service, server_task)
+    }
+
+    fn cache_request(frame: Frame, command_name: &str) -> ClusterCacheRequest {
+        ClusterCacheRequest {
+            frame,
+            command_name: command_name.to_string(),
+            deadline: None,
+            idempotent: true,
+            is_blocking: false,
+        }
+    }
+
     /// Build a service whose peer records any wire write and responds with an
     /// error so a routing regression fails promptly rather than hanging.
     async fn quiet_service() -> (
@@ -2653,6 +3033,7 @@ mod observability_tests {
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 tls: None,
             })),
+            cache_hooks: Arc::new(StdRwLock::new(None)),
             metrics_recorder: Some(recorder),
             include_node_in_metrics,
             node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
@@ -2869,6 +3250,278 @@ mod observability_tests {
             ProtocolVersion::Resp3
         );
         assert_eq!(configured.connection_config.resp_limits(), limits);
+    }
+
+    #[test]
+    fn cache_command_preserves_raw_request_metadata() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let frame = array(vec![bulk("BLPOP"), bulk("queue"), bulk("0")]);
+        let command = ClusterCacheCommand {
+            request: ClusterCacheRequest {
+                frame: frame.clone(),
+                command_name: "BLPOP".to_string(),
+                deadline: Some(deadline),
+                idempotent: false,
+                is_blocking: true,
+            },
+        };
+
+        assert_eq!(command.to_frame(), frame);
+        assert_eq!(command.name(), "BLPOP");
+        assert_eq!(command.deadline(), Some(deadline));
+        assert!(!command.idempotent());
+        assert!(command.is_blocking());
+    }
+
+    #[test]
+    fn cache_coverage_ignores_pre_dispatch_admission_errors() {
+        assert!(!cache_error_requires_node_loss(&RedisError::QueueFull));
+        assert!(!cache_error_requires_node_loss(&RedisError::CircuitOpen));
+        assert!(!cache_error_requires_node_loss(
+            &RedisError::PoolAcquisitionTimeout {
+                waited: Duration::from_millis(1),
+                pool_size: 1,
+            }
+        ));
+        assert!(cache_error_requires_node_loss(&RedisError::CommandTimeout));
+        assert!(cache_error_requires_node_loss(
+            &RedisError::ConnectionClosed
+        ));
+    }
+
+    #[tokio::test]
+    async fn cache_opt_in_prefix_is_atomic_on_the_routed_master() {
+        let get = array(vec![bulk("GET"), bulk("cache-key")]);
+        let value = Frame::BulkString(Some(Bytes::from_static(b"value")));
+        let (addr, service, server) = framed_service(
+            vec![ClientCaching::new(true).to_frame(), get.clone()],
+            vec![Frame::SimpleString(b"OK"[..].into()), value.clone()],
+        )
+        .await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&addr),
+            replicas: Vec::new(),
+        }]);
+        let client = test_client(
+            addr.clone(),
+            topology,
+            HashMap::from([(addr, service)]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+
+        let response = client
+            .execute_cache_request(cache_request(get, "GET"), CacheDispatchMode::OptIn)
+            .await
+            .unwrap();
+        assert_eq!(response, value);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_opt_in_ask_retry_bypasses_the_mutually_exclusive_cache_flag() {
+        let key = "cache-ask-key";
+        let get = array(vec![bulk("GET"), bulk(key)]);
+        let slot = slot_for_key(key.as_bytes());
+        let value = Frame::BulkString(Some(Bytes::from_static(b"migrated")));
+        let (target_addr, target_service, target_server) = framed_service(
+            vec![array(vec![bulk("ASKING")]), get.clone()],
+            vec![Frame::SimpleString(b"OK"[..].into()), value.clone()],
+        )
+        .await;
+        let ask = Frame::Error(format!("ASK {slot} {target_addr}").into_bytes().into());
+        let (initial_addr, initial_service, initial_server) = framed_service(
+            vec![ClientCaching::new(true).to_frame(), get.clone()],
+            vec![Frame::SimpleString(b"OK"[..].into()), ask],
+        )
+        .await;
+        let client = redirect_client(
+            initial_addr,
+            initial_service,
+            target_addr,
+            target_service,
+            Arc::new(RecordingMetrics::default()),
+        );
+
+        let response = client
+            .execute_cache_request(cache_request(get, "GET"), CacheDispatchMode::OptIn)
+            .await
+            .unwrap();
+        assert_eq!(response, value);
+        initial_server.await.unwrap();
+        target_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_opt_in_moved_retry_bypasses_setup_on_the_new_master() {
+        let key = "cache-moved-key";
+        let get = array(vec![bulk("GET"), bulk(key)]);
+        let slot = slot_for_key(key.as_bytes());
+        let value = Frame::BulkString(Some(Bytes::from_static(b"moved")));
+        let (target_addr, target_service, target_server) =
+            framed_service(vec![get.clone()], vec![value.clone()]).await;
+        let moved = Frame::Error(format!("MOVED {slot} {target_addr}").into_bytes().into());
+        let (initial_addr, initial_service, initial_server) = framed_service(
+            vec![ClientCaching::new(true).to_frame(), get.clone()],
+            vec![Frame::SimpleString(b"OK"[..].into()), moved],
+        )
+        .await;
+        let client = redirect_client(
+            initial_addr,
+            initial_service,
+            target_addr,
+            target_service,
+            Arc::new(RecordingMetrics::default()),
+        );
+
+        let response = client
+            .execute_cache_request(cache_request(get, "GET"), CacheDispatchMode::OptIn)
+            .await
+            .unwrap();
+        assert_eq!(response, value);
+        initial_server.await.unwrap();
+        target_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_node_pipeline_targets_the_exact_master() {
+        let (default_addr, default_service, default_saw_wire, default_server) =
+            quiet_service().await;
+        let off = array(vec![bulk("CLIENT"), bulk("TRACKING"), bulk("OFF")]);
+        let on = array(vec![
+            bulk("CLIENT"),
+            bulk("TRACKING"),
+            bulk("ON"),
+            bulk("REDIRECT"),
+            bulk("42"),
+        ]);
+        let (target_addr, target_service, target_server) = framed_service(
+            vec![off.clone(), on.clone()],
+            vec![
+                Frame::SimpleString(b"OK"[..].into()),
+                Frame::SimpleString(b"OK"[..].into()),
+            ],
+        )
+        .await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&default_addr),
+            replicas: Vec::new(),
+        }]);
+        let client = test_client(
+            default_addr.clone(),
+            topology,
+            HashMap::from([
+                (default_addr, default_service),
+                (target_addr.clone(), target_service),
+            ]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+
+        let responses = client
+            .execute_cache_node_pipeline(&target_addr, vec![off, on])
+            .await
+            .unwrap();
+        assert_eq!(responses.len(), 2);
+        assert!(!default_saw_wire.load(Ordering::Relaxed));
+        drop(client);
+        target_server.await.unwrap();
+        default_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn final_shutdown_waits_for_internal_refresh_clone_before_draining() {
+        let (addr, service, _saw_wire, server) = quiet_service().await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&addr),
+            replicas: Vec::new(),
+        }]);
+        let client = test_client(
+            addr.clone(),
+            topology,
+            HashMap::from([(addr, service)]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let permit = client.refresh_gate.try_begin().unwrap();
+        let internal_refresh = RefreshTaskGuard::new(client.clone(), permit);
+        let (release, hold) = tokio::sync::oneshot::channel();
+        let refresh = tokio::spawn(async move {
+            let _ = hold.await;
+            drop(internal_refresh);
+        });
+        let shutdown = tokio::spawn(client.shutdown());
+        tokio::task::yield_now().await;
+        assert!(!shutdown.is_finished());
+
+        release.send(()).unwrap();
+        refresh.await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), shutdown)
+            .await
+            .expect("final shutdown did not wake after refresh released its clone")
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cache_snapshot_atomically_includes_desired_and_missing_masters() {
+        let (connected_addr, service, _saw_wire, connected_server) = quiet_service().await;
+        let missing = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 9,
+        };
+        let topology = ClusterTopology::new(vec![
+            crate::topology::SlotRange {
+                start: 0,
+                end: 8_000,
+                master: node_addr(&connected_addr),
+                replicas: Vec::new(),
+            },
+            crate::topology::SlotRange {
+                start: 8_001,
+                end: 16_383,
+                master: missing.clone(),
+                replicas: Vec::new(),
+            },
+        ]);
+        let client = test_client(
+            connected_addr.clone(),
+            topology,
+            HashMap::from([(connected_addr.clone(), service)]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+
+        let snapshot = client.cache_node_snapshot().await.unwrap();
+        assert_eq!(snapshot.revision.get(), 0);
+        assert_eq!(snapshot.masters.len(), 2);
+        assert!(
+            snapshot
+                .masters
+                .iter()
+                .find(|master| master.addr == connected_addr)
+                .unwrap()
+                .data_health
+                .is_some()
+        );
+        assert!(
+            snapshot
+                .masters
+                .iter()
+                .find(|master| master.addr == missing.addr_string())
+                .unwrap()
+                .data_health
+                .is_none()
+        );
+        drop(snapshot);
+        drop(client);
+        connected_server.await.unwrap();
     }
 
     #[tokio::test]

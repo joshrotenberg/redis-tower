@@ -21,14 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retries, and pinned-node execution for direct and multiplexed clients
 - multiplexed cluster redirect and topology-refresh tracing, plus opt-in bounded per-node latency labels
 - configurable RESP decode limits across cluster discovery, node connections, topology refreshes, and reconnects
-- full `ConnectionConfig` and explicit RESP2/RESP3 selection on both cluster
-  builders, retained across discovery, redirects, topology refreshes, and
-  reconnects
+- full `ConnectionConfig` and explicit RESP2/RESP3 selection on the ordinary
+  cluster builders, retained across discovery, redirects, topology refreshes,
+  and reconnects; the cached builder forces RESP3
 - revisioned master/slot topology changes and slot-scoped cache epochs for
   topology-aware client-side caching
+- cloneable `CachedMultiplexedClusterClient` with one shared slot-aware cache,
+  Broadcast/ServerDefault/OptIn tracking modes, atomic OptIn and ASK dispatch
+  (ASK safely bypasses cache fill), and
+  one RESP3 invalidation receiver per current master;
+  receiver/data loss and topology coverage reconfiguration fail closed with a
+  full clear, while slot epochs immediately reject stale in-flight fills after
+  ownership changes. Replica read preferences are rejected until equivalent
+  invalidation coverage exists
 
 ### Fixed
 
+- require a finite client-side cache TTL for Cluster before connecting, so an
+  unobserved empty-slot ownership change cannot leave an old-owner cached miss
+  stale indefinitely; standalone cached clients still permit disabling TTL
 - authenticate protected cluster nodes before final RESP negotiation so Auto
   and forced RESP3 do not silently remain on RESP2 after a pre-auth `NOAUTH`
 - count `max_redirects` as actual redirect/transient follow-ups after the

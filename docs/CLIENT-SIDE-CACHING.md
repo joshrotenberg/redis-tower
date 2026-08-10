@@ -1,9 +1,10 @@
 # Client-side caching
 
-redis-tower's standalone cached client combines Redis server-assisted tracking
-with a bounded local response cache. Use `CachedMultiplexedClient` for normal
-application work: it is cheap to clone, retains auto-pipelining on misses and
-writes, and serves hits without entering the worker queue.
+redis-tower combines Redis server-assisted tracking with bounded local response
+caches for standalone Redis and master-routed Redis Cluster deployments. Use
+`CachedMultiplexedClient` for standalone work or
+`redis_tower_cluster::CachedMultiplexedClusterClient` for Cluster. Both are
+cheap to clone and share one coherent cache across their clones.
 
 ```rust,ignore
 use std::time::Duration;
@@ -31,7 +32,7 @@ println!("hits={}, misses={}", statistics.hits, statistics.misses);
 # Ok::<(), redis_tower::RedisError>(())
 ```
 
-## Connection setup
+## Standalone connection setup
 
 The address constructor is the shortest path for plain standalone Redis.
 `connect_url` applies URL authentication, database selection, TLS, or a Unix
@@ -66,13 +67,14 @@ those services.
   redis-tower submits `CLIENT CACHING YES` and the read as one atomic worker
   request, so another clone cannot interleave a command between them.
 
-All modes use two RESP3 connections. A dedicated receiver owns invalidation
-pushes; the data connection redirects tracking messages to its client ID and
-uses `NOLOOP`. Writes through the cached client therefore invalidate locally
-both before and after dispatch. The second invalidation also rejects an old
-read that raced the write.
+For standalone `CachedMultiplexedClient`, all modes use two RESP3 connections.
+A dedicated receiver owns invalidation pushes; the data connection redirects
+tracking messages to its client ID and uses `NOLOOP`. Writes through the
+standalone cached client therefore invalidate locally both before and after
+dispatch. The second invalidation also rejects an old read that raced the
+write.
 
-The cached client owns that connection-local state. Caller-issued `CLIENT
+The standalone cached client owns that connection-local state. Caller-issued `CLIENT
 TRACKING`, `CLIENT CACHING`, `CLIENT REPLY`, `HELLO`, `RESET`, and `QUIT`
 commands are rejected, including inside explicit pipelines and transactions.
 Use a dedicated uncached connection for session administration. Read-only
@@ -93,18 +95,19 @@ The local cache has two independent safety bounds:
 - Redis invalidation pushes remove all cached command variants that depend on
   a changed key.
 - `client_ttl` caps how long any entry can be served even when no invalidation
-  arrives. The safe default is 30 seconds; pass `None` only when the deployment
-  can tolerate relying exclusively on tracking.
+  arrives. The safe default is 30 seconds. Standalone clients may pass `None`
+  only when the deployment can tolerate relying exclusively on tracking;
+  Cluster clients reject `None`.
 
 Each cache miss snapshots a per-key invalidation epoch and a global generation.
 If an invalidation, explicit clear, or local write happens while Redis is
 answering, the late response is returned to its caller but is not inserted.
 Epoch bookkeeping is bounded alongside the cache.
 
-If the invalidation receiver disconnects, redis-tower immediately clears and
-disables the cache. Reads pass through to Redis while a supervisor reconnects,
-obtains a new receiver ID, and installs the new redirect on the data worker.
-Caching resumes only after that setup succeeds.
+If the standalone invalidation receiver disconnects, redis-tower immediately
+clears and disables the cache. Reads pass through to Redis while a supervisor
+reconnects, obtains a new receiver ID, and installs the new redirect on the
+data worker. Caching resumes only after that setup succeeds.
 
 The data connection has stricter semantics because its tracking state and
 in-flight command ordering cannot be reconstructed transparently. A clean
@@ -115,9 +118,55 @@ so construct a new cached client. Silent network black holes remain bounded by
 the configured TCP keepalive policy or the next command deadline rather than
 by an application heartbeat.
 
-`is_caching_healthy()` includes both receiver tracking and data-worker health,
-and is suitable for readiness or diagnostics. It never treats an open cache as
-healthy after the fixed data worker has stopped.
+For the standalone client, `is_caching_healthy()` includes both receiver
+tracking and data-worker health and is suitable for readiness or diagnostics.
+It never treats an open cache as healthy after the fixed data worker has
+stopped.
+
+## Redis Cluster
+
+`CachedMultiplexedClusterClient` keeps one cache above cluster routing and one
+dedicated RESP3 invalidation receiver for every current master. Its builder
+accepts the same `CachedClientConfig` and forces RESP3 across seed discovery,
+data nodes, redirects, topology refreshes, receivers, and reconnects.
+
+```rust,ignore
+use redis_tower::{CacheTrackingMode, CachedClientConfig, commands::Get};
+use redis_tower_cluster::CachedMultiplexedClusterClient;
+use std::time::Duration;
+
+let config = CachedClientConfig::new()
+    .client_ttl(Some(Duration::from_secs(30)))
+    .tracking_mode(CacheTrackingMode::OptIn);
+let client = CachedMultiplexedClusterClient::builder("127.0.0.1:7000")
+    .cache_config(config)
+    .connect()
+    .await?;
+
+let value = client.execute(Get::new("user:42")).await?;
+# let _ = value;
+# client.shutdown().await;
+# Ok::<(), redis_tower::RedisError>(())
+```
+
+Cache use opens only after every current master has a healthy data worker and
+`CLIENT TRACKING ... REDIRECT` points at a live receiver. Data or receiver loss,
+an ambiguous timeout, and any receiver/topology coverage rebuild close the gate
+and clear the cache before it can reopen. MOVED and ASK close the gate before
+the router awaits a new connection; slot ownership epochs reject responses
+that began under an older owner. Opt-in dispatch remains one reserved worker
+submission: `[CLIENT CACHING YES, command]`. Redis's one-shot `ASKING` and
+`CLIENT CACHING YES` flags consume one another, so ASK closes the gate and
+retries as `[ASKING, command]`; that migrated response is not cached.
+
+The initial Cluster implementation intentionally supports
+`ReadPreference::Master` only. Replica and prefer-replica policies are rejected
+until equivalent invalidation coverage can be proven for replica reads.
+Cluster caching also requires a finite `client_ttl`. An empty slot can move
+without producing a redirect or invalidation visible to this client, leaving
+an old-owner cached miss that only the TTL can eventually expire. This
+Cluster-specific check runs before the seed connection is opened; standalone
+cached clients continue to permit `client_ttl(None)`.
 
 ## Capacity and observability
 
@@ -155,9 +204,8 @@ service.
 the same cache service and connection actor with a one-request batch limit, so
 it shares the clone-safe tracking, failure, race-protection, and shutdown
 semantics without auto-batching concurrent misses. Existing
-`CachedClient::connect` callers keep the safe broadcast defaults. Both cached
-client types expose `shutdown()` so the final clone can explicitly join their
-worker and invalidation lifecycles.
-
-Client-side caching is standalone-only today. Cluster cache ownership and slot
-migration require a separate topology-aware implementation.
+`CachedClient::connect` callers keep the safe broadcast defaults. Both
+standalone cached client types expose `shutdown()` so the final clone can
+explicitly join their worker and invalidation lifecycles. The cached Cluster
+client provides the same final-clone shutdown behavior for all per-master
+workers and receivers.

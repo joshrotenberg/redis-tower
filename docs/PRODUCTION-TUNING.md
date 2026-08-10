@@ -23,6 +23,7 @@ Client choice has a larger effect than most numeric knobs:
 | Blocking commands or expensive reply parsing | `ConnectionPool<RedisConnection>` | Multiple independent connections isolate head-of-line blocking |
 | Stateful sequence, pub/sub, or MONITOR | Dedicated `RedisConnection`-based API | Exclusive protocol/session ownership |
 | High-concurrency Redis Cluster | `MultiplexedClusterClient` | Per-node auto-pipeline workers, redirects, and topology refresh |
+| Repeated master-routed Cluster reads with bounded staleness | `CachedMultiplexedClusterClient` | One slot-aware shared cache with complete per-master RESP3 invalidation coverage |
 | Sentinel-managed primary with failover | `MultiplexedSentinelClient::connect_with_reconnect` | Re-discovers and verifies the primary after failure or READONLY |
 
 Never send `BLPOP`, `BRPOP`, blocking `XREAD` / `XREADGROUP`, or another
@@ -524,8 +525,12 @@ For cached clients, alert on unhealthy caching before optimizing hit rate.
 While the invalidation receiver is being replaced, redis-tower clears and
 disables the local cache, so a falling hit rate paired with healthy Redis
 latency is an expected safety response rather than silent staleness. A lost
-fixed data worker also clears the cache but requires constructing a new cached
-client; `is_caching_healthy()` distinguishes both cases. See the
+fixed data worker on standalone `CachedMultiplexedClient` also clears the cache
+but requires constructing a new cached client. The Cluster cached client
+instead rebuilds complete data-worker and receiver coverage across every
+master before reopening its global gate, and requires a finite `client_ttl` as
+a backstop for ownership changes it does not observe. `is_caching_healthy()`
+distinguishes these states. See the
 [client-side caching guide](CLIENT-SIDE-CACHING.md) for tracking modes and
 failure semantics.
 
