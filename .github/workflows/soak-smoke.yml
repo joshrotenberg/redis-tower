@@ -1,0 +1,122 @@
+name: Soak Harness Smoke
+
+on:
+  pull_request:
+    paths:
+      - "crates/soak-bench/**"
+      - "crates/redis-test-harness/**"
+      - "crates/redis-tower/**"
+      - "crates/redis-tower-cluster/**"
+      - "Cargo.toml"
+      - ".github/workflows/soak-smoke.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: soak-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  REDIS_VERSION: "8.0.6"
+
+jobs:
+  live-chaos:
+    name: Standalone and cluster chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: soak-smoke
+
+      - name: Cache Redis build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: soak-redis-${{ env.REDIS_VERSION }}-${{ runner.os }}
+
+      - name: Build Redis
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/${REDIS_VERSION}.tar.gz | tar xz
+            cd redis-${REDIS_VERSION}
+            make -j$(nproc)
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> "$GITHUB_PATH"
+
+      - name: Unit tests and strict lint
+        run: |
+          cargo test -p soak-bench --all-targets
+          cargo clippy -p soak-bench --all-targets -- -D warnings
+
+      - name: Run short standalone SIGKILL smoke
+        env:
+          SOAK_MODE: standalone
+          SOAK_CHAOS: standalone-sigkill
+          SOAK_DURATION_SECS: "10"
+          SOAK_WARMUP_SECS: "1"
+          SOAK_REPORT_INTERVAL_SECS: "2"
+          SOAK_CHAOS_AFTER_SECS: "2"
+          SOAK_CONCURRENCY: "8"
+          SOAK_OPERATION_TIMEOUT_MS: "1000"
+          SOAK_RECOVERY_TIMEOUT_SECS: "10"
+        run: |
+          mkdir -p soak-results
+          cargo run --release -p soak-bench -- --jsonl > soak-results/standalone.jsonl
+
+      - name: Run short cluster master-kill smoke
+        env:
+          SOAK_MODE: cluster
+          SOAK_CHAOS: cluster-master-kill
+          SOAK_DURATION_SECS: "15"
+          SOAK_WARMUP_SECS: "1"
+          SOAK_REPORT_INTERVAL_SECS: "3"
+          SOAK_CHAOS_AFTER_SECS: "3"
+          SOAK_CONCURRENCY: "8"
+          SOAK_OPERATION_TIMEOUT_MS: "1000"
+          SOAK_RECOVERY_TIMEOUT_SECS: "10"
+          SOAK_CLUSTER_NODE_TIMEOUT_MS: "500"
+        run: |
+          cargo run --release -p soak-bench -- --jsonl > soak-results/cluster.jsonl
+
+      - name: Validate JSONL smoke artifacts
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          for path in sorted(Path("soak-results").glob("*.jsonl")):
+              records = [json.loads(line) for line in path.read_text().splitlines()]
+              assert records[0]["record_type"] == "metadata", path
+              assert any(record["record_type"] == "interval" for record in records), path
+              summary = records[-1]
+              assert summary["record_type"] == "summary", path
+              assert summary["operations"] > 0, path
+              assert summary["chaos_injections_total"] == 1, path
+              assert summary["recoveries_total"] >= 1, path
+          PY
+
+      - name: Record tool versions
+        run: |
+          redis-server --version > soak-results/redis-version.txt
+          rustc -Vv > soak-results/rust-version.txt
+
+      - name: Upload smoke results
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-smoke-${{ github.run_id }}
+          path: soak-results
+          retention-days: 30

@@ -690,6 +690,12 @@ BENCH_SECS=5 cargo run -p standalone-bench --release -- --json
 BENCH_SECS=5 cargo run -p cluster-bench --release -- --json
 ```
 
+For hours-long stability and recovery evidence, [`crates/soak-bench`](crates/soak-bench/)
+keeps per-worker HDR histograms at constant memory, emits per-minute human or
+JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current
+owner of a key's slot in a managed six-node cluster. Its README documents the
+reconnect and recovery accounting and reproducible four-hour commands.
+
 ## Workspace
 
 ```
@@ -704,6 +710,7 @@ redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
+soak-bench               Hours-long constant-memory stability and chaos harness
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
