@@ -1,0 +1,1520 @@
+//! Constant-memory, fault-injecting soak harness for redis-tower.
+//!
+//! The hot path never appends one entry per operation. Every worker owns an
+//! interval HDR histogram and a full-run HDR histogram, and hands interval
+//! snapshots to the coordinator only between bounded Redis commands.
+
+#![forbid(unsafe_code)]
+
+use std::fmt;
+use std::io::{self, Write};
+use std::net::TcpListener;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use hdrhistogram::Histogram;
+use redis_server_wrapper::chaos;
+use redis_server_wrapper::{RedisServer, RedisServerHandle};
+use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
+use redis_tower::reconnect::{
+    ConnectionEvent, ConnectionEventBus, ConnectionEventRecvError, ReconnectConfig,
+    UrlConnectionFactory,
+};
+use redis_tower::{MultiplexedClient, RedisConnection};
+use redis_tower_cluster::MultiplexedClusterClient;
+use redis_tower_commands::{Get, Set};
+use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
+use serde::Serialize;
+use tokio::sync::{Barrier, mpsc, oneshot};
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep, sleep_until, timeout};
+
+#[cfg(target_os = "linux")]
+use std::fs;
+#[cfg(not(target_os = "linux"))]
+use std::process::Command as ProcessCommand;
+
+const HISTOGRAM_MAX_US: u64 = 60_000_000;
+const HISTOGRAM_SIGFIG: u8 = 3;
+const EVENT_CAPACITY: usize = 4096;
+const SCHEMA_VERSION: u8 = 1;
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+type Result<T> = std::result::Result<T, BoxError>;
+
+/// Topology driven by the harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// One managed Redis process and a reconnecting multiplexed client.
+    Standalone,
+    /// A managed three-master, three-replica Redis Cluster.
+    Cluster,
+}
+
+impl Mode {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "standalone" => Ok(Self::Standalone),
+            "cluster" => Ok(Self::Cluster),
+            _ => Err(format!(
+                "SOAK_MODE must be standalone or cluster, got {value:?}"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::Cluster => "cluster",
+        }
+    }
+}
+
+/// Optional mid-run failure injected by the harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChaosMode {
+    /// Leave the managed topology healthy for the whole run.
+    None,
+    /// SIGKILL standalone Redis and start a fresh process on the same port.
+    StandaloneSigkill,
+    /// SIGKILL the six-node fixture master that owns the workload key.
+    ClusterMasterKill,
+}
+
+impl ChaosMode {
+    fn parse(value: &str) -> std::result::Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "none" | "off" => Ok(Self::None),
+            "standalone-sigkill" | "sigkill" => Ok(Self::StandaloneSigkill),
+            "cluster-master-kill" | "master-kill" => Ok(Self::ClusterMasterKill),
+            _ => Err(format!(
+                "SOAK_CHAOS must be none, standalone-sigkill, or cluster-master-kill, got {value:?}"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::StandaloneSigkill => "standalone_sigkill_same_port_restart",
+            Self::ClusterMasterKill => "cluster_slot_owner_sigkill",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutputFormat {
+    Human,
+    JsonLines,
+}
+
+/// Runtime configuration loaded from environment variables and `--jsonl`.
+#[derive(Clone, Debug)]
+pub struct Config {
+    mode: Mode,
+    chaos: ChaosMode,
+    duration: Duration,
+    warmup: Duration,
+    report_interval: Duration,
+    chaos_after: Duration,
+    concurrency: usize,
+    operation_timeout: Duration,
+    error_backoff: Duration,
+    startup_timeout: Duration,
+    recovery_timeout: Duration,
+    payload_bytes: usize,
+    cluster_slot: u16,
+    cluster_node_timeout_ms: u64,
+    standalone_port: Option<u16>,
+    output: OutputFormat,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Standalone,
+            chaos: ChaosMode::None,
+            duration: Duration::from_secs(4 * 60 * 60),
+            warmup: Duration::from_secs(60),
+            report_interval: Duration::from_secs(60),
+            chaos_after: Duration::from_secs(2 * 60 * 60),
+            concurrency: 32,
+            operation_timeout: Duration::from_secs(2),
+            error_backoff: Duration::from_millis(1),
+            startup_timeout: Duration::from_secs(30),
+            recovery_timeout: Duration::from_secs(30),
+            payload_bytes: 16,
+            cluster_slot: 42,
+            cluster_node_timeout_ms: 1_000,
+            standalone_port: None,
+            output: OutputFormat::Human,
+        }
+    }
+}
+
+impl Config {
+    /// Parse the documented environment variables and output-format flag.
+    pub fn from_env_and_args() -> Result<Self> {
+        let mut config = Self {
+            mode: Mode::parse(&env_string("SOAK_MODE", "standalone"))?,
+            chaos: ChaosMode::parse(&env_string("SOAK_CHAOS", "none"))?,
+            duration: Duration::from_secs(env_parse("SOAK_DURATION_SECS", 14_400_u64)?),
+            warmup: Duration::from_secs(env_parse("SOAK_WARMUP_SECS", 60_u64)?),
+            report_interval: Duration::from_secs(env_parse("SOAK_REPORT_INTERVAL_SECS", 60_u64)?),
+            chaos_after: Duration::from_secs(env_parse("SOAK_CHAOS_AFTER_SECS", 7_200_u64)?),
+            concurrency: env_parse("SOAK_CONCURRENCY", 32_usize)?,
+            operation_timeout: Duration::from_millis(env_parse(
+                "SOAK_OPERATION_TIMEOUT_MS",
+                2_000_u64,
+            )?),
+            error_backoff: Duration::from_millis(env_parse("SOAK_ERROR_BACKOFF_MS", 1_u64)?),
+            startup_timeout: Duration::from_secs(env_parse("SOAK_STARTUP_TIMEOUT_SECS", 30_u64)?),
+            recovery_timeout: Duration::from_secs(env_parse("SOAK_RECOVERY_TIMEOUT_SECS", 30_u64)?),
+            payload_bytes: env_parse("SOAK_PAYLOAD_BYTES", 16_usize)?,
+            cluster_slot: env_parse("SOAK_CLUSTER_SLOT", 42_u16)?,
+            cluster_node_timeout_ms: env_parse("SOAK_CLUSTER_NODE_TIMEOUT_MS", 1_000_u64)?,
+            standalone_port: env_optional("SOAK_STANDALONE_PORT")?,
+            output: OutputFormat::Human,
+        };
+
+        for argument in std::env::args().skip(1) {
+            match argument.as_str() {
+                "--jsonl" => config.output = OutputFormat::JsonLines,
+                "--human" => config.output = OutputFormat::Human,
+                other => return Err(format!("unknown argument {other:?}; try --help").into()),
+            }
+        }
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.duration.is_zero() {
+            return Err("SOAK_DURATION_SECS must be greater than zero".into());
+        }
+        if self.report_interval.is_zero() {
+            return Err("SOAK_REPORT_INTERVAL_SECS must be greater than zero".into());
+        }
+        if self.concurrency == 0 {
+            return Err("SOAK_CONCURRENCY must be greater than zero".into());
+        }
+        if self.operation_timeout.is_zero()
+            || self.startup_timeout.is_zero()
+            || self.recovery_timeout.is_zero()
+        {
+            return Err(
+                "operation, startup, and recovery timeouts must be greater than zero".into(),
+            );
+        }
+        if self.payload_bytes == 0 {
+            return Err("SOAK_PAYLOAD_BYTES must be greater than zero".into());
+        }
+        if self.cluster_slot >= 16_384 {
+            return Err(format!(
+                "SOAK_CLUSTER_SLOT must be below 16384, got {}",
+                self.cluster_slot
+            )
+            .into());
+        }
+        if self.chaos != ChaosMode::None
+            && (self.chaos_after.is_zero() || self.chaos_after >= self.duration)
+        {
+            return Err(
+                "SOAK_CHAOS_AFTER_SECS must be inside the measured duration when chaos is enabled"
+                    .into(),
+            );
+        }
+        match (self.mode, self.chaos) {
+            (Mode::Standalone, ChaosMode::ClusterMasterKill)
+            | (Mode::Cluster, ChaosMode::StandaloneSigkill) => {
+                return Err(format!(
+                    "SOAK_MODE={} is incompatible with SOAK_CHAOS={}",
+                    self.mode.as_str(),
+                    self.chaos.as_str()
+                )
+                .into());
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Usage and environment reference printed by `--help`.
+    pub fn help() -> &'static str {
+        "soak-bench: constant-memory redis-tower soak and chaos harness\n\
+\n\
+Usage: cargo run --release -p soak-bench -- [--human|--jsonl]\n\
+\n\
+Environment:\n\
+  SOAK_MODE=standalone|cluster                 (default: standalone)\n\
+  SOAK_CHAOS=none|standalone-sigkill|cluster-master-kill\n\
+  SOAK_DURATION_SECS=14400                     measured time after warmup\n\
+  SOAK_WARMUP_SECS=60                          discarded warmup\n\
+  SOAK_REPORT_INTERVAL_SECS=60                 interval line cadence\n\
+  SOAK_CHAOS_AFTER_SECS=7200                   offset into measured time\n\
+  SOAK_CONCURRENCY=32                          async workers\n\
+  SOAK_OPERATION_TIMEOUT_MS=2000               bound for every GET\n\
+  SOAK_ERROR_BACKOFF_MS=1                      prevent fail-fast error spin\n\
+  SOAK_STARTUP_TIMEOUT_SECS=30                 fixture/process startup bound\n\
+  SOAK_RECOVERY_TIMEOUT_SECS=30                fault recovery bound\n\
+  SOAK_PAYLOAD_BYTES=16                        validated GET payload\n\
+  SOAK_CLUSTER_SLOT=42                         affected cluster slot\n\
+  SOAK_CLUSTER_NODE_TIMEOUT_MS=1000            failover detector setting\n\
+  SOAK_STANDALONE_PORT=<port>                  default: reserve an ephemeral port\n"
+    }
+}
+
+fn env_string(name: &str, default: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| default.to_owned())
+}
+
+fn env_parse<T>(name: &str, default: T) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| format!("invalid {name}={value:?}: {error}").into()),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(error) => Err(format!("could not read {name}: {error}").into()),
+    }
+}
+
+fn env_optional<T>(name: &str) -> Result<Option<T>>
+where
+    T: std::str::FromStr,
+    T::Err: fmt::Display,
+{
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map(Some)
+            .map_err(|error| format!("invalid {name}={value:?}: {error}").into()),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("could not read {name}: {error}").into()),
+    }
+}
+
+/// Run the configured managed topology and workload.
+pub async fn run(config: Config) -> Result<()> {
+    match config.mode {
+        Mode::Standalone => run_standalone(config).await,
+        Mode::Cluster => run_cluster(config).await,
+    }
+}
+
+#[derive(Clone)]
+enum SoakClient {
+    Standalone(MultiplexedClient),
+    Cluster(MultiplexedClusterClient),
+}
+
+impl SoakClient {
+    async fn get_matches(&self, key: &str, expected: &[u8]) -> bool {
+        let result = match self {
+            Self::Standalone(client) => client.execute(Get::new(key)).await,
+            Self::Cluster(client) => client.execute(Get::new(key)).await,
+        };
+        matches!(result, Ok(Some(value)) if value.as_ref() == expected)
+    }
+
+    async fn shutdown(self) {
+        match self {
+            Self::Standalone(client) => client.shutdown().await,
+            Self::Cluster(client) => client.shutdown().await,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LifecycleCounters {
+    reconnects: AtomicU64,
+    recoveries: AtomicU64,
+    chaos_injections: AtomicU64,
+    event_lagged: AtomicU64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CounterSnapshot {
+    reconnects: u64,
+    recoveries: u64,
+    chaos_injections: u64,
+}
+
+impl LifecycleCounters {
+    fn snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            reconnects: self.reconnects.load(Ordering::Relaxed),
+            recoveries: self.recoveries.load(Ordering::Relaxed),
+            chaos_injections: self.chaos_injections.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl CounterSnapshot {
+    fn delta(self, previous: Self) -> Self {
+        Self {
+            reconnects: self.reconnects.saturating_sub(previous.reconnects),
+            recoveries: self.recoveries.saturating_sub(previous.recoveries),
+            chaos_injections: self
+                .chaos_injections
+                .saturating_sub(previous.chaos_injections),
+        }
+    }
+}
+
+fn new_histogram() -> Histogram<u64> {
+    Histogram::new_with_bounds(1, HISTOGRAM_MAX_US, HISTOGRAM_SIGFIG)
+        .expect("fixed valid HDR histogram bounds")
+}
+
+struct Stats {
+    successes: u64,
+    errors: u64,
+    latency: Histogram<u64>,
+}
+
+impl Stats {
+    fn new() -> Self {
+        Self {
+            successes: 0,
+            errors: 0,
+            latency: new_histogram(),
+        }
+    }
+
+    fn record(&mut self, success: bool, elapsed: Duration) {
+        if success {
+            self.successes += 1;
+            let micros = elapsed.as_micros().clamp(1, u128::from(HISTOGRAM_MAX_US)) as u64;
+            self.latency.saturating_record(micros);
+        } else {
+            self.errors += 1;
+        }
+    }
+
+    fn merge(&mut self, other: &Self) -> Result<()> {
+        self.successes += other.successes;
+        self.errors += other.errors;
+        self.latency
+            .add(&other.latency)
+            .map_err(|error| format!("could not merge HDR histograms: {error}").into())
+    }
+
+    fn operations(&self) -> u64 {
+        self.successes + self.errors
+    }
+}
+
+struct WorkerStats {
+    interval: Stats,
+    aggregate: Stats,
+}
+
+impl WorkerStats {
+    fn new() -> Self {
+        Self {
+            interval: Stats::new(),
+            aggregate: Stats::new(),
+        }
+    }
+
+    fn record(&mut self, success: bool, elapsed: Duration) {
+        self.interval.record(success, elapsed);
+        self.aggregate.record(success, elapsed);
+    }
+
+    fn take_interval(&mut self) -> Stats {
+        std::mem::replace(&mut self.interval, Stats::new())
+    }
+}
+
+enum WorkerCommand {
+    Start { barrier: Arc<Barrier> },
+    Snapshot { reply: oneshot::Sender<Stats> },
+    Stop { reply: oneshot::Sender<WorkerStats> },
+}
+
+struct WorkerGroup {
+    controls: Vec<mpsc::Sender<WorkerCommand>>,
+    joins: Vec<JoinHandle<()>>,
+    command_timeout: Duration,
+}
+
+impl WorkerGroup {
+    fn spawn(
+        client: SoakClient,
+        key: Arc<str>,
+        expected: Arc<[u8]>,
+        concurrency: usize,
+        operation_timeout: Duration,
+        error_backoff: Duration,
+    ) -> Self {
+        let mut controls = Vec::with_capacity(concurrency);
+        let mut joins = Vec::with_capacity(concurrency);
+        for _ in 0..concurrency {
+            let (tx, rx) = mpsc::channel(4);
+            controls.push(tx);
+            joins.push(tokio::spawn(worker_loop(
+                client.clone(),
+                Arc::clone(&key),
+                Arc::clone(&expected),
+                operation_timeout,
+                error_backoff,
+                rx,
+            )));
+        }
+        Self {
+            controls,
+            joins,
+            command_timeout: operation_timeout.saturating_add(Duration::from_secs(5)),
+        }
+    }
+
+    async fn start_measurement(&self) -> Result<Instant> {
+        let barrier = Arc::new(Barrier::new(self.controls.len() + 1));
+        for control in &self.controls {
+            control
+                .send(WorkerCommand::Start {
+                    barrier: Arc::clone(&barrier),
+                })
+                .await
+                .map_err(|_| "soak worker stopped before the measurement barrier")?;
+        }
+        timeout(self.command_timeout, barrier.wait())
+            .await
+            .map_err(|_| "timed out starting soak measurement")?;
+        Ok(Instant::now())
+    }
+
+    async fn snapshot(&self) -> Result<Stats> {
+        let mut replies = Vec::with_capacity(self.controls.len());
+        for control in &self.controls {
+            let (reply, receive) = oneshot::channel();
+            control
+                .send(WorkerCommand::Snapshot { reply })
+                .await
+                .map_err(|_| "soak worker stopped before an interval snapshot")?;
+            replies.push(receive);
+        }
+        let mut merged = Stats::new();
+        for receive in replies {
+            let stats = timeout(self.command_timeout, receive)
+                .await
+                .map_err(|_| "timed out waiting for a soak interval snapshot")?
+                .map_err(|_| "soak worker dropped an interval snapshot")?;
+            merged.merge(&stats)?;
+        }
+        Ok(merged)
+    }
+
+    async fn stop(mut self) -> Result<(Stats, Stats)> {
+        let mut replies = Vec::with_capacity(self.controls.len());
+        for control in &self.controls {
+            let (reply, receive) = oneshot::channel();
+            control
+                .send(WorkerCommand::Stop { reply })
+                .await
+                .map_err(|_| "soak worker stopped before shutdown")?;
+            replies.push(receive);
+        }
+
+        let mut interval = Stats::new();
+        let mut aggregate = Stats::new();
+        for receive in replies {
+            let stats = timeout(self.command_timeout, receive)
+                .await
+                .map_err(|_| "timed out waiting for a soak worker to stop")?
+                .map_err(|_| "soak worker dropped its final statistics")?;
+            interval.merge(&stats.interval)?;
+            aggregate.merge(&stats.aggregate)?;
+        }
+        for join in self.joins.drain(..) {
+            join.await
+                .map_err(|error| format!("soak worker panicked: {error}"))?;
+        }
+        Ok((interval, aggregate))
+    }
+}
+
+impl Drop for WorkerGroup {
+    fn drop(&mut self) {
+        for join in &self.joins {
+            join.abort();
+        }
+    }
+}
+
+async fn worker_loop(
+    client: SoakClient,
+    key: Arc<str>,
+    expected: Arc<[u8]>,
+    operation_timeout: Duration,
+    error_backoff: Duration,
+    mut commands: mpsc::Receiver<WorkerCommand>,
+) {
+    let mut measuring = false;
+    let mut stats = WorkerStats::new();
+    loop {
+        match commands.try_recv() {
+            Ok(WorkerCommand::Start { barrier }) => {
+                stats = WorkerStats::new();
+                measuring = true;
+                barrier.wait().await;
+                continue;
+            }
+            Ok(WorkerCommand::Snapshot { reply }) => {
+                let _ = reply.send(stats.take_interval());
+                continue;
+            }
+            Ok(WorkerCommand::Stop { reply }) => {
+                let _ = reply.send(stats);
+                return;
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => return,
+            Err(mpsc::error::TryRecvError::Empty) => {}
+        }
+
+        let started = Instant::now();
+        let success = timeout(
+            operation_timeout,
+            client.get_matches(key.as_ref(), expected.as_ref()),
+        )
+        .await
+        .unwrap_or(false);
+        let elapsed = started.elapsed();
+        if measuring {
+            stats.record(success, elapsed);
+        }
+        if !success && !error_backoff.is_zero() {
+            sleep(error_backoff).await;
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MetadataRecord<'a> {
+    schema_version: u8,
+    record_type: &'static str,
+    started_unix_ms: u128,
+    mode: Mode,
+    workload: &'static str,
+    key: &'a str,
+    payload_bytes: usize,
+    concurrency: usize,
+    warmup_secs: f64,
+    duration_secs: f64,
+    report_interval_secs: f64,
+    operation_timeout_ms: u128,
+    error_backoff_ms: u128,
+    chaos: ChaosMode,
+    chaos_after_secs: Option<f64>,
+    reconnect_accounting: &'static str,
+    recovery_accounting: &'static str,
+    latency_accounting: &'static str,
+    rss_accounting: &'static str,
+}
+
+#[derive(Serialize)]
+struct IntervalRecord {
+    schema_version: u8,
+    record_type: &'static str,
+    interval: u64,
+    elapsed_secs: f64,
+    window_secs: f64,
+    operations: u64,
+    attempts: u64,
+    successes: u64,
+    errors: u64,
+    ops_per_sec: f64,
+    attempted_ops_per_sec: f64,
+    p50_us: Option<u64>,
+    p99_us: Option<u64>,
+    p999_us: Option<u64>,
+    max_us: Option<u64>,
+    reconnects: Option<u64>,
+    reconnects_total: Option<u64>,
+    recoveries: u64,
+    recoveries_total: u64,
+    chaos_injections: u64,
+    chaos_injections_total: u64,
+    rss_bytes: Option<u64>,
+}
+
+#[derive(Serialize)]
+struct SummaryRecord {
+    schema_version: u8,
+    record_type: &'static str,
+    elapsed_secs: f64,
+    operations: u64,
+    attempts: u64,
+    successes: u64,
+    errors: u64,
+    ops_per_sec: f64,
+    attempted_ops_per_sec: f64,
+    p50_us: Option<u64>,
+    p99_us: Option<u64>,
+    p999_us: Option<u64>,
+    max_us: Option<u64>,
+    reconnects_total: Option<u64>,
+    recoveries_total: u64,
+    chaos_injections_total: u64,
+    rss_bytes: Option<u64>,
+}
+
+struct Reporter {
+    output: OutputFormat,
+    reconnects_supported: bool,
+}
+
+impl Reporter {
+    fn metadata(&self, config: &Config, key: &str) -> Result<()> {
+        let started_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let record = MetadataRecord {
+            schema_version: SCHEMA_VERSION,
+            record_type: "metadata",
+            started_unix_ms,
+            mode: config.mode,
+            workload: "get_validate",
+            key,
+            payload_bytes: config.payload_bytes,
+            concurrency: config.concurrency,
+            warmup_secs: config.warmup.as_secs_f64(),
+            duration_secs: config.duration.as_secs_f64(),
+            report_interval_secs: config.report_interval.as_secs_f64(),
+            operation_timeout_ms: config.operation_timeout.as_millis(),
+            error_backoff_ms: config.error_backoff.as_millis(),
+            chaos: config.chaos,
+            chaos_after_secs: (config.chaos != ChaosMode::None)
+                .then_some(config.chaos_after.as_secs_f64()),
+            reconnect_accounting: match config.mode {
+                Mode::Standalone => "exact_connection_event_reconnected",
+                Mode::Cluster => "not_exposed_by_cluster_client",
+            },
+            recovery_accounting: match config.mode {
+                Mode::Standalone => "exact_connection_event_reconnected",
+                Mode::Cluster => "harness_observed_slot_owner_change_plus_successful_client_get",
+            },
+            latency_accounting: "successful_get_completions_only",
+            rss_accounting: "current_soak_process_resident_set",
+        };
+        match self.output {
+            OutputFormat::JsonLines => print_json_line(&record),
+            OutputFormat::Human => {
+                println!(
+                    "soak start mode={} workload={} concurrency={} warmup={:.0}s duration={:.0}s report_every={:.0}s chaos={} reconnect_accounting={} recovery_accounting={}",
+                    config.mode.as_str(),
+                    record.workload,
+                    config.concurrency,
+                    config.warmup.as_secs_f64(),
+                    config.duration.as_secs_f64(),
+                    config.report_interval.as_secs_f64(),
+                    config.chaos.as_str(),
+                    record.reconnect_accounting,
+                    record.recovery_accounting,
+                );
+                flush_stdout()
+            }
+        }
+    }
+
+    fn interval(
+        &self,
+        interval: u64,
+        elapsed: Duration,
+        window: Duration,
+        stats: &Stats,
+        counters: CounterSnapshot,
+        counter_delta: CounterSnapshot,
+    ) -> Result<()> {
+        let record = IntervalRecord {
+            schema_version: SCHEMA_VERSION,
+            record_type: "interval",
+            interval,
+            elapsed_secs: elapsed.as_secs_f64(),
+            window_secs: window.as_secs_f64(),
+            operations: stats.successes,
+            attempts: stats.operations(),
+            successes: stats.successes,
+            errors: stats.errors,
+            ops_per_sec: stats.successes as f64 / window.as_secs_f64().max(f64::MIN_POSITIVE),
+            attempted_ops_per_sec: stats.operations() as f64
+                / window.as_secs_f64().max(f64::MIN_POSITIVE),
+            p50_us: quantile(&stats.latency, 0.50),
+            p99_us: quantile(&stats.latency, 0.99),
+            p999_us: quantile(&stats.latency, 0.999),
+            max_us: max_latency(&stats.latency),
+            reconnects: self
+                .reconnects_supported
+                .then_some(counter_delta.reconnects),
+            reconnects_total: self.reconnects_supported.then_some(counters.reconnects),
+            recoveries: counter_delta.recoveries,
+            recoveries_total: counters.recoveries,
+            chaos_injections: counter_delta.chaos_injections,
+            chaos_injections_total: counters.chaos_injections,
+            rss_bytes: current_rss_bytes(),
+        };
+        match self.output {
+            OutputFormat::JsonLines => print_json_line(&record),
+            OutputFormat::Human => {
+                let reconnects = record
+                    .reconnects
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_owned());
+                println!(
+                    "soak interval={} elapsed={:.1}s window={:.1}s successful_ops={} attempts={} ops/s={:.0} attempted_ops/s={:.0} p50={}us p99={}us p999={}us max={}us errors={} reconnects={} recoveries={} chaos={} rss={}",
+                    record.interval,
+                    record.elapsed_secs,
+                    record.window_secs,
+                    record.operations,
+                    record.attempts,
+                    record.ops_per_sec,
+                    record.attempted_ops_per_sec,
+                    display_latency(record.p50_us),
+                    display_latency(record.p99_us),
+                    display_latency(record.p999_us),
+                    display_latency(record.max_us),
+                    record.errors,
+                    reconnects,
+                    record.recoveries,
+                    record.chaos_injections,
+                    display_bytes(record.rss_bytes),
+                );
+                flush_stdout()
+            }
+        }
+    }
+
+    fn summary(&self, elapsed: Duration, stats: &Stats, counters: CounterSnapshot) -> Result<()> {
+        let record = SummaryRecord {
+            schema_version: SCHEMA_VERSION,
+            record_type: "summary",
+            elapsed_secs: elapsed.as_secs_f64(),
+            operations: stats.successes,
+            attempts: stats.operations(),
+            successes: stats.successes,
+            errors: stats.errors,
+            ops_per_sec: stats.successes as f64 / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+            attempted_ops_per_sec: stats.operations() as f64
+                / elapsed.as_secs_f64().max(f64::MIN_POSITIVE),
+            p50_us: quantile(&stats.latency, 0.50),
+            p99_us: quantile(&stats.latency, 0.99),
+            p999_us: quantile(&stats.latency, 0.999),
+            max_us: max_latency(&stats.latency),
+            reconnects_total: self.reconnects_supported.then_some(counters.reconnects),
+            recoveries_total: counters.recoveries,
+            chaos_injections_total: counters.chaos_injections,
+            rss_bytes: current_rss_bytes(),
+        };
+        match self.output {
+            OutputFormat::JsonLines => print_json_line(&record),
+            OutputFormat::Human => {
+                let reconnects = record
+                    .reconnects_total
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "n/a".to_owned());
+                println!(
+                    "soak summary elapsed={:.1}s successful_ops={} attempts={} ops/s={:.0} attempted_ops/s={:.0} p50={}us p99={}us p999={}us max={}us errors={} reconnects={} recoveries={} chaos={} rss={}",
+                    record.elapsed_secs,
+                    record.operations,
+                    record.attempts,
+                    record.ops_per_sec,
+                    record.attempted_ops_per_sec,
+                    display_latency(record.p50_us),
+                    display_latency(record.p99_us),
+                    display_latency(record.p999_us),
+                    display_latency(record.max_us),
+                    record.errors,
+                    reconnects,
+                    record.recoveries_total,
+                    record.chaos_injections_total,
+                    display_bytes(record.rss_bytes),
+                );
+                flush_stdout()
+            }
+        }
+    }
+}
+
+fn quantile(histogram: &Histogram<u64>, quantile: f64) -> Option<u64> {
+    (!histogram.is_empty()).then(|| histogram.value_at_quantile(quantile))
+}
+
+fn max_latency(histogram: &Histogram<u64>) -> Option<u64> {
+    (!histogram.is_empty()).then(|| histogram.max())
+}
+
+fn display_latency(value: Option<u64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "n/a".to_owned())
+}
+
+fn display_bytes(value: Option<u64>) -> String {
+    value
+        .map(|value| format!("{:.1}MiB", value as f64 / (1024.0 * 1024.0)))
+        .unwrap_or_else(|| "n/a".to_owned())
+}
+
+fn print_json_line(value: &impl Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string(value)?);
+    flush_stdout()
+}
+
+fn flush_stdout() -> Result<()> {
+    io::stdout().flush().map_err(Into::into)
+}
+
+#[cfg(target_os = "linux")]
+fn current_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    parse_linux_rss(&status)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_rss_bytes() -> Option<u64> {
+    let output = ProcessCommand::new("ps")
+        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_rss(status: &str) -> Option<u64> {
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+struct Measurement {
+    elapsed: Duration,
+    stats: Stats,
+}
+
+async fn measure(
+    config: &Config,
+    client: SoakClient,
+    key: Arc<str>,
+    expected: Arc<[u8]>,
+    counters: Arc<LifecycleCounters>,
+    reconnects_supported: bool,
+    measurement_started: Option<oneshot::Sender<Instant>>,
+) -> Result<Measurement> {
+    let reporter = Reporter {
+        output: config.output,
+        reconnects_supported,
+    };
+    reporter.metadata(config, key.as_ref())?;
+
+    let workers = WorkerGroup::spawn(
+        client,
+        key,
+        expected,
+        config.concurrency,
+        config.operation_timeout,
+        config.error_backoff,
+    );
+    if !config.warmup.is_zero() {
+        eprintln!(
+            "soak-bench: discarding {:.0}s warmup",
+            config.warmup.as_secs_f64()
+        );
+        sleep(config.warmup).await;
+    }
+    let started = workers.start_measurement().await?;
+    if let Some(started_tx) = measurement_started {
+        let _ = started_tx.send(started);
+    }
+
+    let finish = started + config.duration;
+    let mut next_report = (started + config.report_interval).min(finish);
+    let mut last_report = started;
+    let mut interval_index = 0_u64;
+    let mut previous_counters = CounterSnapshot::default();
+
+    while next_report < finish {
+        sleep_until(next_report).await;
+        let stats = workers.snapshot().await?;
+        let now = Instant::now();
+        interval_index += 1;
+        let counter_snapshot = counters.snapshot();
+        reporter.interval(
+            interval_index,
+            now.duration_since(started),
+            now.duration_since(last_report),
+            &stats,
+            counter_snapshot,
+            counter_snapshot.delta(previous_counters),
+        )?;
+        previous_counters = counter_snapshot;
+        last_report = now;
+        next_report = (next_report + config.report_interval).min(finish);
+    }
+
+    sleep_until(finish).await;
+    let (last_interval, aggregate) = workers.stop().await?;
+    let stopped = Instant::now();
+    interval_index += 1;
+    let counter_snapshot = counters.snapshot();
+    reporter.interval(
+        interval_index,
+        stopped.duration_since(started),
+        stopped.duration_since(last_report),
+        &last_interval,
+        counter_snapshot,
+        counter_snapshot.delta(previous_counters),
+    )?;
+    Ok(Measurement {
+        elapsed: stopped.duration_since(started),
+        stats: aggregate,
+    })
+}
+
+fn report_summary(
+    config: &Config,
+    reconnects_supported: bool,
+    measurement: &Measurement,
+    counters: &LifecycleCounters,
+) -> Result<()> {
+    Reporter {
+        output: config.output,
+        reconnects_supported,
+    }
+    .summary(measurement.elapsed, &measurement.stats, counters.snapshot())
+}
+
+async fn run_standalone(config: Config) -> Result<()> {
+    let port = match config.standalone_port {
+        Some(port) => port,
+        None => reserve_ephemeral_port()?,
+    };
+    let key: Arc<str> = Arc::from("redis-tower:soak:standalone");
+    let payload = "x".repeat(config.payload_bytes);
+    let expected: Arc<[u8]> = Arc::from(payload.as_bytes());
+    let server = start_standalone(port, config.startup_timeout).await?;
+    let address = server.addr();
+    seed_standalone(&address, key.as_ref(), &payload, config.operation_timeout).await?;
+
+    let counters = Arc::new(LifecycleCounters::default());
+    let events = ConnectionEventBus::new(EVENT_CAPACITY);
+    let event_stream = events.subscribe();
+    let event_task = spawn_event_monitor(event_stream, Arc::clone(&counters));
+    let pipeline = AutoPipelineConfig {
+        response_timeout: Some(config.operation_timeout),
+        queue_capacity: config.concurrency.saturating_mul(4).max(128),
+        ..AutoPipelineConfig::default()
+    };
+    let reconnect = AutoPipelineReconnectConfig::new(
+        ReconnectConfig::default()
+            .base_delay(Duration::from_millis(25))
+            .max_delay(Duration::from_millis(250))
+            .connect_timeout(config.operation_timeout),
+    );
+    let standalone = MultiplexedClient::from_factory_with_events(
+        UrlConnectionFactory::new(format!("redis://{address}/")),
+        pipeline,
+        reconnect,
+        events,
+    )
+    .await?;
+    let client = SoakClient::Standalone(standalone);
+
+    let (measurement_started_tx, measurement_started_rx) = oneshot::channel();
+    let mut server_without_chaos = None;
+    let mut chaos_task = None;
+    match config.chaos {
+        ChaosMode::None => {
+            server_without_chaos = Some(server);
+        }
+        ChaosMode::StandaloneSigkill => {
+            chaos_task = Some(spawn_standalone_chaos(
+                server,
+                client.clone(),
+                Arc::clone(&key),
+                payload.clone(),
+                Arc::clone(&expected),
+                Arc::clone(&counters),
+                config.clone(),
+                measurement_started_rx,
+            ));
+        }
+        ChaosMode::ClusterMasterKill => unreachable!("configuration validation rejects this"),
+    }
+
+    let measurement = measure(
+        &config,
+        client.clone(),
+        key,
+        expected,
+        Arc::clone(&counters),
+        true,
+        (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
+    )
+    .await;
+
+    let restarted_server = match (measurement.is_ok(), chaos_task) {
+        (true, Some(task)) => Some(
+            task.await
+                .map_err(|error| format!("standalone chaos task panicked: {error}"))??,
+        ),
+        (false, Some(task)) => {
+            task.abort();
+            let _ = task.await;
+            None
+        }
+        (_, None) => None,
+    };
+
+    client.shutdown().await;
+    let event_result = timeout(Duration::from_secs(3), event_task).await;
+    drop(restarted_server);
+    drop(server_without_chaos);
+
+    let measurement = measurement?;
+    match event_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("connection event task panicked: {error}").into()),
+        Err(_) => return Err("connection event task did not close after client shutdown".into()),
+    }
+    let lagged = counters.event_lagged.load(Ordering::Relaxed);
+    if lagged != 0 {
+        return Err(format!(
+            "connection event subscriber lagged by {lagged} event(s); reconnect total is not exact"
+        )
+        .into());
+    }
+    verify_requested_chaos(&config, &counters)?;
+    report_summary(&config, true, &measurement, &counters)
+}
+
+async fn run_cluster(config: Config) -> Result<()> {
+    let fixture = Arc::new(
+        ClusterFixture::builder()
+            .startup_timeout(config.startup_timeout)
+            .readiness_timeout(config.startup_timeout)
+            .operation_timeout(config.operation_timeout)
+            .cluster_node_timeout(config.cluster_node_timeout_ms)
+            .start()
+            .await?,
+    );
+    let key: Arc<str> = Arc::from(key_for_slot(config.cluster_slot));
+    let payload = "x".repeat(config.payload_bytes);
+    let expected: Arc<[u8]> = Arc::from(payload.as_bytes());
+    seed_cluster(
+        fixture.as_ref(),
+        config.cluster_slot,
+        key.as_ref(),
+        &payload,
+    )
+    .await?;
+
+    let pipeline = AutoPipelineConfig {
+        response_timeout: Some(config.operation_timeout),
+        queue_capacity: config.concurrency.saturating_mul(4).max(128),
+        ..AutoPipelineConfig::default()
+    };
+    let reconnect = AutoPipelineReconnectConfig::new(
+        ReconnectConfig::default()
+            .max_retries(8)
+            .base_delay(Duration::from_millis(25))
+            .max_delay(Duration::from_millis(250))
+            .connect_timeout(config.operation_timeout),
+    );
+    let cluster = MultiplexedClusterClient::builder(fixture.seed_addr())
+        .pipeline_config(pipeline)
+        .reconnect_config(reconnect)
+        .connect()
+        .await?;
+    let client = SoakClient::Cluster(cluster);
+    if !client.get_matches(key.as_ref(), expected.as_ref()).await {
+        return Err("cluster workload key failed validation before warmup".into());
+    }
+
+    let counters = Arc::new(LifecycleCounters::default());
+    let (measurement_started_tx, measurement_started_rx) = oneshot::channel();
+    let mut chaos_task = None;
+    if config.chaos == ChaosMode::ClusterMasterKill {
+        chaos_task = Some(spawn_cluster_chaos(
+            Arc::clone(&fixture),
+            client.clone(),
+            Arc::clone(&key),
+            Arc::clone(&expected),
+            Arc::clone(&counters),
+            config.clone(),
+            measurement_started_rx,
+        ));
+    }
+
+    let measurement = measure(
+        &config,
+        client.clone(),
+        key,
+        expected,
+        Arc::clone(&counters),
+        false,
+        (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
+    )
+    .await;
+
+    match (measurement.is_ok(), chaos_task) {
+        (true, Some(task)) => task
+            .await
+            .map_err(|error| format!("cluster chaos task panicked: {error}"))??,
+        (false, Some(task)) => {
+            task.abort();
+            let _ = task.await;
+        }
+        (_, None) => {}
+    }
+    client.shutdown().await;
+    let measurement = measurement?;
+    verify_requested_chaos(&config, &counters)?;
+    report_summary(&config, false, &measurement, &counters)?;
+    drop(fixture);
+    Ok(())
+}
+
+fn reserve_ephemeral_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<RedisServerHandle> {
+    let start = RedisServer::new()
+        .port(port)
+        .save(false)
+        .appendonly(false)
+        .start();
+    timeout(startup_timeout, start)
+        .await
+        .map_err(|_| format!("timed out after {startup_timeout:?} starting Redis on port {port}"))?
+        .map_err(Into::into)
+}
+
+async fn seed_standalone(
+    address: &str,
+    key: &str,
+    payload: &str,
+    operation_timeout: Duration,
+) -> Result<()> {
+    timeout(operation_timeout, async {
+        let mut connection = RedisConnection::connect(address).await?;
+        connection.execute(Set::new(key, payload)).await?;
+        let value = connection.execute(Get::new(key)).await?;
+        if !matches!(value, Some(value) if value.as_ref() == payload.as_bytes()) {
+            return Err(redis_tower::RedisError::Redis(
+                "soak seed key was missing or corrupt".into(),
+            ));
+        }
+        Ok::<(), redis_tower::RedisError>(())
+    })
+    .await
+    .map_err(|_| format!("timed out seeding standalone Redis at {address}"))??;
+    Ok(())
+}
+
+async fn seed_cluster(fixture: &ClusterFixture, slot: u16, key: &str, payload: &str) -> Result<()> {
+    let topology = fixture.topology().await?;
+    let owner = topology
+        .owner_of_slot(slot)
+        .ok_or_else(|| format!("cluster slot {slot} has no owner"))?;
+    let response = fixture
+        .run_node(owner.index, &["SET", key, payload])
+        .await?;
+    if response.trim() != "OK" {
+        return Err(format!("cluster seed SET returned {response:?}").into());
+    }
+    let replicas = fixture
+        .run_node(owner.index, &["WAIT", "1", "5000"])
+        .await?;
+    let replicas = replicas
+        .trim()
+        .parse::<u64>()
+        .map_err(|error| format!("cluster seed WAIT returned {replicas:?}: {error}"))?;
+    if replicas < 1 {
+        return Err("cluster seed did not reach a replica before the chaos run".into());
+    }
+    Ok(())
+}
+
+fn spawn_event_monitor(
+    mut stream: redis_tower::ConnectionEventStream,
+    counters: Arc<LifecycleCounters>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match stream.recv().await {
+                Ok(ConnectionEvent::Reconnected { .. }) => {
+                    counters.reconnects.fetch_add(1, Ordering::Relaxed);
+                    counters.recoveries.fetch_add(1, Ordering::Relaxed);
+                }
+                Ok(_) => {}
+                Err(ConnectionEventRecvError::Lagged { skipped }) => {
+                    counters.event_lagged.fetch_add(skipped, Ordering::Relaxed);
+                }
+                Err(ConnectionEventRecvError::Closed) => return,
+                Err(_) => {
+                    counters.event_lagged.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_standalone_chaos(
+    server: RedisServerHandle,
+    client: SoakClient,
+    key: Arc<str>,
+    payload: String,
+    expected: Arc<[u8]>,
+    counters: Arc<LifecycleCounters>,
+    config: Config,
+    measurement_started: oneshot::Receiver<Instant>,
+) -> JoinHandle<Result<RedisServerHandle>> {
+    tokio::spawn(async move {
+        let started = measurement_started
+            .await
+            .map_err(|_| "measurement stopped before standalone chaos could start")?;
+        sleep_until(started + config.chaos_after).await;
+
+        let port = server.port();
+        let old_pid = server.pid();
+        eprintln!(
+            "soak-bench: SIGKILL standalone Redis pid={old_pid} port={port} at +{:.1}s",
+            config.chaos_after.as_secs_f64()
+        );
+        chaos::kill_node(&server);
+        counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
+        // The handle points at the killed PID. Detach it so its Drop cannot
+        // mistake the replacement on the same port for the old process.
+        server.detach();
+        sleep(Duration::from_millis(100)).await;
+
+        let replacement = start_standalone(port, config.startup_timeout).await?;
+        if replacement.pid() == old_pid {
+            return Err("standalone replacement reused the killed process PID".into());
+        }
+        if replacement.port() != port {
+            return Err(format!(
+                "standalone replacement moved from port {port} to {}",
+                replacement.port()
+            )
+            .into());
+        }
+        seed_standalone(
+            &replacement.addr(),
+            key.as_ref(),
+            &payload,
+            config.operation_timeout,
+        )
+        .await?;
+        wait_for_client_recovery(
+            &client,
+            key.as_ref(),
+            expected.as_ref(),
+            config.operation_timeout,
+            config.recovery_timeout,
+        )
+        .await?;
+        eprintln!(
+            "soak-bench: standalone client recovered on port={port} replacement_pid={}",
+            replacement.pid()
+        );
+        Ok(replacement)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_cluster_chaos(
+    fixture: Arc<ClusterFixture>,
+    client: SoakClient,
+    key: Arc<str>,
+    expected: Arc<[u8]>,
+    counters: Arc<LifecycleCounters>,
+    config: Config,
+    measurement_started: oneshot::Receiver<Instant>,
+) -> JoinHandle<Result<()>> {
+    tokio::spawn(async move {
+        let started = measurement_started
+            .await
+            .map_err(|_| "measurement stopped before cluster chaos could start")?;
+        sleep_until(started + config.chaos_after).await;
+
+        let old_owner = fixture.kill_slot_owner(config.cluster_slot).await?;
+        counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "soak-bench: SIGKILL cluster slot={} owner={} ({}) at +{:.1}s",
+            config.cluster_slot,
+            old_owner.id,
+            old_owner.addr,
+            config.chaos_after.as_secs_f64()
+        );
+
+        let recovery_deadline = Instant::now() + config.recovery_timeout;
+        let remaining = recovery_deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("cluster recovery timeout elapsed before topology polling")?;
+        let new_owner = fixture
+            .wait_for_slot_owner_change(config.cluster_slot, &old_owner.id, remaining)
+            .await?;
+        let remaining = recovery_deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("cluster recovery timeout elapsed before the client probe")?;
+        wait_for_client_recovery(
+            &client,
+            key.as_ref(),
+            expected.as_ref(),
+            config.operation_timeout.min(remaining),
+            remaining,
+        )
+        .await?;
+        counters.recoveries.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "soak-bench: cluster harness observed slot={} owner change {} -> {} and a successful client GET",
+            config.cluster_slot, old_owner.id, new_owner.id
+        );
+        Ok(())
+    })
+}
+
+async fn wait_for_client_recovery(
+    client: &SoakClient,
+    key: &str,
+    expected: &[u8],
+    operation_timeout: Duration,
+    recovery_timeout: Duration,
+) -> Result<()> {
+    timeout(recovery_timeout, async {
+        loop {
+            if timeout(operation_timeout, client.get_matches(key, expected))
+                .await
+                .unwrap_or(false)
+            {
+                return;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("client did not recover within {recovery_timeout:?}"))?;
+    Ok(())
+}
+
+fn verify_requested_chaos(config: &Config, counters: &LifecycleCounters) -> Result<()> {
+    let counters = counters.snapshot();
+    match config.chaos {
+        ChaosMode::None => {
+            if counters.chaos_injections != 0 {
+                return Err("chaos was recorded even though SOAK_CHAOS=none".into());
+            }
+        }
+        ChaosMode::StandaloneSigkill | ChaosMode::ClusterMasterKill => {
+            if counters.chaos_injections != 1 {
+                return Err(format!(
+                    "requested one chaos injection, observed {}",
+                    counters.chaos_injections
+                )
+                .into());
+            }
+            if counters.recoveries == 0 {
+                return Err(
+                    "the requested chaos run completed without an observed recovery".into(),
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_histograms_merge_without_per_operation_storage() {
+        let mut first = Stats::new();
+        let mut second = Stats::new();
+        for value in 1..=10_000_u64 {
+            first.record(true, Duration::from_micros(value));
+            second.record(value % 10 != 0, Duration::from_micros(value * 2));
+        }
+        first.merge(&second).unwrap();
+        assert_eq!(first.successes, 19_000);
+        assert_eq!(first.errors, 1_000);
+        assert_eq!(first.latency.len(), 19_000);
+        assert!(first.latency.value_at_quantile(0.99) > 9_000);
+    }
+
+    #[test]
+    fn interval_reset_keeps_the_full_run_histogram() {
+        let mut worker = WorkerStats::new();
+        worker.record(true, Duration::from_micros(10));
+        worker.record(false, Duration::from_micros(20));
+        let first = worker.take_interval();
+        assert_eq!(first.operations(), 2);
+        assert_eq!(worker.interval.operations(), 0);
+        assert_eq!(worker.aggregate.operations(), 2);
+        worker.record(true, Duration::from_micros(30));
+        assert_eq!(worker.interval.operations(), 1);
+        assert_eq!(worker.aggregate.operations(), 3);
+    }
+
+    #[test]
+    fn counter_snapshots_report_interval_deltas() {
+        let previous = CounterSnapshot {
+            reconnects: 2,
+            recoveries: 1,
+            chaos_injections: 0,
+        };
+        let current = CounterSnapshot {
+            reconnects: 5,
+            recoveries: 2,
+            chaos_injections: 1,
+        };
+        let delta = current.delta(previous);
+        assert_eq!(delta.reconnects, 3);
+        assert_eq!(delta.recoveries, 1);
+        assert_eq!(delta.chaos_injections, 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_linux_rss_in_kibibytes() {
+        let status = "Name:\tsoak-bench\nVmRSS:\t   1234 kB\nThreads:\t8\n";
+        assert_eq!(parse_linux_rss(status), Some(1234 * 1024));
+    }
+
+    #[test]
+    fn validates_mode_specific_chaos() {
+        let config = Config {
+            mode: Mode::Cluster,
+            chaos: ChaosMode::StandaloneSigkill,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+}
