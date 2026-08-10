@@ -21,7 +21,9 @@
 //! read fails when no usable replica is available, and is never silently sent
 //! to the master. [`ReadPreference::PreferReplica`] makes the same selection
 //! attempt but falls back to the master. Writes are unaffected and always use
-//! the master.
+//! the master. The strict guarantee covers the full command attempt: retries
+//! and cluster redirects must not replay an eligible `Replica` read against a
+//! master.
 
 use redis_tower_core::Frame;
 use std::sync::atomic::{AtomicUsize, Ordering};

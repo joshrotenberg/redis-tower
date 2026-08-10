@@ -1,5 +1,6 @@
 //! Cluster-aware Redis connection that routes commands by slot.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -161,10 +162,10 @@ impl ClusterConnectionBuilder {
 
     /// Set the read preference for keyed, read-only commands.
     ///
-    /// [`ReadPreference::Replica`] is strict: when no connected replica is
-    /// available for the command's slot, the command returns an error instead
-    /// of being sent to the master. [`ReadPreference::PreferReplica`] falls
-    /// back to the master in that case. Writes always use the master.
+    /// [`ReadPreference::Replica`] is strict: when no usable replica connection
+    /// is available for the command's slot, the command returns an error
+    /// instead of being sent to the master. [`ReadPreference::PreferReplica`]
+    /// falls back to the master in that case. Writes always use the master.
     pub fn read_preference(mut self, pref: ReadPreference) -> Self {
         self.read_preference = pref;
         self
@@ -491,6 +492,7 @@ impl ClusterConnection {
         cmd: Cmd,
     ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
+        let strict_replica_slot = strict_replica_read_slot(self.read_preference, &cmd_frame);
         let initial_node = self.route_command(&cmd_frame)?.to_string();
 
         let mut target_node = initial_node;
@@ -524,6 +526,14 @@ impl ClusterConnection {
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
                     tracing::debug!(slot, from_addr = %target_node, to_addr = %addr, kind = "MOVED", "cluster redirect");
+                    if let Some(request_slot) = strict_replica_slot {
+                        // MOVED identifies a master. Retain its authoritative
+                        // ownership update, but never replay a strict replica
+                        // read against that master.
+                        let addr = self.remap_addr(&addr);
+                        self.update_slot_owner(slot, &addr);
+                        return Err(replica_unavailable(request_slot));
+                    }
                     if followups_used >= self.max_redirects {
                         break;
                     }
@@ -537,6 +547,11 @@ impl ClusterConnection {
                 }
                 Some(Redirect::Ask { slot, addr }) => {
                     tracing::debug!(slot, to_addr = %addr, kind = "ASK", "cluster redirect");
+                    if let Some(request_slot) = strict_replica_slot {
+                        // ASKING plus the command would run on the migrating
+                        // master. Strict replica reads fail instead.
+                        return Err(replica_unavailable(request_slot));
+                    }
                     if followups_used >= self.max_redirects {
                         break;
                     }
@@ -680,25 +695,22 @@ impl ClusterConnection {
 
     /// Pick a replica for a given slot using the configured read routing strategy.
     fn pick_replica(&self, slot: u16) -> Option<&str> {
-        let replicas = self.topology.replicas_for_slot(slot)?;
-        let selected = self.read_routing.select_replica(slot, replicas)?;
-        let selected_addr = selected.addr_string();
-        if let Some((addr, _connection)) = self.nodes.get_key_value(&selected_addr) {
-            return Some(addr.as_str());
-        }
-
-        // A direct connection is removed after an I/O failure, while the last
-        // topology snapshot can still list it. Retry selection over only the
-        // connected entries so one stale replica does not hide another usable
-        // one. This allocation is confined to that degraded path.
-        let available: Vec<NodeAddr> = replicas
-            .iter()
-            .filter(|replica| self.nodes.contains_key(&replica.addr_string()))
-            .cloned()
-            .collect();
-        if available.is_empty() {
-            return None;
-        }
+        let replicas = self.topology.replicas_for_slot(slot).unwrap_or(&[]);
+        let is_connected = |replica: &NodeAddr| self.nodes.contains_key(&replica.addr_string());
+        let available = if replicas.iter().all(&is_connected) {
+            Cow::Borrowed(replicas)
+        } else {
+            // A direct connection is removed after an I/O failure while the
+            // last topology snapshot can still list it. Never expose those
+            // stale entries to a caller-provided routing strategy.
+            Cow::Owned(
+                replicas
+                    .iter()
+                    .filter(|replica| is_connected(replica))
+                    .cloned()
+                    .collect(),
+            )
+        };
         let selected_addr = self
             .read_routing
             .select_replica(slot, &available)?
@@ -926,6 +938,17 @@ pub(crate) fn replica_unavailable(slot: u16) -> RedisError {
     RedisError::Redis(format!(
         "cluster: ReadPreference::Replica requires a connected replica for slot {slot}, but none is available"
     ))
+}
+
+pub(crate) fn strict_replica_read_slot(
+    read_preference: ReadPreference,
+    frame: &Frame,
+) -> Option<u16> {
+    if read_preference == ReadPreference::Replica && key_extractor::is_readonly_command(frame) {
+        key_extractor::extract_key(frame).map(slot_for_key)
+    } else {
+        None
+    }
 }
 
 /// Parse a MOVED or ASK redirect from an error frame.
@@ -1199,10 +1222,16 @@ mod tests {
     use bytes::Bytes;
     #[cfg(unix)]
     use futures::{SinkExt, StreamExt};
-    use redis_tower_commands::{Get, Ping, Set};
+    #[cfg(unix)]
+    use redis_tower_commands::Set;
+    use redis_tower_commands::{Get, Ping};
     use redis_tower_core::{RedisStream, WithDeadline};
     #[cfg(unix)]
     use redis_tower_protocol::RespCodec;
+    #[cfg(unix)]
+    use std::sync::Mutex;
+    #[cfg(unix)]
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::AsyncReadExt;
     #[cfg(unix)]
     use tokio::io::AsyncWriteExt;
@@ -1283,6 +1312,21 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {needle:?}"));
+    }
+
+    #[cfg(unix)]
+    struct RecordingRouting {
+        calls: Arc<AtomicUsize>,
+        candidates: Arc<Mutex<Vec<NodeAddr>>>,
+    }
+
+    #[cfg(unix)]
+    impl ReadRoutingStrategy for RecordingRouting {
+        fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            replicas.clone_into(&mut self.candidates.lock().unwrap());
+            replicas.first()
+        }
     }
 
     #[tokio::test]
@@ -1403,16 +1447,17 @@ mod tests {
         let connected_replica_addr = "127.0.0.1:7002";
         let (master_client, mut master_server) = tokio::net::UnixStream::pair().unwrap();
         let (replica_client, mut replica_server) = tokio::net::UnixStream::pair().unwrap();
+        let connected_replica = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7002,
+        };
         let mut topology = topology_for_addr(master_addr, 0, 16_383);
         topology.slot_ranges_mut()[0].replicas = vec![
             NodeAddr {
                 host: "127.0.0.1".to_string(),
                 port: 7001,
             },
-            NodeAddr {
-                host: "127.0.0.1".to_string(),
-                port: 7002,
-            },
+            connected_replica.clone(),
         ];
         let mut cluster = cluster_over_stream(master_addr, master_client, topology);
         cluster.nodes.insert(
@@ -1420,7 +1465,12 @@ mod tests {
             RedisConnection::from_stream(RedisStream::Unix(replica_client)),
         );
         cluster.read_preference = ReadPreference::Replica;
-        cluster.read_routing = Arc::new(FirstReplicaRouting);
+        let routing_calls = Arc::new(AtomicUsize::new(0));
+        let routing_candidates = Arc::new(Mutex::new(Vec::new()));
+        cluster.read_routing = Arc::new(RecordingRouting {
+            calls: Arc::clone(&routing_calls),
+            candidates: Arc::clone(&routing_candidates),
+        });
 
         let replica_task = tokio::spawn(async move {
             read_until_contains(&mut replica_server, b"GET").await;
@@ -1436,6 +1486,51 @@ mod tests {
         );
         replica_task.await.unwrap();
         assert_no_wire_request(&mut master_server).await;
+        assert_eq!(routing_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*routing_candidates.lock().unwrap(), vec![connected_replica]);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn strict_replica_redirects_never_reach_direct_master() {
+        for redirect_kind in ["MOVED", "ASK"] {
+            let master_addr = "127.0.0.1:7000";
+            let replica_addr = "127.0.0.1:7001";
+            let (master_client, mut master_server) = tokio::net::UnixStream::pair().unwrap();
+            let (replica_client, mut replica_server) = tokio::net::UnixStream::pair().unwrap();
+            let mut topology = topology_for_addr(master_addr, 0, 16_383);
+            topology.slot_ranges_mut()[0].replicas = vec![NodeAddr {
+                host: "127.0.0.1".to_string(),
+                port: 7001,
+            }];
+            let mut cluster = cluster_over_stream(master_addr, master_client, topology);
+            cluster.nodes.insert(
+                replica_addr.to_string(),
+                RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+            );
+            cluster.read_preference = ReadPreference::Replica;
+            cluster.read_routing = Arc::new(FirstReplicaRouting);
+            let slot = slot_for_key(b"foo");
+            let redirect = format!("-{redirect_kind} {slot} {master_addr}\r\n");
+
+            let replica_task = tokio::spawn(async move {
+                read_until_contains(&mut replica_server, b"GET").await;
+                replica_server.write_all(redirect.as_bytes()).await.unwrap();
+            });
+
+            let error = cluster
+                .execute(Get::new("foo"))
+                .await
+                .expect_err("strict Replica followed a redirect to the master");
+            assert!(
+                error.to_string().contains(&format!(
+                    "ReadPreference::Replica requires a connected replica for slot {slot}"
+                )),
+                "unexpected {redirect_kind} routing error: {error}"
+            );
+            replica_task.await.unwrap();
+            assert_no_wire_request(&mut master_server).await;
+        }
     }
 
     #[tokio::test]
