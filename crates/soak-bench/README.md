@@ -9,10 +9,12 @@ interval and one for the complete measured run. Workers hand snapshots to the
 coordinator between commands; the hot path has no shared mutex and does not
 retain one allocation per operation. Warmup samples are reset at a barrier and
 never enter reported counts or latency distributions. Workers share absolute
-interval deadlines, stop starting work at each boundary, and exclude a command
-that completes after its interval deadline. Reported windows and the final
-duration therefore describe exactly the samples they bound rather than the time
-it happened to take the coordinator to collect them.
+interval deadlines and stop starting work at each boundary. A command crossing
+an intermediate boundary is carried into the first later interval containing
+its completion; a command completing after the final deadline is excluded.
+Reported windows and the final duration therefore describe exactly the samples
+they bound rather than the time it happened to take the coordinator to collect
+them.
 
 ## Output semantics
 
@@ -33,7 +35,9 @@ Lifecycle counters take their own baseline at the measurement barrier, so a
 warmup reconnect is discarded with the warmup latency samples. A requested
 fault must finish recovery before the measurement deadline while workload
 workers are still active. A late or failed recovery aborts the chaos task and
-fails the run without publishing a misleading summary.
+fails the run without publishing a misleading summary. Standalone boundaries
+are ordered on the same connection-event stream, which drains queued warmup
+events and freezes the final counter snapshot before client shutdown.
 
 Reconnect and recovery fields are intentionally topology-specific:
 
@@ -56,8 +60,12 @@ The standalone chaos mode sends a real SIGKILL through
 cannot target a replacement during cleanup only after both its PID and listener
 are confirmed dead, starts a fresh process on the exact same port, reseeds the
 validation key, and requires the existing client to recover within the
-configured bound. Startup owns a unique PID-directory and port cleanup guard,
-including when its future is cancelled or times out:
+configured bound. Startup owns a unique PID-identity process cleanup guard,
+including when its future is cancelled or times out. Cleanup requires the
+pidfile, generated config, Redis command/start fingerprint, and process working
+directory to match that unique run before sending any signal. Port state is
+used only to observe shutdown; an occupied or raced port never authorizes a
+shutdown command:
 
 ```bash
 SOAK_MODE=standalone \
@@ -116,9 +124,12 @@ SOAK_STANDALONE_PORT=<dedicated port>
 
 `SOAK_ERROR_BACKOFF_MS` must be non-zero. `SOAK_OPERATION_TIMEOUT_MS` must be
 at most 60000 because the constant-size latency histogram has an explicit
-60-second upper bound; the harness rejects a larger value instead of silently
-clamping latency.
+two-minute recording range, leaving scheduler headroom above the accepted
+60-second operation timeout. The harness rejects a larger timeout instead of
+silently clamping latency.
 
 When `SOAK_STANDALONE_PORT` is omitted, the harness briefly reserves an
 ephemeral loopback port and then starts Redis on it. An explicit port must be
-dedicated to the run because `redis-server-wrapper` owns and cleans that port.
+dedicated to the run to avoid startup failure. Cleanup signals only the exact
+PID whose pidfile, generated config, command/start fingerprint, and working
+directory prove ownership; port state is observation only.

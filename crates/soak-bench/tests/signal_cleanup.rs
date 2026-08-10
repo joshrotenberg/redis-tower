@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -63,10 +62,9 @@ fn live_sigterm_cleans_replacement_owned_by_chaos_task() {
     wait_for_port(port, true, Duration::from_secs(20));
 
     let soak_pid = child.0.as_ref().expect("child remains owned").id();
-    let replacement_pid_path = std::env::temp_dir()
-        .join(format!("redis-tower-soak-{soak_pid}-{port}-1"))
-        .join(format!("node-{port}/redis.pid"));
-    let replacement_pid = wait_for_pid_file(&replacement_pid_path, Duration::from_secs(20));
+    let initial_pid = wait_for_owned_pid(soak_pid, port, None, Duration::from_secs(20));
+    let replacement_pid =
+        wait_for_owned_pid(soak_pid, port, Some(initial_pid), Duration::from_secs(20));
     assert!(pid_is_alive(replacement_pid));
     wait_for_port(port, true, Duration::from_secs(20));
 
@@ -100,18 +98,27 @@ fn wait_for_port(port: u16, expected_open: bool, wait: Duration) {
     }
 }
 
-fn wait_for_pid_file(path: &Path, wait: Duration) -> u32 {
+fn wait_for_owned_pid(soak_pid: u32, port: u16, excluded: Option<u32>, wait: Duration) -> u32 {
     let deadline = Instant::now() + wait;
+    let prefix = format!("redis-tower-soak-{soak_pid}-{port}-");
     loop {
-        if let Ok(contents) = fs::read_to_string(path)
-            && let Ok(pid) = contents.trim().parse()
-        {
+        let pid = fs::read_dir(std::env::temp_dir())
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+            .filter_map(|entry| {
+                fs::read_to_string(entry.path().join(format!("node-{port}/redis.pid"))).ok()
+            })
+            .find_map(|contents| contents.trim().parse().ok())
+            .filter(|pid| Some(*pid) != excluded);
+        if let Some(pid) = pid {
             return pid;
         }
         assert!(
             Instant::now() < deadline,
-            "PID file {} did not appear within {wait:?}",
-            path.display()
+            "owned Redis PID for soak pid={soak_pid} port={port} did not appear within {wait:?}"
         );
         std::thread::sleep(Duration::from_millis(25));
     }

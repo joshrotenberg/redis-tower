@@ -13,8 +13,8 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hdrhistogram::Histogram;
@@ -30,17 +30,20 @@ use redis_tower_cluster::MultiplexedClusterClient;
 use redis_tower_commands::{Get, Set};
 use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
 use serde::Serialize;
-use tokio::sync::{Barrier, mpsc, oneshot};
+use tokio::sync::{Barrier, Notify, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until, timeout};
 
-const HISTOGRAM_MAX_US: u64 = 60_000_000;
+// The accepted operation timeout remains 60 seconds. The extra minute keeps a
+// completion at that exact edge recordable despite scheduler wakeup latency.
+const HISTOGRAM_MAX_US: u64 = 120_000_000;
 const HISTOGRAM_SIGFIG: u8 = 3;
 const EVENT_CAPACITY: usize = 4096;
 const SCHEMA_VERSION: u8 = 1;
-const START_BARRIER_LEAD: Duration = Duration::from_millis(10);
 const PROCESS_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const PROCESS_CLEANUP_POLL: Duration = Duration::from_millis(25);
+const EVENT_BOUNDARY_TIMEOUT: Duration = Duration::from_secs(3);
+const EVENT_BOUNDARY_MARKER: &str = "redis-tower:soak:lifecycle-boundary";
 
 static STANDALONE_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -294,7 +297,7 @@ impl Config {
         }
         if self.operation_timeout > Duration::from_secs(60) {
             return Err(
-                "SOAK_OPERATION_TIMEOUT_MS must not exceed 60000; the fixed HDR histogram records up to 60 seconds"
+                "SOAK_OPERATION_TIMEOUT_MS must not exceed the supported 60000ms operation bound"
                     .into(),
             );
         }
@@ -426,6 +429,7 @@ impl SoakClient {
 #[derive(Default)]
 struct LifecycleCounters {
     standalone_reconnect_recoveries: AtomicU64,
+    standalone_reconnect_notify: Notify,
     cluster_recoveries: AtomicU64,
     chaos_injections: AtomicU64,
     event_lagged: AtomicU64,
@@ -436,19 +440,21 @@ struct CounterSnapshot {
     reconnects: u64,
     recoveries: u64,
     chaos_injections: u64,
+    event_lagged: u64,
 }
 
 impl LifecycleCounters {
     fn snapshot(&self, reconnects_supported: bool) -> CounterSnapshot {
-        let paired = self.standalone_reconnect_recoveries.load(Ordering::Relaxed);
+        let paired = self.standalone_reconnect_recoveries.load(Ordering::Acquire);
         CounterSnapshot {
             reconnects: if reconnects_supported { paired } else { 0 },
             recoveries: if reconnects_supported {
                 paired
             } else {
-                self.cluster_recoveries.load(Ordering::Relaxed)
+                self.cluster_recoveries.load(Ordering::Acquire)
             },
-            chaos_injections: self.chaos_injections.load(Ordering::Relaxed),
+            chaos_injections: self.chaos_injections.load(Ordering::Acquire),
+            event_lagged: self.event_lagged.load(Ordering::Acquire),
         }
     }
 }
@@ -461,8 +467,138 @@ impl CounterSnapshot {
             chaos_injections: self
                 .chaos_injections
                 .saturating_sub(previous.chaos_injections),
+            event_lagged: self.event_lagged.saturating_sub(previous.event_lagged),
         }
     }
+}
+
+struct EventMonitor {
+    bus: ConnectionEventBus,
+    snapshots: mpsc::UnboundedReceiver<(u64, CounterSnapshot)>,
+    task: AbortOnDropTask<()>,
+    next_boundary_to_publish: u64,
+    next_boundary_to_observe: u64,
+}
+
+impl EventMonitor {
+    fn publish_boundary(&mut self) -> Result<(Instant, u64)> {
+        let boundary = self.reserve_boundaries(1)?;
+        let marked_at = Instant::now();
+        publish_event_boundary(&self.bus, boundary)?;
+        Ok((marked_at, boundary))
+    }
+
+    async fn await_boundary(&mut self, boundary: u64) -> Result<CounterSnapshot> {
+        if boundary != self.next_boundary_to_observe {
+            return Err(format!(
+                "connection event boundary requested out of order: expected {}, requested {boundary}",
+                self.next_boundary_to_observe
+            )
+            .into());
+        }
+        let (observed, snapshot) = timeout(EVENT_BOUNDARY_TIMEOUT, self.snapshots.recv())
+            .await
+            .map_err(|_| "timed out draining the connection event boundary")?
+            .ok_or("connection event monitor stopped before a boundary snapshot")?;
+        if observed != boundary {
+            return Err(format!(
+                "connection event boundary ordering changed: expected {boundary}, observed {observed}"
+            )
+            .into());
+        }
+        self.next_boundary_to_observe += 1;
+        Ok(snapshot)
+    }
+
+    #[cfg(test)]
+    async fn capture_boundary(&mut self) -> Result<CounterSnapshot> {
+        let (_, boundary) = self.publish_boundary()?;
+        self.await_boundary(boundary).await
+    }
+
+    async fn await_next_boundary(&mut self) -> Result<CounterSnapshot> {
+        self.await_boundary(self.next_boundary_to_observe).await
+    }
+
+    fn arm_boundaries(
+        &mut self,
+        started: Instant,
+        duration: Duration,
+        report_interval: Duration,
+    ) -> Result<EventBoundarySchedule> {
+        let count = duration.as_nanos().div_ceil(report_interval.as_nanos());
+        let count = u64::try_from(count)
+            .map_err(|_| "measurement has too many lifecycle reporting boundaries")?;
+        let first_boundary = self.reserve_boundaries(count)?;
+        let bus = self.bus.clone();
+        let task = AbortOnDropTask::spawn(async move {
+            let finish = started + duration;
+            let mut deadline = (started + report_interval).min(finish);
+            let mut boundary = first_boundary;
+            loop {
+                sleep_until(deadline).await;
+                publish_event_boundary(&bus, boundary)?;
+                if deadline == finish {
+                    return Ok(());
+                }
+                deadline = (deadline + report_interval).min(finish);
+                boundary += 1;
+            }
+        });
+        Ok(EventBoundarySchedule { task })
+    }
+
+    fn reserve_boundaries(&mut self, count: u64) -> Result<u64> {
+        let first = self.next_boundary_to_publish;
+        self.next_boundary_to_publish = first
+            .checked_add(count)
+            .ok_or("connection event boundary sequence overflowed")?;
+        Ok(first)
+    }
+
+    async fn cancel(mut self) {
+        self.task.abort();
+        let _ = self.task.join().await;
+    }
+}
+
+struct EventBoundarySchedule {
+    task: AbortOnDropTask<Result<()>>,
+}
+
+impl EventBoundarySchedule {
+    async fn finish(self) -> Result<()> {
+        self.task
+            .join()
+            .await
+            .map_err(|error| format!("connection event boundary task panicked: {error}"))?
+    }
+}
+
+fn publish_event_boundary(bus: &ConnectionEventBus, boundary: u64) -> Result<()> {
+    let published = bus.publish(ConnectionEvent::Failover {
+        previous: Some(Arc::from(EVENT_BOUNDARY_MARKER)),
+        current: Some(Arc::from(format!("{EVENT_BOUNDARY_MARKER}:{boundary}"))),
+    });
+    if !published {
+        return Err("connection event boundary marker had no subscriber".into());
+    }
+    Ok(())
+}
+
+fn event_boundary_number(event: &ConnectionEvent) -> Option<u64> {
+    let ConnectionEvent::Failover { previous, current } = event else {
+        return None;
+    };
+    if previous.as_deref() != Some(EVENT_BOUNDARY_MARKER) {
+        return None;
+    }
+    current
+        .as_deref()?
+        .strip_prefix(EVENT_BOUNDARY_MARKER)?
+        .strip_prefix(':')?
+        .parse()
+        .ok()
 }
 
 fn new_histogram() -> Histogram<u64> {
@@ -517,6 +653,14 @@ impl Stats {
 struct WorkerStats {
     interval: Stats,
     aggregate: Stats,
+    pending: Option<CompletedOperation>,
+}
+
+#[derive(Clone, Copy)]
+struct CompletedOperation {
+    success: bool,
+    elapsed: Duration,
+    completed: Instant,
 }
 
 impl WorkerStats {
@@ -524,23 +668,47 @@ impl WorkerStats {
         Self {
             interval: Stats::new(),
             aggregate: Stats::new(),
+            pending: None,
         }
     }
 
-    fn record(&mut self, success: bool, elapsed: Duration) {
-        self.interval.record(success, elapsed);
-        self.aggregate.record(success, elapsed);
+    fn record_completion(
+        &mut self,
+        operation: CompletedOperation,
+        interval_deadline: Instant,
+        measurement_finish: Instant,
+    ) {
+        if operation.completed > measurement_finish {
+            return;
+        }
+        self.aggregate.record(operation.success, operation.elapsed);
+        if operation.completed <= interval_deadline {
+            self.interval.record(operation.success, operation.elapsed);
+        } else {
+            assert!(
+                self.pending.replace(operation).is_none(),
+                "one worker cannot have two commands crossing a blocked interval boundary"
+            );
+        }
     }
 
-    fn take_interval(&mut self) -> Stats {
-        std::mem::replace(&mut self.interval, Stats::new())
+    fn take_interval(&mut self, next_deadline: Instant) -> Stats {
+        let closed = std::mem::replace(&mut self.interval, Stats::new());
+        if self
+            .pending
+            .is_some_and(|operation| operation.completed <= next_deadline)
+        {
+            let operation = self.pending.take().expect("pending operation exists");
+            self.interval.record(operation.success, operation.elapsed);
+        }
+        closed
     }
 }
 
 enum WorkerCommand {
     Start {
         barrier: Arc<Barrier>,
-        schedule: Arc<OnceLock<MeasurementSchedule>>,
+        schedule: oneshot::Receiver<MeasurementSchedule>,
     },
     Snapshot {
         next_deadline: Instant,
@@ -555,6 +723,22 @@ enum WorkerCommand {
 struct MeasurementSchedule {
     started: Instant,
     first_deadline: Instant,
+    finish: Instant,
+}
+
+struct MeasurementStarter {
+    schedules: Vec<oneshot::Sender<MeasurementSchedule>>,
+}
+
+impl MeasurementStarter {
+    fn begin(self, schedule: MeasurementSchedule) -> Result<()> {
+        for sender in self.schedules {
+            sender
+                .send(schedule)
+                .map_err(|_| "soak worker stopped before the measurement schedule")?;
+        }
+        Ok(())
+    }
 }
 
 struct WorkerGroup {
@@ -593,35 +777,24 @@ impl WorkerGroup {
         }
     }
 
-    async fn start_measurement(
-        &self,
-        duration: Duration,
-        report_interval: Duration,
-    ) -> Result<Instant> {
+    async fn prepare_measurement(&self) -> Result<MeasurementStarter> {
         let barrier = Arc::new(Barrier::new(self.controls.len() + 1));
-        let schedule = Arc::new(OnceLock::new());
+        let mut schedules = Vec::with_capacity(self.controls.len());
         for control in &self.controls {
+            let (schedule, receive_schedule) = oneshot::channel();
             control
                 .send(WorkerCommand::Start {
                     barrier: Arc::clone(&barrier),
-                    schedule: Arc::clone(&schedule),
+                    schedule: receive_schedule,
                 })
                 .await
                 .map_err(|_| "soak worker stopped before the measurement barrier")?;
+            schedules.push(schedule);
         }
         timeout(self.command_timeout, barrier.wait())
             .await
             .map_err(|_| "timed out starting soak measurement")?;
-        let started = Instant::now() + START_BARRIER_LEAD;
-        let finish = started + duration;
-        schedule
-            .set(MeasurementSchedule {
-                started,
-                first_deadline: (started + report_interval).min(finish),
-            })
-            .map_err(|_| "measurement schedule was initialized twice")?;
-        sleep_until(started).await;
-        Ok(started)
+        Ok(MeasurementStarter { schedules })
     }
 
     async fn snapshot(&self, next_deadline: Instant) -> Result<Stats> {
@@ -701,6 +874,7 @@ async fn worker_loop(
 ) {
     let mut measuring = false;
     let mut interval_deadline = None;
+    let mut measurement_finish = None;
     let mut stats = WorkerStats::new();
     loop {
         let command = if interval_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -720,22 +894,20 @@ async fn worker_loop(
             Some(WorkerCommand::Start { barrier, schedule }) => {
                 stats = WorkerStats::new();
                 barrier.wait().await;
-                let schedule = loop {
-                    if let Some(schedule) = schedule.get().copied() {
-                        break schedule;
-                    }
-                    tokio::task::yield_now().await;
+                let Ok(schedule) = schedule.await else {
+                    return;
                 };
                 sleep_until(schedule.started).await;
                 measuring = true;
                 interval_deadline = Some(schedule.first_deadline);
+                measurement_finish = Some(schedule.finish);
                 continue;
             }
             Some(WorkerCommand::Snapshot {
                 next_deadline,
                 reply,
             }) => {
-                let _ = reply.send(stats.take_interval());
+                let _ = reply.send(stats.take_interval(next_deadline));
                 interval_deadline = Some(next_deadline);
                 continue;
             }
@@ -755,20 +927,21 @@ async fn worker_loop(
         .unwrap_or(false);
         let completed = Instant::now();
         let elapsed = started.elapsed();
-        if measuring
-            && interval_deadline
-                .is_some_and(|deadline| completion_is_in_window(completed, deadline))
-        {
-            stats.record(success, elapsed);
+        if measuring {
+            stats.record_completion(
+                CompletedOperation {
+                    success,
+                    elapsed,
+                    completed,
+                },
+                interval_deadline.expect("measuring workers have an interval deadline"),
+                measurement_finish.expect("measuring workers have a final deadline"),
+            );
         }
         if !success && !error_backoff.is_zero() {
             sleep(error_backoff).await;
         }
     }
-}
-
-fn completion_is_in_window(completed: Instant, deadline: Instant) -> bool {
-    completed <= deadline
 }
 
 #[derive(Serialize)]
@@ -1084,6 +1257,7 @@ struct Measurement {
     elapsed: Duration,
     stats: Stats,
     counter_baseline: CounterSnapshot,
+    counter_final: CounterSnapshot,
 }
 
 struct MeasurementTarget {
@@ -1099,6 +1273,7 @@ async fn measure(
     target: MeasurementTarget,
     measurement_started: Option<oneshot::Sender<Instant>>,
     mut chaos: Option<&mut ChaosRun>,
+    mut event_monitor: Option<&mut EventMonitor>,
 ) -> Result<Measurement> {
     let MeasurementTarget {
         client,
@@ -1128,22 +1303,50 @@ async fn measure(
         );
         sleep(config.warmup).await;
     }
-    let started = workers
-        .start_measurement(config.duration, config.report_interval)
-        .await?;
-    let counter_baseline = counters.snapshot(reconnects_supported);
+    let starter = workers.prepare_measurement().await?;
+    let (started, counter_baseline, mut boundary_schedule) = if reconnects_supported {
+        let monitor = event_monitor
+            .as_deref_mut()
+            .ok_or("standalone measurement is missing its connection event monitor")?;
+        // Publish the ordered lifecycle marker first, then release workers at
+        // that timestamp. Draining the marker cannot steal measured runtime.
+        let (started, start_boundary) = monitor.publish_boundary()?;
+        let finish = started + config.duration;
+        starter.begin(MeasurementSchedule {
+            started,
+            first_deadline: (started + config.report_interval).min(finish),
+            finish,
+        })?;
+        // Boundary publication is independent of worker snapshots. A command
+        // crossing several intervals therefore cannot move lifecycle events
+        // into an earlier interval or past the final deadline.
+        let schedule = monitor.arm_boundaries(started, config.duration, config.report_interval)?;
+        let baseline = monitor.await_boundary(start_boundary).await?;
+        (started, baseline, Some(schedule))
+    } else {
+        let started = Instant::now();
+        let finish = started + config.duration;
+        let baseline = counters.snapshot(false);
+        starter.begin(MeasurementSchedule {
+            started,
+            first_deadline: (started + config.report_interval).min(finish),
+            finish,
+        })?;
+        (started, baseline, None)
+    };
+    let finish = started + config.duration;
     if let Some(started_tx) = measurement_started {
         let _ = started_tx.send(started);
     }
 
-    let finish = started + config.duration;
     let mut completion = match chaos.as_mut() {
         Some(run) => Some(run.take_completion()?),
         None => None,
     };
     let mut chaos_completed = completion.is_none();
 
-    let interval_result: Result<(u64, Instant, CounterSnapshot)> = async {
+    let mut reported_stats = Stats::new();
+    let interval_result: Result<(u64, Instant, CounterSnapshot, CounterSnapshot)> = async {
         let mut boundary = (started + config.report_interval).min(finish);
         let mut previous_boundary = started;
         let mut interval_index = 0_u64;
@@ -1151,11 +1354,16 @@ async fn measure(
 
         while boundary < finish {
             wait_for_boundary(boundary, finish, &mut completion, &mut chaos_completed).await?;
-            let counter_snapshot = counters
-                .snapshot(reconnects_supported)
-                .delta(counter_baseline);
+            let counter_snapshot = lifecycle_boundary_snapshot(
+                &counters,
+                reconnects_supported,
+                event_monitor.as_deref_mut(),
+            )
+            .await?
+            .delta(counter_baseline);
             let next_boundary = (boundary + config.report_interval).min(finish);
             let stats = workers.snapshot(next_boundary).await?;
+            reported_stats.merge(&stats)?;
             interval_index += 1;
             reporter.interval(
                 interval_index,
@@ -1171,21 +1379,51 @@ async fn measure(
         }
 
         wait_for_boundary(finish, finish, &mut completion, &mut chaos_completed).await?;
+        let standalone_final = if reconnects_supported {
+            Some(
+                lifecycle_boundary_snapshot(
+                    &counters,
+                    reconnects_supported,
+                    event_monitor.as_deref_mut(),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         require_chaos_completion_at_deadline(finish, &mut completion, &mut chaos_completed)?;
-        Ok((interval_index, previous_boundary, previous_counters))
+        let counter_final = match standalone_final {
+            Some(mut snapshot) => {
+                // The marker freezes ordered connection events. Completion's
+                // oneshot synchronizes the chaos-task atomics separately.
+                snapshot.chaos_injections = counters.chaos_injections.load(Ordering::Acquire);
+                snapshot
+            }
+            None => counters.snapshot(false),
+        };
+        if let Some(schedule) = boundary_schedule.take() {
+            schedule.finish().await?;
+        }
+        Ok((
+            interval_index,
+            previous_boundary,
+            previous_counters,
+            counter_final,
+        ))
     }
     .await;
 
-    let (interval_index, previous_boundary, previous_counters) = match interval_result {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(run) = chaos.as_mut() {
-                run.abort();
+    let (interval_index, previous_boundary, previous_counters, counter_final) =
+        match interval_result {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(run) = chaos.as_mut() {
+                    run.abort();
+                }
+                let _ = workers.stop().await;
+                return Err(error);
             }
-            let _ = workers.stop().await;
-            return Err(error);
-        }
-    };
+        };
 
     let (last_interval, aggregate) = match workers.stop().await {
         Ok(stats) => stats,
@@ -1196,9 +1434,23 @@ async fn measure(
             return Err(error);
         }
     };
-    let counter_snapshot = counters
-        .snapshot(reconnects_supported)
-        .delta(counter_baseline);
+    reported_stats.merge(&last_interval)?;
+    if reported_stats.operations() != aggregate.operations()
+        || reported_stats.successes != aggregate.successes
+        || reported_stats.errors != aggregate.errors
+    {
+        return Err(format!(
+            "interval statistics lost or duplicated work: intervals={} successes={} errors={}, summary={} successes={} errors={}",
+            reported_stats.operations(),
+            reported_stats.successes,
+            reported_stats.errors,
+            aggregate.operations(),
+            aggregate.successes,
+            aggregate.errors,
+        )
+        .into());
+    }
+    let counter_snapshot = counter_final.delta(counter_baseline);
     reporter.interval(
         interval_index + 1,
         config.duration,
@@ -1211,7 +1463,23 @@ async fn measure(
         elapsed: config.duration,
         stats: aggregate,
         counter_baseline,
+        counter_final,
     })
+}
+
+async fn lifecycle_boundary_snapshot(
+    counters: &LifecycleCounters,
+    reconnects_supported: bool,
+    event_monitor: Option<&mut EventMonitor>,
+) -> Result<CounterSnapshot> {
+    if reconnects_supported {
+        event_monitor
+            .ok_or("standalone measurement is missing its connection event monitor")?
+            .await_next_boundary()
+            .await
+    } else {
+        Ok(counters.snapshot(false))
+    }
 }
 
 async fn wait_for_boundary(
@@ -1281,7 +1549,6 @@ fn report_summary(
     config: &Config,
     reconnects_supported: bool,
     measurement: &Measurement,
-    counters: &LifecycleCounters,
 ) -> Result<()> {
     Reporter {
         output: config.output,
@@ -1290,8 +1557,8 @@ fn report_summary(
     .summary(
         measurement.elapsed,
         &measurement.stats,
-        counters
-            .snapshot(reconnects_supported)
+        measurement
+            .counter_final
             .delta(measurement.counter_baseline),
     )
 }
@@ -1311,7 +1578,8 @@ async fn run_standalone(config: Config) -> Result<()> {
     let counters = Arc::new(LifecycleCounters::default());
     let events = ConnectionEventBus::new(EVENT_CAPACITY);
     let event_stream = events.subscribe();
-    let event_task = spawn_event_monitor(event_stream, Arc::clone(&counters));
+    let mut event_monitor =
+        spawn_event_monitor(event_stream, Arc::clone(&counters), events.clone());
     let pipeline = AutoPipelineConfig {
         response_timeout: Some(config.operation_timeout),
         queue_capacity: config.concurrency.saturating_mul(4).max(128),
@@ -1365,6 +1633,7 @@ async fn run_standalone(config: Config) -> Result<()> {
         },
         (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
         chaos_run.as_mut(),
+        Some(&mut event_monitor),
     )
     .await;
 
@@ -1372,34 +1641,32 @@ async fn run_standalone(config: Config) -> Result<()> {
         if let Some(run) = chaos_run.take() {
             run.cancel().await;
         }
+        event_monitor.cancel().await;
         client.shutdown().await;
         drop(server_without_chaos);
-        let _ = event_task.join().await;
         return measurement.map(|_| ());
     }
 
+    event_monitor.cancel().await;
     client.shutdown().await;
-    let event_result = timeout(Duration::from_secs(3), event_task.join()).await;
     if let Some(run) = chaos_run.take() {
         run.finish().await?;
     }
     drop(server_without_chaos);
 
     let measurement = measurement.expect("measurement error returned above");
-    match event_result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(format!("connection event task panicked: {error}").into()),
-        Err(_) => return Err("connection event task did not close after client shutdown".into()),
-    }
-    let lagged = counters.event_lagged.load(Ordering::Relaxed);
+    let final_counters = measurement
+        .counter_final
+        .delta(measurement.counter_baseline);
+    let lagged = final_counters.event_lagged;
     if lagged != 0 {
         return Err(format!(
             "connection event subscriber lagged by {lagged} event(s); reconnect total is not exact"
         )
         .into());
     }
-    verify_requested_chaos(&config, &counters, measurement.counter_baseline)?;
-    report_summary(&config, true, &measurement, &counters)
+    verify_requested_chaos(&config, final_counters)?;
+    report_summary(&config, true, &measurement)
 }
 
 async fn run_cluster(config: Config) -> Result<()> {
@@ -1472,6 +1739,7 @@ async fn run_cluster(config: Config) -> Result<()> {
         },
         (config.chaos != ChaosMode::None).then_some(measurement_started_tx),
         chaos_run.as_mut(),
+        None,
     )
     .await;
 
@@ -1487,48 +1755,174 @@ async fn run_cluster(config: Config) -> Result<()> {
         run.finish().await?;
     }
     let measurement = measurement.expect("measurement error returned above");
-    verify_requested_chaos(&config, &counters, measurement.counter_baseline)?;
-    report_summary(&config, false, &measurement, &counters)?;
+    verify_requested_chaos(
+        &config,
+        measurement
+            .counter_final
+            .delta(measurement.counter_baseline),
+    )?;
+    report_summary(&config, false, &measurement)?;
     drop(fixture);
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProcessIdentity {
+    pid: u32,
+    command: String,
+    started: String,
+    cwd: PathBuf,
+}
+
 struct StandaloneCleanup {
     base_dir: PathBuf,
+    node_dir: PathBuf,
+    config_path: PathBuf,
     pid_path: PathBuf,
+    owner_path: PathBuf,
+    owner_token: String,
     port: u16,
+    adopted: Option<ProcessIdentity>,
+    cleanup_timeout: Duration,
 }
 
 impl StandaloneCleanup {
-    fn new(port: u16) -> Self {
-        let sequence = STANDALONE_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let base_dir = std::env::temp_dir().join(format!(
-            "redis-tower-soak-{}-{port}-{sequence}",
-            std::process::id()
-        ));
-        let pid_path = base_dir.join(format!("node-{port}/redis.pid"));
-        Self {
+    fn new(port: u16) -> Result<Self> {
+        let process = std::process::id();
+        let created = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let (base_dir, owner_token) = (0..32_u64)
+            .find_map(|attempt| {
+                let sequence = STANDALONE_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+                let token = format!("{process}-{port}-{created}-{sequence}-{attempt}");
+                let path = std::env::temp_dir().join(format!("redis-tower-soak-{token}"));
+                match fs::create_dir(&path) {
+                    Ok(()) => Some(Ok((path, token))),
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+                    Err(error) => Some(Err(error)),
+                }
+            })
+            .ok_or("could not allocate a unique standalone ownership directory")??;
+        let owner_path = base_dir.join("owner");
+        if let Err(error) = fs::write(&owner_path, &owner_token) {
+            let _ = fs::remove_dir(&base_dir);
+            return Err(error.into());
+        }
+        let node_dir = base_dir.join(format!("node-{port}"));
+        Ok(Self {
+            config_path: node_dir.join("redis.conf"),
+            pid_path: node_dir.join("redis.pid"),
             base_dir,
-            pid_path,
+            node_dir,
+            owner_path,
+            owner_token,
             port,
+            adopted: None,
+            cleanup_timeout: PROCESS_CLEANUP_TIMEOUT,
+        })
+    }
+
+    fn adopt(&mut self, pid: u32) -> Result<()> {
+        let identity = self.owned_identity_for_pid(pid).ok_or_else(|| {
+            format!(
+                "Redis pid={pid} did not match its unique soak ownership identity at {}",
+                self.base_dir.display()
+            )
+        })?;
+        self.adopted = Some(identity);
+        Ok(())
+    }
+
+    fn owned_identity(&self) -> Option<ProcessIdentity> {
+        match &self.adopted {
+            Some(identity) if self.identity_still_owned(identity) => Some(identity.clone()),
+            Some(_) => None,
+            None => self
+                .pid_path
+                .exists()
+                .then(|| read_pid(&self.pid_path))
+                .flatten()
+                .and_then(|pid| self.owned_identity_for_pid(pid)),
         }
     }
 
-    fn cleanup(&self) {
-        let deadline = std::time::Instant::now() + PROCESS_CLEANUP_TIMEOUT;
+    fn owned_identity_for_pid(&self, pid: u32) -> Option<ProcessIdentity> {
+        if read_pid(&self.pid_path) != Some(pid)
+            || fs::read_to_string(&self.owner_path).ok()?.trim() != self.owner_token
+            || !self.config_matches()
+        {
+            return None;
+        }
+        let identity = inspect_process(pid)?;
+        if !redis_command_matches(&identity.command, &self.config_path, self.port)
+            || !same_directory(&identity.cwd, &self.node_dir)
+        {
+            return None;
+        }
+        Some(identity)
+    }
+
+    fn identity_still_owned(&self, expected: &ProcessIdentity) -> bool {
+        self.owned_identity_for_pid(expected.pid).as_ref() == Some(expected)
+    }
+
+    fn config_matches(&self) -> bool {
+        let Ok(config) = fs::read_to_string(&self.config_path) else {
+            return false;
+        };
+        config_directive_equals(&config, "port", &self.port.to_string())
+            && config_directive_equals(&config, "pidfile", &self.pid_path.display().to_string())
+            && config_directive_equals(&config, "dir", &self.node_dir.display().to_string())
+    }
+
+    fn signal_owned(&self, expected: &ProcessIdentity, signal: &str) -> bool {
+        if !self.identity_still_owned(expected) {
+            return false;
+        }
+        ProcessCommand::new("kill")
+            .args([signal, &expected.pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    fn terminate_owned(&self, expected: &ProcessIdentity) {
+        if !self.signal_owned(expected, "-TERM") {
+            return;
+        }
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        while self.identity_still_owned(expected) && std::time::Instant::now() < deadline {
+            std::thread::sleep(PROCESS_CLEANUP_POLL);
+        }
+        if self.identity_still_owned(expected) {
+            let _ = self.signal_owned(expected, "-KILL");
+        }
+    }
+
+    fn cleanup(&mut self) {
+        let deadline = std::time::Instant::now() + self.cleanup_timeout;
+        let mut identity = self.owned_identity();
+        if let Some(expected) = &identity {
+            self.terminate_owned(expected);
+        }
+
         let mut quiet_since = None;
         loop {
-            if let Some(pid) = read_pid(&self.pid_path)
-                && pid_alive(pid)
-            {
-                terminate_pid(pid);
+            if identity.is_none() && self.adopted.is_none() {
+                identity = self.owned_identity();
+                if let Some(expected) = &identity {
+                    self.terminate_owned(expected);
+                }
             }
-            if port_is_open(self.port) {
-                shutdown_redis_port(self.port);
-            }
-
-            let pid_is_alive = read_pid(&self.pid_path).is_some_and(pid_alive);
-            if !pid_is_alive && !port_is_open(self.port) {
+            let owned_alive = identity
+                .as_ref()
+                .is_some_and(|expected| self.identity_still_owned(expected));
+            // Port state is observation only. It can extend the quiescence
+            // wait, but it never authorizes a signal or Redis command.
+            if !owned_alive && !port_is_open(self.port) {
                 let quiet = quiet_since.get_or_insert_with(std::time::Instant::now);
                 if quiet.elapsed() >= Duration::from_millis(150) {
                     break;
@@ -1542,16 +1936,28 @@ impl StandaloneCleanup {
             std::thread::sleep(PROCESS_CLEANUP_POLL);
         }
 
-        if let Some(pid) = read_pid(&self.pid_path)
-            && pid_alive(pid)
+        if let Some(expected) = &identity
+            && self.identity_still_owned(expected)
         {
-            force_kill_pid(pid);
+            let _ = self.signal_owned(expected, "-KILL");
         }
-        if port_is_open(self.port) {
-            shutdown_redis_port(self.port);
+        if identity
+            .as_ref()
+            .is_none_or(|expected| !self.identity_still_owned(expected))
+        {
+            let _ = fs::remove_dir_all(&self.base_dir);
         }
-        let _ = fs::remove_dir_all(&self.base_dir);
     }
+}
+
+fn config_directive_equals(config: &str, directive: &str, expected: &str) -> bool {
+    config.lines().any(|line| {
+        let mut fields = line.trim().splitn(2, char::is_whitespace);
+        fields.next() == Some(directive)
+            && fields
+                .next()
+                .is_some_and(|value| value.trim().trim_matches('"') == expected)
+    })
 }
 
 impl Drop for StandaloneCleanup {
@@ -1562,7 +1968,7 @@ impl Drop for StandaloneCleanup {
 
 struct ManagedStandalone {
     handle: Option<RedisServerHandle>,
-    _cleanup: StandaloneCleanup,
+    cleanup: StandaloneCleanup,
 }
 
 impl ManagedStandalone {
@@ -1587,8 +1993,11 @@ impl ManagedStandalone {
     async fn sigkill_and_confirm(mut self, wait: Duration) -> Result<(u16, u32)> {
         let port = self.port();
         let pid = self.pid();
+        let identity = self.cleanup.owned_identity().ok_or_else(|| {
+            format!("refusing to SIGKILL Redis pid={pid}: its ownership identity changed")
+        })?;
         chaos::kill_node(self.handle());
-        wait_for_process_death(pid, port, wait).await?;
+        wait_for_process_death(&self.cleanup, &identity, port, wait).await?;
         self.handle
             .take()
             .expect("killed standalone handle remains owned")
@@ -1602,10 +2011,12 @@ impl ManagedStandalone {
 
 impl Drop for ManagedStandalone {
     fn drop(&mut self) {
-        // RedisServerHandle performs its normal graceful/forced shutdown first;
-        // StandaloneCleanup then catches cancellation during startup and any
-        // residual PID or listener scoped to this run.
-        drop(self.handle.take());
+        // redis-server-wrapper 0.4.x performs an unsafe kill-by-port fallback
+        // in its handle Drop. Detach it; only our PID-identity guard may stop
+        // the process, and port state is used solely to observe quiescence.
+        if let Some(handle) = self.handle.take() {
+            handle.detach();
+        }
     }
 }
 
@@ -1617,7 +2028,7 @@ fn reserve_ephemeral_port() -> Result<u16> {
 }
 
 async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<ManagedStandalone> {
-    let cleanup = StandaloneCleanup::new(port);
+    let cleanup = StandaloneCleanup::new(port)?;
     let start = RedisServer::new()
         .port(port)
         .dir(&cleanup.base_dir)
@@ -1628,10 +2039,24 @@ async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<Manage
         .await
         .map_err(|_| format!("timed out after {startup_timeout:?} starting Redis on port {port}"))?
         .map_err(BoxError::from)?;
-    Ok(ManagedStandalone {
+    // Wrap the raw handle before the first cancellation point. The wrapper's
+    // Drop detaches redis-server-wrapper's unsafe kill-by-port fallback and
+    // leaves shutdown exclusively to our PID-identity guard.
+    let mut server = ManagedStandalone {
         handle: Some(handle),
-        _cleanup: cleanup,
-    })
+        cleanup,
+    };
+    let reported_dir = server.handle().run(&["CONFIG", "GET", "dir"]).await;
+    let expected_dir = server.cleanup.node_dir.display().to_string();
+    if !matches!(reported_dir, Ok(ref reply) if reply.contains(&expected_dir)) {
+        return Err(format!(
+            "Redis on port {port} did not report this run's unique directory {}",
+            server.cleanup.node_dir.display()
+        )
+        .into());
+    }
+    server.cleanup.adopt(server.pid())?;
+    Ok(server)
 }
 
 fn read_pid(path: &Path) -> Option<u32> {
@@ -1653,31 +2078,71 @@ fn pid_alive(_pid: u32) -> bool {
     false
 }
 
-#[cfg(unix)]
-fn signal_pid(pid: u32, signal: &str) {
-    let _ = ProcessCommand::new("kill")
-        .args([signal, &pid.to_string()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+fn inspect_process(pid: u32) -> Option<ProcessIdentity> {
+    if !pid_alive(pid) {
+        return None;
+    }
+    let command = process_field(pid, "command")?;
+    let started = process_field(pid, "lstart")?;
+    let cwd = process_cwd(pid)?;
+    Some(ProcessIdentity {
+        pid,
+        command,
+        started,
+        cwd,
+    })
 }
 
-#[cfg(not(unix))]
-fn signal_pid(_pid: u32, _signal: &str) {}
-
-fn terminate_pid(pid: u32) {
-    signal_pid(pid, "-TERM");
-    let deadline = std::time::Instant::now() + Duration::from_millis(250);
-    while pid_alive(pid) && std::time::Instant::now() < deadline {
-        std::thread::sleep(PROCESS_CLEANUP_POLL);
+fn process_field(pid: u32, field: &str) -> Option<String> {
+    let output = ProcessCommand::new("ps")
+        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
     }
-    if pid_alive(pid) {
-        force_kill_pid(pid);
-    }
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_owned();
+    (!value.is_empty()).then_some(value)
 }
 
-fn force_kill_pid(pid: u32) {
-    signal_pid(pid, "-KILL");
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_cwd(pid: u32) -> Option<PathBuf> {
+    let output = ProcessCommand::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .map(PathBuf::from)
+}
+
+fn redis_command_matches(command: &str, config_path: &Path, port: u16) -> bool {
+    let Some(program) = command.split_whitespace().next() else {
+        return false;
+    };
+    let name = program.rsplit('/').next().unwrap_or(program);
+    matches!(name, "redis-server" | "redis-stack-server")
+        && (command.contains(&config_path.display().to_string())
+            || command
+                .split_whitespace()
+                .any(|argument| argument.ends_with(&format!(":{port}"))))
+}
+
+fn same_directory(actual: &Path, expected: &Path) -> bool {
+    match (fs::canonicalize(actual), fs::canonicalize(expected)) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        _ => actual == expected,
+    }
 }
 
 fn port_is_open(port: u16) -> bool {
@@ -1688,28 +2153,21 @@ fn port_is_open(port: u16) -> bool {
     .is_ok()
 }
 
-fn shutdown_redis_port(port: u16) {
-    let _ = ProcessCommand::new("redis-cli")
-        .args([
-            "-h",
-            "127.0.0.1",
-            "-p",
-            &port.to_string(),
-            "SHUTDOWN",
-            "NOSAVE",
-        ])
-        .output();
-}
-
-async fn wait_for_process_death(pid: u32, port: u16, wait: Duration) -> Result<()> {
+async fn wait_for_process_death(
+    cleanup: &StandaloneCleanup,
+    identity: &ProcessIdentity,
+    port: u16,
+    wait: Duration,
+) -> Result<()> {
     let deadline = Instant::now() + wait;
     loop {
-        if !pid_alive(pid) && !port_is_open(port) {
+        if !cleanup.identity_still_owned(identity) && !port_is_open(port) {
             return Ok(());
         }
         if Instant::now() >= deadline {
             return Err(format!(
-                "SIGKILL did not stop standalone Redis pid={pid} port={port} within {wait:?}"
+                "SIGKILL did not stop standalone Redis pid={} port={port} within {wait:?}",
+                identity.pid
             )
             .into());
         }
@@ -1766,27 +2224,47 @@ async fn seed_cluster(fixture: &ClusterFixture, slot: u16, key: &str, payload: &
 fn spawn_event_monitor(
     mut stream: redis_tower::ConnectionEventStream,
     counters: Arc<LifecycleCounters>,
-) -> AbortOnDropTask<()> {
-    AbortOnDropTask::spawn(async move {
+    bus: ConnectionEventBus,
+) -> EventMonitor {
+    let (snapshot_tx, snapshots) = mpsc::unbounded_channel();
+    let task = AbortOnDropTask::spawn(async move {
         loop {
             match stream.recv().await {
+                Ok(event) if event_boundary_number(&event).is_some() => {
+                    let boundary = event_boundary_number(&event)
+                        .expect("guard established a lifecycle boundary marker");
+                    if snapshot_tx
+                        .send((boundary, counters.snapshot(true)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
                 Ok(ConnectionEvent::Reconnected { .. }) => {
                     counters
                         .standalone_reconnect_recoveries
-                        .fetch_add(1, Ordering::Relaxed);
+                        .fetch_add(1, Ordering::AcqRel);
+                    counters.standalone_reconnect_notify.notify_one();
                 }
                 Ok(_) => {}
                 Err(ConnectionEventRecvError::Lagged { skipped }) => {
-                    counters.event_lagged.fetch_add(skipped, Ordering::Relaxed);
+                    counters.event_lagged.fetch_add(skipped, Ordering::AcqRel);
                 }
                 Err(ConnectionEventRecvError::Closed) => return,
                 Err(_) => {
-                    counters.event_lagged.fetch_add(1, Ordering::Relaxed);
+                    counters.event_lagged.fetch_add(1, Ordering::AcqRel);
                     return;
                 }
             }
         }
-    })
+    });
+    EventMonitor {
+        bus,
+        snapshots,
+        task,
+        next_boundary_to_publish: 1,
+        next_boundary_to_observe: 1,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1814,7 +2292,7 @@ fn spawn_standalone_chaos(
             let old_pid = server.pid();
             let reconnect_before = counters
                 .standalone_reconnect_recoveries
-                .load(Ordering::Relaxed);
+                .load(Ordering::Acquire);
             eprintln!(
                 "soak-bench: SIGKILL standalone Redis pid={old_pid} port={port} at +{:.1}s",
                 config.chaos_after.as_secs_f64()
@@ -1823,7 +2301,7 @@ fn spawn_standalone_chaos(
             let (confirmed_port, confirmed_pid) = server.sigkill_and_confirm(remaining).await?;
             debug_assert_eq!(confirmed_port, port);
             debug_assert_eq!(confirmed_pid, old_pid);
-            counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
+            counters.chaos_injections.fetch_add(1, Ordering::AcqRel);
 
             let remaining = remaining_until(recovery_deadline, "restarting standalone Redis")?;
             let replacement = start_standalone(port, config.startup_timeout.min(remaining)).await?;
@@ -1858,12 +2336,7 @@ fn spawn_standalone_chaos(
                 recovery_deadline,
                 "observing the standalone reconnect event",
             )?;
-            wait_for_counter_increment(
-                &counters.standalone_reconnect_recoveries,
-                reconnect_before,
-                remaining,
-            )
-            .await?;
+            wait_for_counter_increment(&counters, reconnect_before, remaining).await?;
             eprintln!(
                 "soak-bench: standalone client recovered on port={port} replacement_pid={}",
                 replacement.pid()
@@ -1914,7 +2387,7 @@ fn spawn_cluster_chaos(
             sleep_until(started + config.chaos_after).await;
 
             let old_owner = fixture.kill_slot_owner(config.cluster_slot).await?;
-            counters.chaos_injections.fetch_add(1, Ordering::Relaxed);
+            counters.chaos_injections.fetch_add(1, Ordering::AcqRel);
             eprintln!(
                 "soak-bench: SIGKILL cluster slot={} owner={} ({}) at +{:.1}s",
                 config.cluster_slot,
@@ -1937,7 +2410,7 @@ fn spawn_cluster_chaos(
                 remaining,
             )
             .await?;
-            counters.cluster_recoveries.fetch_add(1, Ordering::Relaxed);
+            counters.cluster_recoveries.fetch_add(1, Ordering::AcqRel);
             eprintln!(
                 "soak-bench: cluster harness observed slot={} owner change {} -> {} and a successful client GET",
                 config.cluster_slot, old_owner.id, new_owner.id
@@ -1998,30 +2471,37 @@ fn remaining_until(deadline: Instant, operation: &str) -> Result<Duration> {
 }
 
 async fn wait_for_counter_increment(
-    counter: &AtomicU64,
+    counters: &LifecycleCounters,
     previous: u64,
     wait: Duration,
 ) -> Result<()> {
-    timeout(wait, async {
-        while counter.load(Ordering::Relaxed) <= previous {
-            tokio::task::yield_now().await;
+    let deadline = Instant::now() + wait;
+    loop {
+        if counters
+            .standalone_reconnect_recoveries
+            .load(Ordering::Acquire)
+            > previous
+        {
+            return Ok(());
         }
-    })
-    .await
-    .map_err(
-        |_| "client recovered but its ConnectionEvent::Reconnected was not observed in time",
-    )?;
-    Ok(())
+        let notified = counters.standalone_reconnect_notify.notified();
+        if counters
+            .standalone_reconnect_recoveries
+            .load(Ordering::Acquire)
+            > previous
+        {
+            return Ok(());
+        }
+        let remaining = deadline.checked_duration_since(Instant::now()).ok_or(
+            "client recovered but its ConnectionEvent::Reconnected was not observed in time",
+        )?;
+        timeout(remaining, notified).await.map_err(
+            |_| "client recovered but its ConnectionEvent::Reconnected was not observed in time",
+        )?;
+    }
 }
 
-fn verify_requested_chaos(
-    config: &Config,
-    counters: &LifecycleCounters,
-    baseline: CounterSnapshot,
-) -> Result<()> {
-    let counters = counters
-        .snapshot(config.mode == Mode::Standalone)
-        .delta(baseline);
+fn verify_requested_chaos(config: &Config, counters: CounterSnapshot) -> Result<()> {
     match config.chaos {
         ChaosMode::None => {
             if counters.chaos_injections != 0 {
@@ -2067,16 +2547,97 @@ mod tests {
 
     #[test]
     fn interval_reset_keeps_the_full_run_histogram() {
+        let started = Instant::now();
+        let first_deadline = started + Duration::from_secs(1);
+        let second_deadline = started + Duration::from_secs(2);
         let mut worker = WorkerStats::new();
-        worker.record(true, Duration::from_micros(10));
-        worker.record(false, Duration::from_micros(20));
-        let first = worker.take_interval();
+        worker.record_completion(
+            CompletedOperation {
+                success: true,
+                elapsed: Duration::from_micros(10),
+                completed: started + Duration::from_millis(100),
+            },
+            first_deadline,
+            second_deadline,
+        );
+        worker.record_completion(
+            CompletedOperation {
+                success: false,
+                elapsed: Duration::from_micros(20),
+                completed: started + Duration::from_millis(200),
+            },
+            first_deadline,
+            second_deadline,
+        );
+        let first = worker.take_interval(second_deadline);
         assert_eq!(first.operations(), 2);
         assert_eq!(worker.interval.operations(), 0);
         assert_eq!(worker.aggregate.operations(), 2);
-        worker.record(true, Duration::from_micros(30));
+        worker.record_completion(
+            CompletedOperation {
+                success: true,
+                elapsed: Duration::from_micros(30),
+                completed: started + Duration::from_millis(1_500),
+            },
+            second_deadline,
+            second_deadline,
+        );
         assert_eq!(worker.interval.operations(), 1);
         assert_eq!(worker.aggregate.operations(), 3);
+    }
+
+    #[test]
+    fn cross_boundary_completion_is_carried_and_counted_exactly_once() {
+        let started = Instant::now();
+        let first_deadline = started + Duration::from_secs(1);
+        let second_deadline = started + Duration::from_secs(2);
+        let mut worker = WorkerStats::new();
+        worker.record_completion(
+            CompletedOperation {
+                success: true,
+                elapsed: Duration::from_millis(200),
+                completed: first_deadline + Duration::from_millis(50),
+            },
+            first_deadline,
+            second_deadline,
+        );
+
+        let first = worker.take_interval(second_deadline);
+        worker.record_completion(
+            CompletedOperation {
+                success: false,
+                elapsed: Duration::from_millis(10),
+                completed: first_deadline + Duration::from_millis(500),
+            },
+            second_deadline,
+            second_deadline,
+        );
+        let second = worker.take_interval(second_deadline);
+        assert_eq!(first.operations(), 0);
+        assert_eq!(second.successes, 1);
+        assert_eq!(second.errors, 1);
+        assert_eq!(first.operations() + second.operations(), 2);
+        assert_eq!(worker.aggregate.operations(), 2);
+        assert_eq!(worker.aggregate.successes, 1);
+        assert_eq!(worker.aggregate.errors, 1);
+    }
+
+    #[test]
+    fn completion_after_final_deadline_is_excluded() {
+        let started = Instant::now();
+        let finish = started + Duration::from_secs(1);
+        let mut worker = WorkerStats::new();
+        worker.record_completion(
+            CompletedOperation {
+                success: false,
+                elapsed: Duration::from_secs(1),
+                completed: finish + Duration::from_nanos(1),
+            },
+            finish,
+            finish,
+        );
+        assert_eq!(worker.interval.operations(), 0);
+        assert_eq!(worker.aggregate.operations(), 0);
     }
 
     #[test]
@@ -2085,16 +2646,19 @@ mod tests {
             reconnects: 2,
             recoveries: 1,
             chaos_injections: 0,
+            event_lagged: 4,
         };
         let current = CounterSnapshot {
             reconnects: 5,
             recoveries: 2,
             chaos_injections: 1,
+            event_lagged: 6,
         };
         let delta = current.delta(previous);
         assert_eq!(delta.reconnects, 3);
         assert_eq!(delta.recoveries, 1);
         assert_eq!(delta.chaos_injections, 1);
+        assert_eq!(delta.event_lagged, 2);
     }
 
     #[cfg(target_os = "linux")]
@@ -2133,6 +2697,10 @@ mod tests {
             ..Config::default()
         };
         assert!(maximum_timeout.validate().is_ok());
+
+        let mut stats = Stats::new();
+        stats.record(true, Duration::from_millis(60_001));
+        assert_eq!(stats.successes, 1);
     }
 
     #[test]
@@ -2154,28 +2722,68 @@ mod tests {
         assert_eq!(snapshot.recoveries, 7);
     }
 
-    #[test]
-    fn lifecycle_baseline_discards_warmup_events() {
-        let counters = LifecycleCounters::default();
-        counters
-            .standalone_reconnect_recoveries
-            .store(2, Ordering::Relaxed);
-        let baseline = counters.snapshot(true);
-        counters
-            .standalone_reconnect_recoveries
-            .fetch_add(1, Ordering::Relaxed);
-        let measured = counters.snapshot(true).delta(baseline);
+    #[tokio::test]
+    async fn lifecycle_boundaries_exclude_queued_warmup_and_post_deadline_events() {
+        let counters = Arc::new(LifecycleCounters::default());
+        let bus = ConnectionEventBus::new(16);
+        let stream = bus.subscribe();
+        let mut monitor = spawn_event_monitor(stream, Arc::clone(&counters), bus.clone());
+        let reconnect = || ConnectionEvent::Reconnected {
+            attempts: 1,
+            elapsed: Duration::from_millis(1),
+        };
+
+        assert!(bus.publish(reconnect()));
+        let baseline = monitor.capture_boundary().await.unwrap();
+        assert!(bus.publish(reconnect()));
+        let final_snapshot = monitor.capture_boundary().await.unwrap();
+        assert!(bus.publish(reconnect()));
+        wait_for_counter_increment(&counters, 2, Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let measured = final_snapshot.delta(baseline);
+        assert_eq!(baseline.reconnects, 1);
         assert_eq!(measured.reconnects, 1);
         assert_eq!(measured.recoveries, 1);
+        assert_eq!(counters.snapshot(true).reconnects, 3);
+        monitor.cancel().await;
     }
 
     #[tokio::test(start_paused = true)]
-    async fn completion_after_interval_deadline_is_not_recordable() {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        tokio::time::advance(Duration::from_millis(999)).await;
-        assert!(completion_is_in_window(Instant::now(), deadline));
-        tokio::time::advance(Duration::from_millis(2)).await;
-        assert!(!completion_is_in_window(Instant::now(), deadline));
+    async fn lifecycle_boundaries_are_published_while_reporting_is_blocked() {
+        let counters = Arc::new(LifecycleCounters::default());
+        let bus = ConnectionEventBus::new(16);
+        let stream = bus.subscribe();
+        let mut monitor = spawn_event_monitor(stream, Arc::clone(&counters), bus.clone());
+        let reconnect = || ConnectionEvent::Reconnected {
+            attempts: 1,
+            elapsed: Duration::from_millis(1),
+        };
+
+        let (started, start_boundary) = monitor.publish_boundary().unwrap();
+        let baseline = monitor.await_boundary(start_boundary).await.unwrap();
+        let schedule = monitor
+            .arm_boundaries(started, Duration::from_secs(3), Duration::from_secs(1))
+            .unwrap();
+
+        tokio::task::yield_now().await;
+        sleep(Duration::from_millis(2_500)).await;
+        assert!(bus.publish(reconnect()));
+        sleep(Duration::from_millis(500)).await;
+        schedule.finish().await.unwrap();
+        assert!(bus.publish(reconnect()));
+
+        let first = monitor.await_next_boundary().await.unwrap();
+        let second = monitor.await_next_boundary().await.unwrap();
+        let final_snapshot = monitor.await_next_boundary().await.unwrap();
+        let after_final = monitor.capture_boundary().await.unwrap();
+
+        assert_eq!(first.delta(baseline).reconnects, 0);
+        assert_eq!(second.delta(first).reconnects, 0);
+        assert_eq!(final_snapshot.delta(second).reconnects, 1);
+        assert_eq!(after_final.delta(final_snapshot).reconnects, 1);
+        monitor.cancel().await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -2236,6 +2844,86 @@ mod tests {
         drop(task);
         tokio::time::advance(Duration::from_secs(10)).await;
         assert_eq!(injections.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_pidfile_naming_this_process_is_not_owned() {
+        let port = reserve_ephemeral_port().unwrap();
+        let mut cleanup = StandaloneCleanup::new(port).unwrap();
+        cleanup.cleanup_timeout = Duration::from_millis(250);
+        write_guard_config(&cleanup, std::process::id());
+        assert!(cleanup.owned_identity().is_none());
+        let base_dir = cleanup.base_dir.clone();
+        drop(cleanup);
+        assert!(!base_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_occupied_port_is_preserved_after_failed_startup() {
+        let port = reserve_ephemeral_port().unwrap();
+        let existing = start_standalone(port, Duration::from_secs(20))
+            .await
+            .expect("start existing Redis");
+        let existing_pid = existing.pid();
+
+        let result = start_standalone(port, Duration::from_secs(3)).await;
+        assert!(result.is_err());
+        assert!(existing.handle().is_alive().await);
+        assert!(pid_alive(existing_pid));
+        assert!(port_is_open(port));
+        drop(existing);
+        wait_until_process_is_gone(existing_pid, port).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_stale_reused_redis_pid_is_not_owned() {
+        let port = reserve_ephemeral_port().unwrap();
+        let existing = start_standalone(port, Duration::from_secs(20))
+            .await
+            .expect("start unrelated Redis");
+        let existing_pid = existing.pid();
+        let mut cleanup = StandaloneCleanup::new(port).unwrap();
+        cleanup.cleanup_timeout = Duration::from_millis(300);
+        write_guard_config(&cleanup, existing_pid);
+
+        assert!(cleanup.owned_identity().is_none());
+        drop(cleanup);
+        assert!(existing.handle().is_alive().await);
+        assert!(pid_alive(existing_pid));
+        drop(existing);
+        wait_until_process_is_gone(existing_pid, port).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_late_unowned_pidfile_does_not_authorize_cleanup() {
+        let port = reserve_ephemeral_port().unwrap();
+        let existing = start_standalone(port, Duration::from_secs(20))
+            .await
+            .expect("start unrelated Redis");
+        let existing_pid = existing.pid();
+        let mut cleanup = StandaloneCleanup::new(port).unwrap();
+        cleanup.cleanup_timeout = Duration::from_millis(500);
+        fs::create_dir_all(&cleanup.node_dir).unwrap();
+        fs::write(&cleanup.config_path, matching_guard_config(&cleanup)).unwrap();
+        let pid_path = cleanup.pid_path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            fs::write(pid_path, existing_pid.to_string()).unwrap();
+        });
+
+        drop(cleanup);
+        writer.join().unwrap();
+        assert!(existing.handle().is_alive().await);
+        assert!(pid_alive(existing_pid));
+        drop(existing);
+        wait_until_process_is_gone(existing_pid, port).await;
     }
 
     #[cfg(unix)]
@@ -2345,5 +3033,22 @@ mod tests {
         .expect("managed process cleanup bound");
         assert!(!pid_alive(pid));
         assert!(!port_is_open(port));
+    }
+
+    #[cfg(unix)]
+    fn write_guard_config(cleanup: &StandaloneCleanup, pid: u32) {
+        fs::create_dir_all(&cleanup.node_dir).unwrap();
+        fs::write(&cleanup.config_path, matching_guard_config(cleanup)).unwrap();
+        fs::write(&cleanup.pid_path, pid.to_string()).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn matching_guard_config(cleanup: &StandaloneCleanup) -> String {
+        format!(
+            "port {}\npidfile \"{}\"\ndir \"{}\"\n",
+            cleanup.port,
+            cleanup.pid_path.display(),
+            cleanup.node_dir.display(),
+        )
     }
 }
