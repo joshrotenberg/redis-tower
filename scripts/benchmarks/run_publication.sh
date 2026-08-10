@@ -140,7 +140,7 @@ if [[ $resume_candidate -eq 1 ]]; then
   initial_disk_mode="minima"
 fi
 # Fresh runs receive no credit for pre-existing files. A resume receives
-# owned-target/checkpoint credit only after its state passes exact validation.
+# bounded owned-target credit only after its state passes exact validation.
 "${python_clean[@]}" "$disk_budget_tool" \
   --mode "$initial_disk_mode" \
   --workspace "$workspace_root" \
@@ -218,14 +218,21 @@ verify_source_provenance() {
   --lock-sha256 "$lock_sha256" \
   --mode "$run_mode" \
   --fingerprint-file "$fingerprint_tmp"
+post_init_disk_mode="claim"
 if [[ $resume_candidate -eq 1 ]]; then
-  "${python_clean[@]}" "$disk_budget_tool" \
-    --mode resume \
-    --workspace "$workspace_root" \
-    --temporary "${TMPDIR:-/tmp}" \
-    --result "$result_dir" \
-    --target "$target_dir"
+  post_init_disk_mode="resume"
 fi
+# The manifest initializer has now proved that state matches the exact current
+# source, lockfile, benchmark config, and execution fingerprint. Claim only an
+# empty target on a fresh run; a resume must validate the matching marker before
+# any bounded target allocation can reduce the workspace free-space requirement.
+"${python_clean[@]}" "$disk_budget_tool" \
+  --mode "$post_init_disk_mode" \
+  --workspace "$workspace_root" \
+  --temporary "${TMPDIR:-/tmp}" \
+  --result "$result_dir" \
+  --target "$target_dir" \
+  --state-file "$result_dir/.run-state.json"
 
 install_generated() {
   local final="$1"

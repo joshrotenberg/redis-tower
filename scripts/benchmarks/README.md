@@ -96,9 +96,14 @@ Before creating state or compiling, a fresh run requires at least 10 GiB free
 on the workspace/build filesystem, 2 GiB on the temporary filesystem, and 1
 GiB on the result filesystem. A fresh run never receives credit for an old
 target directory. After an existing run state passes exact provenance
-validation, resume preflight counts the allocated size of that run's isolated
-target and result directory when they share the workspace filesystem: current
-free space plus those owned bytes must still total at least 10 GiB. The 2-GiB
+validation, resume preflight requires a regular marker in the source-specific
+isolated target that binds it to the exact source, lockfile, benchmark config,
+and execution fingerprint. A fresh run creates that marker atomically only in a
+new or empty target; it refuses to adopt a non-empty unmarked or mismatched
+target. A valid resume may credit only the target's allocated size when it
+shares the workspace filesystem, capped at the documented 6-GiB target budget.
+A missing or mismatched marker aborts the resume, and result artifacts are never
+credited. Thus workspace free space never falls below 4 GiB, while the 2-GiB
 temporary and 1-GiB result free-space floors always remain. Symlinked target or
 result roots are refused. A host with 16 GiB free therefore retains roughly 8
 GiB of conservative headroom at peak without blocking a legitimate resume once

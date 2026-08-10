@@ -662,6 +662,27 @@ class FingerprintTests(unittest.TestCase):
 
 
 class DiskBudgetTests(unittest.TestCase):
+    def _state_fixture(self, root: Path) -> tuple[Path, Path]:
+        source_sha = "a" * 40
+        state_file = root / ".run-state.json"
+        state_file.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "source_sha": source_sha,
+                    "cargo_lock_sha256": "b" * 64,
+                    "mode": "matrix-only",
+                    "config": artifact_manifest.PUBLICATION_CONFIG,
+                    "execution_fingerprint_sha256": "c" * 64,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return state_file, root / "workspace" / "target" / f"publication-{source_sha}"
+
     def test_resume_credits_owned_bytes_but_fresh_run_never_does(self) -> None:
         gib = check_disk_budget.GIB_KIB
         self.assertEqual(
@@ -679,26 +700,118 @@ class DiskBudgetTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            state_file, target = self._state_fixture(root)
             paths = {
                 "workspace": root / "workspace",
                 "temporary": root / "tmp",
                 "result": root / "results",
-                "target": root / "workspace" / "target",
+                "target": target,
             }
-            for path in paths.values():
+            for name, path in paths.items():
+                if name == "target":
+                    continue
                 path.mkdir(parents=True, exist_ok=True)
+            check_disk_budget.claim_target(target, state_file)
             with mock.patch.object(
                 check_disk_budget, "available_kib", return_value=6 * gib
             ), mock.patch.object(
-                check_disk_budget, "owned_workspace_kib", return_value=6 * gib
+                check_disk_budget, "owned_target_kib", return_value=6 * gib
             ):
                 with self.assertRaisesRegex(
                     check_disk_budget.DiskBudgetError, "workspace/build"
                 ):
                     check_disk_budget.check_budget(mode="fresh", **paths)
-                result = check_disk_budget.check_budget(mode="resume", **paths)
+                result = check_disk_budget.check_budget(
+                    mode="resume", state_file=state_file, **paths
+                )
                 self.assertEqual(result["workspace_owned_kib"], 6 * gib)
                 self.assertEqual(result["workspace_required_kib"], 4 * gib)
+
+    def test_resume_caps_huge_target_credit_at_six_gib(self) -> None:
+        gib = check_disk_budget.GIB_KIB
+        self.assertEqual(
+            check_disk_budget.workspace_required_kib(
+                resume=True, owned_kib=100 * gib
+            ),
+            4 * gib,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file, target = self._state_fixture(root)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            check_disk_budget.claim_target(target, state_file)
+            with mock.patch.object(
+                check_disk_budget, "allocated_kib", return_value=100 * gib
+            ):
+                self.assertEqual(
+                    check_disk_budget.owned_target_kib(
+                        workspace, target, state_file
+                    ),
+                    6 * gib,
+                )
+
+    def test_result_directory_is_never_credited(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file, target = self._state_fixture(root)
+            workspace = root / "workspace"
+            result = root / "results"
+            workspace.mkdir()
+            result.mkdir()
+            (result / "arbitrary-large-file").write_bytes(b"not owned target data")
+            check_disk_budget.claim_target(target, state_file)
+            with mock.patch.object(
+                check_disk_budget, "allocated_kib", return_value=123
+            ) as allocated:
+                self.assertEqual(
+                    check_disk_budget.owned_target_kib(
+                        workspace, target, state_file
+                    ),
+                    123,
+                )
+            allocated.assert_called_once_with(target)
+
+    def test_resume_rejects_missing_or_mismatched_target_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file, target = self._state_fixture(root)
+            workspace = root / "workspace"
+            target.mkdir(parents=True)
+            with self.assertRaisesRegex(check_disk_budget.DiskBudgetError, "marker"):
+                check_disk_budget.owned_target_kib(workspace, target, state_file)
+
+            check_disk_budget.claim_target(target, state_file)
+            marker_path = target / check_disk_budget.TARGET_MARKER_NAME
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["config_sha256"] = "d" * 64
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+            with self.assertRaisesRegex(
+                check_disk_budget.DiskBudgetError, "does not match"
+            ):
+                check_disk_budget.owned_target_kib(workspace, target, state_file)
+
+    def test_fresh_claim_refuses_stale_or_mismatched_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file, target = self._state_fixture(root)
+            target.mkdir(parents=True)
+            (target / "stale-object").write_bytes(b"stale")
+            with self.assertRaisesRegex(
+                check_disk_budget.DiskBudgetError, "non-empty"
+            ):
+                check_disk_budget.claim_target(target, state_file)
+
+            (target / "stale-object").unlink()
+            check_disk_budget.claim_target(target, state_file)
+            marker_path = target / check_disk_budget.TARGET_MARKER_NAME
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            marker["source_sha"] = "d" * 40
+            marker_path.write_text(json.dumps(marker), encoding="utf-8")
+            with self.assertRaisesRegex(
+                check_disk_budget.DiskBudgetError, "does not match"
+            ):
+                check_disk_budget.claim_target(target, state_file)
 
     def test_disk_budget_rejects_symlinked_target_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -981,9 +1094,15 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("checkpoint-verify", runner)
         self.assertIn('initial_disk_mode="fresh"', runner)
         self.assertIn('initial_disk_mode="minima"', runner)
-        self.assertIn("--mode resume", runner)
+        self.assertIn('post_init_disk_mode="claim"', runner)
+        self.assertIn('post_init_disk_mode="resume"', runner)
+        self.assertIn('--state-file "$result_dir/.run-state.json"', runner)
         self.assertEqual(
             check_disk_budget.FRESH_WORKSPACE_KIB, 10 * check_disk_budget.GIB_KIB
+        )
+        self.assertEqual(
+            check_disk_budget.TARGET_CREDIT_CAP_KIB,
+            6 * check_disk_budget.GIB_KIB,
         )
         self.assertIn("--workloads", artifact_manifest.commands_text("publication"))
         self.assertIn("--workloads set,get", artifact_manifest.commands_text("publication"))
