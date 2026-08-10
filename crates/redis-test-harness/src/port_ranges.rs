@@ -3,7 +3,7 @@
 //!
 //! Every fixture that starts a real `redis-server` (or `redis-sentinel`)
 //! process on a hardcoded port belongs here, even if it does not import the
-//! constants directly, so [`fixture_port_ranges_do_not_overlap`] can catch a
+//! constants directly, so `fixture_port_ranges_do_not_overlap` can catch a
 //! new fixture landing on top of an existing one before it ever produces the
 //! kind of cross-suite ordering flake described in #655 (the sync fixture
 //! silently reused the Sentinel fixtures' 6390-6395 block, so writes could
