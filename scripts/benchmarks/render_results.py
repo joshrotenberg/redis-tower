@@ -14,6 +14,7 @@ from typing import Any
 
 PAYLOADS = (16, 64, 1024, 16 * 1024, 100 * 1024)
 CONCURRENCIES = (1, 8, 32, 128)
+PIPELINE_DEPTHS = (10, 100, 1000)
 STANDALONE_CLIENTS = (
     "redis-tower",
     "redis-tower-mux",
@@ -75,6 +76,7 @@ def validate_matrix(
     concurrencies: Sequence[int] = CONCURRENCIES,
     runs: int = 3,
     commands_per_batch: int | None = None,
+    require_samples: bool = False,
 ) -> None:
     expected = {
         (client, workload, payload, concurrency)
@@ -86,6 +88,13 @@ def validate_matrix(
     actual: set[tuple[str, str, int, int]] = set()
     for row in records:
         key = _cell_key(row)
+        if (
+            type(row.get("client_id")) is not str
+            or type(row.get("workload")) is not str
+            or type(row.get("payload_bytes")) is not int
+            or type(row.get("concurrency")) is not int
+        ):
+            raise ResultError(f"{name} has non-canonical matrix identity types: {row!r}")
         if key in actual:
             raise ResultError(f"{name} contains duplicate cell {key!r}")
         actual.add(key)
@@ -97,17 +106,35 @@ def validate_matrix(
             )
         if row.get("errors") != 0:
             raise ResultError(f"{name} cell {key!r} reports errors={row.get('errors')!r}")
-        if not isinstance(row.get("total_commands"), int) or row["total_commands"] <= 0:
+        if type(row.get("total_commands")) is not int or row["total_commands"] <= 0:
             raise ResultError(f"{name} cell {key!r} has no successful commands")
-        for metric in ("commands_per_sec_mean", "commands_per_sec_stddev", "p99_us"):
+        for metric in (
+            "commands_per_sec_mean",
+            "commands_per_sec_stddev",
+            "p50_us",
+            "p90_us",
+            "p99_us",
+            "p999_us",
+            "max_us",
+        ):
             value = row.get(metric)
-            if not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+            if not _finite_number(value) or float(value) < 0:
                 raise ResultError(f"{name} cell {key!r} has invalid {metric}={value!r}")
+        if not (
+            float(row["p50_us"])
+            <= float(row["p90_us"])
+            <= float(row["p99_us"])
+            <= float(row["p999_us"])
+            <= float(row["max_us"])
+        ):
+            raise ResultError(f"{name} cell {key!r} has unordered aggregate quantiles")
         if commands_per_batch is not None and row.get("commands_per_batch") != commands_per_batch:
             raise ResultError(
                 f"{name} cell {key!r} has commands_per_batch="
                 f"{row.get('commands_per_batch')!r}, expected {commands_per_batch}"
             )
+        if require_samples:
+            validate_samples(row, name=name, key=key, runs=runs)
 
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
@@ -116,6 +143,115 @@ def validate_matrix(
             f"{name} matrix mismatch: {len(missing)} missing, {len(extra)} extra; "
             f"first missing={missing[:3]!r}, first extra={extra[:3]!r}"
         )
+
+
+def _finite_number(value: Any) -> bool:
+    return type(value) in (int, float) and math.isfinite(float(value))
+
+
+def _population_stddev(values: Sequence[float]) -> float:
+    mean = sum(values) / len(values)
+    return math.sqrt(sum((value - mean) ** 2 for value in values) / len(values))
+
+
+def _close(actual: Any, expected: float, *, absolute: float = 1e-6) -> bool:
+    return _finite_number(actual) and math.isclose(
+        float(actual), expected, rel_tol=1e-9, abs_tol=absolute
+    )
+
+
+def validate_samples(
+    row: dict[str, Any],
+    *,
+    name: str,
+    key: tuple[str, str, int, int],
+    runs: int,
+) -> None:
+    samples = row.get("samples")
+    if not isinstance(samples, list) or len(samples) != runs:
+        raise ResultError(
+            f"{name} cell {key!r} must retain exactly {runs} raw run samples"
+        )
+    if not all(isinstance(sample, dict) for sample in samples):
+        raise ResultError(f"{name} cell {key!r} has a non-object raw sample")
+    if [sample.get("run") for sample in samples] != list(range(1, runs + 1)):
+        raise ResultError(f"{name} cell {key!r} has invalid raw sample numbering")
+
+    rates: list[float] = []
+    latency_samples: dict[str, list[float]] = {
+        metric: [] for metric in ("p50_us", "p90_us", "p99_us", "p999_us", "max_us")
+    }
+    total_commands = 0
+    total_errors = 0
+    for sample in samples:
+        commands = sample.get("total_commands")
+        errors = sample.get("errors")
+        rate = sample.get("commands_per_sec")
+        if type(commands) is not int or commands <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid raw command count")
+        if type(errors) is not int or errors != 0:
+            raise ResultError(f"{name} cell {key!r} has errors in a raw sample")
+        if not _finite_number(rate) or float(rate) <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid raw command rate")
+        for metric in ("p50_us", "p90_us", "p99_us", "p999_us", "max_us"):
+            if not _finite_number(sample.get(metric)) or float(sample[metric]) < 0:
+                raise ResultError(
+                    f"{name} cell {key!r} has invalid raw {metric}={sample.get(metric)!r}"
+                )
+        if not (
+            float(sample["p50_us"])
+            <= float(sample["p90_us"])
+            <= float(sample["p99_us"])
+            <= float(sample["p999_us"])
+            <= float(sample["max_us"])
+        ):
+            raise ResultError(f"{name} cell {key!r} has unordered raw quantiles")
+        total_commands += commands
+        total_errors += errors
+        rates.append(float(rate))
+        for metric in latency_samples:
+            latency_samples[metric].append(float(sample[metric]))
+
+    expected_mean = sum(rates) / len(rates)
+    expected_stddev = _population_stddev(rates)
+    if row.get("total_commands") != total_commands or row.get("errors") != total_errors:
+        raise ResultError(f"{name} cell {key!r} aggregate counters do not match samples")
+    if not _close(row.get("commands_per_sec_mean"), expected_mean):
+        raise ResultError(f"{name} cell {key!r} mean cannot be recomputed from samples")
+    if not _close(row.get("commands_per_sec_stddev"), expected_stddev):
+        raise ResultError(f"{name} cell {key!r} stddev cannot be recomputed from samples")
+    for metric, values in latency_samples.items():
+        if not _close(row.get(metric), sum(values) / runs):
+            raise ResultError(f"{name} cell {key!r} {metric} does not match samples")
+
+    if "total_batches" in samples[0]:
+        batches = [sample.get("total_batches") for sample in samples]
+        batch_rates = [sample.get("batches_per_sec") for sample in samples]
+        if not all(type(value) is int and value > 0 for value in batches):
+            raise ResultError(f"{name} cell {key!r} has invalid raw batch counts")
+        if not all(_finite_number(value) and float(value) > 0 for value in batch_rates):
+            raise ResultError(f"{name} cell {key!r} has invalid raw batch rates")
+        numeric_batch_rates = [float(value) for value in batch_rates]
+        commands_per_batch = row.get("commands_per_batch")
+        if type(commands_per_batch) is not int or commands_per_batch <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid commands_per_batch")
+        for sample, batches_count, batch_rate in zip(
+            samples, batches, numeric_batch_rates, strict=True
+        ):
+            if sample["total_commands"] != batches_count * commands_per_batch:
+                raise ResultError(f"{name} cell {key!r} raw batch/command counts disagree")
+            if not _close(
+                sample["commands_per_sec"], batch_rate * commands_per_batch
+            ):
+                raise ResultError(f"{name} cell {key!r} raw batch/command rates disagree")
+        if row.get("total_batches") != sum(batches):
+            raise ResultError(f"{name} cell {key!r} batch total does not match samples")
+        if not _close(row.get("batches_per_sec_mean"), sum(numeric_batch_rates) / runs):
+            raise ResultError(f"{name} cell {key!r} batch mean does not match samples")
+        if not _close(
+            row.get("batches_per_sec_stddev"), _population_stddev(numeric_batch_rates)
+        ):
+            raise ResultError(f"{name} cell {key!r} batch stddev does not match samples")
 
 
 def _headline(
@@ -253,124 +389,301 @@ def parse_pipeline(value: str) -> tuple[int, Path]:
         parsed_depth = int(depth)
     except ValueError as error:
         raise argparse.ArgumentTypeError(f"invalid pipeline depth {depth!r}") from error
-    if parsed_depth not in (10, 100, 1000):
+    if parsed_depth not in PIPELINE_DEPTHS:
         raise argparse.ArgumentTypeError("pipeline depth must be 10, 100, or 1000")
     return parsed_depth, Path(raw_path)
 
 
+def _nonnegative_integer(value: Any) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _validate_quantiles(record: dict[str, Any], *, context: str) -> None:
+    fields = ("p50_us", "p99_us", "p999_us", "max_us")
+    values = [record.get(field) for field in fields]
+    if record.get("successes") == 0:
+        if any(value is not None for value in values):
+            raise ResultError(f"{context} has latency quantiles without successes")
+        return
+    if not all(type(value) is int and value > 0 for value in values):
+        raise ResultError(f"{context} has invalid latency quantiles {values!r}")
+    if values != sorted(values):
+        raise ResultError(f"{context} has unordered latency quantiles {values!r}")
+
+
+def _validate_rate(
+    record: dict[str, Any], *, numerator: str, rate: str, window: float, context: str
+) -> None:
+    expected = int(record[numerator]) / window
+    if not _close(record.get(rate), expected):
+        raise ResultError(
+            f"{context} {rate}={record.get(rate)!r} does not match "
+            f"{numerator}/{window:.6f}={expected:.6f}"
+        )
+
+
 def validate_soak(path: Path) -> dict[str, Any]:
     try:
-        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        records = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
     except (OSError, json.JSONDecodeError) as error:
         raise ResultError(f"cannot read soak artifact {path}: {error}") from error
     if len(records) != 242 or not all(isinstance(record, dict) for record in records):
         raise ResultError(
-            f"four-hour soak must contain metadata, 240 intervals, and summary; got {len(records)} records"
+            "four-hour soak must contain metadata, exactly 240 intervals, "
+            f"and summary; got {len(records)} records"
         )
     metadata, *intervals, summary = records
     expected_metadata = {
         "schema_version": 1,
         "record_type": "metadata",
         "mode": "standalone",
+        "workload": "get_validate",
+        "key": "redis-tower:soak:standalone",
+        "payload_bytes": 1024,
+        "concurrency": 32,
+        "warmup_secs": 60.0,
         "duration_secs": 14_400.0,
         "report_interval_secs": 60.0,
+        "operation_timeout_ms": 2_000,
+        "error_backoff_ms": 1,
+        "startup_timeout_secs": 30.0,
+        "recovery_timeout_secs": 30.0,
+        "cluster_slot": 42,
+        "cluster_node_timeout_ms": 1_000,
+        "standalone_port": 6_481,
         "chaos": "standalone_sigkill",
         "chaos_after_secs": 7_200.0,
         "reconnect_accounting": "exact_connection_event_reconnected",
+        "recovery_accounting": "exact_connection_event_reconnected",
+        "latency_accounting": "successful_get_completions_only",
+        "rss_accounting": "current_soak_process_resident_set",
     }
     for field, expected in expected_metadata.items():
         if metadata.get(field) != expected:
             raise ResultError(
                 f"soak metadata {field}={metadata.get(field)!r}, expected {expected!r}"
             )
+    if not _nonnegative_integer(metadata.get("started_unix_ms")) or metadata["started_unix_ms"] == 0:
+        raise ResultError("soak metadata has no valid start timestamp")
 
-    total_successes = 0
-    total_errors = 0
+    totals = {"successes": 0, "errors": 0, "attempts": 0, "operations": 0}
+    lifecycle_fields = ("reconnects", "recoveries", "chaos_injections")
+    lifecycle_totals = {field: 0 for field in lifecycle_fields}
+    lifecycle_events: dict[str, list[int]] = {field: [] for field in lifecycle_fields}
     previous_elapsed = 0.0
     for index, record in enumerate(intervals, start=1):
+        context = f"soak interval {index}"
         if record.get("schema_version") != 1 or record.get("record_type") != "interval":
-            raise ResultError(f"soak record {index} is not a schema-1 interval")
+            raise ResultError(f"{context} is not a schema-1 interval")
         if record.get("interval") != index:
             raise ResultError(
                 f"soak interval sequence is discontinuous at {record.get('interval')!r}"
             )
-        successes = record.get("successes")
-        errors = record.get("errors")
-        attempts = record.get("attempts")
-        if not all(isinstance(value, int) and value >= 0 for value in (successes, errors, attempts)):
-            raise ResultError(f"soak interval {index} has invalid operation counters")
-        if attempts != successes + errors:
-            raise ResultError(f"soak interval {index} violates attempts=successes+errors")
+        counters = tuple(record.get(field) for field in totals)
+        if not all(_nonnegative_integer(value) for value in counters):
+            raise ResultError(f"{context} has invalid operation counters")
+        if record["operations"] != record["successes"]:
+            raise ResultError(f"{context} violates operations=successes")
+        if record["attempts"] != record["successes"] + record["errors"]:
+            raise ResultError(f"{context} violates attempts=successes+errors")
+
         elapsed = record.get("elapsed_secs")
-        if not isinstance(elapsed, (int, float)) or elapsed <= previous_elapsed:
-            raise ResultError(f"soak interval {index} has non-monotonic elapsed time")
+        window = record.get("window_secs")
+        if not _finite_number(elapsed) or float(elapsed) <= previous_elapsed:
+            raise ResultError(f"{context} has non-monotonic elapsed time")
+        if not _finite_number(window) or not 55.0 <= float(window) <= 65.0:
+            raise ResultError(f"{context} is not an approximately 60-second window")
+        if abs(float(elapsed) - index * 60.0) > 5.0:
+            raise ResultError(f"{context} elapsed time is not on the minute cadence")
+        if not math.isclose(
+            float(window), float(elapsed) - previous_elapsed, rel_tol=0.0, abs_tol=2.0
+        ):
+            raise ResultError(f"{context} window does not match elapsed-time delta")
         previous_elapsed = float(elapsed)
-        total_successes += successes
-        total_errors += errors
+
+        _validate_rate(
+            record,
+            numerator="successes",
+            rate="ops_per_sec",
+            window=float(window),
+            context=context,
+        )
+        _validate_rate(
+            record,
+            numerator="attempts",
+            rate="attempted_ops_per_sec",
+            window=float(window),
+            context=context,
+        )
+        _validate_quantiles(record, context=context)
+        if not _nonnegative_integer(record.get("rss_bytes")) or record["rss_bytes"] == 0:
+            raise ResultError(f"{context} has no positive RSS sample")
+
+        for field in lifecycle_fields:
+            delta = record.get(field)
+            total = record.get(f"{field}_total")
+            if not _nonnegative_integer(delta) or not _nonnegative_integer(total):
+                raise ResultError(f"{context} has invalid {field} accounting")
+            if total != lifecycle_totals[field] + delta:
+                raise ResultError(f"{context} {field} delta does not reconcile with total")
+            if total < lifecycle_totals[field]:
+                raise ResultError(f"{context} has non-monotonic {field} total")
+            if delta > 1:
+                raise ResultError(f"{context} records more than one {field} event")
+            if delta:
+                lifecycle_events[field].append(index)
+            lifecycle_totals[field] = total
+
+        for field in totals:
+            totals[field] += record[field]
+
+    if len(lifecycle_events["chaos_injections"]) != 1:
+        raise ResultError("soak must contain exactly one chaos injection")
+    if len(lifecycle_events["reconnects"]) != 1:
+        raise ResultError("soak must contain exactly one reconnect")
+    if len(lifecycle_events["recoveries"]) != 1:
+        raise ResultError("soak must contain exactly one recovery")
+    chaos_index = lifecycle_events["chaos_injections"][0]
+    if float(intervals[chaos_index - 1]["elapsed_secs"]) < 7_195.0:
+        raise ResultError("soak chaos was recorded before the configured injection time")
+    if lifecycle_events["reconnects"][0] < chaos_index:
+        raise ResultError("soak reconnect was recorded before chaos")
+    if lifecycle_events["recoveries"][0] < chaos_index:
+        raise ResultError("soak recovery was recorded before chaos")
 
     if summary.get("schema_version") != 1 or summary.get("record_type") != "summary":
         raise ResultError("soak artifact does not end with a schema-1 summary")
-    if summary.get("successes") != total_successes or summary.get("errors") != total_errors:
-        raise ResultError("soak summary counters do not equal the interval totals")
-    if summary.get("attempts") != total_successes + total_errors:
+    for field, expected in totals.items():
+        if summary.get(field) != expected:
+            raise ResultError(f"soak summary {field} does not equal interval totals")
+    if summary["operations"] != summary["successes"]:
+        raise ResultError("soak summary violates operations=successes")
+    if summary["attempts"] != summary["successes"] + summary["errors"]:
         raise ResultError("soak summary violates attempts=successes+errors")
     elapsed = summary.get("elapsed_secs")
-    if not isinstance(elapsed, (int, float)) or not 14_399.0 <= elapsed <= 14_430.0:
+    if not _finite_number(elapsed) or not 14_399.0 <= float(elapsed) <= 14_405.0:
         raise ResultError(f"soak summary elapsed_secs={elapsed!r} is not a four-hour run")
-    if not isinstance(summary.get("successes"), int) or summary["successes"] <= 0:
+    if not math.isclose(float(elapsed), previous_elapsed, rel_tol=0.0, abs_tol=2.0):
+        raise ResultError("soak summary elapsed time does not match the final interval")
+    if summary["successes"] <= 0:
         raise ResultError("soak summary has no successful operations")
-    if summary.get("reconnects_total") != 1:
-        raise ResultError(
-            f"soak expected exactly one reconnect, got {summary.get('reconnects_total')!r}"
-        )
-    if summary.get("recoveries_total") != 1 or summary.get("chaos_injections_total") != 1:
-        raise ResultError("soak did not record exactly one chaos injection and recovery")
-    for metric in ("p50_us", "p99_us", "p999_us", "max_us", "rss_bytes"):
-        if not isinstance(summary.get(metric), int) or summary[metric] <= 0:
-            raise ResultError(f"soak summary has invalid {metric}={summary.get(metric)!r}")
+    _validate_rate(
+        summary,
+        numerator="successes",
+        rate="ops_per_sec",
+        window=float(elapsed),
+        context="soak summary",
+    )
+    _validate_rate(
+        summary,
+        numerator="attempts",
+        rate="attempted_ops_per_sec",
+        window=float(elapsed),
+        context="soak summary",
+    )
+    _validate_quantiles(summary, context="soak summary")
+    if not _nonnegative_integer(summary.get("rss_bytes")) or summary["rss_bytes"] == 0:
+        raise ResultError("soak summary has no positive RSS sample")
+    for field in lifecycle_fields:
+        if summary.get(f"{field}_total") != lifecycle_totals[field]:
+            raise ResultError(f"soak summary {field} total does not match intervals")
     return summary
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--standalone", required=True, type=Path)
-    parser.add_argument("--cluster", required=True, type=Path)
-    parser.add_argument("--pipeline", action="append", required=True, type=parse_pipeline)
+    parser.add_argument("--standalone", action="append", type=Path)
+    parser.add_argument("--cluster", action="append", type=Path)
+    parser.add_argument(
+        "--pipeline-depth", action="append", type=parse_pipeline
+    )
+    parser.add_argument(
+        "--pipeline-concurrency", action="append", type=Path
+    )
     parser.add_argument("--soak", type=Path)
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--validate-soak-only", action="store_true")
+    parser.add_argument(
+        "--matrix-only",
+        action="store_true",
+        help="validate development matrices but emit an explicitly incomplete summary",
+    )
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
 
-    standalone = load_records(args.standalone)
-    cluster = load_records(args.cluster)
+    if args.validate_soak_only:
+        if args.soak is None:
+            raise ResultError("--validate-soak-only requires --soak")
+        validate_soak(args.soak)
+        return 0
+    if not all(
+        (
+            args.standalone,
+            args.cluster,
+            args.pipeline_depth,
+            args.pipeline_concurrency,
+            args.output_dir,
+        )
+    ):
+        raise ResultError(
+            "matrix validation requires standalone, cluster, pipeline-depth, "
+            "pipeline-concurrency, and output-dir arguments"
+        )
+
+    if args.matrix_only and args.soak is not None:
+        raise ResultError("--matrix-only cannot be combined with --soak")
+    if not args.matrix_only and args.soak is None:
+        raise ResultError("publication validation requires --soak (or explicit --matrix-only)")
+
+    standalone = [row for path in args.standalone for row in load_records(path)]
+    cluster = [row for path in args.cluster for row in load_records(path)]
     validate_matrix(
         standalone,
         name="standalone",
         clients=STANDALONE_CLIENTS,
         workloads=("Set", "Get"),
+        require_samples=True,
     )
     validate_matrix(
         cluster,
         name="cluster",
         clients=CLUSTER_CLIENTS,
         workloads=("Set", "Get"),
+        require_samples=True,
     )
 
     pipelines: dict[int, list[dict[str, Any]]] = {}
-    for depth, path in args.pipeline:
-        if depth in pipelines:
-            raise ResultError(f"duplicate pipeline depth {depth}")
-        records = load_records(path)
+    for depth, path in args.pipeline_depth:
+        pipelines.setdefault(depth, []).extend(load_records(path))
+    if set(pipelines) != set(PIPELINE_DEPTHS):
+        raise ResultError("pipeline depth sweep must cover depths 10, 100, and 1000")
+    for depth, records in pipelines.items():
         validate_matrix(
             records,
-            name=f"pipeline-{depth}",
+            name=f"pipeline-depth-{depth}",
             clients=STANDALONE_CLIENTS,
             workloads=("Pipeline",),
             concurrencies=(1,),
             commands_per_batch=depth,
+            require_samples=True,
         )
-        pipelines[depth] = records
-    if set(pipelines) != {10, 100, 1000}:
-        raise ResultError("pipeline artifacts must cover depths 10, 100, and 1000")
+
+    pipeline_concurrency = [
+        row for path in args.pipeline_concurrency for row in load_records(path)
+    ]
+    validate_matrix(
+        pipeline_concurrency,
+        name="pipeline-concurrency",
+        clients=STANDALONE_CLIENTS,
+        workloads=("Pipeline",),
+        payloads=(1024,),
+        concurrencies=CONCURRENCIES,
+        commands_per_batch=100,
+        require_samples=True,
+    )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     render_svg(
@@ -388,15 +701,22 @@ def main() -> int:
         output=args.output_dir / "p99-vs-concurrency.svg",
     )
     summary: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "mode": "matrix_only_development" if args.matrix_only else "publication",
+        "publication_complete": not args.matrix_only,
+        "incomplete_reason": "four_hour_soak_not_run" if args.matrix_only else None,
         "chart_selection": {"workload": "Get", "payload_bytes": 1024},
         "standalone": _headline(standalone),
         "cluster": _headline(cluster),
-        "pipeline": {str(depth): records for depth, records in sorted(pipelines.items())},
+        "pipeline_depth_sweep": {
+            str(depth): records for depth, records in sorted(pipelines.items())
+        },
+        "pipeline_concurrency_sweep": pipeline_concurrency,
     }
     if args.soak is not None:
         summary["soak"] = validate_soak(args.soak)
-    (args.output_dir / "summary.json").write_text(
+    summary_name = "summary.incomplete.json" if args.matrix_only else "summary.json"
+    (args.output_dir / summary_name).write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     return 0

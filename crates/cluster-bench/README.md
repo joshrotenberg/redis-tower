@@ -30,6 +30,7 @@ values. Replica reads and topology-churn workloads are opt-in scenarios.
 | `BENCH_CONCURRENCY` | `1,8,32,128` | Comma-separated concurrency levels |
 | `BENCH_PAYLOAD_SIZES` | `64,1024,16384` | Comma-separated value sizes; `K`/`KiB` and `M`/`MiB` suffixes are accepted |
 | `BENCH_CLIENTS` | all five clients | Comma-separated client aliases (`redis-tower`, `redis-tower-mux`, `redis-rs-sync`, `redis-rs-async`, `fred`) |
+| `BENCH_INCLUDE_SAMPLES` | `false` | Retain every bounded per-run sample in JSON output (`--include-samples`) |
 | `BENCH_BASE_PORT` | `17000` | Starting port for the throwaway cluster |
 
 The matrix axes also have CLI forms, for example:
@@ -51,6 +52,9 @@ Each record declares `schema_version: 2` and adds a stable kebab-case
 `client_id`. The historical `client` variant name and `total_ops` /
 `ops_per_sec_*` fields remain available; `total_batches` / `batches_per_sec_*`
 and `total_commands` / `commands_per_sec_*` make their units explicit.
+Pass `--include-samples` for publication evidence. It adds the raw bounded run
+samples needed to recompute each cell's mean and standard deviation while
+remaining omitted from ordinary schema-v2 output.
 
 ## Replica-read scenario
 

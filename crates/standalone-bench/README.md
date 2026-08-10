@@ -30,6 +30,7 @@ cargo run -p standalone-bench --release -- --json
 | `BENCH_PIPELINE_COMMANDS` | `--pipeline-commands` | `100` | Commands in each explicit batch |
 | `BENCH_WORKLOADS` | `--workloads` | `set,get,pipeline` | Workloads to include |
 | `BENCH_CLIENTS` | `--clients` | all six | Client aliases to include |
+| `BENCH_INCLUDE_SAMPLES` | `--include-samples` | `false` | Retain every bounded per-run sample in JSON output |
 | `BENCH_PORT` | `--port` | `6480` | Throwaway Redis server port |
 
 For example, this is a small three-client smoke matrix:
@@ -53,6 +54,9 @@ Each JSON record declares `schema_version: 2` and adds a stable kebab-case
 `client_id`. For compatibility, `client` keeps its original Rust variant name
 and `total_ops` / `ops_per_sec_*` keep the original per-iteration (batch for
 pipeline) meaning. Prefer the explicit batch and command fields in new tools.
+Pass `--include-samples` for publication evidence: each schema-v2 cell then
+contains the raw bounded run samples used to recompute its means and standard
+deviations. The field is omitted by default for backward compatibility.
 
 For GET and SET, one batch is one command, so batches/s and commands/s are the
 same. For the pipeline workload, latency and batches/s describe the complete

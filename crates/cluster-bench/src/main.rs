@@ -25,6 +25,7 @@
 //! BENCH_CONCURRENCY=1,8,...  concurrency levels (default: 1,8,32,128)
 //! BENCH_PAYLOAD_SIZES=64,1K,16K payload bytes (default: 64,1024,16384)
 //! BENCH_CLIENTS=fred,...     client aliases to include (default: all five)
+//! BENCH_INCLUDE_SAMPLES=true retain bounded per-run samples in JSON
 //! BENCH_BASE_PORT=17000      starting port for the throwaway cluster
 //! BENCH_SCENARIO=throughput  throughput (default), replica, reshard, or failover
 //! ```
@@ -85,6 +86,7 @@ struct MatrixConfig {
     concurrencies: Vec<usize>,
     payload_sizes: Vec<usize>,
     clients: Vec<ClientKind>,
+    include_samples: bool,
 }
 
 impl MatrixConfig {
@@ -106,6 +108,7 @@ impl MatrixConfig {
                 env_or_arg_optional("BENCH_CLIENTS", "--clients").as_deref(),
                 default_clients,
             )?,
+            include_samples: flag_or_env("BENCH_INCLUDE_SAMPLES", "--include-samples")?,
         })
     }
 }
@@ -153,7 +156,7 @@ async fn run_throughput(json: bool) -> Result<(), String> {
         .await?;
     }
     drop(cluster);
-    print_reports(&reports, json);
+    print_reports(&reports, json, config.include_samples);
     Ok(())
 }
 
@@ -192,7 +195,7 @@ async fn run_replica_reads(json: bool) -> Result<(), String> {
         .await?;
     }
     drop(fixture);
-    print_reports(&reports, json);
+    print_reports(&reports, json, config.include_samples);
     Ok(())
 }
 
@@ -238,9 +241,9 @@ async fn run_matrix_cells(
     Ok(())
 }
 
-fn print_reports(reports: &[AggregatedReport], json: bool) {
+fn print_reports(reports: &[AggregatedReport], json: bool, include_samples: bool) {
     if json {
-        println!("{}", to_json(reports));
+        println!("{}", to_json(reports, include_samples));
     } else {
         println!();
         print_table(reports);
@@ -284,11 +287,11 @@ fn print_table(reports: &[AggregatedReport]) {
 }
 
 /// Serialize the aggregated reports to a JSON array for mechanical diffing.
-fn to_json(reports: &[AggregatedReport]) -> String {
+fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
     let arr: Vec<serde_json::Value> = reports
         .iter()
         .map(|r| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "schema_version": THROUGHPUT_SCHEMA_VERSION,
                 "client": format!("{:?}", r.client),
                 "client_id": r.client.as_str(),
@@ -312,7 +315,29 @@ fn to_json(reports: &[AggregatedReport]) -> String {
                 "p99_us": r.p99_us,
                 "p999_us": r.p999_us,
                 "max_us": r.max_us,
-            })
+            });
+            if include_samples {
+                value["samples"] = serde_json::Value::Array(
+                    r.samples
+                        .iter()
+                        .enumerate()
+                        .map(|(index, sample)| {
+                            serde_json::json!({
+                                "run": index + 1,
+                                "total_commands": sample.total_commands,
+                                "errors": sample.errors,
+                                "commands_per_sec": sample.commands_per_sec,
+                                "p50_us": sample.p50_us,
+                                "p90_us": sample.p90_us,
+                                "p99_us": sample.p99_us,
+                                "p999_us": sample.p999_us,
+                                "max_us": sample.max_us,
+                            })
+                        })
+                        .collect(),
+                );
+            }
+            value
         })
         .collect();
     serde_json::to_string_pretty(&serde_json::Value::Array(arr))
@@ -397,6 +422,23 @@ where
     value
         .parse()
         .map_err(|_| format!("invalid value {value:?} for {arg}/{env}"))
+}
+
+fn flag_or_env(env: &str, arg: &str) -> Result<bool, String> {
+    if std::env::args().any(|value| value == arg) {
+        return Ok(true);
+    }
+    match std::env::var(env) {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => Err(format!(
+                "invalid value {value:?} for {env}; expected true or false"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(format!("could not read {env}: {error}")),
+    }
 }
 
 fn parse_positive_list(value: &str, name: &str) -> Result<Vec<usize>, String> {
@@ -813,8 +855,22 @@ mod tests {
             p99_us: 30.0,
             p999_us: 40.0,
             max_us: 50.0,
+            samples: vec![BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Get,
+                concurrency: 8,
+                payload_bytes: 1024,
+                total_commands: 42,
+                errors: 1,
+                commands_per_sec: 123.0,
+                p50_us: 10.0,
+                p90_us: 20.0,
+                p99_us: 30.0,
+                p999_us: 40.0,
+                max_us: 50.0,
+            }],
         };
-        let value: serde_json::Value = serde_json::from_str(&to_json(&[report])).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&to_json(&[report], false)).unwrap();
         let record = &value[0];
         assert_eq!(record["schema_version"], 2);
         assert_eq!(record["client"], "RedisTowerMux");
@@ -822,5 +878,43 @@ mod tests {
         assert_eq!(record["total_ops"], record["total_commands"]);
         assert_eq!(record["ops_per_sec_mean"], record["commands_per_sec_mean"]);
         assert_eq!(record["total_batches"], record["total_commands"]);
+        assert!(record.get("samples").is_none());
+    }
+
+    #[test]
+    fn publication_json_can_retain_raw_run_samples() {
+        let report = aggregate(&[
+            BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Get,
+                concurrency: 1,
+                payload_bytes: 16,
+                total_commands: 10,
+                errors: 0,
+                commands_per_sec: 100.0,
+                p50_us: 10.0,
+                p90_us: 20.0,
+                p99_us: 30.0,
+                p999_us: 40.0,
+                max_us: 50.0,
+            },
+            BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Get,
+                concurrency: 1,
+                payload_bytes: 16,
+                total_commands: 20,
+                errors: 0,
+                commands_per_sec: 200.0,
+                p50_us: 11.0,
+                p90_us: 21.0,
+                p99_us: 31.0,
+                p999_us: 41.0,
+                max_us: 51.0,
+            },
+        ]);
+        let value: serde_json::Value = serde_json::from_str(&to_json(&[report], true)).unwrap();
+        assert_eq!(value[0]["samples"].as_array().unwrap().len(), 2);
+        assert_eq!(value[0]["samples"][1]["commands_per_sec"], 200.0);
     }
 }

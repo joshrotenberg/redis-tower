@@ -3,7 +3,8 @@
 //! The default matrix sweeps 64 B, 1 KiB, and 16 KiB values across GET, SET,
 //! and explicit pipeline workloads. Use the environment variables documented
 //! in `crates/standalone-bench/README.md`, or their CLI equivalents, to select
-//! smaller smoke matrices.
+//! smaller smoke matrices. Publication tooling can pass `--include-samples` to
+//! retain the bounded per-run inputs behind each aggregate JSON cell.
 
 mod clients;
 mod runner;
@@ -38,6 +39,7 @@ struct MatrixConfig {
     pipeline_commands: usize,
     clients: Vec<ClientKind>,
     workloads: Vec<Workload>,
+    include_samples: bool,
 }
 
 impl MatrixConfig {
@@ -71,6 +73,7 @@ impl MatrixConfig {
                 "--workloads",
                 "set,get,pipeline",
             ))?,
+            include_samples: flag_or_env("BENCH_INCLUDE_SAMPLES", "--include-samples")?,
         })
     }
 }
@@ -132,7 +135,7 @@ async fn run(json: bool) -> Result<(), String> {
 
     drop(server);
     if json {
-        println!("{}", to_json(&reports));
+        println!("{}", to_json(&reports, config.include_samples));
     } else {
         println!();
         print_table(&reports);
@@ -179,11 +182,11 @@ fn print_table(reports: &[AggregatedReport]) {
     println!("pipeline latency is measured per batch; GET/SET latency is per command");
 }
 
-fn to_json(reports: &[AggregatedReport]) -> String {
+fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
     let reports = reports
         .iter()
         .map(|report| {
-            serde_json::json!({
+            let mut value = serde_json::json!({
                 "schema_version": THROUGHPUT_SCHEMA_VERSION,
                 "client": format!("{:?}", report.client),
                 "client_id": report.client.as_str(),
@@ -209,7 +212,32 @@ fn to_json(reports: &[AggregatedReport]) -> String {
                 "p99_us": report.p99_us,
                 "p999_us": report.p999_us,
                 "max_us": report.max_us,
-            })
+            });
+            if include_samples {
+                value["samples"] = serde_json::Value::Array(
+                    report
+                        .samples
+                        .iter()
+                        .enumerate()
+                        .map(|(index, sample)| {
+                            serde_json::json!({
+                                "run": index + 1,
+                                "total_batches": sample.total_batches,
+                                "total_commands": sample.total_commands,
+                                "errors": sample.errors,
+                                "batches_per_sec": sample.batches_per_sec,
+                                "commands_per_sec": sample.commands_per_sec,
+                                "p50_us": sample.p50_us,
+                                "p90_us": sample.p90_us,
+                                "p99_us": sample.p99_us,
+                                "p999_us": sample.p999_us,
+                                "max_us": sample.max_us,
+                            })
+                        })
+                        .collect(),
+                );
+            }
+            value
         })
         .collect::<Vec<_>>();
     serde_json::to_string_pretty(&serde_json::Value::Array(reports))
@@ -248,6 +276,23 @@ where
     value
         .parse()
         .map_err(|_| format!("invalid value {value:?} for {arg}/{env}"))
+}
+
+fn flag_or_env(env: &str, arg: &str) -> Result<bool, String> {
+    if std::env::args().any(|value| value == arg) {
+        return Ok(true);
+    }
+    match std::env::var(env) {
+        Ok(value) => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" => Ok(true),
+            "0" | "false" | "no" => Ok(false),
+            _ => Err(format!(
+                "invalid value {value:?} for {env}; expected true or false"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(error) => Err(format!("could not read {env}: {error}")),
+    }
 }
 
 fn parse_positive_list(value: &str, name: &str) -> Result<Vec<usize>, String> {
@@ -379,8 +424,25 @@ mod tests {
             p99_us: 30.0,
             p999_us: 40.0,
             max_us: 50.0,
+            samples: vec![BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Pipeline,
+                concurrency: 1,
+                payload_bytes: 64,
+                commands_per_batch: 100,
+                total_batches: 7,
+                total_commands: 700,
+                errors: 0,
+                batches_per_sec: 10.0,
+                commands_per_sec: 1000.0,
+                p50_us: 10.0,
+                p90_us: 20.0,
+                p99_us: 30.0,
+                p999_us: 40.0,
+                max_us: 50.0,
+            }],
         };
-        let value: serde_json::Value = serde_json::from_str(&to_json(&[report])).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&to_json(&[report], false)).unwrap();
         let record = &value[0];
         assert_eq!(record["schema_version"], 2);
         assert_eq!(record["client"], "RedisTowerMux");
@@ -388,5 +450,49 @@ mod tests {
         assert_eq!(record["total_ops"], record["total_batches"]);
         assert_eq!(record["ops_per_sec_mean"], record["batches_per_sec_mean"]);
         assert_ne!(record["ops_per_sec_mean"], record["commands_per_sec_mean"]);
+        assert!(record.get("samples").is_none());
+    }
+
+    #[test]
+    fn publication_json_can_retain_raw_run_samples() {
+        let report = aggregate(&[
+            BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Get,
+                concurrency: 1,
+                payload_bytes: 16,
+                commands_per_batch: 1,
+                total_batches: 10,
+                total_commands: 10,
+                errors: 0,
+                batches_per_sec: 100.0,
+                commands_per_sec: 100.0,
+                p50_us: 10.0,
+                p90_us: 20.0,
+                p99_us: 30.0,
+                p999_us: 40.0,
+                max_us: 50.0,
+            },
+            BenchReport {
+                client: ClientKind::RedisTowerMux,
+                workload: Workload::Get,
+                concurrency: 1,
+                payload_bytes: 16,
+                commands_per_batch: 1,
+                total_batches: 20,
+                total_commands: 20,
+                errors: 0,
+                batches_per_sec: 200.0,
+                commands_per_sec: 200.0,
+                p50_us: 11.0,
+                p90_us: 21.0,
+                p99_us: 31.0,
+                p999_us: 41.0,
+                max_us: 51.0,
+            },
+        ]);
+        let value: serde_json::Value = serde_json::from_str(&to_json(&[report], true)).unwrap();
+        assert_eq!(value[0]["samples"].as_array().unwrap().len(), 2);
+        assert_eq!(value[0]["samples"][1]["commands_per_sec"], 200.0);
     }
 }

@@ -53,7 +53,7 @@ pub struct BenchReport {
 
 /// Aggregate of `BENCH_RUNS` repeated runs of the same cell. Throughput carries
 /// a mean and standard deviation; latency percentiles are averaged across runs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct AggregatedReport {
     pub client: ClientKind,
     pub workload: Workload,
@@ -69,6 +69,8 @@ pub struct AggregatedReport {
     pub p99_us: f64,
     pub p999_us: f64,
     pub max_us: f64,
+    /// The bounded repeated-run input retained for optional publication JSON.
+    pub samples: Vec<BenchReport>,
 }
 
 pub type WorkerResult = Result<Histogram<u64>, String>;
@@ -212,6 +214,7 @@ pub fn aggregate(reports: &[BenchReport]) -> AggregatedReport {
         p99_us: mean(&reports.iter().map(|r| r.p99_us).collect::<Vec<_>>()),
         p999_us: mean(&reports.iter().map(|r| r.p999_us).collect::<Vec<_>>()),
         max_us: mean(&reports.iter().map(|r| r.max_us).collect::<Vec<_>>()),
+        samples: reports.to_vec(),
     }
 }
 
