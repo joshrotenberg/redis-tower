@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- cancellation-safe idle RESP3 push reads on `RedisConnection`, allowing an
+  exclusive worker to route pushes and detect socket loss without waiting for
+  the next command
 - `WithDeadline<Cmd>` for carrying one absolute command deadline through
   middleware, retries, and resource acquisition
 - structured, reference-counted reconnect failure causes so every waiter from

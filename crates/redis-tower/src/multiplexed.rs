@@ -38,17 +38,25 @@
 //! ```
 
 use std::future::Future;
+use std::sync::Arc;
 
 use redis_tower_commands::Ping;
-use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
+use redis_tower_core::{
+    Command, ConnectionConfig, Frame, ProtocolVersion, RedisConnection, RedisError,
+};
 use redis_tower_protocol::helpers::{array, bulk};
 use tower_service::Service;
 
 use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
+use crate::cache_layer::CacheService;
+use crate::cache_state::CacheStatistics;
+use crate::caching::{CachedClientConfig, connect_resp3, force_resp3};
 use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::command_adapter::CommandAdapter;
 use crate::pipeline::PipelineExecutor;
-use crate::reconnect::{ConnectionEventBus, ConnectionFactory};
+use crate::reconnect::{
+    ConnectionEventBus, ConnectionFactory, Resp3AddrConnectionFactory, UrlConnectionFactory,
+};
 use crate::retry::{RetryClient, RetryPolicy};
 use crate::transaction::TransactionExecutor;
 
@@ -134,6 +142,22 @@ use crate::transaction::TransactionExecutor;
 #[derive(Clone)]
 pub struct MultiplexedClient<S = AutoPipelineService> {
     inner: CommandAdapter<S>,
+}
+
+/// A cloneable, auto-pipelined Redis client with server-assisted local caching.
+///
+/// This client keeps [`CacheService`] inside the typed command adapter and
+/// directly above the shared [`AutoPipelineService`] worker. Cache hits
+/// therefore avoid the worker queue, while misses and non-cacheable commands
+/// retain the same batching and back-pressure behavior as
+/// [`MultiplexedClient`].
+///
+/// It is a distinct newtype rather than a type alias so its tracked connection
+/// constructors do not make the standard [`MultiplexedClient`] constructors
+/// ambiguous.
+#[derive(Clone)]
+pub struct CachedMultiplexedClient {
+    inner: MultiplexedClient<CacheService<AutoPipelineService>>,
 }
 
 impl MultiplexedClient<AutoPipelineService> {
@@ -239,7 +263,7 @@ impl MultiplexedClient<AutoPipelineService> {
     ///
     /// The factory is also the right place to replay any per-connection
     /// session setup -- AUTH, SELECT, HELLO, READONLY. Use a
-    /// [`UrlConnectionFactory`](crate::reconnect::UrlConnectionFactory) for
+    /// [`UrlConnectionFactory`] for
     /// AUTH+SELECT from a URL, or implement [`ConnectionFactory`] yourself
     /// for custom init.
     ///
@@ -342,6 +366,256 @@ impl MultiplexedClient<AutoPipelineService> {
     /// ```
     pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
         RetryClient::new(self.clone(), policy)
+    }
+}
+
+impl CachedMultiplexedClient {
+    /// Connect a cloneable, auto-pipelined client with server-assisted caching
+    /// and safe cache defaults.
+    ///
+    /// This opens a RESP3 data connection plus a dedicated invalidation
+    /// receiver. The receiver lifecycle is owned by the cached service: if it
+    /// disconnects, caching is disabled and cleared until tracking has been
+    /// re-established and the data connection atomically redirects
+    /// invalidations to the replacement receiver. Losing the fixed data worker
+    /// instead clears the cache and closes the client so tracking state is
+    /// never reconstructed implicitly.
+    pub async fn connect(addr: &str) -> Result<Self, RedisError> {
+        Self::connect_with_config(addr, CachedClientConfig::default()).await
+    }
+
+    /// Connect with explicit cache and tracking configuration.
+    pub async fn connect_with_config(
+        addr: &str,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        Self::connect_with_pipeline_config(addr, cache_config, AutoPipelineConfig::default()).await
+    }
+
+    /// Connect a cached client with explicit transport and RESP decode
+    /// settings.
+    ///
+    /// Client-side caching always forces RESP3, regardless of the protocol
+    /// policy in `connection_config`. The remaining settings are applied to
+    /// both the data connection and every invalidation receiver.
+    pub async fn connect_with_connection_config(
+        addr: &str,
+        connection_config: &ConnectionConfig,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        let factory =
+            Resp3AddrConnectionFactory::new(addr).with_connection_config(connection_config.clone());
+        Self::from_factory(factory, cache_config).await
+    }
+
+    /// Connect using a Redis URL (`redis://`, `rediss://`, or `unix://`) with
+    /// safe cache defaults.
+    ///
+    /// URL authentication and database selection are applied independently to
+    /// the data and invalidation connections.
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        Self::connect_url_with_config(url, CachedClientConfig::default()).await
+    }
+
+    /// Connect using a Redis URL with explicit cache and tracking
+    /// configuration.
+    pub async fn connect_url_with_config(
+        url: &str,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        Self::connect_url_with_connection_config(url, &ConnectionConfig::new(), cache_config).await
+    }
+
+    /// Connect using a Redis URL with explicit transport and RESP decode
+    /// settings.
+    ///
+    /// Client-side caching always forces RESP3. For custom TLS roots or mTLS,
+    /// build a [`UrlConnectionFactory`] and pass it to [`Self::from_factory`].
+    pub async fn connect_url_with_connection_config(
+        url: &str,
+        connection_config: &ConnectionConfig,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        let connection_config = connection_config
+            .clone()
+            .with_protocol(ProtocolVersion::Resp3);
+        let factory = UrlConnectionFactory::new(url).with_connection_config(connection_config);
+        Self::from_factory(factory, cache_config).await
+    }
+
+    /// Connect a cached client with explicit auto-pipeline configuration.
+    pub async fn connect_with_pipeline_config(
+        addr: &str,
+        cache_config: CachedClientConfig,
+        pipeline_config: AutoPipelineConfig,
+    ) -> Result<Self, RedisError> {
+        let factory = Resp3AddrConnectionFactory::new(addr);
+        Self::from_factory_with_pipeline_config(factory, cache_config, pipeline_config).await
+    }
+
+    /// Connect the data and invalidation paths through one shared factory.
+    ///
+    /// The factory creates the initial fixed data connection, the invalidation
+    /// receiver, and any replacement receiver after tracking loss. This does
+    /// not make the data worker reconnecting: use a new cached client after a
+    /// data-connection failure so tracking setup cannot be silently lost.
+    pub async fn from_factory(
+        factory: impl ConnectionFactory,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        Self::from_factory_with_pipeline_config(
+            factory,
+            cache_config,
+            AutoPipelineConfig::default(),
+        )
+        .await
+    }
+
+    /// Connect through a shared factory with explicit auto-pipeline settings.
+    pub async fn from_factory_with_pipeline_config(
+        factory: impl ConnectionFactory,
+        cache_config: CachedClientConfig,
+        pipeline_config: AutoPipelineConfig,
+    ) -> Result<Self, RedisError> {
+        Self::from_shared_factory_with_pipeline_config(
+            Arc::new(factory),
+            cache_config,
+            pipeline_config,
+        )
+        .await
+    }
+
+    async fn from_shared_factory_with_pipeline_config(
+        factory: Arc<dyn ConnectionFactory>,
+        cache_config: CachedClientConfig,
+        pipeline_config: AutoPipelineConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = connect_resp3(factory.as_ref()).await?;
+        Self::from_connection_with_shared_factory_and_pipeline_config(
+            conn,
+            factory,
+            cache_config,
+            pipeline_config,
+        )
+        .await
+    }
+
+    /// Wrap an existing data connection and create invalidation receivers with
+    /// `receiver_factory`.
+    ///
+    /// The existing connection is upgraded to RESP3 if necessary. The factory
+    /// must reproduce any authentication and transport setup required for a
+    /// second connection to the same Redis server.
+    pub async fn from_connection_with_factory(
+        conn: RedisConnection,
+        receiver_factory: impl ConnectionFactory,
+        cache_config: CachedClientConfig,
+    ) -> Result<Self, RedisError> {
+        Self::from_connection_with_factory_and_pipeline_config(
+            conn,
+            receiver_factory,
+            cache_config,
+            AutoPipelineConfig::default(),
+        )
+        .await
+    }
+
+    /// Wrap an existing data connection and use explicit auto-pipeline
+    /// settings.
+    pub async fn from_connection_with_factory_and_pipeline_config(
+        conn: RedisConnection,
+        receiver_factory: impl ConnectionFactory,
+        cache_config: CachedClientConfig,
+        pipeline_config: AutoPipelineConfig,
+    ) -> Result<Self, RedisError> {
+        Self::from_connection_with_shared_factory_and_pipeline_config(
+            conn,
+            Arc::new(receiver_factory),
+            cache_config,
+            pipeline_config,
+        )
+        .await
+    }
+
+    async fn from_connection_with_shared_factory_and_pipeline_config(
+        conn: RedisConnection,
+        receiver_factory: Arc<dyn ConnectionFactory>,
+        cache_config: CachedClientConfig,
+        pipeline_config: AutoPipelineConfig,
+    ) -> Result<Self, RedisError> {
+        let conn = force_resp3(conn).await?;
+        let pipeline = AutoPipelineService::new(conn, pipeline_config);
+        let cache = CacheService::with_tracking(pipeline, receiver_factory, &cache_config).await?;
+        Ok(Self {
+            inner: MultiplexedClient::from_layered(cache),
+        })
+    }
+
+    /// Return the current number of requests pending in the auto-pipeline
+    /// queue.
+    ///
+    /// Cache hits bypass this queue. As with the standard multiplexed client,
+    /// this value is an instantaneous observability snapshot.
+    pub fn queue_depth(&self) -> usize {
+        self.inner.inner.inner().queue_depth()
+    }
+
+    /// Return the number of entries currently held in the local cache.
+    pub async fn cache_size(&self) -> usize {
+        self.inner.inner.inner().cache_size().await
+    }
+
+    /// Clear every local cache entry.
+    pub async fn clear_cache(&self) {
+        self.inner.inner.inner().clear_cache().await;
+    }
+
+    /// Return whether the data worker and invalidation tracking are healthy and
+    /// cache reads are currently active.
+    ///
+    /// A disconnected tracking receiver disables and clears the cache until
+    /// its replacement has been connected and installed on the data worker. A
+    /// disconnected fixed data worker leaves this false permanently and
+    /// requires constructing a new cached client.
+    pub async fn is_caching_healthy(&self) -> bool {
+        self.inner.inner.inner().is_caching_healthy().await
+    }
+
+    /// Return a point-in-time snapshot of cache activity counters.
+    pub async fn cache_statistics(&self) -> CacheStatistics {
+        self.inner.inner.inner().cache_statistics().await
+    }
+
+    /// Execute a command through the shared cached auto-pipeline.
+    pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        self.inner.execute(cmd).await
+    }
+
+    /// Send a PING to verify the data connection is alive.
+    pub async fn health_check(&self) -> Result<(), RedisError> {
+        self.inner.health_check().await
+    }
+
+    /// Protect this cached client with a Redis-aware circuit breaker.
+    pub fn with_circuit_breaker(
+        self,
+        config: RedisCircuitBreakerConfig,
+    ) -> RedisCircuitBreakerClient<CacheService<AutoPipelineService>> {
+        self.inner.with_circuit_breaker(config)
+    }
+
+    /// Wrap this client in idempotent-aware automatic retries.
+    pub fn retry(&self, policy: RetryPolicy) -> RetryClient<Self> {
+        RetryClient::new(self.clone(), policy)
+    }
+
+    /// Gracefully stop invalidation tracking and the auto-pipeline worker.
+    ///
+    /// If other client clones remain, this returns immediately and their
+    /// shared tracking and worker lifecycle continues. The final clone waits
+    /// for both background tasks to finish.
+    pub async fn shutdown(self) {
+        self.inner.inner.into_inner().shutdown().await;
     }
 }
 
@@ -464,6 +738,22 @@ impl PipelineExecutor for MultiplexedClient<AutoPipelineService> {
     }
 }
 
+/// Explicit pipelining for the cached multiplexed client.
+///
+/// The cache service conservatively clears local entries around the raw batch
+/// before forwarding all frames as one worker request. This preserves
+/// read-your-own-writes even though [`PipelineExecutor`] carries untyped frames
+/// whose complete key effects cannot always be determined locally.
+impl PipelineExecutor for CachedMultiplexedClient {
+    fn execute_pipeline(
+        &mut self,
+        frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Vec<Frame>, RedisError>> + Send {
+        let mut svc = self.inner.inner.clone().into_inner();
+        async move { svc.call_pipeline(frames).await }
+    }
+}
+
 /// Atomic MULTI/EXEC for the standard multiplexed client.
 ///
 /// The WATCH/MULTI/commands/EXEC frames are sent as one contiguous batch via
@@ -512,13 +802,53 @@ impl TransactionExecutor for MultiplexedClient<AutoPipelineService> {
     }
 }
 
+/// Atomic MULTI/EXEC for the cached multiplexed client.
+///
+/// As with explicit pipelines, the cache service clears local entries before
+/// and after this untyped batch, then submits the complete WATCH/MULTI/EXEC
+/// sequence as one contiguous worker request.
+impl TransactionExecutor for CachedMultiplexedClient {
+    const SUPPORTS_TRANSACTION_RETRY: bool = false;
+
+    fn execute_transaction(
+        &mut self,
+        watch_frames: Vec<Frame>,
+        command_frames: Vec<Frame>,
+    ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+        let mut frames = watch_frames;
+        frames.push(array(vec![bulk("MULTI")]));
+        frames.extend(command_frames);
+        frames.push(array(vec![bulk("EXEC")]));
+
+        let mut svc = self.inner.inner.clone().into_inner();
+        async move {
+            let mut responses = svc.call_pipeline(frames).await?;
+            let exec = responses.pop().ok_or(RedisError::UnexpectedResponse {
+                expected: "EXEC response",
+                actual: "empty pipeline response".to_string(),
+            })?;
+            match exec {
+                Frame::Array(Some(results)) => Ok(Some(results)),
+                Frame::Array(None) | Frame::Null => Ok(None),
+                Frame::Error(e) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "array or null",
+                    actual: format!("{other:?}"),
+                }),
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
     use redis_tower_commands::Get;
     use redis_tower_core::WithDeadline;
+    use std::collections::VecDeque;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
@@ -576,6 +906,131 @@ mod tests {
     fn multiplexed_client_is_pipeline_executor() {
         fn assert_pipeline_executor<T: PipelineExecutor>() {}
         assert_pipeline_executor::<MultiplexedClient>();
+    }
+
+    #[test]
+    fn cached_multiplexed_client_preserves_shared_executor_surface() {
+        fn assert_clone_send_sync<T: Clone + Send + Sync>() {}
+        fn assert_pipeline_executor<T: PipelineExecutor>() {}
+        fn assert_transaction_executor<T: TransactionExecutor>() {}
+        fn assert_redis_executor<T: crate::RedisExecutor>() {}
+
+        assert_clone_send_sync::<CachedMultiplexedClient>();
+        assert_pipeline_executor::<CachedMultiplexedClient>();
+        assert_transaction_executor::<CachedMultiplexedClient>();
+        assert_redis_executor::<CachedMultiplexedClient>();
+    }
+
+    #[cfg(unix)]
+    struct QueuedConnectionFactory {
+        connections: StdMutex<VecDeque<RedisConnection>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl ConnectionFactory for QueuedConnectionFactory {
+        fn connect(
+            &self,
+        ) -> std::pin::Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>>
+        {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let connection = self
+                .connections
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or(RedisError::ConnectionClosed);
+            Box::pin(async move { connection })
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_factory_shares_setup_and_forces_resp3_on_both_connections() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        let (data_client, data_server) = tokio::net::UnixStream::pair().unwrap();
+        let (receiver_client, receiver_server) = tokio::net::UnixStream::pair().unwrap();
+        let data_connection =
+            RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(data_client));
+        let receiver_connection =
+            RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(receiver_client));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory: Arc<dyn ConnectionFactory> = Arc::new(QueuedConnectionFactory {
+            connections: StdMutex::new(VecDeque::from([data_connection, receiver_connection])),
+            calls: Arc::clone(&calls),
+        });
+
+        let data_task = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(data_server),
+                redis_tower_core::RespCodec::new(),
+            );
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("HELLO"), bulk("3")])
+            );
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("CLIENT"), bulk("TRACKING"), bulk("OFF")])
+            );
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("TRACKING"),
+                    bulk("ON"),
+                    bulk("REDIRECT"),
+                    bulk("42"),
+                    bulk("BCAST"),
+                    bulk("NOLOOP"),
+                ])
+            );
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+            futures::future::pending::<()>().await;
+        });
+        let receiver_task = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(receiver_server),
+                redis_tower_core::RespCodec::new(),
+            );
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("HELLO"), bulk("3")])
+            );
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("CLIENT"), bulk("ID")])
+            );
+            framed.send(Frame::Integer(42)).await.unwrap();
+            futures::future::pending::<()>().await;
+        });
+
+        let client = CachedMultiplexedClient::from_factory(factory, CachedClientConfig::default())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(client.is_caching_healthy().await);
+
+        client.shutdown().await;
+        data_task.abort();
+        receiver_task.abort();
     }
 
     #[cfg(unix)]
@@ -672,6 +1127,127 @@ mod tests {
             "a cancelled multiplexed pipeline reached the Redis socket"
         );
 
+        client.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cached_pipeline_and_transaction_writes_cannot_leave_stale_reads() {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_commands::Set;
+        use tokio_util::codec::Framed;
+
+        use crate::cache_layer::CacheConfig;
+        use crate::{Pipeline, Transaction};
+
+        let (client_stream, server_stream) = tokio::net::UnixStream::pair().unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Unix(client_stream));
+        let pipeline = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        let cache = CacheService::new(pipeline, CacheConfig::default());
+        let mut client = CachedMultiplexedClient {
+            inner: MultiplexedClient::from_layered(cache),
+        };
+        assert_eq!(client.queue_depth(), 0);
+
+        let get = array(vec![bulk("GET"), bulk("key")]);
+        let set_pipeline = array(vec![bulk("SET"), bulk("key"), bulk("pipeline")]);
+        let set_transaction = array(vec![bulk("SET"), bulk("key"), bulk("transaction")]);
+
+        let server = tokio::spawn(async move {
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Unix(server_stream),
+                redis_tower_core::RespCodec::new(),
+            );
+
+            assert_eq!(framed.next().await.unwrap().unwrap(), get);
+            framed
+                .send(Frame::BulkString(Some(Bytes::from_static(b"initial"))))
+                .await
+                .unwrap();
+
+            assert_eq!(framed.next().await.unwrap().unwrap(), set_pipeline);
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("GET"), bulk("key")])
+            );
+            framed
+                .send(Frame::BulkString(Some(Bytes::from_static(b"pipeline"))))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("MULTI")])
+            );
+            assert_eq!(framed.next().await.unwrap().unwrap(), set_transaction);
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("EXEC")])
+            );
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"QUEUED")))
+                .await
+                .unwrap();
+            framed
+                .send(Frame::Array(Some(vec![Frame::SimpleString(
+                    Bytes::from_static(b"OK"),
+                )])))
+                .await
+                .unwrap();
+
+            assert_eq!(
+                framed.next().await.unwrap().unwrap(),
+                array(vec![bulk("GET"), bulk("key")])
+            );
+            framed
+                .send(Frame::BulkString(Some(Bytes::from_static(b"transaction"))))
+                .await
+                .unwrap();
+        });
+
+        let initial: Option<Bytes> = client.execute(Get::new("key")).await.unwrap();
+        assert_eq!(initial, Some(Bytes::from_static(b"initial")));
+        let cached: Option<Bytes> = client.execute(Get::new("key")).await.unwrap();
+        assert_eq!(cached, initial);
+        assert_eq!(
+            client.queue_depth(),
+            0,
+            "a cache hit must release its readiness reservation"
+        );
+        assert_eq!(client.cache_size().await, 1);
+        assert!(client.is_caching_healthy().await);
+        let stats = client.cache_statistics().await;
+        assert_eq!(stats.hits, 1);
+        assert_eq!(stats.misses, 1);
+
+        Pipeline::new()
+            .push(Set::new("key", "pipeline"))
+            .execute(&mut client)
+            .await
+            .unwrap();
+        let after_pipeline: Option<Bytes> = client.execute(Get::new("key")).await.unwrap();
+        assert_eq!(after_pipeline, Some(Bytes::from_static(b"pipeline")));
+
+        let _ = Transaction::new()
+            .push(Set::new("key", "transaction"))
+            .execute(&mut client)
+            .await
+            .unwrap();
+        let after_transaction: Option<Bytes> = client.execute(Get::new("key")).await.unwrap();
+        assert_eq!(after_transaction, Some(Bytes::from_static(b"transaction")));
+
+        server.await.unwrap();
+        client.clear_cache().await;
+        assert_eq!(client.cache_size().await, 0);
         client.shutdown().await;
     }
 

@@ -845,6 +845,61 @@ impl RedisConnection {
         rx
     }
 
+    /// Wait for one unsolicited RESP3 push frame while the connection is idle.
+    ///
+    /// The frame is routed to the receiver returned by [`subscribe_pushes`](Self::subscribe_pushes),
+    /// matching the behavior of command-response reads. EOF, decode failures,
+    /// and non-push frames are returned as errors because a response arriving
+    /// without an outstanding command means protocol alignment has been lost.
+    ///
+    /// This method is cancellation-safe: it borrows the framed transport in
+    /// place, so cancelling the wait preserves both the transport and any
+    /// partially buffered frame. It is intended for an exclusive connection
+    /// owner, such as an auto-pipeline worker, and must not be called while a
+    /// [`Service::call`](tower_service::Service::call) future is in flight.
+    pub async fn read_idle_push(&mut self) -> Result<(), RedisError> {
+        if self.framed.is_none() {
+            return if self.inflight.is_some() {
+                Err(RedisError::ConnectionInUse)
+            } else {
+                Err(RedisError::ConnectionClosed)
+            };
+        }
+        let next = self.framed.as_mut().unwrap().next().await;
+        let frame = match next {
+            Some(Ok(frame)) => frame,
+            Some(Err(error)) => {
+                // A decode/I/O failure leaves the transport unusable. Drop it
+                // at this completed read boundary while keeping cancellation
+                // before the boundary non-destructive.
+                self.framed.take();
+                return Err(RedisError::from(error));
+            }
+            None => {
+                self.framed.take();
+                return Err(RedisError::ConnectionClosed);
+            }
+        };
+
+        match frame {
+            Frame::Push(_) => {
+                if let Some(push_tx) = &self.push_tx {
+                    let _ = push_tx.send(frame);
+                }
+                Ok(())
+            }
+            other => {
+                // There is no outstanding request that could own this reply.
+                // Quarantine the now-misaligned transport.
+                self.framed.take();
+                Err(RedisError::UnexpectedResponse {
+                    expected: "RESP3 push frame while connection is idle",
+                    actual: format!("{other:?}"),
+                })
+            }
+        }
+    }
+
     /// Ensure the framed transport is available, reclaiming it from an
     /// in-flight `Service::call` future if necessary.
     async fn ensure_framed(&mut self) -> Result<(), RedisError> {
@@ -1680,6 +1735,64 @@ mod tests {
             .await
             .expect("connection should remain usable after Redis error");
 
+        server_task.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_push_read_is_cancellation_safe_and_routes_the_complete_frame() {
+        let (client, mut server) = stream_pair().await;
+        let mut conn = RedisConnection::from_stream(client);
+        let mut pushes = conn.subscribe_pushes();
+        let expected = Frame::Push(vec![
+            Frame::SimpleString(b"invalidate"[..].into()),
+            Frame::Array(Some(vec![Frame::SimpleString(b"key"[..].into())])),
+        ]);
+        let wire = redis_tower_protocol::frame_to_bytes(&expected);
+
+        // Leave the final LF outstanding so the first idle read buffers a
+        // partial frame, then cancel that read at a deterministic boundary.
+        let split = wire.len() - 1;
+        write_all(&mut server, &wire[..split]).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), conn.read_idle_push())
+                .await
+                .is_err(),
+            "an incomplete push unexpectedly decoded"
+        );
+
+        write_all(&mut server, &wire[split..]).await;
+        conn.read_idle_push()
+            .await
+            .expect("the cancelled read must preserve its buffered prefix");
+        assert_eq!(pushes.recv().await.unwrap(), expected);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn idle_push_read_reports_eof_and_unsolicited_responses() {
+        let (client, server) = stream_pair().await;
+        let mut conn = RedisConnection::from_stream(client);
+        drop(server);
+        assert!(matches!(
+            conn.read_idle_push().await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(conn.framed.is_none(), "EOF transport was not quarantined");
+
+        let (client, mut server) = stream_pair().await;
+        let mut conn = RedisConnection::from_stream(client);
+        let server_task = tokio::spawn(async move {
+            write_all(&mut server, b"+PONG\r\n").await;
+        });
+        assert!(matches!(
+            conn.read_idle_push().await,
+            Err(RedisError::UnexpectedResponse { .. })
+        ));
+        assert!(
+            conn.framed.is_none(),
+            "unsolicited response transport was not quarantined"
+        );
         server_task.await.unwrap();
     }
 

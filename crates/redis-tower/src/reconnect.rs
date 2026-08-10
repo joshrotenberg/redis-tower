@@ -334,6 +334,12 @@ where
     }
 }
 
+impl ConnectionFactory for Arc<dyn ConnectionFactory> {
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
+        self.as_ref().connect()
+    }
+}
+
 /// A [`ConnectionFactory`] that connects via a Redis URL string.
 ///
 /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
