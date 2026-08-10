@@ -15,6 +15,13 @@
 //! read-only or not, the other input routing needs beyond an address: given
 //! a [`ReadPreference`] other than [`ReadPreference::Master`], only commands
 //! this function accepts are safe to send to a replica.
+//!
+//! Read preferences have the same availability semantics in every client that
+//! supports replica routing. [`ReadPreference::Replica`] is strict: an eligible
+//! read fails when no usable replica is available, and is never silently sent
+//! to the master. [`ReadPreference::PreferReplica`] makes the same selection
+//! attempt but falls back to the master. Writes are unaffected and always use
+//! the master.
 
 use redis_tower_core::Frame;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -64,11 +71,12 @@ pub enum ReadPreference {
     /// Always read from the master (default).
     #[default]
     Master,
-    /// Route read-only commands to a replica.
+    /// Route read-only commands strictly to a replica.
     ///
-    /// Each client documents how it handles an unavailable replica.
+    /// If no usable replica is available, return an error rather than falling
+    /// back to the master.
     Replica,
-    /// Prefer replica, fall back to master.
+    /// Prefer a replica, but fall back to the master when none is usable.
     PreferReplica,
 }
 

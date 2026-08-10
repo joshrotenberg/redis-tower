@@ -97,7 +97,7 @@ use crate::caching::{
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
     RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError, parse_cluster_url, parse_redirect,
-    remap_topology, remap_topology_with_map,
+    remap_topology, remap_topology_with_map, replica_unavailable,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
@@ -370,7 +370,12 @@ impl MultiplexedClusterClientBuilder {
         self
     }
 
-    /// Set the read preference.
+    /// Set the read preference for keyed, read-only commands.
+    ///
+    /// [`ReadPreference::Replica`] is strict: when no connected replica is
+    /// available for the command's slot, the command returns an error instead
+    /// of being sent to the master. [`ReadPreference::PreferReplica`] falls
+    /// back to the master in that case. Writes always use the master.
     pub fn read_preference(mut self, pref: ReadPreference) -> Self {
         self.read_preference = pref;
         self
@@ -1742,13 +1747,19 @@ impl MultiplexedClusterClient {
             // Read-only commands with replica preference: try a replica first.
             if inner.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
-                && let Some(addr) = pick_replica(&inner, slot)
-                && let Some(svc) = inner.replicas.get(&addr)
             {
-                return Ok(Target {
-                    svc: svc.clone(),
-                    addr,
-                });
+                if let Some(addr) = pick_replica(&inner, slot) {
+                    let svc = inner
+                        .replicas
+                        .get(&addr)
+                        .expect("pick_replica only returns connected replica services")
+                        .clone();
+                    return Ok(Target { svc, addr });
+                }
+                if inner.read_preference == ReadPreference::Replica {
+                    return Err(replica_unavailable(slot));
+                }
+                // PreferReplica falls through to master.
             }
 
             if let Some(addr_node) = inner.topology.master_for_slot(slot) {
@@ -2056,11 +2067,32 @@ fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError
 
 fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
     let replicas = inner.topology.replicas_for_slot(slot)?;
-    if replicas.is_empty() {
+    let selected_addr = inner
+        .read_routing
+        .select_replica(slot, replicas)?
+        .addr_string();
+    if inner.replicas.contains_key(&selected_addr) {
+        return Some(selected_addr);
+    }
+
+    // A best-effort topology refresh may retain a slot's advertised replica
+    // even when its service could not be built. Retry selection over connected
+    // entries so one unavailable node cannot hide another usable replica. The
+    // allocation is confined to that partial-refresh path.
+    let available: Vec<NodeAddr> = replicas
+        .iter()
+        .filter(|replica| inner.replicas.contains_key(&replica.addr_string()))
+        .cloned()
+        .collect();
+    if available.is_empty() {
         return None;
     }
-    let selected = inner.read_routing.select_replica(slot, replicas)?;
-    Some(selected.addr_string())
+    Some(
+        inner
+            .read_routing
+            .select_replica(slot, &available)?
+            .addr_string(),
+    )
 }
 
 /// Counts reported when a topology refresh completes successfully.
@@ -3798,6 +3830,137 @@ mod observability_tests {
         initial_server.await.unwrap();
         middle_server.await.unwrap();
         final_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_replica_without_replica_never_reaches_multiplexed_master() {
+        let (master_addr, master_service, master_saw_wire, master_server) = quiet_service().await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&master_addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            master_addr.clone(),
+            topology,
+            HashMap::from([(master_addr, master_service)]),
+            recorder,
+            false,
+        );
+        client.inner.write().await.read_preference = ReadPreference::Replica;
+        let slot = slot_for_key(b"foo");
+
+        let error = client
+            .execute(Get::new("foo"))
+            .await
+            .expect_err("strict Replica unexpectedly fell back to the master");
+
+        assert!(
+            error.to_string().contains(&format!(
+                "ReadPreference::Replica requires a connected replica for slot {slot}"
+            )),
+            "unexpected routing error: {error}"
+        );
+        client.shutdown().await;
+        master_server.await.unwrap();
+        assert!(!master_saw_wire.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn prefer_replica_without_replica_falls_back_to_multiplexed_master() {
+        let (master_addr, master_service, master_server) =
+            scripted_service(vec![b"GET"], b"$5\r\nvalue\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&master_addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            master_addr.clone(),
+            topology,
+            HashMap::from([(master_addr, master_service)]),
+            recorder,
+            false,
+        );
+        client.inner.write().await.read_preference = ReadPreference::PreferReplica;
+
+        assert_eq!(
+            client.execute(Get::new("foo")).await.unwrap(),
+            Some(Bytes::from_static(b"value"))
+        );
+        client.shutdown().await;
+        master_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn strict_replica_skips_unconnected_topology_replica_on_multiplexed_client() {
+        let (master_addr, master_service, master_saw_wire, master_server) = quiet_service().await;
+        let (replica_addr, replica_service, replica_server) =
+            scripted_service(vec![b"GET"], b"$7\r\nreplica\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&master_addr),
+            replicas: vec![
+                NodeAddr {
+                    host: "127.0.0.1".to_string(),
+                    port: 1,
+                },
+                node_addr(&replica_addr),
+            ],
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            master_addr.clone(),
+            topology,
+            HashMap::from([(master_addr, master_service)]),
+            recorder,
+            false,
+        );
+        {
+            let mut inner = client.inner.write().await;
+            inner.read_preference = ReadPreference::Replica;
+            inner.read_routing = Arc::new(redis_tower::FirstReplicaRouting);
+            inner.replicas.insert(replica_addr, replica_service);
+        }
+
+        assert_eq!(
+            client.execute(Get::new("foo")).await.unwrap(),
+            Some(Bytes::from_static(b"replica"))
+        );
+        client.shutdown().await;
+        replica_server.await.unwrap();
+        master_server.await.unwrap();
+        assert!(!master_saw_wire.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test]
+    async fn strict_replica_still_routes_multiplexed_writes_to_master() {
+        let (master_addr, master_service, master_server) =
+            scripted_service(vec![b"SET"], b"+OK\r\n".to_vec()).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&master_addr),
+            replicas: Vec::new(),
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            master_addr.clone(),
+            topology,
+            HashMap::from([(master_addr, master_service)]),
+            recorder,
+            false,
+        );
+        client.inner.write().await.read_preference = ReadPreference::Replica;
+
+        client.execute(Set::new("foo", "value")).await.unwrap();
+        client.shutdown().await;
+        master_server.await.unwrap();
     }
 
     fn get_frame(key: &'static str) -> Frame {

@@ -119,7 +119,10 @@
 //! [`ReadPreference`] controls whether read-only commands are routed to
 //! masters, replicas, or replicas with a master fallback. [`ClusterClient`]
 //! and [`MultiplexedClusterClient`] honor it. The cached client currently
-//! requires `Master` and rejects the replica variants.
+//! requires [`ReadPreference::Master`] and rejects the replica variants.
+//! [`ReadPreference::Replica`] is strict and returns an error when no connected
+//! replica is available for the key's slot; [`ReadPreference::PreferReplica`]
+//! falls back to the master. Writes always use the master.
 //!
 //! # Read Routing Strategy
 //!
