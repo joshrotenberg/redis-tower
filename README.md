@@ -696,6 +696,14 @@ BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
   cargo run -p cluster-bench --release -- --json
 ```
 
+Release evidence uses the resumable
+[`scripts/benchmarks/run_publication.sh`](scripts/benchmarks/run_publication.sh)
+runner and its [publication protocol](scripts/benchmarks/README.md). It records
+three explicit non-Cartesian sweeps: GET/SET payload-by-concurrency, pipeline
+depth-by-payload at concurrency 1, and pipeline concurrency at a fixed 1 KiB /
+100-command batch. Publication mode requires the validated four-hour soak;
+`--matrix-only` is visibly incomplete development output.
+
 For hours-long stability and recovery evidence, [`crates/soak-bench`](crates/soak-bench/)
 keeps per-worker HDR histograms at constant memory, emits per-minute human or
 JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current

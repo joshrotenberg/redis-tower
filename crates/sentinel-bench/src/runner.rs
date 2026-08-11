@@ -1,7 +1,7 @@
 //! Fixed-duration workload runner with an HDR latency histogram.
 //!
 //! Each run discards a warmup window, records every post-warmup op latency into
-//! a per-worker [`hdrhistogram::Histogram`] (constant ~few-KB footprint), and
+//! a per-worker [`hdrhistogram::Histogram`] (constant-size footprint), and
 //! merges the per-worker histograms into one before reporting
 //! p50/p90/p99/p999/max. The whole run is repeated `BENCH_RUNS` times and the
 //! per-cell results are aggregated into a mean and standard deviation by
@@ -18,6 +18,8 @@ use hdrhistogram::Histogram;
 use tokio::task::JoinHandle;
 
 use crate::clients::{Client, ClientKind};
+
+const HISTOGRAM_MAX_US: u64 = 120_000_000;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Workload {
@@ -52,7 +54,7 @@ pub struct BenchReport {
 
 /// Aggregate of `BENCH_RUNS` repeated runs of the same cell. `ops_per_sec`
 /// carries a mean and standard deviation; latency percentiles are averaged
-/// across runs.
+/// across runs, while `max_us` is the largest HDR-reported run maximum.
 #[derive(Clone, Copy, Debug)]
 pub struct AggregatedReport {
     pub client: ClientKind,
@@ -72,10 +74,23 @@ pub struct AggregatedReport {
 /// Every sentinel-bench worker is an async tokio task.
 pub type WorkerHandle = JoinHandle<Histogram<u64>>;
 
-/// A fresh recording histogram. Three significant figures, auto-resizing so a
-/// long soak run never overflows its trackable range.
+/// A fresh recording histogram with three significant figures and a validated
+/// two-minute latency range.
 pub fn new_histogram() -> Histogram<u64> {
-    Histogram::<u64>::new(3).expect("valid histogram sigfig")
+    Histogram::<u64>::new_with_bounds(1, HISTOGRAM_MAX_US, 3)
+        .expect("fixed valid HDR histogram bounds")
+}
+
+/// Record a latency without wrapping or silently clipping an outlier.
+pub fn record_latency(histogram: &mut Histogram<u64>, elapsed: Duration) {
+    let micros = elapsed.as_micros().max(1);
+    assert!(
+        micros <= u128::from(HISTOGRAM_MAX_US),
+        "successful latency {micros}us exceeds the validated HDR range"
+    );
+    histogram
+        .record(micros as u64)
+        .expect("validated latency fits the HDR histogram");
 }
 
 pub async fn run(client: Client, cfg: BenchConfig) -> BenchReport {
@@ -100,8 +115,10 @@ pub async fn run(client: Client, cfg: BenchConfig) -> BenchReport {
 
     let mut merged = new_histogram();
     for h in handles {
-        let hist = h.await.unwrap_or_else(|_| new_histogram());
-        let _ = merged.add(&hist);
+        let hist = h.await.expect("sentinel benchmark worker remains alive");
+        merged
+            .add(&hist)
+            .expect("matching sentinel latency histograms merge");
     }
     let wall = measure_start.elapsed().as_secs_f64();
     let total_ops = ops.load(Ordering::Relaxed);
@@ -156,7 +173,10 @@ pub fn aggregate(reports: &[BenchReport]) -> AggregatedReport {
         p90_us: mean(&reports.iter().map(|r| r.p90_us).collect::<Vec<_>>()),
         p99_us: mean(&reports.iter().map(|r| r.p99_us).collect::<Vec<_>>()),
         p999_us: mean(&reports.iter().map(|r| r.p999_us).collect::<Vec<_>>()),
-        max_us: mean(&reports.iter().map(|r| r.max_us).collect::<Vec<_>>()),
+        max_us: reports
+            .iter()
+            .map(|report| report.max_us)
+            .fold(0.0_f64, f64::max),
     }
 }
 
@@ -203,31 +223,40 @@ mod tests {
         assert!((agg.ops_per_sec_stddev - (20000.0_f64 / 3.0).sqrt()).abs() < 1e-6);
         assert_eq!(agg.p50_us, 20.0);
         assert_eq!(agg.p90_us, 40.0);
+        assert_eq!(agg.max_us, 150.0);
     }
 
     #[test]
     fn histogram_percentiles_track_recorded_values() {
         let mut h = new_histogram();
-        for v in 1..=1000u64 {
-            h.saturating_record(v);
+        for value in [1, 2_047, 2_048, 2_049, 10_000, 1_000_000, 120_000_000] {
+            record_latency(&mut h, Duration::from_micros(value));
         }
-        // value_at_quantile is monotonic and within the recorded range.
+        // Values around the old auto-resize/clamping boundary remain monotonic.
+        assert_eq!(h.len(), 7);
         assert!(h.value_at_quantile(0.50) <= h.value_at_quantile(0.99));
         assert!(h.value_at_quantile(0.99) <= h.max());
-        assert!(h.max() >= 1000 - 1); // 3 sig figs -> tiny rounding
+        assert!(h.value_at_quantile(0.99) > 10_000);
+        assert!(h.max() >= 119_000_000); // 3 sig figs -> small rounding
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the validated HDR range")]
+    fn histogram_rejects_latency_above_validated_range() {
+        record_latency(
+            &mut new_histogram(),
+            Duration::from_micros(HISTOGRAM_MAX_US + 1),
+        );
     }
 
     #[test]
     fn merged_histograms_sum_counts() {
         let mut a = new_histogram();
         let mut b = new_histogram();
-        for _ in 0..50 {
-            a.saturating_record(100);
-        }
-        for _ in 0..50 {
-            b.saturating_record(200);
-        }
+        record_latency(&mut a, Duration::from_micros(100));
+        record_latency(&mut b, Duration::from_micros(120_000_000));
         a.add(&b).unwrap();
-        assert_eq!(a.len(), 100);
+        assert_eq!(a.len(), 2);
+        assert!(a.max() >= 119_000_000);
     }
 }

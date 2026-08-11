@@ -11,6 +11,9 @@ Standalone Redis throughput and latency comparison across:
 
 The runner starts and stops its own Redis server. Its default matrix covers
 GET, SET, and 100-command batches with 64 B, 1 KiB, and 16 KiB values.
+It launches `redis-server` from `PATH` with Redis Stack module auto-loading
+disabled, so the measured runtime matches the version recorded by the
+publication fingerprint.
 
 ```bash
 cargo run -p standalone-bench --release
@@ -30,6 +33,7 @@ cargo run -p standalone-bench --release -- --json
 | `BENCH_PIPELINE_COMMANDS` | `--pipeline-commands` | `100` | Commands in each explicit batch |
 | `BENCH_WORKLOADS` | `--workloads` | `set,get,pipeline` | Workloads to include |
 | `BENCH_CLIENTS` | `--clients` | all six | Client aliases to include |
+| `BENCH_INCLUDE_SAMPLES` | `--include-samples` | `false` | Retain every bounded per-run sample in JSON output |
 | `BENCH_PORT` | `--port` | `6480` | Throwaway Redis server port |
 
 For example, this is a small three-client smoke matrix:
@@ -48,11 +52,19 @@ Every successful GET must return a value of the configured size. Missing or
 wrong-sized values count as errors. Failed prepopulation writes, worker
 connection/setup errors, and worker panics abort with a non-zero exit status.
 JSON and human output report p50, p99, and p999 (plus p90/max in JSON).
+Latency uses a checked HDR histogram with an explicit two-minute range; an
+out-of-range successful operation fails loudly instead of being clipped. The
+aggregate percentiles are means of the per-run percentiles, while `max_us` is
+the largest HDR-reported run maximum.
 
 Each JSON record declares `schema_version: 2` and adds a stable kebab-case
 `client_id`. For compatibility, `client` keeps its original Rust variant name
 and `total_ops` / `ops_per_sec_*` keep the original per-iteration (batch for
 pipeline) meaning. Prefer the explicit batch and command fields in new tools.
+Pass `--include-samples` for publication evidence: each schema-v2 cell then
+contains measured wall time, counts, rates, and latency for every bounded run,
+allowing each rate, mean, and standard deviation to be recomputed. The field is
+omitted by default for backward compatibility.
 
 For GET and SET, one batch is one command, so batches/s and commands/s are the
 same. For the pipeline workload, latency and batches/s describe the complete
@@ -64,3 +76,9 @@ path by issuing the configured commands concurrently; the other pipeline rows
 use each client's explicit pipeline API. Compare rows produced by the same
 invocation and record the Redis/client versions and host configuration with any
 published result.
+
+The redis-rs async and connection-manager adapters explicitly disable
+redis-rs's client-specific 500 ms response timeout. This keeps the comparison
+completion-based like the other adapters and prevents a deep, valid
+multiplexed queue from being counted as failed work. Connection setup timeouts
+remain at each client's configured default.

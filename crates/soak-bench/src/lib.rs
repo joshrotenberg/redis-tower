@@ -959,6 +959,11 @@ struct MetadataRecord<'a> {
     report_interval_secs: f64,
     operation_timeout_ms: u128,
     error_backoff_ms: u128,
+    startup_timeout_secs: f64,
+    recovery_timeout_secs: f64,
+    cluster_slot: u16,
+    cluster_node_timeout_ms: u64,
+    standalone_port: Option<u16>,
     chaos: ChaosMode,
     chaos_after_secs: Option<f64>,
     reconnect_accounting: &'static str,
@@ -1039,6 +1044,11 @@ impl Reporter {
             report_interval_secs: config.report_interval.as_secs_f64(),
             operation_timeout_ms: config.operation_timeout.as_millis(),
             error_backoff_ms: config.error_backoff.as_millis(),
+            startup_timeout_secs: config.startup_timeout.as_secs_f64(),
+            recovery_timeout_secs: config.recovery_timeout.as_secs_f64(),
+            cluster_slot: config.cluster_slot,
+            cluster_node_timeout_ms: config.cluster_node_timeout_ms,
+            standalone_port: config.standalone_port,
             chaos: config.chaos,
             chaos_after_secs: (config.chaos != ChaosMode::None)
                 .then_some(config.chaos_after.as_secs_f64()),
@@ -2030,6 +2040,10 @@ fn reserve_ephemeral_port() -> Result<u16> {
 async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<ManagedStandalone> {
     let cleanup = StandaloneCleanup::new(port)?;
     let start = RedisServer::new()
+        // Publication provenance fingerprints `redis-server` from PATH. Pin
+        // the wrapper to that executable instead of its Redis Stack preference.
+        .redis_server_bin("redis-server")
+        .no_stack_modules()
         .port(port)
         .dir(&cleanup.base_dir)
         .save(false)

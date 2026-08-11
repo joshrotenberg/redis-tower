@@ -17,6 +17,10 @@ via `redis-test-harness`:
 cargo run -p cluster-bench --release
 ```
 
+The throughput scenario launches `redis-server` from `PATH` with Redis Stack
+module auto-loading disabled, so the measured runtime matches the version
+recorded by the publication fingerprint.
+
 The default stable matrix covers GET and SET with 64 B, 1 KiB, and 16 KiB
 values. Replica reads and topology-churn workloads are opt-in scenarios.
 
@@ -30,6 +34,7 @@ values. Replica reads and topology-churn workloads are opt-in scenarios.
 | `BENCH_CONCURRENCY` | `1,8,32,128` | Comma-separated concurrency levels |
 | `BENCH_PAYLOAD_SIZES` | `64,1024,16384` | Comma-separated value sizes; `K`/`KiB` and `M`/`MiB` suffixes are accepted |
 | `BENCH_CLIENTS` | all five clients | Comma-separated client aliases (`redis-tower`, `redis-tower-mux`, `redis-rs-sync`, `redis-rs-async`, `fred`) |
+| `BENCH_INCLUDE_SAMPLES` | `false` | Retain every bounded per-run sample in JSON output (`--include-samples`) |
 | `BENCH_BASE_PORT` | `17000` | Starting port for the throwaway cluster |
 
 The matrix axes also have CLI forms, for example:
@@ -47,10 +52,19 @@ command count, error count, commands/s mean and standard deviation, and HDR
 p50/p90/p99/p999/max latency. A missing GET or a value of the wrong size is an
 error, not a successful operation. Failed seed writes, worker connection/setup
 errors, and worker panics abort the benchmark with a non-zero exit status.
+Latency uses a checked HDR histogram with an explicit two-minute range; an
+out-of-range successful operation fails loudly instead of being clipped. The
+aggregate percentiles are means of per-run percentiles, while `max_us` is the
+largest HDR-reported run maximum.
+
 Each record declares `schema_version: 2` and adds a stable kebab-case
 `client_id`. The historical `client` variant name and `total_ops` /
 `ops_per_sec_*` fields remain available; `total_batches` / `batches_per_sec_*`
 and `total_commands` / `commands_per_sec_*` make their units explicit.
+Pass `--include-samples` for publication evidence. It adds the raw bounded run
+samples—with measured wall time, counts, rates, and latency—needed to recompute
+each rate, mean, and standard deviation while remaining omitted from ordinary
+schema-v2 output.
 
 ## Replica-read scenario
 

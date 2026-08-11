@@ -53,6 +53,12 @@ Reconnect and recovery fields are intentionally topology-specific:
 Errors during a deliberate outage remain errors. They are neither hidden nor
 subtracted from throughput.
 
+JSON metadata records the workload, payload, concurrency, warmup, duration,
+report cadence, operation/error-backoff/startup/recovery timeouts, topology
+controls, selected standalone port, and the exact reconnect/recovery,
+latency, and RSS accounting modes. This lets publication tooling reject a run
+that relied on an unintended default.
+
 ## Four-hour runs
 
 The standalone chaos mode sends a real SIGKILL through
@@ -99,6 +105,16 @@ otherwise idle host, retain stderr with the JSONL artifact, and capture the
 Redis/Rust versions and git commit alongside the result. The short CI job is a
 functional smoke test and deliberately sets no performance threshold; a
 publishable four-hour result belongs in the benchmark evidence report.
+Standalone mode pins the managed process to that `redis-server` executable and
+disables Redis Stack module auto-loading, matching the publication fingerprint.
+For release evidence, prefer the repository's
+[`run_publication.sh`](../../scripts/benchmarks/run_publication.sh) protocol;
+it sets every input, protects the whole run from sleep where supported, and
+refuses to finalize without validating all 240 one-minute records.
+Publication validation requires successful work in every interval, permits
+errors only during the bounded chaos/recovery window, and rejects mean RSS
+growth from the first ten minutes to the final ten minutes above the larger of
+16 MiB or 50%.
 SIGINT and SIGTERM cancel abort-owned chaos work and synchronously clean the
 managed standalone or cluster processes before the CLI exits.
 

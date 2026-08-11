@@ -1,7 +1,7 @@
 //! Fixed-duration workload runner with an HDR latency histogram.
 //!
 //! Each run discards a warmup window, records every post-warmup op latency into
-//! a per-worker [`hdrhistogram::Histogram`] (constant ~few-KB footprint, unlike
+//! a per-worker [`hdrhistogram::Histogram`] (constant-size footprint, unlike
 //! the old per-op `Vec` storage), and merges the per-worker histograms into one
 //! before reporting p50/p90/p99/p999/max. The whole run is repeated
 //! `BENCH_RUNS` times and the per-cell results are aggregated into a mean and
@@ -16,6 +16,8 @@ use hdrhistogram::Histogram;
 use tokio::task::JoinHandle as TokioJoinHandle;
 
 use crate::clients::{Client, ClientKind};
+
+const HISTOGRAM_MAX_US: u64 = 120_000_000;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Workload {
@@ -58,6 +60,7 @@ pub struct BenchReport {
     pub total_batches: u64,
     pub total_commands: u64,
     pub errors: u64,
+    pub elapsed_secs: f64,
     pub batches_per_sec: f64,
     pub commands_per_sec: f64,
     pub p50_us: f64,
@@ -69,8 +72,9 @@ pub struct BenchReport {
 
 /// Aggregate of `BENCH_RUNS` repeated runs of the same cell. Batch and command
 /// throughput carry means and standard deviations; latency percentiles are
-/// averaged across runs.
-#[derive(Clone, Copy, Debug)]
+/// averaged across runs, while `max_us` is the largest HDR-reported run
+/// maximum.
+#[derive(Clone, Debug)]
 pub struct AggregatedReport {
     pub client: ClientKind,
     pub workload: Workload,
@@ -90,6 +94,10 @@ pub struct AggregatedReport {
     pub p99_us: f64,
     pub p999_us: f64,
     pub max_us: f64,
+    /// The bounded set of repeated runs used to calculate this aggregate.
+    /// Publication tooling can retain these samples to make mean/stddev
+    /// independently reproducible; ordinary output may omit them.
+    pub samples: Vec<BenchReport>,
 }
 
 pub type WorkerResult = Result<Histogram<u64>, String>;
@@ -99,10 +107,23 @@ pub enum WorkerHandle {
     Thread(JoinHandle<WorkerResult>),
 }
 
-/// A fresh recording histogram. Three significant figures, auto-resizing so a
-/// long soak run never overflows its trackable range.
+/// A fresh recording histogram with three significant figures and a validated
+/// two-minute latency range.
 pub fn new_histogram() -> Histogram<u64> {
-    Histogram::<u64>::new(3).expect("valid histogram sigfig")
+    Histogram::<u64>::new_with_bounds(1, HISTOGRAM_MAX_US, 3)
+        .expect("fixed valid HDR histogram bounds")
+}
+
+/// Record a latency without wrapping or silently clipping an outlier.
+pub fn record_latency(histogram: &mut Histogram<u64>, elapsed: Duration) {
+    let micros = elapsed.as_micros().max(1);
+    assert!(
+        micros <= u128::from(HISTOGRAM_MAX_US),
+        "successful latency {micros}us exceeds the validated HDR range"
+    );
+    histogram
+        .record(micros as u64)
+        .expect("validated latency fits the HDR histogram");
 }
 
 pub async fn run(client: Client, cfg: BenchConfig) -> Result<BenchReport, String> {
@@ -145,6 +166,7 @@ pub async fn run(client: Client, cfg: BenchConfig) -> Result<BenchReport, String
         total_batches,
         total_commands,
         errors: errors.load(Ordering::Relaxed),
+        elapsed_secs: wall,
         batches_per_sec,
         commands_per_sec: batches_per_sec * commands_per_batch as f64,
         p50_us: merged.value_at_quantile(0.50) as f64,
@@ -250,7 +272,11 @@ pub fn aggregate(reports: &[BenchReport]) -> AggregatedReport {
         p90_us: mean(&reports.iter().map(|r| r.p90_us).collect::<Vec<_>>()),
         p99_us: mean(&reports.iter().map(|r| r.p99_us).collect::<Vec<_>>()),
         p999_us: mean(&reports.iter().map(|r| r.p999_us).collect::<Vec<_>>()),
-        max_us: mean(&reports.iter().map(|r| r.max_us).collect::<Vec<_>>()),
+        max_us: reports
+            .iter()
+            .map(|report| report.max_us)
+            .fold(0.0_f64, f64::max),
+        samples: reports.to_vec(),
     }
 }
 
@@ -268,6 +294,7 @@ mod tests {
             total_batches,
             total_commands: total_batches,
             errors: 0,
+            elapsed_secs: total_batches as f64 / batches_per_sec,
             batches_per_sec,
             commands_per_sec: batches_per_sec,
             p50_us: p50,
@@ -303,32 +330,41 @@ mod tests {
         assert!((agg.batches_per_sec_stddev - (20000.0_f64 / 3.0).sqrt()).abs() < 1e-6);
         assert_eq!(agg.p50_us, 20.0);
         assert_eq!(agg.p90_us, 40.0);
+        assert_eq!(agg.max_us, 150.0);
     }
 
     #[test]
     fn histogram_percentiles_track_recorded_values() {
         let mut h = new_histogram();
-        for v in 1..=1000u64 {
-            h.saturating_record(v);
+        for value in [1, 2_047, 2_048, 2_049, 10_000, 1_000_000, 120_000_000] {
+            record_latency(&mut h, Duration::from_micros(value));
         }
-        // value_at_quantile is monotonic and within the recorded range.
+        // Values around the old auto-resize/clamping boundary remain monotonic.
+        assert_eq!(h.len(), 7);
         assert!(h.value_at_quantile(0.50) <= h.value_at_quantile(0.99));
         assert!(h.value_at_quantile(0.99) <= h.max());
-        assert!(h.max() >= 1000 - 1); // 3 sig figs -> tiny rounding
+        assert!(h.value_at_quantile(0.99) > 10_000);
+        assert!(h.max() >= 119_000_000); // 3 sig figs -> small rounding
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds the validated HDR range")]
+    fn histogram_rejects_latency_above_validated_range() {
+        record_latency(
+            &mut new_histogram(),
+            Duration::from_micros(HISTOGRAM_MAX_US + 1),
+        );
     }
 
     #[test]
     fn merged_histograms_sum_counts() {
         let mut a = new_histogram();
         let mut b = new_histogram();
-        for _ in 0..50 {
-            a.saturating_record(100);
-        }
-        for _ in 0..50 {
-            b.saturating_record(200);
-        }
+        record_latency(&mut a, Duration::from_micros(100));
+        record_latency(&mut b, Duration::from_micros(120_000_000));
         a.add(&b).unwrap();
-        assert_eq!(a.len(), 100);
+        assert_eq!(a.len(), 2);
+        assert!(a.max() >= 119_000_000);
     }
 
     #[test]

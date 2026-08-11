@@ -25,7 +25,7 @@ use redis_tower::MultiplexedClient;
 use redis_tower::commands::{Get as TGet, Set as TSet};
 use redis_tower_sentinel::{MultiplexedSentinelClient, SentinelClient};
 
-use crate::runner::{WorkerHandle, Workload, new_histogram};
+use crate::runner::{WorkerHandle, Workload, new_histogram, record_latency};
 
 #[derive(Clone, Copy, Debug)]
 pub enum ClientKind {
@@ -205,8 +205,7 @@ fn record(hist: &mut Histogram<u64>, ops: &AtomicU64, t0: Instant, warmup_deadli
     if Instant::now() < warmup_deadline {
         return;
     }
-    let us = t0.elapsed().as_micros() as u64;
-    hist.saturating_record(us);
+    record_latency(hist, t0.elapsed());
     ops.fetch_add(1, Ordering::Relaxed);
 }
 
