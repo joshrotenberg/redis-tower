@@ -116,6 +116,29 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 2
 fi
 
+refuse_cargo_configuration() {
+  local search_dir="$workspace_root"
+  local cargo_home_dir="${CARGO_HOME:-$HOME/.cargo}"
+  local config_path
+  for config_path in "$cargo_home_dir/config" "$cargo_home_dir/config.toml"; do
+    if [[ -e "$config_path" || -L "$config_path" ]]; then
+      echo "publication benchmarks refuse ambient Cargo configuration: $config_path" >&2
+      exit 2
+    fi
+  done
+  while :; do
+    for config_path in "$search_dir/.cargo/config" "$search_dir/.cargo/config.toml"; do
+      if [[ -e "$config_path" || -L "$config_path" ]]; then
+        echo "publication benchmarks refuse Cargo configuration: $config_path" >&2
+        exit 2
+      fi
+    done
+    [[ "$search_dir" == "/" ]] && break
+    search_dir="$(dirname "$search_dir")"
+  done
+}
+refuse_cargo_configuration
+
 base_env=(
   env -i
   "PATH=$PATH"
@@ -210,6 +233,7 @@ verify_source_provenance() {
     echo "Cargo.lock changed during the benchmark run" >&2
     exit 2
   fi
+  refuse_cargo_configuration
 }
 
 "${python_clean[@]}" "$manifest_tool" init \
@@ -218,21 +242,43 @@ verify_source_provenance() {
   --lock-sha256 "$lock_sha256" \
   --mode "$run_mode" \
   --fingerprint-file "$fingerprint_tmp"
-post_init_disk_mode="claim"
-if [[ $resume_candidate -eq 1 ]]; then
-  post_init_disk_mode="resume"
+
+if [[ -L "$result_dir/manifest.json" ]] \
+  || [[ -e "$result_dir/manifest.json" && ! -f "$result_dir/manifest.json" ]]; then
+  echo "completed manifest path is not a regular file" >&2
+  exit 2
 fi
+if [[ -f "$result_dir/manifest.json" ]]; then
+  "${python_clean[@]}" "$manifest_tool" verify \
+    --result-dir "$result_dir" \
+    --source-sha "$source_sha" \
+    --lock-sha256 "$lock_sha256" \
+    --mode "$run_mode" \
+    --fingerprint-file "$fingerprint_tmp"
+  echo "verified existing completed benchmark artifact set: $result_dir"
+  exit 0
+fi
+
 # The manifest initializer has now proved that state matches the exact current
-# source, lockfile, benchmark config, and execution fingerprint. Claim only an
-# empty target on a fresh run; a resume must validate the matching marker before
-# any bounded target allocation can reduce the workspace free-space requirement.
+# source, lockfile, benchmark config, and execution fingerprint. Claiming is
+# idempotent: it creates a missing/empty target after an interrupted init, or
+# validates an existing marker before resume credit is considered.
 "${python_clean[@]}" "$disk_budget_tool" \
-  --mode "$post_init_disk_mode" \
+  --mode claim \
   --workspace "$workspace_root" \
   --temporary "${TMPDIR:-/tmp}" \
   --result "$result_dir" \
   --target "$target_dir" \
   --state-file "$result_dir/.run-state.json"
+if [[ $resume_candidate -eq 1 ]]; then
+  "${python_clean[@]}" "$disk_budget_tool" \
+    --mode resume \
+    --workspace "$workspace_root" \
+    --temporary "${TMPDIR:-/tmp}" \
+    --result "$result_dir" \
+    --target "$target_dir" \
+    --state-file "$result_dir/.run-state.json"
+fi
 
 install_generated() {
   local final="$1"
@@ -255,22 +301,6 @@ install_generated() {
     mv "$candidate" "$final"
   fi
 }
-
-if [[ -L "$result_dir/manifest.json" ]] \
-  || [[ -e "$result_dir/manifest.json" && ! -f "$result_dir/manifest.json" ]]; then
-  echo "completed manifest path is not a regular file" >&2
-  exit 2
-fi
-if [[ -f "$result_dir/manifest.json" ]]; then
-  "${python_clean[@]}" "$manifest_tool" verify \
-    --result-dir "$result_dir" \
-    --source-sha "$source_sha" \
-    --lock-sha256 "$lock_sha256" \
-    --mode "$run_mode" \
-    --fingerprint-file "$fingerprint_tmp"
-  echo "verified existing completed benchmark artifact set: $result_dir"
-  exit 0
-fi
 
 fingerprint_candidate="$result_dir/execution-fingerprint.json.partial"
 if [[ -e "$fingerprint_candidate" || -L "$fingerprint_candidate" ]]; then
@@ -320,6 +350,7 @@ write_build_environment() {
     '{' \
     '  "schema_version": 1,' \
     '  "execution_environment": "cleared_then_allowlisted",' \
+    '  "cargo_configuration": "refused",' \
     '  "inherited_names_without_values": ["PATH", "HOME", "TMPDIR", "CARGO_HOME", "RUSTUP_HOME"],' \
     '  "normalized": {' \
     '    "CARGO_INCREMENTAL": "0",' \

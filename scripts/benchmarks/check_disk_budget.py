@@ -166,21 +166,45 @@ def _validate_target_marker(target: Path, expected: dict[str, Any]) -> None:
 
 def claim_target(target: Path, state_file: Path) -> None:
     expected = _target_marker(state_file)
+    marker_name = TARGET_MARKER_NAME
+    partial_name = marker_name + ".partial"
     if target.is_symlink():
         raise DiskBudgetError(f"owned target root must not be a symlink: {target}")
     if target.exists():
         if not target.is_dir():
             raise DiskBudgetError(f"owned target root must be a directory: {target}")
-        marker_path = target / TARGET_MARKER_NAME
+        marker_path = target / marker_name
         if marker_path.exists() or marker_path.is_symlink():
             _require_target_directory(target, expected["source_sha"])
             _validate_target_marker(target, expected)
             return
         try:
-            has_entries = next(target.iterdir(), None) is not None
+            entries = list(target.iterdir())
         except OSError as error:
             raise DiskBudgetError(f"cannot inspect isolated target: {error}") from error
-        if has_entries:
+        partial_path = target / partial_name
+        if entries == [partial_path]:
+            if partial_path.is_symlink() or not partial_path.is_file():
+                raise DiskBudgetError("incomplete isolated-target marker is not a regular file")
+            try:
+                partial = json.loads(partial_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as error:
+                raise DiskBudgetError(
+                    f"cannot read incomplete isolated-target marker: {error}"
+                ) from error
+            if partial != expected:
+                raise DiskBudgetError(
+                    "incomplete isolated-target marker does not match run state"
+                )
+            try:
+                os.replace(partial_path, marker_path)
+            except OSError as error:
+                raise DiskBudgetError(
+                    f"cannot promote incomplete isolated-target marker: {error}"
+                ) from error
+            _validate_target_marker(target, expected)
+            return
+        if entries:
             raise DiskBudgetError("refusing to claim a non-empty unmarked target directory")
     else:
         try:
@@ -188,8 +212,8 @@ def claim_target(target: Path, state_file: Path) -> None:
         except OSError as error:
             raise DiskBudgetError(f"cannot create isolated target directory: {error}") from error
     _require_target_directory(target, expected["source_sha"])
-    marker_path = target / TARGET_MARKER_NAME
-    partial_path = marker_path.with_name(marker_path.name + ".partial")
+    marker_path = target / marker_name
+    partial_path = target / partial_name
     if partial_path.exists() or partial_path.is_symlink():
         raise DiskBudgetError("incomplete isolated-target marker already exists")
     try:

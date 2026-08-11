@@ -27,6 +27,14 @@ PUBLICATION_CONFIG: dict[str, Any] = {
         "cargo_incremental": False,
         "isolated_target_directory": True,
     },
+    "runtime": {
+        "redis_server_binary": "redis-server from PATH",
+        "redis_stack_modules": False,
+        "redis_rs_response_timeout_ms": None,
+        "latency_histogram_max_us": 120_000_000,
+        "minimum_host_memory_bytes": 16 * 1024 * 1024 * 1024,
+        "cargo_configuration": "refused",
+    },
     "throughput": {
         "workloads": ["set", "get"],
         "standalone_clients": [
@@ -105,6 +113,11 @@ PUBLICATION_CONFIG: dict[str, Any] = {
         "error_backoff_ms": 1,
         "startup_timeout_secs": 30,
         "recovery_timeout_secs": 30,
+        "rss_stability": {
+            "tail_window_intervals": 10,
+            "max_growth_bytes": 16 * 1024 * 1024,
+            "max_growth_fraction": 0.5,
+        },
         "cluster_slot": 42,
         "cluster_node_timeout_ms": 1000,
         "standalone_port": 6481,
@@ -113,6 +126,7 @@ PUBLICATION_CONFIG: dict[str, Any] = {
 BUILD_ENVIRONMENT: dict[str, Any] = {
     "schema_version": 1,
     "execution_environment": "cleared_then_allowlisted",
+    "cargo_configuration": "refused",
     "inherited_names_without_values": [
         "PATH",
         "HOME",
@@ -267,6 +281,14 @@ def _load_fingerprint(
     if set(fingerprint) != {*expected_fields, "execution"}:
         raise ManifestError("execution fingerprint has missing or unexpected fields")
     _validate_execution(fingerprint.get("execution"))
+    minimum_memory = PUBLICATION_CONFIG["runtime"]["minimum_host_memory_bytes"]
+    if (
+        mode == "publication"
+        and fingerprint["execution"]["hardware"]["memory_bytes"] < minimum_memory
+    ):
+        raise ManifestError(
+            "publication execution host has less than the configured minimum memory"
+        )
     _assert_path_free(fingerprint)
     return fingerprint
 
@@ -606,6 +628,7 @@ def _validate_checkpoint_result(directory: Path, spec: dict[str, Any]) -> None:
                 workloads=("Set", "Get"),
                 payloads=(spec["payload_bytes"],),
                 concurrencies=(spec["concurrency"],),
+                measurement_secs=PUBLICATION_CONFIG["throughput"]["duration_secs"],
                 require_samples=True,
             )
         elif spec["kind"] == "cluster-throughput":
@@ -616,6 +639,7 @@ def _validate_checkpoint_result(directory: Path, spec: dict[str, Any]) -> None:
                 workloads=("Set", "Get"),
                 payloads=(spec["payload_bytes"],),
                 concurrencies=(spec["concurrency"],),
+                measurement_secs=PUBLICATION_CONFIG["throughput"]["duration_secs"],
                 require_samples=True,
             )
         else:
@@ -627,6 +651,11 @@ def _validate_checkpoint_result(directory: Path, spec: dict[str, Any]) -> None:
                 payloads=(spec["payload_bytes"],),
                 concurrencies=(spec["concurrency"],),
                 commands_per_batch=spec["depth"],
+                measurement_secs=(
+                    PUBLICATION_CONFIG["pipeline_concurrency_sweep"]["duration_secs"]
+                    if "concurrency-sweep" in spec.get("roles", [])
+                    else PUBLICATION_CONFIG["pipeline_depth_sweep"]["duration_secs"]
+                ),
                 require_samples=True,
             )
     except render_results.ResultError as error:
@@ -1020,6 +1049,27 @@ def verify(
         raise ManifestError("artifact inventory digest does not match the manifest")
 
 
+def verify_recorded(result_dir: Path) -> None:
+    """Verify a completed artifact set using only its recorded provenance."""
+    _require_result_directory(result_dir)
+    state = _read_json(result_dir / STATE_NAME)
+    if not isinstance(state, dict):
+        raise ManifestError("run state must be a JSON object")
+    try:
+        source_sha = state["source_sha"]
+        lock_sha256 = state["cargo_lock_sha256"]
+        mode = state["mode"]
+    except KeyError as error:
+        raise ManifestError(f"run state is missing {error.args[0]}") from error
+    verify(
+        result_dir,
+        source_sha,
+        mode,
+        lock_sha256,
+        result_dir / FINGERPRINT_NAME,
+    )
+
+
 def _add_provenance_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--result-dir", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
@@ -1033,6 +1083,8 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="command", required=True)
     for command in ("init", "verify"):
         _add_provenance_args(subparsers.add_parser(command))
+    verify_recorded_parser = subparsers.add_parser("verify-recorded")
+    verify_recorded_parser.add_argument("--result-dir", required=True, type=Path)
     finalize_parser = subparsers.add_parser("finalize")
     finalize_parser.add_argument("--result-dir", required=True, type=Path)
     digest_parser = subparsers.add_parser("fingerprint-digest")
@@ -1069,6 +1121,8 @@ def main() -> int:
                 args.lock_sha256,
                 args.fingerprint_file,
             )
+        elif args.command == "verify-recorded":
+            verify_recorded(args.result_dir)
         elif args.command == "finalize":
             finalize(args.result_dir)
         elif args.command == "fingerprint-digest":

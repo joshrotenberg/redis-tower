@@ -12,7 +12,7 @@ use redis_tower_cluster::{ClusterClient as TowerClusterClient, MultiplexedCluste
 use redis_tower_commands::{Get as TGet, Set as TSet, Wait as TWait};
 use redis_tower_test::cluster::{ClusterFixture, hash_slot};
 
-use crate::runner::{WorkerHandle, WorkerResult, Workload, new_histogram};
+use crate::runner::{WorkerHandle, WorkerResult, Workload, new_histogram, record_latency};
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -410,7 +410,7 @@ fn record_outcome(
         return;
     }
     if succeeded {
-        histogram.saturating_record(started.elapsed().as_micros() as u64);
+        record_latency(histogram, started.elapsed());
         context.batches.fetch_add(1, Ordering::Relaxed);
     } else {
         context.errors.fetch_add(1, Ordering::Relaxed);

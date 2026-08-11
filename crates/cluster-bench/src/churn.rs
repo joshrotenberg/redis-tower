@@ -21,7 +21,7 @@ use redis_tower_commands::{Get as TowerGet, Set as TowerSet};
 use serde::Serialize;
 
 use crate::clients::ClientKind;
-use crate::runner::{mean, new_histogram, std_dev};
+use crate::runner::{mean, new_histogram, record_latency, std_dev};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -693,8 +693,7 @@ impl PhaseStats {
     fn record(&mut self, success: bool, latency: Duration) {
         if success {
             self.successes += 1;
-            self.histogram
-                .saturating_record(latency.as_micros().clamp(1, u128::from(u64::MAX)) as u64);
+            record_latency(&mut self.histogram, latency);
         } else {
             self.errors += 1;
         }
@@ -703,7 +702,9 @@ impl PhaseStats {
     fn merge(&mut self, other: &Self) {
         self.successes += other.successes;
         self.errors += other.errors;
-        let _ = self.histogram.add(&other.histogram);
+        self.histogram
+            .add(&other.histogram)
+            .expect("matching churn latency histograms merge");
     }
 
     fn report(&self) -> PhaseReport {
@@ -927,12 +928,18 @@ where
     phase.store(PHASE_STOP, Ordering::Release);
 
     let mut runs = Vec::with_capacity(client_handles.len());
+    let mut worker_errors = Vec::new();
     let join_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     for running in client_handles {
         let mut merged = WorkerStats::new();
         for worker in running.workers {
-            let stats = finalize_worker(worker, join_deadline, run_started).await;
-            merged.merge(&stats);
+            match finalize_worker(worker, join_deadline, run_started).await {
+                Ok(stats) => merged.merge(&stats),
+                Err(error) => worker_errors.push(format!(
+                    "{} churn worker failed: {error}",
+                    running.kind.as_str()
+                )),
+            }
         }
         let after_metrics = running.client.metrics();
         running.client.shutdown().await;
@@ -957,6 +964,10 @@ where
         });
     }
 
+    if !worker_errors.is_empty() {
+        return Err(worker_errors.join("; "));
+    }
+
     Ok(runs
         .into_iter()
         .map(|run| build_report(scenario, config, event_started_ns, &event, run))
@@ -977,13 +988,19 @@ async fn finalize_worker(
     worker: RunningWorker,
     join_deadline: tokio::time::Instant,
     run_started: Instant,
-) -> WorkerStats {
+) -> Result<WorkerStats, String> {
     let RunningWorker { state, mut handle } = worker;
     let interrupted = if handle.is_finished() {
-        handle.await.is_err()
+        handle
+            .await
+            .map_err(|error| format!("task terminated unexpectedly: {error}"))?;
+        false
     } else {
         match tokio::time::timeout_at(join_deadline, &mut handle).await {
-            Ok(result) => result.is_err(),
+            Ok(result) => {
+                result.map_err(|error| format!("task terminated unexpectedly: {error}"))?;
+                false
+            }
             Err(_) => {
                 handle.abort();
                 let _ = handle.await;
@@ -1000,7 +1017,7 @@ async fn finalize_worker(
         // dropped operation in the phase it crossed into.
         state.abort_in_flight(now);
     }
-    state.take_stats()
+    Ok(state.take_stats())
 }
 
 fn build_report(
@@ -1137,13 +1154,14 @@ mod tests {
     #[test]
     fn latency_report_includes_tail_percentiles() {
         let mut histogram = new_histogram();
-        for value in 1..=1000 {
-            histogram.saturating_record(value);
+        for value in [1, 1_000, 10_000, 1_000_000] {
+            record_latency(&mut histogram, Duration::from_micros(value));
         }
         let report = LatencyReport::from_histogram(&histogram);
-        assert_eq!(report.samples, 1000);
+        assert_eq!(report.samples, 4);
         assert!(report.p99_us <= report.p999_us);
         assert!(report.p999_us <= report.max_us);
+        assert!(report.max_us >= 999_000.0);
     }
 
     #[test]
@@ -1321,12 +1339,32 @@ mod tests {
             tokio::time::Instant::now(),
             run_started,
         )
-        .await;
+        .await
+        .unwrap();
 
         assert_eq!(stats.stable.successes, 1);
         assert_eq!(stats.churn.errors, 1);
         assert_eq!(stats.post_trigger_events.len(), 1);
         assert!(!stats.post_trigger_events[0].success);
+    }
+
+    #[tokio::test]
+    async fn panicking_worker_is_reported() {
+        let state = Arc::new(Mutex::new(WorkerState::new()));
+        let handle = tokio::spawn(async { panic!("synthetic worker panic") });
+        let result = finalize_worker(
+            RunningWorker { state, handle },
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            Instant::now(),
+        )
+        .await;
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("panicking worker unexpectedly finalized successfully"),
+        };
+
+        assert!(error.contains("task terminated unexpectedly"));
+        assert!(error.contains("synthetic worker panic"));
     }
 
     #[test]

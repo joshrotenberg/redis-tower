@@ -123,6 +123,10 @@ async fn run_throughput(json: bool) -> Result<(), String> {
         base_port + 2
     );
     let cluster = RedisCluster::builder()
+        // Match the executable fingerprinted by run_publication.sh and keep
+        // every node free of Redis Stack modules.
+        .redis_server_bin("redis-server")
+        .with_node_config(|context| context.server.no_stack_modules())
         .masters(3)
         .replicas_per_master(0)
         .base_port(base_port)
@@ -299,6 +303,7 @@ fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
                 "payload_bytes": r.payload_bytes,
                 "concurrency": r.concurrency,
                 "runs": r.runs,
+                "commands_per_batch": 1,
                 // Compatibility aliases retain the v1 command/op semantics.
                 "total_ops": r.total_commands,
                 "ops_per_sec_mean": r.commands_per_sec_mean,
@@ -310,6 +315,7 @@ fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
                 "errors": r.errors,
                 "commands_per_sec_mean": r.commands_per_sec_mean,
                 "commands_per_sec_stddev": r.commands_per_sec_stddev,
+                "latency_unit": "command",
                 "p50_us": r.p50_us,
                 "p90_us": r.p90_us,
                 "p99_us": r.p99_us,
@@ -324,8 +330,11 @@ fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
                         .map(|(index, sample)| {
                             serde_json::json!({
                                 "run": index + 1,
+                                "total_batches": sample.total_commands,
                                 "total_commands": sample.total_commands,
                                 "errors": sample.errors,
+                                "elapsed_secs": sample.elapsed_secs,
+                                "batches_per_sec": sample.commands_per_sec,
                                 "commands_per_sec": sample.commands_per_sec,
                                 "p50_us": sample.p50_us,
                                 "p90_us": sample.p90_us,
@@ -862,6 +871,7 @@ mod tests {
                 payload_bytes: 1024,
                 total_commands: 42,
                 errors: 1,
+                elapsed_secs: 42.0 / 123.0,
                 commands_per_sec: 123.0,
                 p50_us: 10.0,
                 p90_us: 20.0,
@@ -891,6 +901,7 @@ mod tests {
                 payload_bytes: 16,
                 total_commands: 10,
                 errors: 0,
+                elapsed_secs: 0.1,
                 commands_per_sec: 100.0,
                 p50_us: 10.0,
                 p90_us: 20.0,
@@ -905,6 +916,7 @@ mod tests {
                 payload_bytes: 16,
                 total_commands: 20,
                 errors: 0,
+                elapsed_secs: 0.1,
                 commands_per_sec: 200.0,
                 p50_us: 11.0,
                 p90_us: 21.0,

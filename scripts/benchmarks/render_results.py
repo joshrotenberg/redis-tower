@@ -15,6 +15,10 @@ from typing import Any
 PAYLOADS = (16, 64, 1024, 16 * 1024, 100 * 1024)
 CONCURRENCIES = (1, 8, 32, 128)
 PIPELINE_DEPTHS = (10, 100, 1000)
+PUBLICATION_MEASUREMENT_SECS = 10.0
+SOAK_RSS_TAIL_WINDOW_INTERVALS = 10
+SOAK_RSS_MAX_GROWTH_BYTES = 16 * 1024 * 1024
+SOAK_RSS_MAX_GROWTH_FRACTION = 0.5
 STANDALONE_CLIENTS = (
     "redis-tower",
     "redis-tower-mux",
@@ -30,6 +34,14 @@ CLUSTER_CLIENTS = (
     "redis-rs-async",
     "fred",
 )
+CLIENT_VARIANTS = {
+    "redis-tower": "RedisTower",
+    "redis-tower-mux": "RedisTowerMux",
+    "redis-rs-sync": "RedisRsSync",
+    "redis-rs-async": "RedisRsAsync",
+    "redis-rs-manager": "RedisRsManager",
+    "fred": "Fred",
+}
 COLORS = (
     "#7b2cbf",
     "#e63946",
@@ -76,6 +88,7 @@ def validate_matrix(
     concurrencies: Sequence[int] = CONCURRENCIES,
     runs: int = 3,
     commands_per_batch: int | None = None,
+    measurement_secs: float | None = None,
     require_samples: bool = False,
 ) -> None:
     expected = {
@@ -100,6 +113,12 @@ def validate_matrix(
         actual.add(key)
         if row.get("schema_version") != 2:
             raise ResultError(f"{name} cell {key!r} is not schema version 2")
+        expected_client = CLIENT_VARIANTS.get(row["client_id"], row["client_id"])
+        if row.get("client") != expected_client:
+            raise ResultError(
+                f"{name} cell {key!r} has client={row.get('client')!r}, "
+                f"expected {expected_client!r}"
+            )
         if row.get("runs") != runs:
             raise ResultError(
                 f"{name} cell {key!r} has runs={row.get('runs')!r}, expected {runs}"
@@ -108,6 +127,41 @@ def validate_matrix(
             raise ResultError(f"{name} cell {key!r} reports errors={row.get('errors')!r}")
         if type(row.get("total_commands")) is not int or row["total_commands"] <= 0:
             raise ResultError(f"{name} cell {key!r} has no successful commands")
+        expected_commands_per_batch = commands_per_batch or 1
+        if row.get("commands_per_batch") != expected_commands_per_batch:
+            raise ResultError(
+                f"{name} cell {key!r} has commands_per_batch="
+                f"{row.get('commands_per_batch')!r}, expected {expected_commands_per_batch}"
+            )
+        expected_latency_unit = "batch" if row["workload"] == "Pipeline" else "command"
+        if row.get("latency_unit") != expected_latency_unit:
+            raise ResultError(
+                f"{name} cell {key!r} has latency_unit={row.get('latency_unit')!r}, "
+                f"expected {expected_latency_unit!r}"
+            )
+        total_batches = row.get("total_batches")
+        if type(total_batches) is not int or total_batches <= 0:
+            raise ResultError(f"{name} cell {key!r} has no successful batches")
+        if row["total_commands"] != total_batches * expected_commands_per_batch:
+            raise ResultError(f"{name} cell {key!r} batch/command totals disagree")
+        if row.get("total_ops") != total_batches:
+            raise ResultError(f"{name} cell {key!r} legacy total_ops alias disagrees")
+        for metric in ("batches_per_sec_mean", "batches_per_sec_stddev"):
+            value = row.get(metric)
+            if not _finite_number(value) or float(value) < 0:
+                raise ResultError(f"{name} cell {key!r} has invalid {metric}={value!r}")
+        if not _close(
+            row.get("commands_per_sec_mean"),
+            float(row["batches_per_sec_mean"]) * expected_commands_per_batch,
+        ) or not _close(
+            row.get("commands_per_sec_stddev"),
+            float(row["batches_per_sec_stddev"]) * expected_commands_per_batch,
+        ):
+            raise ResultError(f"{name} cell {key!r} aggregate batch/command rates disagree")
+        if not _close(row.get("ops_per_sec_mean"), float(row["batches_per_sec_mean"])) or not _close(
+            row.get("ops_per_sec_stddev"), float(row["batches_per_sec_stddev"])
+        ):
+            raise ResultError(f"{name} cell {key!r} legacy ops/s aliases disagree")
         for metric in (
             "commands_per_sec_mean",
             "commands_per_sec_stddev",
@@ -128,13 +182,15 @@ def validate_matrix(
             <= float(row["max_us"])
         ):
             raise ResultError(f"{name} cell {key!r} has unordered aggregate quantiles")
-        if commands_per_batch is not None and row.get("commands_per_batch") != commands_per_batch:
-            raise ResultError(
-                f"{name} cell {key!r} has commands_per_batch="
-                f"{row.get('commands_per_batch')!r}, expected {commands_per_batch}"
-            )
         if require_samples:
-            validate_samples(row, name=name, key=key, runs=runs)
+            validate_samples(
+                row,
+                name=name,
+                key=key,
+                runs=runs,
+                commands_per_batch=expected_commands_per_batch,
+                measurement_secs=measurement_secs,
+            )
 
     missing = sorted(expected - actual)
     extra = sorted(actual - expected)
@@ -166,6 +222,8 @@ def validate_samples(
     name: str,
     key: tuple[str, str, int, int],
     runs: int,
+    commands_per_batch: int,
+    measurement_secs: float | None,
 ) -> None:
     samples = row.get("samples")
     if not isinstance(samples, list) or len(samples) != runs:
@@ -182,17 +240,44 @@ def validate_samples(
         metric: [] for metric in ("p50_us", "p90_us", "p99_us", "p999_us", "max_us")
     }
     total_commands = 0
+    total_batches = 0
     total_errors = 0
+    batch_rates: list[float] = []
     for sample in samples:
+        batches = sample.get("total_batches")
         commands = sample.get("total_commands")
         errors = sample.get("errors")
+        elapsed = sample.get("elapsed_secs")
+        batch_rate = sample.get("batches_per_sec")
         rate = sample.get("commands_per_sec")
+        if type(batches) is not int or batches <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid raw batch count")
         if type(commands) is not int or commands <= 0:
             raise ResultError(f"{name} cell {key!r} has invalid raw command count")
         if type(errors) is not int or errors != 0:
             raise ResultError(f"{name} cell {key!r} has errors in a raw sample")
         if not _finite_number(rate) or float(rate) <= 0:
             raise ResultError(f"{name} cell {key!r} has invalid raw command rate")
+        if not _finite_number(batch_rate) or float(batch_rate) <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid raw batch rate")
+        if not _finite_number(elapsed) or float(elapsed) <= 0:
+            raise ResultError(f"{name} cell {key!r} has invalid raw elapsed time")
+        if measurement_secs is not None:
+            lower = measurement_secs * 0.95
+            upper = measurement_secs + max(5.0, measurement_secs * 0.5)
+            if not lower <= float(elapsed) <= upper:
+                raise ResultError(
+                    f"{name} cell {key!r} raw elapsed time {elapsed!r} is outside "
+                    f"the expected {lower:.3f}..{upper:.3f}s measurement window"
+                )
+        if commands != batches * commands_per_batch:
+            raise ResultError(f"{name} cell {key!r} raw batch/command counts disagree")
+        if not _close(float(batch_rate), batches / float(elapsed)) or not _close(
+            float(rate), commands / float(elapsed)
+        ):
+            raise ResultError(f"{name} cell {key!r} raw rates do not match counts/time")
+        if not _close(float(rate), float(batch_rate) * commands_per_batch):
+            raise ResultError(f"{name} cell {key!r} raw batch/command rates disagree")
         for metric in ("p50_us", "p90_us", "p99_us", "p999_us", "max_us"):
             if not _finite_number(sample.get(metric)) or float(sample[metric]) < 0:
                 raise ResultError(
@@ -206,8 +291,10 @@ def validate_samples(
             <= float(sample["max_us"])
         ):
             raise ResultError(f"{name} cell {key!r} has unordered raw quantiles")
+        total_batches += batches
         total_commands += commands
         total_errors += errors
+        batch_rates.append(float(batch_rate))
         rates.append(float(rate))
         for metric in latency_samples:
             latency_samples[metric].append(float(sample[metric]))
@@ -216,42 +303,26 @@ def validate_samples(
     expected_stddev = _population_stddev(rates)
     if row.get("total_commands") != total_commands or row.get("errors") != total_errors:
         raise ResultError(f"{name} cell {key!r} aggregate counters do not match samples")
+    if row.get("total_batches") != total_batches:
+        raise ResultError(f"{name} cell {key!r} batch total does not match samples")
     if not _close(row.get("commands_per_sec_mean"), expected_mean):
         raise ResultError(f"{name} cell {key!r} mean cannot be recomputed from samples")
     if not _close(row.get("commands_per_sec_stddev"), expected_stddev):
         raise ResultError(f"{name} cell {key!r} stddev cannot be recomputed from samples")
     for metric, values in latency_samples.items():
-        if not _close(row.get(metric), sum(values) / runs):
-            raise ResultError(f"{name} cell {key!r} {metric} does not match samples")
+        expected = max(values) if metric == "max_us" else sum(values) / runs
+        if not _close(row.get(metric), expected):
+            aggregation = "maximum" if metric == "max_us" else "mean"
+            raise ResultError(
+                f"{name} cell {key!r} {metric} does not match sample {aggregation}"
+            )
 
-    if "total_batches" in samples[0]:
-        batches = [sample.get("total_batches") for sample in samples]
-        batch_rates = [sample.get("batches_per_sec") for sample in samples]
-        if not all(type(value) is int and value > 0 for value in batches):
-            raise ResultError(f"{name} cell {key!r} has invalid raw batch counts")
-        if not all(_finite_number(value) and float(value) > 0 for value in batch_rates):
-            raise ResultError(f"{name} cell {key!r} has invalid raw batch rates")
-        numeric_batch_rates = [float(value) for value in batch_rates]
-        commands_per_batch = row.get("commands_per_batch")
-        if type(commands_per_batch) is not int or commands_per_batch <= 0:
-            raise ResultError(f"{name} cell {key!r} has invalid commands_per_batch")
-        for sample, batches_count, batch_rate in zip(
-            samples, batches, numeric_batch_rates, strict=True
-        ):
-            if sample["total_commands"] != batches_count * commands_per_batch:
-                raise ResultError(f"{name} cell {key!r} raw batch/command counts disagree")
-            if not _close(
-                sample["commands_per_sec"], batch_rate * commands_per_batch
-            ):
-                raise ResultError(f"{name} cell {key!r} raw batch/command rates disagree")
-        if row.get("total_batches") != sum(batches):
-            raise ResultError(f"{name} cell {key!r} batch total does not match samples")
-        if not _close(row.get("batches_per_sec_mean"), sum(numeric_batch_rates) / runs):
-            raise ResultError(f"{name} cell {key!r} batch mean does not match samples")
-        if not _close(
-            row.get("batches_per_sec_stddev"), _population_stddev(numeric_batch_rates)
-        ):
-            raise ResultError(f"{name} cell {key!r} batch stddev does not match samples")
+    if not _close(row.get("batches_per_sec_mean"), sum(batch_rates) / runs):
+        raise ResultError(f"{name} cell {key!r} batch mean does not match samples")
+    if not _close(
+        row.get("batches_per_sec_stddev"), _population_stddev(batch_rates)
+    ):
+        raise ResultError(f"{name} cell {key!r} batch stddev does not match samples")
 
 
 def _headline(
@@ -474,6 +545,8 @@ def validate_soak(path: Path) -> dict[str, Any]:
     lifecycle_fields = ("reconnects", "recoveries", "chaos_injections")
     lifecycle_totals = {field: 0 for field in lifecycle_fields}
     lifecycle_events: dict[str, list[int]] = {field: [] for field in lifecycle_fields}
+    error_intervals: list[int] = []
+    rss_samples: list[int] = []
     previous_elapsed = 0.0
     for index, record in enumerate(intervals, start=1):
         context = f"soak interval {index}"
@@ -490,6 +563,10 @@ def validate_soak(path: Path) -> dict[str, Any]:
             raise ResultError(f"{context} violates operations=successes")
         if record["attempts"] != record["successes"] + record["errors"]:
             raise ResultError(f"{context} violates attempts=successes+errors")
+        if record["successes"] == 0:
+            raise ResultError(f"{context} has no successful operations")
+        if record["errors"] > 0:
+            error_intervals.append(index)
 
         elapsed = record.get("elapsed_secs")
         window = record.get("window_secs")
@@ -522,6 +599,7 @@ def validate_soak(path: Path) -> dict[str, Any]:
         _validate_quantiles(record, context=context)
         if not _nonnegative_integer(record.get("rss_bytes")) or record["rss_bytes"] == 0:
             raise ResultError(f"{context} has no positive RSS sample")
+        rss_samples.append(record["rss_bytes"])
 
         for field in lifecycle_fields:
             delta = record.get(field)
@@ -564,6 +642,28 @@ def validate_soak(path: Path) -> dict[str, Any]:
         )
     if reconnect_index != recovery_index:
         raise ResultError("soak reconnect and recovery accounting is not paired")
+    allowed_error_intervals = set(range(chaos_index, recovery_index + 1))
+    unexpected_error_intervals = [
+        index for index in error_intervals if index not in allowed_error_intervals
+    ]
+    if unexpected_error_intervals:
+        raise ResultError(
+            "soak has errors outside the chaos/recovery window in intervals "
+            f"{unexpected_error_intervals[:8]!r}"
+        )
+    rss_window = SOAK_RSS_TAIL_WINDOW_INTERVALS
+    rss_head_mean = sum(rss_samples[:rss_window]) / rss_window
+    rss_tail_mean = sum(rss_samples[-rss_window:]) / rss_window
+    allowed_rss_growth = max(
+        SOAK_RSS_MAX_GROWTH_BYTES,
+        rss_head_mean * SOAK_RSS_MAX_GROWTH_FRACTION,
+    )
+    if rss_tail_mean - rss_head_mean > allowed_rss_growth:
+        raise ResultError(
+            "soak RSS tail mean grew beyond the stability bound: "
+            f"head={rss_head_mean:.0f}, tail={rss_tail_mean:.0f}, "
+            f"allowed_growth={allowed_rss_growth:.0f} bytes"
+        )
 
     if summary.get("schema_version") != 1 or summary.get("record_type") != "summary":
         raise ResultError("soak artifact does not end with a schema-1 summary")
@@ -655,6 +755,7 @@ def main() -> int:
         name="standalone",
         clients=STANDALONE_CLIENTS,
         workloads=("Set", "Get"),
+        measurement_secs=PUBLICATION_MEASUREMENT_SECS,
         require_samples=True,
     )
     validate_matrix(
@@ -662,6 +763,7 @@ def main() -> int:
         name="cluster",
         clients=CLUSTER_CLIENTS,
         workloads=("Set", "Get"),
+        measurement_secs=PUBLICATION_MEASUREMENT_SECS,
         require_samples=True,
     )
 
@@ -678,6 +780,7 @@ def main() -> int:
             workloads=("Pipeline",),
             concurrencies=(1,),
             commands_per_batch=depth,
+            measurement_secs=PUBLICATION_MEASUREMENT_SECS,
             require_samples=True,
         )
 
@@ -692,6 +795,7 @@ def main() -> int:
         payloads=(1024,),
         concurrencies=CONCURRENCIES,
         commands_per_batch=100,
+        measurement_secs=PUBLICATION_MEASUREMENT_SECS,
         require_samples=True,
     )
 

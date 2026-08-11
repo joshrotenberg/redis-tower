@@ -9,7 +9,9 @@ use hdrhistogram::Histogram;
 use redis_tower::commands::{Get as TGet, Set as TSet};
 use redis_tower::{MultiplexedClient, Pipeline, RedisClient, RedisConnection};
 
-use crate::runner::{WorkerHandle, WorkerResult, Workload, new_histogram};
+use crate::runner::{WorkerHandle, WorkerResult, Workload, new_histogram, record_latency};
+
+const MAX_FAILURE_DIAGNOSTICS: u64 = 8;
 
 #[allow(clippy::enum_variant_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,16 +95,21 @@ impl Client {
                 .map_err(|error| error.to_string()),
             ClientKind::RedisRsAsync => {
                 let client = redis::Client::open(url).map_err(|error| error.to_string())?;
+                // The redis-rs default is 500 ms. At 128-way concurrency over
+                // one multiplexed connection, 100 KiB replies can legitimately
+                // queue longer than that. Disable the client-specific timeout
+                // so every adapter measures completed operations consistently.
+                let config = redis::AsyncConnectionConfig::new().set_response_timeout(None);
                 let connection = client
-                    .get_multiplexed_async_connection()
+                    .get_multiplexed_async_connection_with_config(&config)
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(Self::RedisRsAsync(connection))
             }
             ClientKind::RedisRsManager => {
                 let client = redis::Client::open(url).map_err(|error| error.to_string())?;
-                let manager = client
-                    .get_connection_manager()
+                let config = redis::aio::ConnectionManagerConfig::new().set_response_timeout(None);
+                let manager = redis::aio::ConnectionManager::new_with_config(client, config)
                     .await
                     .map_err(|error| error.to_string())?;
                 Ok(Self::RedisRsManager(manager))
@@ -388,14 +395,14 @@ async fn redis_rs_async_loop(
         let key = next_key(sequence);
         sequence = sequence.wrapping_add(1);
         let started = Instant::now();
-        let succeeded = match context.workload {
+        let outcome = match context.workload {
             Workload::Set => client
                 .set::<_, _, ()>(&key, context.payload.as_ref())
                 .await
-                .is_ok(),
-            Workload::Get => matches!(
+                .map_err(|error| redis_error_detail("SET", &error)),
+            Workload::Get => validate_redis_get(
                 client.get::<_, Option<Vec<u8>>>(&key).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                context.payload.len(),
             ),
             Workload::Pipeline => {
                 let mut pipeline = redis::Pipeline::new();
@@ -405,10 +412,16 @@ async fn redis_rs_async_loop(
                         context.payload.as_ref(),
                     );
                 }
-                pipeline.query_async::<()>(&mut client).await.is_ok()
+                pipeline
+                    .query_async::<()>(&mut client)
+                    .await
+                    .map_err(|error| redis_error_detail("PIPELINE", &error))
             }
         };
-        record_outcome(&mut histogram, &context, started, succeeded);
+        match outcome {
+            Ok(()) => record_outcome(&mut histogram, &context, started, true),
+            Err(detail) => record_failure(&context, "redis-rs-async", started, &key, &detail),
+        }
     }
     Ok(histogram)
 }
@@ -425,14 +438,14 @@ async fn redis_rs_manager_loop(
         let key = next_key(sequence);
         sequence = sequence.wrapping_add(1);
         let started = Instant::now();
-        let succeeded = match context.workload {
+        let outcome = match context.workload {
             Workload::Set => client
                 .set::<_, _, ()>(&key, context.payload.as_ref())
                 .await
-                .is_ok(),
-            Workload::Get => matches!(
+                .map_err(|error| redis_error_detail("SET", &error)),
+            Workload::Get => validate_redis_get(
                 client.get::<_, Option<Vec<u8>>>(&key).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                context.payload.len(),
             ),
             Workload::Pipeline => {
                 let mut pipeline = redis::Pipeline::new();
@@ -442,10 +455,16 @@ async fn redis_rs_manager_loop(
                         context.payload.as_ref(),
                     );
                 }
-                pipeline.query_async::<()>(&mut client).await.is_ok()
+                pipeline
+                    .query_async::<()>(&mut client)
+                    .await
+                    .map_err(|error| redis_error_detail("PIPELINE", &error))
             }
         };
-        record_outcome(&mut histogram, &context, started, succeeded);
+        match outcome {
+            Ok(()) => record_outcome(&mut histogram, &context, started, true),
+            Err(detail) => record_failure(&context, "redis-rs-manager", started, &key, &detail),
+        }
     }
     Ok(histogram)
 }
@@ -544,11 +563,51 @@ fn record_outcome(
         return;
     }
     if succeeded {
-        histogram.saturating_record(started.elapsed().as_micros() as u64);
+        record_latency(histogram, started.elapsed());
         context.batches.fetch_add(1, Ordering::Relaxed);
     } else {
         context.errors.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn record_failure(
+    context: &WorkerContext,
+    client: &str,
+    started: Instant,
+    key: &str,
+    detail: &str,
+) {
+    if Instant::now() < context.warmup_deadline {
+        return;
+    }
+    let error_index = context.errors.fetch_add(1, Ordering::Relaxed) + 1;
+    if error_index <= MAX_FAILURE_DIAGNOSTICS {
+        eprintln!(
+            "{client} failure {error_index}: worker={} workload={:?} key={key:?} elapsed_us={} detail={detail}",
+            context.worker_id,
+            context.workload,
+            started.elapsed().as_micros(),
+        );
+    }
+}
+
+fn validate_redis_get(
+    result: redis::RedisResult<Option<Vec<u8>>>,
+    expected_len: usize,
+) -> Result<(), String> {
+    match result {
+        Ok(Some(value)) if value.len() == expected_len => Ok(()),
+        Ok(Some(value)) => Err(format!(
+            "GET returned {} bytes; expected {expected_len}",
+            value.len()
+        )),
+        Ok(None) => Err("GET returned no value".to_owned()),
+        Err(error) => Err(redis_error_detail("GET", &error)),
+    }
+}
+
+fn redis_error_detail(operation: &str, error: &redis::RedisError) -> String {
+    format!("{operation} redis error {:?}: {error}", error.kind())
 }
 
 /// Populate every benchmark key and fail on the first rejected write.
@@ -585,5 +644,18 @@ mod tests {
         for kind in ClientKind::DEFAULTS {
             assert_eq!(ClientKind::parse(kind.as_str()), Some(kind));
         }
+    }
+
+    #[test]
+    fn redis_get_validation_distinguishes_missing_and_wrong_length_values() {
+        assert!(validate_redis_get(Ok(Some(vec![0; 4])), 4).is_ok());
+        assert_eq!(
+            validate_redis_get(Ok(None), 4).unwrap_err(),
+            "GET returned no value"
+        );
+        assert_eq!(
+            validate_redis_get(Ok(Some(vec![0; 3])), 4).unwrap_err(),
+            "GET returned 3 bytes; expected 4"
+        );
     }
 }

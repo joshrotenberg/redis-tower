@@ -44,14 +44,17 @@ def record(
     *,
     commands_per_batch: int = 1,
 ) -> dict[str, object]:
-    command_rates = [float(100 * concurrency - 1), float(100 * concurrency), float(100 * concurrency + 1)]
-    batch_rates = [rate / commands_per_batch for rate in command_rates]
+    elapsed_values = [10.1, 10.0, 9.9]
+    batches_per_run = 100 * concurrency
+    batch_rates = [batches_per_run / elapsed for elapsed in elapsed_values]
+    command_rates = [rate * commands_per_batch for rate in batch_rates]
     samples = [
         {
             "run": index,
-            "total_batches": 100,
-            "total_commands": 100 * commands_per_batch,
+            "total_batches": batches_per_run,
+            "total_commands": batches_per_run * commands_per_batch,
             "errors": 0,
+            "elapsed_secs": elapsed,
             "batches_per_sec": batch_rate,
             "commands_per_sec": command_rate,
             "p50_us": 10.0,
@@ -60,26 +63,35 @@ def record(
             "p999_us": 40.0,
             "max_us": 50.0,
         }
-        for index, (batch_rate, command_rate) in enumerate(
-            zip(batch_rates, command_rates, strict=True), start=1
+        for index, (elapsed, batch_rate, command_rate) in enumerate(
+            zip(elapsed_values, batch_rates, command_rates, strict=True), start=1
         )
     ]
-    stddev = math.sqrt(2.0 / 3.0)
+    batch_mean = sum(batch_rates) / len(batch_rates)
+    batch_stddev = math.sqrt(
+        sum((rate - batch_mean) ** 2 for rate in batch_rates) / len(batch_rates)
+    )
+    total_batches = batches_per_run * len(samples)
     return {
         "schema_version": 2,
+        "client": render_results.CLIENT_VARIANTS.get(client, client),
         "client_id": client,
         "workload": workload,
         "payload_bytes": payload,
         "concurrency": concurrency,
         "runs": 3,
         "commands_per_batch": commands_per_batch,
-        "total_batches": 300,
-        "total_commands": 300 * commands_per_batch,
+        "latency_unit": "batch" if workload == "Pipeline" else "command",
+        "total_ops": total_batches,
+        "total_batches": total_batches,
+        "total_commands": total_batches * commands_per_batch,
         "errors": 0,
-        "batches_per_sec_mean": 100.0 * concurrency / commands_per_batch,
-        "batches_per_sec_stddev": stddev / commands_per_batch,
-        "commands_per_sec_mean": float(100 * concurrency),
-        "commands_per_sec_stddev": stddev,
+        "batches_per_sec_mean": batch_mean,
+        "batches_per_sec_stddev": batch_stddev,
+        "ops_per_sec_mean": batch_mean,
+        "ops_per_sec_stddev": batch_stddev,
+        "commands_per_sec_mean": batch_mean * commands_per_batch,
+        "commands_per_sec_stddev": batch_stddev * commands_per_batch,
         "p50_us": 10.0,
         "p90_us": 20.0,
         "p99_us": 30.0,
@@ -334,7 +346,7 @@ class ResultTests(unittest.TestCase):
 
         broken = copy.deepcopy(rows)
         broken[0]["samples"][0]["commands_per_sec"] = 99_999.0
-        with self.assertRaisesRegex(render_results.ResultError, "mean cannot be recomputed"):
+        with self.assertRaisesRegex(render_results.ResultError, "rates do not match counts/time"):
             render_results.validate_matrix(
                 broken,
                 name="fixture",
@@ -342,6 +354,106 @@ class ResultTests(unittest.TestCase):
                 workloads=("Get", "Set"),
                 payloads=(16, 64),
                 concurrencies=(1, 8),
+                require_samples=True,
+            )
+
+    def test_matrix_rejects_schema_alias_and_unit_corruption(self) -> None:
+        mutations = (
+            ("client", lambda row: row.__setitem__("client", "WrongClient")),
+            ("latency_unit", lambda row: row.__setitem__("latency_unit", "batch")),
+            (
+                "commands_per_batch",
+                lambda row: row.__setitem__("commands_per_batch", 2),
+            ),
+            ("total_ops", lambda row: row.__setitem__("total_ops", 299)),
+            (
+                "raw batch count",
+                lambda row: row["samples"][0].pop("total_batches"),
+            ),
+        )
+        for expected_error, mutate in mutations:
+            with self.subTest(expected_error=expected_error):
+                row = record("a", "Get", 16, 1)
+                mutate(row)
+                with self.assertRaisesRegex(render_results.ResultError, expected_error):
+                    render_results.validate_matrix(
+                        [row],
+                        name="fixture",
+                        clients=("a",),
+                        workloads=("Get",),
+                        payloads=(16,),
+                        concurrencies=(1,),
+                        require_samples=True,
+                    )
+
+    def test_matrix_recomputes_rates_and_checks_measurement_window(self) -> None:
+        row = record("a", "Get", 16, 1)
+        render_results.validate_matrix(
+            [row],
+            name="fixture",
+            clients=("a",),
+            workloads=("Get",),
+            payloads=(16,),
+            concurrencies=(1,),
+            measurement_secs=10.0,
+            require_samples=True,
+        )
+
+        broken_rate = copy.deepcopy(row)
+        broken_rate["samples"][0]["elapsed_secs"] = 0.5
+        with self.assertRaisesRegex(render_results.ResultError, "rates do not match counts/time"):
+            render_results.validate_matrix(
+                [broken_rate],
+                name="fixture",
+                clients=("a",),
+                workloads=("Get",),
+                payloads=(16,),
+                concurrencies=(1,),
+                require_samples=True,
+            )
+
+        implausible_window = copy.deepcopy(row)
+        sample = implausible_window["samples"][0]
+        sample["elapsed_secs"] = 20.0
+        sample["batches_per_sec"] = sample["total_batches"] / 20.0
+        sample["commands_per_sec"] = sample["total_commands"] / 20.0
+        with self.assertRaisesRegex(render_results.ResultError, "measurement window"):
+            render_results.validate_matrix(
+                [implausible_window],
+                name="fixture",
+                clients=("a",),
+                workloads=("Get",),
+                payloads=(16,),
+                concurrencies=(1,),
+                measurement_secs=10.0,
+                require_samples=True,
+            )
+
+    def test_aggregate_max_is_the_largest_run_maximum(self) -> None:
+        row = record("a", "Get", 16, 1)
+        row["samples"][0]["max_us"] = 50.0
+        row["samples"][1]["max_us"] = 75.0
+        row["samples"][2]["max_us"] = 60.0
+        row["max_us"] = 75.0
+        render_results.validate_matrix(
+            [row],
+            name="fixture",
+            clients=("a",),
+            workloads=("Get",),
+            payloads=(16,),
+            concurrencies=(1,),
+            require_samples=True,
+        )
+
+        row["max_us"] = (50.0 + 75.0 + 60.0) / 3.0
+        with self.assertRaisesRegex(render_results.ResultError, "sample maximum"):
+            render_results.validate_matrix(
+                [row],
+                name="fixture",
+                clients=("a",),
+                workloads=("Get",),
+                payloads=(16,),
+                concurrencies=(1,),
                 require_samples=True,
             )
 
@@ -586,6 +698,45 @@ class ResultTests(unittest.TestCase):
             write_jsonl(path, records)
             self.assertEqual(render_results.validate_soak(path), records[-1])
 
+    def test_four_hour_soak_rejects_a_post_recovery_outage(self) -> None:
+        records = soak_fixture()
+        interval = records[122]
+        interval["operations"] = 0
+        interval["attempts"] = 0
+        interval["successes"] = 0
+        interval["errors"] = 0
+        interval["ops_per_sec"] = 0.0
+        interval["attempted_ops_per_sec"] = 0.0
+        for field in ("p50_us", "p99_us", "p999_us", "max_us"):
+            interval[field] = None
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "soak.jsonl"
+            write_jsonl(path, records)
+            with self.assertRaisesRegex(render_results.ResultError, "no successful operations"):
+                render_results.validate_soak(path)
+
+    def test_four_hour_soak_rejects_errors_outside_chaos_recovery(self) -> None:
+        records = soak_fixture()
+        interval = records[200]
+        interval["attempts"] += 1
+        interval["errors"] += 1
+        interval["attempted_ops_per_sec"] = interval["attempts"] / interval["window_secs"]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "soak.jsonl"
+            write_jsonl(path, records)
+            with self.assertRaisesRegex(render_results.ResultError, "outside the chaos/recovery"):
+                render_results.validate_soak(path)
+
+    def test_four_hour_soak_rejects_unbounded_rss_growth(self) -> None:
+        records = soak_fixture()
+        for interval in records[231:241]:
+            interval["rss_bytes"] = 100 * 1024 * 1024
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "soak.jsonl"
+            write_jsonl(path, records)
+            with self.assertRaisesRegex(render_results.ResultError, "RSS tail mean"):
+                render_results.validate_soak(path)
+
 
 class MetadataTests(unittest.TestCase):
     def test_dependency_graph_removes_paths_credentials_and_raw_metadata(self) -> None:
@@ -653,12 +804,37 @@ class FingerprintTests(unittest.TestCase):
             execution_fixture(),
         )
         self.assertEqual(fingerprint["config"]["throughput"]["workloads"], ["set", "get"])
+        self.assertEqual(
+            fingerprint["config"]["throughput"]["duration_secs"],
+            render_results.PUBLICATION_MEASUREMENT_SECS,
+        )
+        self.assertEqual(
+            fingerprint["config"]["soak"]["rss_stability"],
+            {
+                "tail_window_intervals": render_results.SOAK_RSS_TAIL_WINDOW_INTERVALS,
+                "max_growth_bytes": render_results.SOAK_RSS_MAX_GROWTH_BYTES,
+                "max_growth_fraction": render_results.SOAK_RSS_MAX_GROWTH_FRACTION,
+            },
+        )
         leaked = copy.deepcopy(fingerprint["execution"])
         leaked["tools"]["cargo_vv"] = "cargo /Users/alice/private/bin/cargo"
         with self.assertRaisesRegex(execution_fingerprint.FingerprintError, "filesystem path"):
             execution_fingerprint.build_fingerprint(
                 "a" * 40, "b" * 64, "publication", leaked
             )
+
+    def test_publication_requires_sixteen_gibibytes_of_memory(self) -> None:
+        execution = execution_fixture()
+        execution["hardware"]["memory_bytes"] = 16 * 1024**3 - 1
+        with self.assertRaisesRegex(
+            execution_fingerprint.FingerprintError, "at least 16 GiB"
+        ):
+            execution_fingerprint.build_fingerprint(
+                "a" * 40, "b" * 64, "publication", execution
+            )
+        execution_fingerprint.build_fingerprint(
+            "a" * 40, "b" * 64, "matrix-only", execution
+        )
 
 
 class DiskBudgetTests(unittest.TestCase):
@@ -813,6 +989,20 @@ class DiskBudgetTests(unittest.TestCase):
             ):
                 check_disk_budget.claim_target(target, state_file)
 
+    def test_claim_recovers_an_exact_interrupted_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_file, target = self._state_fixture(root)
+            check_disk_budget.claim_target(target, state_file)
+            marker = target / check_disk_budget.TARGET_MARKER_NAME
+            partial = marker.with_name(marker.name + ".partial")
+            marker.rename(partial)
+
+            check_disk_budget.claim_target(target, state_file)
+
+            self.assertTrue(marker.is_file())
+            self.assertFalse(partial.exists())
+
     def test_disk_budget_rejects_symlinked_target_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -886,6 +1076,24 @@ class ManifestTests(unittest.TestCase):
                 {artifact["path"] for artifact in manifest["artifacts"]},
                 artifact_manifest.expected_artifact_paths("matrix-only"),
             )
+
+    def test_recorded_verification_is_self_contained(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            context = prepare_artifact_set(Path(temporary), finalize=True)
+
+            artifact_manifest.verify_recorded(context["result_dir"])
+
+            archived_fingerprint = context["result_dir"] / "execution-fingerprint.json"
+            fingerprint = json.loads(archived_fingerprint.read_text(encoding="utf-8"))
+            fingerprint["execution"]["hardware"]["cpu_model"] = "tampered"
+            archived_fingerprint.write_text(
+                json.dumps(fingerprint, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                artifact_manifest.ManifestError, "run state does not match"
+            ):
+                artifact_manifest.verify_recorded(context["result_dir"])
 
     def test_verify_rejects_extra_manifest_fields(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1094,9 +1302,13 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("checkpoint-verify", runner)
         self.assertIn('initial_disk_mode="fresh"', runner)
         self.assertIn('initial_disk_mode="minima"', runner)
-        self.assertIn('post_init_disk_mode="claim"', runner)
-        self.assertIn('post_init_disk_mode="resume"', runner)
+        self.assertIn('--mode claim', runner)
+        self.assertIn('--mode resume', runner)
         self.assertIn('--state-file "$result_dir/.run-state.json"', runner)
+        self.assertLess(
+            runner.index('if [[ -f "$result_dir/manifest.json" ]]'),
+            runner.index('--mode claim'),
+        )
         self.assertEqual(
             check_disk_budget.FRESH_WORKSPACE_KIB, 10 * check_disk_budget.GIB_KIB
         )

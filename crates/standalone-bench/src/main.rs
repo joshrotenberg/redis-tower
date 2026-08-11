@@ -83,6 +83,11 @@ async fn run(json: bool) -> Result<(), String> {
     let port = env_or_arg_parse("BENCH_PORT", "--port", 6480_u16)?;
     eprintln!("starting redis server on port {port}");
     let server = RedisServer::new()
+        // Match the executable fingerprinted by run_publication.sh. The
+        // wrapper otherwise prefers an installed Redis Stack binary even when
+        // `redis-server` on PATH is a different version.
+        .redis_server_bin("redis-server")
+        .no_stack_modules()
         .port(port)
         .start()
         .await
@@ -225,6 +230,7 @@ fn to_json(reports: &[AggregatedReport], include_samples: bool) -> String {
                                 "total_batches": sample.total_batches,
                                 "total_commands": sample.total_commands,
                                 "errors": sample.errors,
+                                "elapsed_secs": sample.elapsed_secs,
                                 "batches_per_sec": sample.batches_per_sec,
                                 "commands_per_sec": sample.commands_per_sec,
                                 "p50_us": sample.p50_us,
@@ -433,6 +439,7 @@ mod tests {
                 total_batches: 7,
                 total_commands: 700,
                 errors: 0,
+                elapsed_secs: 0.7,
                 batches_per_sec: 10.0,
                 commands_per_sec: 1000.0,
                 p50_us: 10.0,
@@ -465,6 +472,7 @@ mod tests {
                 total_batches: 10,
                 total_commands: 10,
                 errors: 0,
+                elapsed_secs: 0.1,
                 batches_per_sec: 100.0,
                 commands_per_sec: 100.0,
                 p50_us: 10.0,
@@ -482,6 +490,7 @@ mod tests {
                 total_batches: 20,
                 total_commands: 20,
                 errors: 0,
+                elapsed_secs: 0.1,
                 batches_per_sec: 200.0,
                 commands_per_sec: 200.0,
                 p50_us: 11.0,

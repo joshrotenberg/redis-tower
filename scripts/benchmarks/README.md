@@ -42,14 +42,20 @@ practical on a 16 GiB host:
 Depth, payload, and concurrency are not multiplied into one Cartesian pipeline
 matrix. The identical depth-100 / 1-KiB / concurrency-1 cell is shared by the
 second and third sweeps rather than measured twice. Each cell runs three
-measured 10-second samples after a two-second
-warmup. Publication JSON retains those raw samples so the validator can
-recompute every throughput mean and population standard deviation.
+measured 10-second samples after a two-second warmup. Publication JSON retains
+those raw samples so the validator can recompute every throughput rate from
+counts and measured wall time, then every mean and population standard
+deviation. Samples outside the expected 9.5-to-15-second measured window are
+rejected.
 
 Publication mode then runs one standalone four-hour GET-validation soak with a
 same-port Redis SIGKILL/restart halfway through. The validator requires exactly
 240 approximately one-minute windows, complete operation/rate/latency/RSS
 accounting, and exactly one ordered chaos, reconnect, and recovery lifecycle.
+Every interval must continue completing successful work; errors are accepted
+only in the bounded chaos/recovery interval. The mean RSS of the final ten
+minutes may grow by at most the larger of 16 MiB or 50% relative to the first
+ten minutes.
 
 ## Preflight, privacy, and resumption
 
@@ -67,7 +73,10 @@ OS/kernel details, `rustc -vV`, `cargo -vV`, Redis versions, the lockfile, and a
 sanitized dependency graph containing only package name, version, normalized
 source, and resolved features. CPU model/count and RAM size must be available
 and numeric; if sandbox restrictions hide them, preflight fails with an
-explicit instruction to rerun outside the sandbox.
+explicit instruction to rerun outside the sandbox. Publication mode also
+enforces the documented 16-GiB minimum. Cargo configuration files in
+`CARGO_HOME` or any workspace ancestor are refused so an unrecorded linker,
+registry replacement, or rustflag cannot alter the build.
 
 Every long matrix unit writes into a `.partial` checkpoint directory and is
 atomically renamed only after semantic validation and creation of a checkpoint
@@ -102,9 +111,38 @@ and execution fingerprint. A fresh run creates that marker atomically only in a
 new or empty target; it refuses to adopt a non-empty unmarked or mismatched
 target. A valid resume may credit only the target's allocated size when it
 shares the workspace filesystem, capped at the documented 6-GiB target budget.
-A missing or mismatched marker aborts the resume, and result artifacts are never
+A mismatched marker aborts the resume. If initialization was interrupted before
+an empty target was claimed, retrying safely creates the marker; an exact
+interrupted marker write is promoted atomically. Result artifacts are never
 credited. Thus workspace free space never falls below 4 GiB, while the 2-GiB
 temporary and 1-GiB result free-space floors always remain. Symlinked target or
 result roots are refused. A host with 16 GiB free therefore retains roughly 8
 GiB of conservative headroom at peak without blocking a legitimate resume once
 the isolated target has consumed part of that budget.
+
+## Verify and reproduce archived evidence
+
+A completed result directory is self-verifying on any host; this does not
+rerun benchmarks or require the original isolated Cargo target:
+
+```bash
+python3 scripts/benchmarks/artifact_manifest.py verify-recorded \
+  --result-dir /absolute/path/to/completed-results
+```
+
+To reproduce the measurement inputs, first verify the archive, check out the
+`source_sha` recorded in `manifest.json`, and restore the exact ignored
+lockfile before invoking the runner into a new empty directory:
+
+```bash
+cd /absolute/path/to/completed-results
+shasum -a 256 -c cargo-lock.sha256
+
+cd /absolute/path/to/redis-tower-at-recorded-source
+cp /absolute/path/to/completed-results/cargo-lock.txt Cargo.lock
+bash scripts/benchmarks/run_publication.sh /absolute/path/to/new-results
+```
+
+The new run intentionally records its own execution-host fingerprint, so its
+manifest and performance values will differ across hosts even when source,
+lockfile, commands, and configuration match.

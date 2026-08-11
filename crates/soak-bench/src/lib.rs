@@ -2040,6 +2040,10 @@ fn reserve_ephemeral_port() -> Result<u16> {
 async fn start_standalone(port: u16, startup_timeout: Duration) -> Result<ManagedStandalone> {
     let cleanup = StandaloneCleanup::new(port)?;
     let start = RedisServer::new()
+        // Publication provenance fingerprints `redis-server` from PATH. Pin
+        // the wrapper to that executable instead of its Redis Stack preference.
+        .redis_server_bin("redis-server")
+        .no_stack_modules()
         .port(port)
         .dir(&cleanup.base_dir)
         .save(false)

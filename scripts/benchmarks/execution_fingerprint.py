@@ -217,6 +217,12 @@ def build_fingerprint(
     if mode not in ("publication", "matrix-only"):
         raise FingerprintError(f"invalid run mode {mode!r}")
     validate_execution(execution)
+    minimum_memory = PUBLICATION_CONFIG["runtime"]["minimum_host_memory_bytes"]
+    if mode == "publication" and execution["hardware"]["memory_bytes"] < minimum_memory:
+        raise FingerprintError(
+            "publication benchmarks require at least "
+            f"{minimum_memory / (1024**3):.0f} GiB of host memory"
+        )
     fingerprint = {
         "schema_version": 1,
         "source_sha": source_sha,
