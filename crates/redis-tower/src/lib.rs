@@ -452,7 +452,11 @@ pub use metrics_layer::{
 pub use monitor::{MonitorEvent, MonitorStream};
 pub use multiplexed::{CachedMultiplexedClient, MultiplexedClient};
 pub use pipeline::{Pipeline, PipelineExecutor, PipelineResults};
-pub use pool::{ConnectionPool, DispatchStrategy, PoolConfig};
+pub use pool::{
+    ConnectionPool, DispatchStrategy, HealthProbe, HealthProbeKind, HealthProbeResult,
+    HealthProberConfig, HealthProberHandle, IdleReaperHandle, PingHealthProbe, PoolConfig,
+    PoolHealthState, PoolStats, RedisRole, ReplicationLagHealthProbe, RoleHealthProbe,
+};
 pub use pubsub::{
     KeyspaceEvent, KeyspaceEventStream, MessageKind, NotificationKind, PubSubConnection,
     PubSubMessage,

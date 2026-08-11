@@ -109,6 +109,15 @@ tokio::spawn(async move { p.execute(Ping::new()).await });
 
 Dispatch strategies: `RoundRobin` (default), `Random`, `LeastConnections`.
 
+Factory-backed pools can opt into dynamic sizing with
+`PoolConfig::bounds(min, max)`. They grow on acquisition contention; configure
+`idle_timeout` and retain the handle returned by `spawn_idle_reaper` to shrink
+back to the minimum. Active health probing is likewise explicit:
+`spawn_health_prober` defaults to PING, while ROLE, replication-lag, and custom
+probes are available through the pool module. Dropping either owned handle
+stops its task. `ConnectionPool::connect_lazy` starts at zero for serverless
+scale-to-zero workloads.
+
 Works with any connection type -- standalone, cluster, or sentinel.
 
 ## Tower middleware
@@ -199,11 +208,15 @@ The built-in recorder emits:
   invalidation, and eviction event labels;
 - pool waits and lifecycle: `db.client.connection.wait_time`,
   `db.client.connection.timeouts`, `redis_tower.pool.health_check_failures`,
-  and `redis_tower.pool.connection_replacements`;
+  `redis_tower.pool.connection_replacements`,
+  `redis_tower.pool.health_probes`, and
+  `redis_tower.pool.connections_reaped`;
 - pool snapshots: `db.client.connection.count`,
   `db.client.connection.max`, `db.client.connection.pending_requests`,
   `redis_tower.pool.inflight_commands`, and
-  `redis_tower.pool.max_inflight_per_connection`;
+  `redis_tower.pool.max_inflight_per_connection`; replication-lag gauges are
+  paired with an `*_observed` freshness gauge so an unknown observation cannot
+  leave a stale lag reading;
 - cluster routing: `redis_tower.cluster.redirects`,
   `redis_tower.cluster.topology_refreshes`, and
   `redis_tower.cluster.topology_refresh.duration`.
@@ -565,8 +578,10 @@ Other resilience building blocks:
 - **Per-command timeouts** -- `CommandTimeoutLayer` applies a generic static
   timeout; call `.with_request_deadlines()` to let a `WithDeadline<Cmd>` carry
   one earlier absolute budget through typed middleware.
-- **Pool health** -- `ConnectionPool` replaces dead connections after a failed
-  health check and exposes live `PoolStats`.
+- **Pool health** -- `ConnectionPool` replaces dead connections after a lazy
+  health check, exposes active PING/ROLE/replication-lag probing through an
+  explicit owned task, and reports health and dynamic-sizing state in
+  `PoolStats`.
 - **Error taxonomy** -- `RedisError::is_retryable()`, `is_connection_error()`,
   `is_moved()` / `is_ask()`, and `is_wrongtype()` classify failures so callers
   can respond appropriately.
