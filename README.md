@@ -763,6 +763,11 @@ ring-buffer workflows.
 
 ## Testing
 
+The [test conformance report](docs/TEST-CONFORMANCE.md) maps the generated test
+inventory, client/protocol and server-version matrices, destructive fault
+coverage, execution cadence, and known gaps to their source and workflow
+evidence.
+
 `redis-tower-test` ships two test utilities that let you write Redis tests without a running server.
 
 ### MockConnection
