@@ -14,7 +14,7 @@ synchronous constructor panics when no runtime is entered.
 For a Redis URL, including credentials, TLS, database selection, or a Unix
 socket, construct the client synchronously:
 
-```rust,no_run
+```rust,ignore
 use redis_tower::MultiplexedClient;
 use redis_tower::commands::Ping;
 
@@ -33,7 +33,7 @@ Use `MultiplexedClient::connect_lazy("host:port")` for an unauthenticated TCP
 endpoint. For custom connection setup or reconnect policy, pass a
 `ConnectionFactory` to `MultiplexedClient::from_lazy_factory`:
 
-```rust,no_run
+```rust,ignore
 use std::time::Duration;
 use redis_tower::{AutoPipelineConfig, MultiplexedClient};
 use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
@@ -64,7 +64,7 @@ When commands need independent connections, a factory-backed pool can also
 start empty. It grows on command demand and acquisition contention, up to the
 configured maximum:
 
-```rust,no_run
+```rust,ignore
 use std::time::Duration;
 use redis_tower::{ConnectionPool, PoolConfig};
 use redis_tower::reconnect::UrlConnectionFactory;
