@@ -35,6 +35,7 @@ use tower_service::Service;
 
 #[cfg(feature = "metrics")]
 use crate::multiplexed::MultiplexedClient;
+use crate::pool::HealthProbeKind;
 #[cfg(feature = "metrics")]
 use crate::pool::{ConnectionPool, PoolStats};
 
@@ -315,6 +316,26 @@ pub trait MetricsRecorder: Send + Sync + 'static {
     fn pool_connection_replaced(&self, pool_name: &str) {
         let _ = pool_name;
     }
+
+    /// Called after one active pool health probe completes.
+    ///
+    /// Probe kinds and outcomes are bounded for safe metric labels. Lag is
+    /// present only for replication-lag probes.
+    fn pool_health_probe_completed(
+        &self,
+        pool_name: &str,
+        kind: HealthProbeKind,
+        duration: Duration,
+        healthy: bool,
+        replication_lag_bytes: Option<u64>,
+    ) {
+        let _ = (pool_name, kind, duration, healthy, replication_lag_bytes);
+    }
+
+    /// Called after an idle reaper removes one or more pool connections.
+    fn pool_connections_reaped(&self, pool_name: &str, count: usize) {
+        let _ = (pool_name, count);
+    }
 }
 
 impl<R> MetricsRecorder for Arc<R>
@@ -365,6 +386,27 @@ where
 
     fn pool_connection_replaced(&self, pool_name: &str) {
         (**self).pool_connection_replaced(pool_name);
+    }
+
+    fn pool_health_probe_completed(
+        &self,
+        pool_name: &str,
+        kind: HealthProbeKind,
+        duration: Duration,
+        healthy: bool,
+        replication_lag_bytes: Option<u64>,
+    ) {
+        (**self).pool_health_probe_completed(
+            pool_name,
+            kind,
+            duration,
+            healthy,
+            replication_lag_bytes,
+        );
+    }
+
+    fn pool_connections_reaped(&self, pool_name: &str, count: usize) {
+        (**self).pool_connections_reaped(pool_name, count);
     }
 }
 
@@ -549,6 +591,63 @@ impl MetricsRecorder for MetricsFacadeRecorder {
         )
         .increment(1);
     }
+
+    fn pool_health_probe_completed(
+        &self,
+        pool_name: &str,
+        kind: HealthProbeKind,
+        duration: Duration,
+        healthy: bool,
+        replication_lag_bytes: Option<u64>,
+    ) {
+        let outcome = if healthy { "healthy" } else { "unhealthy" };
+        metrics::histogram!(
+            description: "Duration of active Redis pool health probes",
+            unit: metrics::Unit::Seconds,
+            "redis_tower.pool.health_probe.duration",
+            "db.client.connection.pool.name" => pool_name.to_owned(),
+            "probe" => kind.as_str(),
+            "outcome" => outcome,
+        )
+        .record(duration.as_secs_f64());
+        metrics::counter!(
+            description: "Active Redis pool health probe outcomes",
+            unit: metrics::Unit::Count,
+            "redis_tower.pool.health_probes",
+            "db.client.connection.pool.name" => pool_name.to_owned(),
+            "probe" => kind.as_str(),
+            "outcome" => outcome,
+        )
+        .increment(1);
+        metrics::gauge!(
+            description: "Latest Redis replication lag observed by a pool probe",
+            unit: metrics::Unit::Bytes,
+            "redis_tower.pool.replication_lag",
+            "db.client.connection.pool.name" => pool_name.to_owned(),
+        )
+        .set(replication_lag_bytes.unwrap_or(0) as f64);
+        metrics::gauge!(
+            description: "Whether the Redis pool replication-lag gauge has a current observation",
+            unit: metrics::Unit::Count,
+            "redis_tower.pool.replication_lag_observed",
+            "db.client.connection.pool.name" => pool_name.to_owned(),
+        )
+        .set(if replication_lag_bytes.is_some() {
+            1.0
+        } else {
+            0.0
+        });
+    }
+
+    fn pool_connections_reaped(&self, pool_name: &str, count: usize) {
+        metrics::counter!(
+            description: "Redis pool connections removed after becoming idle",
+            unit: metrics::Unit::Count,
+            "redis_tower.pool.connections_reaped",
+            "db.client.connection.pool.name" => pool_name.to_owned(),
+        )
+        .increment(count as u64);
+    }
 }
 
 /// A cancellation handle for a background metrics snapshot exporter.
@@ -654,7 +753,14 @@ fn record_pool_stats(pool_name: &str, stats: &PoolStats) {
         "db.client.connection.max",
         "db.client.connection.pool.name" => pool_name.clone(),
     )
-    .set(stats.size as f64);
+    .set(stats.max_size as f64);
+    metrics::gauge!(
+        description: "Minimum Redis pool connection count",
+        unit: metrics::Unit::Count,
+        "db.client.connection.min",
+        "db.client.connection.pool.name" => pool_name.clone(),
+    )
+    .set(stats.min_size as f64);
     metrics::gauge!(
         description: "Redis requests waiting for a pool connection",
         unit: metrics::Unit::Count,
@@ -673,9 +779,58 @@ fn record_pool_stats(pool_name: &str, stats: &PoolStats) {
         description: "Highest in-flight command count on one Redis pool connection",
         unit: metrics::Unit::Count,
         "redis_tower.pool.max_inflight_per_connection",
-        "db.client.connection.pool.name" => pool_name,
+        "db.client.connection.pool.name" => pool_name.clone(),
     )
     .set(stats.max_inflight as f64);
+    metrics::gauge!(
+        description: "Redis pool connections by active-probe health state",
+        unit: metrics::Unit::Count,
+        "redis_tower.pool.health_count",
+        "db.client.connection.pool.name" => pool_name.clone(),
+        "state" => "healthy",
+    )
+    .set(stats.healthy_count as f64);
+    metrics::gauge!(
+        description: "Redis pool connections by active-probe health state",
+        unit: metrics::Unit::Count,
+        "redis_tower.pool.health_count",
+        "db.client.connection.pool.name" => pool_name.clone(),
+        "state" => "unhealthy",
+    )
+    .set(stats.unhealthy_count as f64);
+    metrics::gauge!(
+        description: "Redis pool connections by active-probe health state",
+        unit: metrics::Unit::Count,
+        "redis_tower.pool.health_count",
+        "db.client.connection.pool.name" => pool_name.clone(),
+        "state" => "unknown",
+    )
+    .set(stats.unknown_health_count as f64);
+    metrics::gauge!(
+        description: "Cumulative Redis pool connections removed by idle reaping",
+        unit: metrics::Unit::Count,
+        "redis_tower.pool.connections_reaped_total",
+        "db.client.connection.pool.name" => pool_name.clone(),
+    )
+    .set(stats.reaped_connections as f64);
+    metrics::gauge!(
+        description: "Maximum latest Redis replication lag across pool slots",
+        unit: metrics::Unit::Bytes,
+        "redis_tower.pool.max_replication_lag",
+        "db.client.connection.pool.name" => pool_name.clone(),
+    )
+    .set(stats.max_replication_lag_bytes.unwrap_or(0) as f64);
+    metrics::gauge!(
+        description: "Whether the maximum Redis pool replication-lag gauge has a current observation",
+        unit: metrics::Unit::Count,
+        "redis_tower.pool.max_replication_lag_observed",
+        "db.client.connection.pool.name" => pool_name,
+    )
+    .set(if stats.max_replication_lag_bytes.is_some() {
+        1.0
+    } else {
+        0.0
+    });
 }
 
 #[cfg(feature = "metrics")]
@@ -1416,6 +1571,13 @@ mod tests {
             idle_count: 1,
             total_inflight: 7,
             max_inflight: 3,
+            min_size: 2,
+            max_size: 8,
+            healthy_count: 2,
+            unhealthy_count: 1,
+            unknown_health_count: 1,
+            max_replication_lag_bytes: Some(42),
+            reaped_connections: 5,
         };
         assert_eq!(pool_gauge_values(&stats), (3, 4));
     }
@@ -1429,6 +1591,13 @@ mod tests {
             idle_count: 1,
             total_inflight: 7,
             max_inflight: 3,
+            min_size: 2,
+            max_size: 8,
+            healthy_count: 2,
+            unhealthy_count: 1,
+            unknown_health_count: 1,
+            max_replication_lag_bytes: Some(42),
+            reaped_connections: 5,
         };
         metrics::with_local_recorder(&capture, || record_pool_stats("primary", &stats));
 
@@ -1449,12 +1618,47 @@ mod tests {
             .iter()
             .find(|metric| metric.name == "db.client.connection.max")
             .unwrap();
-        assert_eq!(max.value(), 4.0);
+        assert_eq!(max.value(), 8.0);
         let pending = gauges
             .iter()
             .find(|metric| metric.name == "db.client.connection.pending_requests")
             .unwrap();
         assert_eq!(pending.value(), 4.0);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn unknown_replication_lag_resets_value_and_freshness_gauges() {
+        let capture = CapturingFacadeRecorder::default();
+        let recorder = MetricsFacadeRecorder::new();
+        metrics::with_local_recorder(&capture, || {
+            recorder.pool_health_probe_completed(
+                "primary",
+                HealthProbeKind::ReplicationLag,
+                Duration::from_millis(1),
+                true,
+                Some(42),
+            );
+            recorder.pool_health_probe_completed(
+                "primary",
+                HealthProbeKind::ReplicationLag,
+                Duration::from_millis(1),
+                false,
+                None,
+            );
+        });
+
+        let gauges = capture.gauges.lock().unwrap();
+        let lag = gauges
+            .iter()
+            .rfind(|metric| metric.name == "redis_tower.pool.replication_lag")
+            .unwrap();
+        let observed = gauges
+            .iter()
+            .rfind(|metric| metric.name == "redis_tower.pool.replication_lag_observed")
+            .unwrap();
+        assert_eq!(lag.value(), 0.0);
+        assert_eq!(observed.value(), 0.0);
     }
 
     #[cfg(feature = "metrics")]

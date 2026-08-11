@@ -55,7 +55,8 @@ use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfi
 use crate::command_adapter::CommandAdapter;
 use crate::pipeline::PipelineExecutor;
 use crate::reconnect::{
-    ConnectionEventBus, ConnectionFactory, Resp3AddrConnectionFactory, UrlConnectionFactory,
+    AddrConnectionFactory, ConnectionEventBus, ConnectionFactory, Resp3AddrConnectionFactory,
+    UrlConnectionFactory,
 };
 use crate::retry::{RetryClient, RetryPolicy};
 use crate::transaction::TransactionExecutor;
@@ -227,6 +228,44 @@ impl MultiplexedClient<AutoPipelineService> {
         Ok(Self::from_connection(conn))
     }
 
+    /// Create a client that connects to `host:port` on its first command.
+    ///
+    /// This constructor is synchronous and performs no DNS or network I/O,
+    /// which makes it suitable for serverless initialization paths. The first
+    /// command receives [`RedisError::ConnectionClosed`] if that deferred
+    /// attempt fails. Later connection loss is handled using the default
+    /// reconnect policy.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime. Construction
+    /// starts the lightweight request worker even though network I/O is
+    /// deferred.
+    pub fn connect_lazy(addr: impl Into<String>) -> Self {
+        Self::from_lazy_factory(
+            AddrConnectionFactory::new(addr),
+            AutoPipelineConfig::default(),
+            AutoPipelineReconnectConfig::default(),
+        )
+    }
+
+    /// Create a URL-backed client that connects on its first command.
+    ///
+    /// URL authentication, database selection, TLS, and Unix-socket settings
+    /// are applied by [`UrlConnectionFactory`] on the deferred connection and
+    /// every reconnect.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime.
+    pub fn connect_url_lazy(url: impl Into<String>) -> Self {
+        Self::from_lazy_factory(
+            UrlConnectionFactory::new(url),
+            AutoPipelineConfig::default(),
+            AutoPipelineReconnectConfig::default(),
+        )
+    }
+
     /// Wrap an existing connection in a multiplexed client.
     pub fn from_connection(conn: RedisConnection) -> Self {
         Self::from_connection_with_config(conn, AutoPipelineConfig::default())
@@ -316,6 +355,70 @@ impl MultiplexedClient<AutoPipelineService> {
         Ok(Self {
             inner: CommandAdapter::new(svc),
         })
+    }
+
+    /// Build a reconnecting client whose factory is first called by a command.
+    ///
+    /// Unlike [`Self::from_factory`], this returns synchronously and does not
+    /// establish a Redis connection during application startup. Connection
+    /// health is initially false. A failed first attempt returns
+    /// [`RedisError::ConnectionClosed`] to the triggering command, while a
+    /// later command can attempt connection again. Use the event-enabled form
+    /// when the underlying connection failure detail is required.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime.
+    pub fn from_lazy_factory(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Self {
+        let svc = AutoPipelineService::with_lazy_factory(factory, config, reconnect);
+        Self {
+            inner: CommandAdapter::new(svc),
+        }
+    }
+
+    /// Build a lazily connected client that publishes lifecycle events.
+    ///
+    /// Construction emits no event. The first deferred success publishes
+    /// [`crate::ConnectionEvent::Connected`]; a deferred failure publishes
+    /// [`crate::ConnectionEvent::ConnectFailed`]. Subscribe before calling
+    /// this constructor to observe that first command-driven transition.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime.
+    pub fn from_lazy_factory_with_events(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Self {
+        let svc =
+            AutoPipelineService::with_lazy_factory_and_events(factory, config, reconnect, events);
+        Self {
+            inner: CommandAdapter::new(svc),
+        }
+    }
+
+    /// Return whether the shared worker currently owns a usable connection.
+    ///
+    /// This is an instantaneous local snapshot and does not send `PING`. It is
+    /// initially `false` for a client built with a lazy constructor, becomes
+    /// `true` after its first connection succeeds, and returns to `false`
+    /// before disconnect events or failed request responses are delivered.
+    pub fn is_connection_healthy(&self) -> bool {
+        self.inner.inner().is_connection_healthy()
+    }
+
+    /// Subscribe to connection-health transitions without forcing a connect.
+    ///
+    /// The initial snapshot follows [`Self::is_connection_healthy`]. The watch
+    /// channel closes when the shared worker terminates.
+    pub fn subscribe_connection_health(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.inner.inner().subscribe_connection_health()
     }
 
     /// Returns the current number of requests pending in the auto-pipeline

@@ -150,12 +150,18 @@ let factory = AddrConnectionFactory::new("127.0.0.1:6379")
 let pool = ConnectionPool::<RedisConnection>::connect_with_factory(
     PoolConfig::default()
         .name("blocking-jobs")
-        .size(8)
+        .bounds(2, 8)
         .dispatch(DispatchStrategy::LeastConnections)
         .health_check_interval(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(60))
         .acquisition_timeout(Duration::from_millis(250)),
     factory,
 ).await?;
+
+// Background work is never implicit. Retain each handle for its lifetime.
+let reaper = pool.spawn_idle_reaper(Duration::from_secs(15));
+let prober = pool.spawn_health_prober(Default::default());
+# let _ = (reaper, prober);
 ```
 
 Pool guidance:
@@ -168,17 +174,28 @@ Pool guidance:
 - Configure a factory when health checks should replace a dead slot. A closure-
   built pool without a retained factory can detect failure but cannot restore
   capacity automatically.
+- Dynamic sizing is opt-in. `bounds(min, max)` starts with `min` connections
+  and creates more only when every live slot is contended. An `idle_timeout`
+  is inert until `spawn_idle_reaper` is called; dropping its handle stops
+  shrinking immediately.
+- Active health probing is also explicit. The default PING probe, ROLE probe,
+  replication-lag-via-INFO probe, and custom `HealthProbe` implementations
+  update metrics and `PoolStats`; they do not silently become a second circuit
+  breaker or change dispatch policy. Run the byte-lag probe against primaries:
+  it compares primary-side offsets for directly connected replicas and marks
+  missing/offline replicas unhealthy. Replica-local INFO cannot establish the
+  upstream primary's current byte offset and is rejected conservatively.
 - Size from observed concurrency and Redis capacity. For blocking commands, the
   minimum useful size is usually the maximum number of blockers you intend to
   allow, plus deliberate headroom for health/control traffic. Enforce a higher-
   level concurrency limit rather than letting callers grow without bound.
 - Use a stable, unique `PoolConfig::name`; it becomes the pool metrics label.
 
-Inspect `pool.stats()` for size, idle count, total in-flight commands, and the
-maximum in-flight count on one connection. Acquisition wait increasing while
-Redis command latency stays flat indicates pool contention. Both increasing
-usually means Redis or the network is the bottleneck, and adding connections
-may make it worse.
+Inspect `pool.stats()` for current/min/max size, idle and in-flight counts,
+active-probe health, replication lag, and cumulative idle reaping. Acquisition
+wait increasing while Redis command latency stays flat indicates pool
+contention. Both increasing usually means Redis or the network is the
+bottleneck, and adding connections may make it worse.
 
 ## Set timeouts at distinct failure boundaries
 
@@ -512,7 +529,9 @@ exporter. The built-in recorder can report:
   counts;
 - `db.client.connection.wait_time`,
   `db.client.connection.pending_requests`, connection count/max, and pool
-  lifecycle counters;
+  lifecycle counters, including active-probe outcomes, replication lag, and
+  idle reaping. Treat replication lag as current only while its paired
+  `*_observed` freshness gauge is `1`;
 - `redis_tower.cluster.redirects`, topology refresh count, and topology refresh
   duration.
 

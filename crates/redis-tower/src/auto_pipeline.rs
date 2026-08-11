@@ -152,14 +152,16 @@ impl Default for AutoPipelineConfig {
 /// Reconnect policy for a factory-backed [`AutoPipelineService`].
 ///
 /// Applies only when the service is constructed via
-/// [`AutoPipelineService::with_factory`]. The plain [`AutoPipelineService::new`]
-/// path owns a single pre-built connection and does not reconnect.
+/// [`AutoPipelineService::with_factory`] or
+/// [`AutoPipelineService::with_lazy_factory`]. The plain
+/// [`AutoPipelineService::new`] path owns a single pre-built connection and
+/// does not reconnect.
 #[derive(Debug, Clone, Default)]
 pub struct AutoPipelineReconnectConfig {
     /// Backoff parameters for reconnection attempts.
     ///
     /// Its [`ReconnectConfig::connect_timeout`] also bounds the initial
-    /// factory call made by `with_factory` constructors.
+    /// factory call made by eager and lazy `with_factory` constructors.
     pub reconnect: ReconnectConfig,
 }
 
@@ -499,7 +501,7 @@ impl AutoPipelineService {
     /// in a reconnect layer, or use [`Self::with_factory`] to build a
     /// service that rebuilds its own connection on failure.
     pub fn new(conn: RedisConnection, config: AutoPipelineConfig) -> Self {
-        Self::from_parts(conn, config, ConnSource::Fixed, None)
+        Self::from_parts(Some(conn), config, ConnSource::Fixed, None)
     }
 
     /// Create a non-reconnecting auto-pipeline service with lifecycle events.
@@ -513,7 +515,7 @@ impl AutoPipelineService {
         config: AutoPipelineConfig,
         events: ConnectionEventBus,
     ) -> Self {
-        Self::from_parts(conn, config, ConnSource::Fixed, Some(events))
+        Self::from_parts(Some(conn), config, ConnSource::Fixed, Some(events))
     }
 
     /// Create a new auto-pipelining service that rebuilds its connection on
@@ -575,11 +577,68 @@ impl AutoPipelineService {
             factory,
             reconnect: reconnect.reconnect,
         };
-        Ok(Self::from_parts(conn, config, source, event_bus))
+        Ok(Self::from_parts(Some(conn), config, source, event_bus))
+    }
+
+    /// Create a factory-backed service without opening a connection yet.
+    ///
+    /// Construction is synchronous and performs no network I/O. The first
+    /// accepted request invokes the factory and waits for that connection
+    /// attempt before it is sent. If the attempt fails, that request receives
+    /// [`RedisError::ConnectionClosed`]; the worker remains alive and the next
+    /// request makes a fresh attempt. Once connected, failures use `reconnect`
+    /// in exactly the same way as [`Self::with_factory`].
+    ///
+    /// Connection health starts as `false` and becomes `true` immediately
+    /// before the first [`ConnectionEvent::Connected`] event is published.
+    /// With an event bus, a failed deferred attempt publishes
+    /// [`ConnectionEvent::ConnectFailed`]. No `Connected` event is emitted
+    /// merely by constructing the service.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime because the
+    /// lightweight request worker is spawned during construction.
+    pub fn with_lazy_factory(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Self {
+        Self::with_lazy_factory_inner(factory, config, reconnect, None)
+    }
+
+    /// Create a lazily connected factory-backed service with lifecycle events.
+    ///
+    /// Subscribe to `events` before this call to observe the first deferred
+    /// connection result. Construction itself publishes no connection event.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside an entered Tokio runtime.
+    pub fn with_lazy_factory_and_events(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Self {
+        Self::with_lazy_factory_inner(factory, config, reconnect, Some(events))
+    }
+
+    fn with_lazy_factory_inner(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        event_bus: Option<ConnectionEventBus>,
+    ) -> Self {
+        let source = ConnSource::Factory {
+            factory: Arc::new(factory),
+            reconnect: reconnect.reconnect,
+        };
+        Self::from_parts(None, config, source, event_bus)
     }
 
     fn from_parts(
-        conn: RedisConnection,
+        conn: Option<RedisConnection>,
         config: AutoPipelineConfig,
         source: ConnSource,
         event_bus: Option<ConnectionEventBus>,
@@ -588,12 +647,13 @@ impl AutoPipelineService {
         let poll_tx = PollSender::new(tx.clone());
         let shed_load = config.shed_load_on_full;
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        let (connection_health_tx, connection_health) = watch::channel(true);
+        let initially_connected = conn.is_some();
+        let (connection_health_tx, connection_health) = watch::channel(initially_connected);
         let control = Arc::new(WorkerControl::new(shutdown_tx, event_bus.clone()));
         let lease = WorkerLease {
             control: Arc::clone(&control),
         };
-        if let Some(events) = &event_bus {
+        if initially_connected && let Some(events) = &event_bus {
             events.publish(ConnectionEvent::Connected);
         }
         let lifecycle = WorkerLifecycle {
@@ -604,7 +664,9 @@ impl AutoPipelineService {
                 control: Arc::clone(&control),
             },
         };
-        let handle = tokio::spawn(pipeline_worker(
+        let runtime = tokio::runtime::Handle::try_current()
+            .expect("AutoPipelineService must be constructed inside an entered Tokio runtime");
+        let handle = runtime.spawn(pipeline_worker(
             rx, conn, config, source, event_bus, lifecycle,
         ));
         Self {
@@ -778,12 +840,13 @@ impl AutoPipelineService {
 
     /// Subscribe to data-connection health transitions.
     ///
-    /// The initial value is `true`. Failures publish `false` before request
-    /// responders or disconnect events are notified, and factory-backed
-    /// reconnection publishes `true` only after a replacement connection is
-    /// installed. The channel closes when the worker terminates. This is public
-    /// only for sibling workspace clients that own a coordinated lifecycle
-    /// across multiple data connections.
+    /// The initial value is `true` for a service given an established
+    /// connection and `false` for a lazily connected service. Failures publish
+    /// `false` before request responders or disconnect events are notified;
+    /// initial connection and factory-backed reconnection publish `true` only
+    /// after a connection is installed. The channel closes when the worker
+    /// terminates. This is public only for sibling workspace clients that own
+    /// a coordinated lifecycle across multiple data connections.
     #[doc(hidden)]
     pub fn subscribe_connection_health(&self) -> watch::Receiver<bool> {
         self.connection_health.clone()
@@ -798,7 +861,7 @@ impl AutoPipelineService {
 /// callers send.
 async fn pipeline_worker(
     mut rx: mpsc::Receiver<WorkerRequest>,
-    mut conn: RedisConnection,
+    mut conn: Option<RedisConnection>,
     config: AutoPipelineConfig,
     source: ConnSource,
     event_bus: Option<ConnectionEventBus>,
@@ -828,7 +891,7 @@ async fn pipeline_worker(
                         break rx.recv().await;
                     }
                     request = rx.recv() => break request,
-                    idle_result = conn.read_idle_push() => match idle_result {
+                    idle_result = read_idle_push_if_connected(&mut conn) => match idle_result {
                         Ok(()) => {
                             // A push was routed to its subscriber. Re-enter the
                             // biased select so queued requests retain priority
@@ -857,7 +920,7 @@ async fn pipeline_worker(
                                 }
                                 ConnSource::Factory { factory, reconnect } => {
                                     if !reconnect_worker_connection(
-                                        &mut conn,
+                                        conn.as_mut().expect("idle failure requires a connection"),
                                         &mut rx,
                                         factory.as_ref(),
                                         reconnect,
@@ -941,8 +1004,52 @@ async fn pipeline_worker(
             }
         }
 
+        if conn.is_none() {
+            let ConnSource::Factory { factory, reconnect } = &source else {
+                unreachable!("a fixed worker always starts with a connection");
+            };
+            let connect = connect_with_timeout(factory.as_ref(), reconnect.connect_timeout);
+            tokio::pin!(connect);
+            let connect_result = tokio::select! {
+                biased;
+                () = wait_for_shutdown(&mut shutdown) => {
+                    shutting_down = true;
+                    rx.close();
+                    fail_requests(batch);
+                    continue;
+                }
+                result = &mut connect => result,
+            };
+            match connect_result {
+                Ok(new_conn) => {
+                    let connected = control.with_active_handle(|| {
+                        connection_health.set(true);
+                        if let Some(events) = &event_bus {
+                            events.publish(ConnectionEvent::Connected);
+                        }
+                    });
+                    if connected.is_none() {
+                        fail_requests(batch);
+                        return;
+                    }
+                    conn = Some(new_conn);
+                }
+                Err(error) => {
+                    control.with_active_handle(|| {
+                        if let Some(events) = &event_bus {
+                            events.publish_with(|| ConnectionEvent::ConnectFailed {
+                                error: Arc::from(error.to_string()),
+                            });
+                        }
+                    });
+                    fail_requests(batch);
+                    continue;
+                }
+            }
+        }
+
         let flush_result = flush_batch(
-            &mut conn,
+            conn.as_mut().expect("connection established before flush"),
             batch,
             config.response_timeout,
             config.metrics_recorder.as_ref(),
@@ -980,7 +1087,7 @@ async fn pipeline_worker(
                 }
                 ConnSource::Factory { factory, reconnect } => {
                     if !reconnect_worker_connection(
-                        &mut conn,
+                        conn.as_mut().expect("failed flush requires a connection"),
                         &mut rx,
                         factory.as_ref(),
                         reconnect,
@@ -997,6 +1104,24 @@ async fn pipeline_worker(
                 }
             }
         }
+    }
+}
+
+/// Wait for an unsolicited push only while a connection exists.
+///
+/// A lazy worker has no socket to poll before its first command, so this stays
+/// pending and lets the request/shutdown branches of the surrounding select
+/// drive progress.
+async fn read_idle_push_if_connected(conn: &mut Option<RedisConnection>) -> Result<(), RedisError> {
+    match conn {
+        Some(conn) => conn.read_idle_push().await,
+        None => futures::future::pending().await,
+    }
+}
+
+fn fail_requests(requests: Vec<WorkerRequest>) {
+    for request in requests {
+        request.fail(RedisError::ConnectionClosed);
     }
 }
 
@@ -1402,6 +1527,149 @@ impl AutoPipelineService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_factory_requires_an_entered_tokio_runtime() {
+        let result = std::panic::catch_unwind(|| {
+            AutoPipelineService::with_lazy_factory(
+                || async { Err::<RedisConnection, _>(RedisError::ConnectionClosed) },
+                AutoPipelineConfig::default(),
+                AutoPipelineReconnectConfig::default(),
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn lazy_factory_defers_connection_and_retries_after_initial_failure() {
+        use futures::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Tcp(stream),
+                redis_tower_core::RespCodec::new(),
+            );
+            let request = framed
+                .next()
+                .await
+                .expect("client closed before request")
+                .expect("client sent an invalid request");
+            assert_eq!(
+                request,
+                Frame::SimpleString(bytes::Bytes::from_static(b"PING"))
+            );
+            framed
+                .send(Frame::SimpleString(bytes::Bytes::from_static(b"PONG")))
+                .await
+                .unwrap();
+            let _ = framed.next().await;
+        });
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory_calls = Arc::clone(&calls);
+        let factory = move || {
+            let factory_calls = Arc::clone(&factory_calls);
+            async move {
+                if factory_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                    return Err(RedisError::ConnectionClosed);
+                }
+                let stream = tokio::net::TcpStream::connect(addr)
+                    .await
+                    .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+                Ok(RedisConnection::from_stream(
+                    redis_tower_core::RedisStream::Tcp(stream),
+                ))
+            }
+        };
+
+        let events = ConnectionEventBus::new(8);
+        let mut event_stream = events.subscribe();
+        let mut service = AutoPipelineService::with_lazy_factory_and_events(
+            factory,
+            AutoPipelineConfig::default(),
+            AutoPipelineReconnectConfig::default(),
+            events,
+        );
+
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+        assert!(!service.is_connection_healthy());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), event_stream.recv())
+                .await
+                .is_err(),
+            "lazy construction must not publish a connection event"
+        );
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        assert!(matches!(
+            service
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"FIRST")))
+                .await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(!service.is_connection_healthy());
+        assert!(matches!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::ConnectFailed { .. }
+        ));
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        assert_eq!(
+            service
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
+                .await
+                .unwrap(),
+            Frame::SimpleString(bytes::Bytes::from_static(b"PONG"))
+        );
+        assert!(service.is_connection_healthy());
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
+        assert_eq!(calls.load(Ordering::Acquire), 2);
+
+        service.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn lazy_factory_shutdown_cancels_first_connection_attempt() {
+        use tokio::sync::Notify;
+
+        let entered = Arc::new(Notify::new());
+        let factory_entered = Arc::clone(&entered);
+        let factory = move || {
+            let factory_entered = Arc::clone(&factory_entered);
+            async move {
+                factory_entered.notify_one();
+                futures::future::pending::<Result<RedisConnection, RedisError>>().await
+            }
+        };
+        let mut service = AutoPipelineService::with_lazy_factory(
+            factory,
+            AutoPipelineConfig {
+                shed_load_on_full: true,
+                ..AutoPipelineConfig::default()
+            },
+            AutoPipelineReconnectConfig::default(),
+        );
+
+        let response = service.call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")));
+        entered.notified().await;
+        tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+            .await
+            .expect("shutdown must cancel a deferred connection attempt");
+        assert!(matches!(response.await, Err(RedisError::ConnectionClosed)));
+    }
 
     #[tokio::test]
     async fn initial_factory_timeout_publishes_connect_failed() {

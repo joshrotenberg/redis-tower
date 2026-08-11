@@ -1,9 +1,13 @@
 mod common;
 
 use bytes::Bytes;
+use redis_server_wrapper::RedisServer;
 use redis_tower::RedisConnection;
 use redis_tower::commands::*;
-use redis_tower::pool::{ConnectionPool, PoolConfig};
+use redis_tower::pool::{
+    ConnectionPool, HealthProberConfig, PoolConfig, ReplicationLagHealthProbe,
+};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
 // ConnectionPool<RedisConnection> integration tests (issue #345)
@@ -125,4 +129,86 @@ async fn pool_health_check_ping() {
 
     let pong: String = pool.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
+}
+
+/// The replication-lag probe reads primary-side replica offsets from a real
+/// `INFO replication` response rather than comparing replica-local offsets.
+#[tokio::test]
+async fn pool_replication_lag_probe_uses_primary_replica_offsets() {
+    if std::env::var_os("REDIS_EXTERNAL_SERVICE").is_some() {
+        return;
+    }
+
+    let first = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let second = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let primary_port = first.local_addr().unwrap().port();
+    let replica_port = second.local_addr().unwrap().port();
+    drop((first, second));
+
+    let _primary_server = RedisServer::new()
+        .port(primary_port)
+        .repl_diskless_sync_delay(0)
+        .start()
+        .await
+        .expect("failed to start primary");
+    let _replica_server = RedisServer::new()
+        .port(replica_port)
+        .repl_diskless_sync_delay(0)
+        .start()
+        .await
+        .expect("failed to start replica");
+    let primary_addr = format!("127.0.0.1:{primary_port}");
+    let replica_addr = format!("127.0.0.1:{replica_port}");
+    let mut primary = RedisConnection::connect(&primary_addr).await.unwrap();
+    let mut replica = RedisConnection::connect(&replica_addr).await.unwrap();
+    replica
+        .execute(ReplicaOf::new("127.0.0.1", primary_port))
+        .await
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let info = primary
+            .execute(Info::new().section("replication"))
+            .await
+            .unwrap();
+        if info.contains("connected_slaves:1") && info.contains("state=online") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "replica did not become visible in primary INFO replication:\n{info}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    primary
+        .execute(Set::new("test:pool:replication-lag", "caught-up"))
+        .await
+        .unwrap();
+    assert_eq!(primary.execute(Wait::new(1, 5_000)).await.unwrap(), 1);
+
+    let pool = ConnectionPool::from_connections(vec![primary], PoolConfig::default()).unwrap();
+    let max_expected_lag = 1_000_000;
+    let prober = pool.spawn_health_prober_with(
+        HealthProberConfig::default().interval(Duration::from_secs(60)),
+        ReplicationLagHealthProbe::new(max_expected_lag),
+    );
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while pool.stats().unknown_health_count != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the primary-side replication probe should complete");
+
+    let stats = pool.stats();
+    assert_eq!(stats.healthy_count, 1, "unexpected probe stats: {stats:?}");
+    assert!(
+        stats
+            .max_replication_lag_bytes
+            .is_some_and(|lag| lag <= max_expected_lag),
+        "primary-side lag should be parsed from the live replica entry: {stats:?}"
+    );
+    prober.shutdown().await;
 }
