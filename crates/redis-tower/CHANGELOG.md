@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- provider-backed `CredentialConnectionFactory` for resilient, multiplexed,
+  and retained-pool connections, with per-connection credential fetch,
+  authentication before requested protocol negotiation, and one bounded
+  provider refresh when connection-establishment authentication is rejected
+  (#475)
 - explicit `Pipeline` execution through the standard `MultiplexedClient`, sent
   as one ordered, cancellation-aware auto-pipeline batch
 - `WithDeadline<Cmd>` end-to-end absolute deadlines honored by deadline-aware

@@ -2,8 +2,10 @@
 //!
 //! Implement [`CredentialProvider`] to supply credentials dynamically,
 //! e.g., from AWS IAM, Azure Entra ID, or a secrets manager. The
-//! [`AuthenticatedConnection`] wrapper re-authenticates on each
-//! reconnect and can proactively refresh before expiry.
+//! [`CredentialConnectionFactory`] fetches credentials for every fresh
+//! connection and composes with reconnecting clients and connection pools.
+//! [`AuthenticatedConnection`] remains available for direct, manually managed
+//! connections.
 //!
 //! # Example
 //!
@@ -23,8 +25,8 @@
 //! let mut conn = AuthenticatedConnection::connect("127.0.0.1:6379", creds).await?;
 //! conn.execute(Ping::new()).await?;
 //!
-//! // Dynamic credentials (cloud IAM). The provider re-fetches on each
-//! // reconnect, so a rotated token is picked up automatically.
+//! // Dynamic credentials (cloud IAM). This direct wrapper fetches once on
+//! // connect and again whenever reauthenticate() is called explicitly.
 //! struct IamProvider;
 //! impl CredentialProvider for IamProvider {
 //!     fn get_credentials(
@@ -42,9 +44,10 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use redis_tower_commands::Auth;
-use redis_tower_core::{Command, RedisConnection, RedisError};
+use redis_tower_core::{Command, ConnectionConfig, ProtocolVersion, RedisConnection, RedisError};
 
 /// Credentials for Redis authentication.
 #[derive(Debug, Clone)]
@@ -88,11 +91,27 @@ impl Credentials {
 pub trait CredentialProvider: Send + Sync + 'static {
     /// Fetch current credentials.
     ///
-    /// Called on initial connection and on each reconnect. Implementations
-    /// should handle caching and refresh internally.
+    /// [`CredentialConnectionFactory`] calls this for the initial connection
+    /// and every reconnect. Direct wrappers call it when connecting or when
+    /// reauthentication is requested. Implementations should handle caching
+    /// internally.
     fn get_credentials(
         &self,
     ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>>;
+
+    /// Force a fresh credential fetch after Redis rejects cached credentials.
+    ///
+    /// Providers that cache credentials should override this method to
+    /// invalidate or bypass that cache. The default calls
+    /// [`get_credentials`](Self::get_credentials) again, preserving the
+    /// existing behavior of simple providers and closures.
+    /// Calls may be concurrent across factory-backed clients or pool slots, so
+    /// caching providers must synchronize cache invalidation and refetching.
+    fn force_refresh(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        self.get_credentials()
+    }
 }
 
 /// A simple provider that always returns the same credentials.
@@ -139,11 +158,189 @@ where
     }
 }
 
+/// A provider-backed factory for authenticated Redis connections.
+///
+/// Every call fetches credentials, authenticates the fresh connection, and
+/// then negotiates the requested RESP protocol. This setup order matters for
+/// protected servers: negotiating RESP3 before `AUTH` can produce `NOAUTH`
+/// and leave an automatic negotiation silently on RESP2.
+///
+/// If Redis rejects the first `AUTH` with `NOAUTH` or `WRONGPASS`, the factory
+/// asks the provider to [`force_refresh`](CredentialProvider::force_refresh)
+/// and retries `AUTH` once. It never retries user commands.
+///
+/// The factory implements both
+/// [`ConnectionFactory`](crate::reconnect::ConnectionFactory) and
+/// [`PoolFactory`](crate::pool::PoolFactory), so the same setup is replayed by
+/// resilient, multiplexed, lazy, and replacement pool connections.
+///
+/// # Example
+///
+/// ```no_run
+/// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+/// use redis_tower::credentials::{CredentialConnectionFactory, StaticCredentials};
+/// use redis_tower::reconnect::{ReconnectConfig, ResilientConnection};
+///
+/// let factory = CredentialConnectionFactory::new(
+///     "127.0.0.1:6379",
+///     StaticCredentials::password("secret"),
+/// );
+/// let connection = ResilientConnection::new(factory, ReconnectConfig::default()).await?;
+/// # let _ = connection;
+/// # Ok(())
+/// # }
+/// ```
+#[must_use = "a credential connection factory must be passed to a client or pool"]
+pub struct CredentialConnectionFactory {
+    addr: String,
+    provider: Arc<dyn CredentialProvider>,
+    connection_config: ConnectionConfig,
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    tls: Option<(String, Arc<redis_tower_core::tls::TlsConfig>)>,
+}
+
+impl Clone for CredentialConnectionFactory {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+            provider: Arc::clone(&self.provider),
+            connection_config: self.connection_config.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: self.tls.clone(),
+        }
+    }
+}
+
+impl CredentialConnectionFactory {
+    /// Create a plain-TCP factory backed by `provider`.
+    pub fn new(addr: impl Into<String>, provider: impl CredentialProvider) -> Self {
+        Self::from_shared_provider(addr, Arc::new(provider))
+    }
+
+    /// Create a plain-TCP factory from a shared, type-erased provider.
+    ///
+    /// This constructor lets several topology or pool factories share one
+    /// provider cache and refresh state.
+    pub fn from_shared_provider(
+        addr: impl Into<String>,
+        provider: Arc<dyn CredentialProvider>,
+    ) -> Self {
+        Self {
+            addr: addr.into(),
+            provider,
+            connection_config: ConnectionConfig::default(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        }
+    }
+
+    /// Apply connection settings to every initial connection and reconnect.
+    ///
+    /// Keepalive, connect timeout, and RESP decode limits apply during the
+    /// initial RESP2 bootstrap. The requested protocol is negotiated only
+    /// after authentication succeeds.
+    pub fn with_connection_config(mut self, config: ConnectionConfig) -> Self {
+        self.connection_config = config;
+        self
+    }
+
+    /// Use explicit TLS settings for every connection made by this factory.
+    ///
+    /// `hostname` is the server name used for certificate verification. This
+    /// explicit form avoids guessing from an address that may be an IPv6
+    /// literal or a proxy endpoint.
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    pub fn with_tls(
+        mut self,
+        hostname: impl Into<String>,
+        tls: redis_tower_core::tls::TlsConfig,
+    ) -> Self {
+        self.tls = Some((hostname.into(), Arc::new(tls)));
+        self
+    }
+
+    /// Return the shared credential provider used by this factory.
+    pub fn provider(&self) -> &dyn CredentialProvider {
+        self.provider.as_ref()
+    }
+
+    async fn connect_inner(&self) -> Result<RedisConnection, RedisError> {
+        let requested_protocol = self.connection_config.protocol();
+        let bootstrap_config = self
+            .connection_config
+            .clone()
+            .with_protocol(ProtocolVersion::Resp2);
+
+        #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+        let mut conn = match &self.tls {
+            Some((hostname, tls)) => {
+                RedisConnection::connect_tls_with_config(
+                    &self.addr,
+                    hostname,
+                    tls.as_ref(),
+                    &bootstrap_config,
+                )
+                .await?
+            }
+            None => RedisConnection::connect_with_config(&self.addr, &bootstrap_config).await?,
+        };
+        #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+        let mut conn = RedisConnection::connect_with_config(&self.addr, &bootstrap_config).await?;
+
+        authenticate_with_refresh(&mut conn, self.provider.as_ref()).await?;
+        conn.negotiate_protocol(requested_protocol).await?;
+        Ok(conn)
+    }
+}
+
+impl crate::reconnect::ConnectionFactory for CredentialConnectionFactory {
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>> {
+        let factory = self.clone();
+        Box::pin(async move { factory.connect_inner().await })
+    }
+}
+
+impl crate::pool::PoolFactory for CredentialConnectionFactory {
+    type Connection = RedisConnection;
+
+    fn create(&self) -> Pin<Box<dyn Future<Output = Result<Self::Connection, RedisError>> + Send>> {
+        crate::reconnect::ConnectionFactory::connect(self)
+    }
+}
+
+async fn authenticate_with_refresh(
+    conn: &mut RedisConnection,
+    provider: &dyn CredentialProvider,
+) -> Result<(), RedisError> {
+    let credentials = provider.get_credentials().await?;
+    match conn.execute(credentials.to_auth_command()).await {
+        Err(error) if is_auth_rejection(&error) => {
+            let credentials = provider.force_refresh().await?;
+            conn.execute(credentials.to_auth_command()).await
+        }
+        result => result,
+    }
+}
+
+fn is_auth_rejection(error: &RedisError) -> bool {
+    let RedisError::Redis(message) = error else {
+        return false;
+    };
+    message
+        .split_ascii_whitespace()
+        .next()
+        .map(|prefix| prefix.trim_start_matches('-'))
+        .is_some_and(|prefix| {
+            prefix.eq_ignore_ascii_case("NOAUTH") || prefix.eq_ignore_ascii_case("WRONGPASS")
+        })
+}
+
 /// A connection that authenticates using a [`CredentialProvider`].
 ///
 /// Fetches credentials from the provider and sends AUTH after connecting.
-/// On reconnect (via the execute-and-retry pattern), credentials are
-/// re-fetched, supporting token rotation.
+/// This direct wrapper does not reconnect automatically. Use
+/// [`CredentialConnectionFactory`] with a reconnecting client when credentials
+/// must be fetched again for every replacement connection.
 pub struct AuthenticatedConnection<P> {
     conn: RedisConnection,
     provider: P,
@@ -290,6 +487,28 @@ impl<P> Drop for RotatingAuthClient<P> {
 mod tests {
     use super::*;
     use redis_tower_protocol::helpers::{array, bulk};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RefreshAwareProvider {
+        get_calls: Arc<AtomicUsize>,
+        refresh_calls: Arc<AtomicUsize>,
+    }
+
+    impl CredentialProvider for RefreshAwareProvider {
+        fn get_credentials(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            self.get_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Credentials::password("cached")) })
+        }
+
+        fn force_refresh(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Credentials::password("fresh")) })
+        }
+    }
 
     #[test]
     fn credentials_password_only() {
@@ -340,6 +559,70 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let creds = rt.block_on(provider.get_credentials()).unwrap();
         assert_eq!(creds.password, "dynamic_token");
+    }
+
+    #[test]
+    fn force_refresh_defaults_to_another_get() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = {
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok(Credentials::password("fresh")) }
+            }
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let credentials = rt.block_on(provider.force_refresh()).unwrap();
+
+        assert_eq!(credentials.password, "fresh");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn force_refresh_is_object_safe_and_overridable() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn CredentialProvider> = Arc::new(RefreshAwareProvider {
+            get_calls: Arc::clone(&get_calls),
+            refresh_calls: Arc::clone(&refresh_calls),
+        });
+        let factory = CredentialConnectionFactory::from_shared_provider("localhost:6379", provider);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let credentials = rt.block_on(factory.provider().force_refresh()).unwrap();
+
+        assert_eq!(credentials.password, "fresh");
+        assert_eq!(get_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn auth_rejection_classification_is_specific() {
+        assert!(is_auth_rejection(&RedisError::Redis(
+            "WRONGPASS invalid username-password pair".into()
+        )));
+        assert!(is_auth_rejection(&RedisError::Redis(
+            "NOAUTH Authentication required".into()
+        )));
+        assert!(is_auth_rejection(&RedisError::Redis(
+            "-wrongpass stale token".into()
+        )));
+        assert!(!is_auth_rejection(&RedisError::Redis(
+            "ERR invalid password policy".into()
+        )));
+        assert!(!is_auth_rejection(&RedisError::ConnectionClosed));
+    }
+
+    #[test]
+    fn credential_factory_implements_connection_and_pool_factories() {
+        fn assert_connection_factory<T: crate::reconnect::ConnectionFactory>() {}
+        fn assert_pool_factory<T: crate::pool::PoolFactory<Connection = RedisConnection>>() {}
+        fn assert_send_sync<T: Send + Sync>() {}
+
+        assert_connection_factory::<CredentialConnectionFactory>();
+        assert_pool_factory::<CredentialConnectionFactory>();
+        assert_send_sync::<CredentialConnectionFactory>();
     }
 
     #[test]

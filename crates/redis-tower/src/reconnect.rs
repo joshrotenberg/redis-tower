@@ -13,9 +13,15 @@
 //! - [`UrlConnectionFactory`] -- AUTH + SELECT from URL parameters, automatic
 //!   RESP3 negotiation
 //! - [`Resp3AddrConnectionFactory`] -- plain TCP, RESP3 via `HELLO 3`, no auth
+//! - [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory)
+//!   -- dynamic credentials fetched on every connection, with AUTH before the
+//!   requested protocol negotiation
 //!
-//! To require RESP3 with authentication, configure [`UrlConnectionFactory`]
-//! with a [`ConnectionConfig`] whose protocol is [`ProtocolVersion::Resp3`].
+//! For static URL credentials, configure [`UrlConnectionFactory`] with a
+//! [`ConnectionConfig`] whose protocol is [`ProtocolVersion::Resp3`]. For a
+//! rotating provider, use
+//! [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory)
+//! with the same protocol setting.
 //!
 //! # Example
 //!
@@ -318,7 +324,8 @@ impl Stream for ConnectionEventStream {
 ///
 /// A blanket implementation is provided for any `Fn() -> Future<Output = Result<RedisConnection, RedisError>>`,
 /// so closures work out of the box. For named factories, see
-/// [`AddrConnectionFactory`] and [`UrlConnectionFactory`].
+/// [`AddrConnectionFactory`], [`UrlConnectionFactory`], and
+/// [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory).
 pub trait ConnectionFactory: Send + Sync + 'static {
     /// Create a new [`RedisConnection`].
     fn connect(&self) -> Pin<Box<dyn Future<Output = Result<RedisConnection, RedisError>> + Send>>;
@@ -714,8 +721,9 @@ pub(crate) enum ConnState {
 /// | [`AddrConnectionFactory`] | No | No | Auto (RESP3 with RESP2 fallback) |
 /// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | Auto (RESP3 with RESP2 fallback) |
 /// | [`Resp3AddrConnectionFactory`] | No | No | Forced RESP3 |
+/// | [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory) | Yes (from provider) | No | Configurable after AUTH |
 ///
-/// All three named factories can retain a [`ConnectionConfig`] across every
+/// All four named factories can retain a [`ConnectionConfig`] across every
 /// reconnect via their `with_connection_config` builders.
 ///
 /// # Custom Setup on Reconnect
