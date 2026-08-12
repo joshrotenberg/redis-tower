@@ -711,6 +711,7 @@ impl PubSubConnection {
 
         match &items[1] {
             Frame::BulkString(_) | Frame::SimpleString(_) => Some(Ok(())),
+            Frame::Null if expected_kind.ends_with("unsubscribe") => Some(Ok(())),
             _ => None,
         }
     }
@@ -1034,6 +1035,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn is_confirmation_accepts_resp3_null_unsubscribe_name() {
+        let frame = Frame::Push(vec![bulk("unsubscribe"), Frame::Null, Frame::Integer(0)]);
+        assert!(matches!(
+            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            Some(Ok(()))
+        ));
+    }
+
     #[tokio::test]
     async fn subscribe_bypasses_existing_buffer_and_preserves_wire_messages() {
         let (mut pubsub, mut server) = pubsub_pair().await;
@@ -1161,7 +1171,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsubscribe_empty_family_accepts_null_ack_and_preserves_message() {
+    async fn unsubscribe_empty_family_accepts_resp3_null_ack_and_preserves_message() {
         let (mut pubsub, mut server) = pubsub_pair().await;
         let server_task = tokio::spawn(async move {
             assert_eq!(
@@ -1173,9 +1183,9 @@ mod tests {
                 .await
                 .unwrap();
             server
-                .send(array(vec![
+                .send(Frame::Push(vec![
                     bulk("unsubscribe"),
-                    Frame::BulkString(None),
+                    Frame::Null,
                     Frame::Integer(0),
                 ]))
                 .await
