@@ -68,7 +68,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 
 use futures::stream::{StreamExt, TryStreamExt};
@@ -337,6 +337,180 @@ struct Inner {
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<TlsConfig>>,
+}
+
+/// The narrow slice of cluster state needed by dedicated Pub/Sub sessions.
+///
+/// Pub/Sub sockets do not use the auto-pipeline workers, so retaining a full
+/// [`MultiplexedClusterClient`] clone would unnecessarily keep every worker
+/// alive and change the client's last-owner shutdown semantics. The weak
+/// handle lets sharded sessions observe topology while their originating
+/// client is alive without becoming another owner of that client.
+#[derive(Clone)]
+pub(crate) struct ClusterPubSubBackend {
+    inner: Weak<RwLock<Inner>>,
+    cache_hooks: Weak<StdRwLock<Option<ClusterCacheHooks>>>,
+    connector: ClusterNodeConnector,
+    reconnect: ReconnectConfig,
+    max_redirects: usize,
+}
+
+impl ClusterPubSubBackend {
+    fn inner(&self) -> Result<Arc<RwLock<Inner>>, RedisError> {
+        self.inner.upgrade().ok_or(RedisError::ConnectionClosed)
+    }
+
+    pub(crate) fn reconnect_config(&self) -> &ReconnectConfig {
+        &self.reconnect
+    }
+
+    pub(crate) fn max_redirects(&self) -> usize {
+        self.max_redirects
+    }
+
+    pub(crate) fn fixed_factory(&self, node: NodeAddr) -> NodeConnectionFactory {
+        NodeConnectionFactory {
+            addr: node.addr_string(),
+            readonly: false,
+            connector: self.connector.clone(),
+        }
+    }
+
+    /// Connect a dedicated Pub/Sub socket while honoring the client's
+    /// configured per-attempt connect timeout.
+    pub(crate) async fn connect_node(
+        &self,
+        node: &NodeAddr,
+    ) -> Result<RedisConnection, RedisError> {
+        let factory = self.fixed_factory(node.clone());
+        match self.reconnect.connect_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, factory.connect())
+                .await
+                .map_err(|_| RedisError::ConnectTimeout)?,
+            None => factory.connect().await,
+        }
+    }
+
+    pub(crate) async fn validate_member(&self, node: &NodeAddr) -> Result<(), RedisError> {
+        let inner = self.inner()?;
+        let inner = inner.read().await;
+        let is_member = inner
+            .topology
+            .master_addrs()
+            .into_iter()
+            .chain(inner.topology.replica_addrs())
+            .any(|candidate| candidate == node);
+        if is_member {
+            Ok(())
+        } else {
+            Err(RedisError::Redis(format!(
+                "cluster Pub/Sub node {node} is not a member of the current topology"
+            )))
+        }
+    }
+
+    /// Atomically capture a topology revision and subscribe to all later
+    /// revisions. Holding one read lock closes the snapshot/subscribe race.
+    pub(crate) async fn topology_state(
+        &self,
+    ) -> Result<
+        (
+            TopologySnapshot,
+            tokio::sync::watch::Receiver<Option<Arc<TopologyChange>>>,
+        ),
+        RedisError,
+    > {
+        let inner = self.inner()?;
+        let inner = inner.read().await;
+        let changes = inner.topology_changes.subscribe();
+        let snapshot = inner.topology_changes.snapshot(&inner.topology);
+        Ok((snapshot, changes))
+    }
+
+    pub(crate) async fn topology_snapshot(&self) -> Result<TopologySnapshot, RedisError> {
+        let inner = self.inner()?;
+        let inner = inner.read().await;
+        Ok(inner.topology_changes.snapshot(&inner.topology))
+    }
+
+    /// Apply the same address-map/host-override policy used by ordinary
+    /// command redirects to an address advertised in a Pub/Sub MOVED reply.
+    pub(crate) async fn remap_redirect(&self, addr: &str) -> Result<NodeAddr, RedisError> {
+        let inner = self.inner()?;
+        let inner = inner.read().await;
+        let remapped = if let Some(mapped) = inner
+            .address_map
+            .as_ref()
+            .and_then(|address_map| address_map.get(addr))
+        {
+            mapped.clone()
+        } else if let Some(host) = &inner.host_override {
+            match addr.rsplit_once(':') {
+                Some((_old_host, port)) => format!("{host}:{port}"),
+                None => addr.to_string(),
+            }
+        } else {
+            addr.to_string()
+        };
+
+        NodeAddr::parse(&remapped).ok_or_else(|| {
+            RedisError::Redis(format!(
+                "cluster Pub/Sub redirect returned an invalid node address: {remapped}"
+            ))
+        })
+    }
+
+    /// Commit an authoritative Pub/Sub MOVED reply into the shared routing
+    /// snapshot and notify every topology-derived consumer before the new
+    /// owner becomes visible.
+    pub(crate) async fn commit_moved(&self, slot: u16, target: NodeAddr) -> Result<(), RedisError> {
+        self.ensure_master(&target).await?;
+        let inner = self.inner()?;
+        let mut inner = inner.write().await;
+        let previous_topology = inner.topology.clone();
+        let mut current_topology = previous_topology.clone();
+        current_topology.reassign_slot(slot, target);
+        let change = inner
+            .topology_changes
+            .record(&previous_topology, &current_topology);
+        if let Some(change) = change
+            && let Some(cache_hooks) = self.cache_hooks.upgrade()
+            && let Some(hooks) = cache_hooks.read().unwrap().as_ref().cloned()
+        {
+            hooks.topology_changing(change);
+        }
+        inner.topology = current_topology;
+        Ok(())
+    }
+
+    /// Ensure command routing can use a Pub/Sub MOVED target before exposing
+    /// that target as the shared slot owner. A failover target may previously
+    /// have existed only in the replica service map, or may be entirely new.
+    async fn ensure_master(&self, target: &NodeAddr) -> Result<(), RedisError> {
+        let inner = self.inner()?;
+        let addr = target.addr_string();
+        let (pipeline_config, reconnect_config) = {
+            let inner = inner.read().await;
+            if inner.masters.contains_key(&addr) {
+                return Ok(());
+            }
+            (
+                inner.pipeline_config.clone(),
+                inner.reconnect_config.clone(),
+            )
+        };
+
+        let service = build_node_service(
+            &addr,
+            false,
+            pipeline_config,
+            reconnect_config,
+            self.connector.clone(),
+        )
+        .await?;
+        inner.write().await.masters.entry(addr).or_insert(service);
+        Ok(())
+    }
 }
 
 /// Builder for configuring a [`MultiplexedClusterClient`].
@@ -1584,6 +1758,24 @@ impl MultiplexedClusterClient {
         self.inner.read().await.topology.clone()
     }
 
+    /// Build the weak, dedicated-connection backend used by cluster Pub/Sub.
+    pub(crate) async fn pubsub_backend(&self) -> ClusterPubSubBackend {
+        let inner = self.inner.read().await;
+        let connector = ClusterNodeConnector::new(
+            inner.connection_config.clone(),
+            inner.credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            inner.tls.clone(),
+        );
+        ClusterPubSubBackend {
+            inner: Arc::downgrade(&self.inner),
+            cache_hooks: Arc::downgrade(&self.cache_hooks),
+            connector,
+            reconnect: inner.reconnect_config.reconnect.clone(),
+            max_redirects: inner.max_redirects,
+        }
+    }
+
     /// Snapshot the topology together with its monotonic ownership revision.
     #[allow(dead_code)] // Consumed by the stacked cluster-caching runtime.
     pub(crate) async fn topology_snapshot(&self) -> TopologySnapshot {
@@ -2318,7 +2510,7 @@ async fn build_node_service(
 /// 3. Negotiate the configured RESP protocol.
 /// 4. If `readonly` is set (replica node), send READONLY so reads to this
 ///    connection succeed.
-struct NodeConnectionFactory {
+pub(crate) struct NodeConnectionFactory {
     addr: String,
     readonly: bool,
     connector: ClusterNodeConnector,
@@ -2858,7 +3050,7 @@ mod observability_tests {
     use bytes::Bytes;
     use futures::SinkExt;
     use redis_tower::metrics_layer::{ClusterRedirectKind, ErrorKind, MetricsRecorder};
-    use redis_tower_commands::{Get, Set};
+    use redis_tower_commands::{Get, SPublish, Set};
     use redis_tower_core::WithDeadline;
     use redis_tower_protocol::RespCodec;
     use std::sync::Mutex;
@@ -2956,6 +3148,19 @@ mod observability_tests {
             .any(|window| window == needle)
     }
 
+    fn command_parts(frame: Frame) -> Vec<Bytes> {
+        let Frame::Array(Some(parts)) = frame else {
+            panic!("expected command array, got {frame:?}");
+        };
+        parts
+            .into_iter()
+            .map(|part| match part {
+                Frame::BulkString(Some(value)) => value,
+                other => panic!("expected bulk-string command part, got {other:?}"),
+            })
+            .collect()
+    }
+
     /// Build an auto-pipeline service on one end of a loopback TCP connection
     /// and script the server end to answer its first request.
     ///
@@ -3018,6 +3223,39 @@ mod observability_tests {
         let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(client));
         let service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
         (addr.to_string(), service, server_task)
+    }
+
+    /// Spawn a target that accepts the standard connection bootstrap and one
+    /// SPUBLISH, proving a Pub/Sub MOVED target is immediately usable by the
+    /// ordinary command router.
+    async fn pubsub_moved_target(
+        expected_channel: &'static str,
+    ) -> (NodeAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut framed =
+                Framed::new(redis_tower_core::RedisStream::Tcp(socket), RespCodec::new());
+
+            for expected in [b"CLIENT".as_slice(), b"CLIENT", b"HELLO"] {
+                let command = command_parts(framed.next().await.unwrap().unwrap());
+                assert_eq!(command[0].as_ref(), expected);
+                // SETINFO is best-effort and a failed HELLO makes Auto fall
+                // back to RESP2, which keeps this fake node intentionally
+                // small while exercising the real connector path.
+                framed
+                    .send(Frame::Error(Bytes::from_static(b"ERR unsupported")))
+                    .await
+                    .unwrap();
+            }
+
+            let command = command_parts(framed.next().await.unwrap().unwrap());
+            assert_eq!(command[0].as_ref(), b"SPUBLISH");
+            assert_eq!(command[1].as_ref(), expected_channel.as_bytes());
+            framed.send(Frame::Integer(1)).await.unwrap();
+        });
+        (node_addr(&addr.to_string()), task)
     }
 
     fn cache_request(frame: Frame, command_name: &str) -> ClusterCacheRequest {
@@ -3207,6 +3445,67 @@ mod observability_tests {
             (target_addr, target_service),
         ]);
         test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[tokio::test]
+    async fn pubsub_moved_commits_each_later_authoritative_owner() {
+        const CHANNEL: &str = "{pubsub-moved}:events";
+        let slot = slot_for_key(CHANNEL.as_bytes());
+        let first = NodeAddr {
+            host: "127.0.0.1".to_string(),
+            port: 7000,
+        };
+        let (second, second_server) = pubsub_moved_target(CHANNEL).await;
+        let (third, third_server) = pubsub_moved_target(CHANNEL).await;
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: first.clone(),
+            replicas: Vec::new(),
+        }]);
+        let client = test_client(
+            first.addr_string(),
+            topology,
+            HashMap::new(),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let backend = client.pubsub_backend().await;
+        let (_snapshot, mut changes) = backend.topology_state().await.unwrap();
+
+        backend.commit_moved(slot, second.clone()).await.unwrap();
+        changes.changed().await.unwrap();
+        assert_eq!(
+            client.topology().await.master_for_slot(slot),
+            Some(&second),
+            "the first Pub/Sub MOVED target must become the shared owner"
+        );
+        assert_eq!(
+            client
+                .execute(SPublish::new(CHANNEL, "second"))
+                .await
+                .unwrap(),
+            1
+        );
+        second_server.await.unwrap();
+
+        backend.commit_moved(slot, third.clone()).await.unwrap();
+        changes.changed().await.unwrap();
+        assert_eq!(
+            client.topology().await.master_for_slot(slot),
+            Some(&third),
+            "a later authoritative owner must supersede the earlier MOVED"
+        );
+        assert_eq!(
+            client
+                .execute(SPublish::new(CHANNEL, "third"))
+                .await
+                .unwrap(),
+            1
+        );
+        third_server.await.unwrap();
+
+        client.shutdown().await;
     }
 
     #[tokio::test]

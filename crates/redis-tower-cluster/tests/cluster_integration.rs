@@ -1872,3 +1872,710 @@ async fn cluster_pool_exhaustion_and_recovery() {
         h.await.unwrap();
     }
 }
+
+// -- Cluster Pub/Sub tests --
+
+mod cluster_pubsub {
+    use super::*;
+    use redis_tower::{
+        Command, MessageKind, NodeAddr, PubSubConnection, PubSubMessage, RedisConnection,
+    };
+    use std::future::Future;
+
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
+    const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+    const RECOVERY_TIMEOUT: Duration = Duration::from_secs(20);
+
+    async fn bounded<T>(operation: &str, duration: Duration, future: impl Future<Output = T>) -> T {
+        tokio::time::timeout(duration, future)
+            .await
+            .unwrap_or_else(|_| panic!("timed out after {duration:?} while {operation}"))
+    }
+
+    async fn start_fixture() -> ClusterFixture {
+        bounded(
+            "starting cluster Pub/Sub fixture",
+            STARTUP_TIMEOUT,
+            ClusterFixture::start(),
+        )
+        .await
+        .expect("failed to start cluster Pub/Sub fixture")
+    }
+
+    async fn node_commandstat_calls(
+        fixture: &ClusterFixture,
+        node_index: usize,
+        command: &str,
+    ) -> u64 {
+        let info = bounded(
+            "reading Pub/Sub commandstats",
+            OPERATION_TIMEOUT,
+            fixture.run_node(node_index, &["INFO", "commandstats"]),
+        )
+        .await
+        .expect("failed to read Pub/Sub commandstats");
+        commandstat_calls(&info, command)
+    }
+
+    async fn wait_for_commandstat(
+        fixture: &ClusterFixture,
+        node_index: usize,
+        command: &str,
+        minimum: u64,
+    ) {
+        bounded(
+            "waiting for a replayed Pub/Sub subscription",
+            RECOVERY_TIMEOUT,
+            async {
+                loop {
+                    if node_commandstat_calls(fixture, node_index, command).await >= minimum {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await;
+    }
+
+    async fn wait_for_shard_subscribers(
+        fixture: &ClusterFixture,
+        node_index: usize,
+        channel: &str,
+        minimum: u64,
+    ) {
+        bounded(
+            "waiting for a confirmed sharded Pub/Sub subscription",
+            RECOVERY_TIMEOUT,
+            async {
+                loop {
+                    let output = fixture
+                        .run_node(node_index, &["PUBSUB", "SHARDNUMSUB", channel])
+                        .await
+                        .expect("failed to read sharded Pub/Sub subscriber count");
+                    let count = output
+                        .lines()
+                        .rev()
+                        .find_map(|line| line.trim().parse::<u64>().ok())
+                        .unwrap_or(0);
+                    if count >= minimum {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            },
+        )
+        .await;
+    }
+
+    async fn shard_subscriber_client_id(fixture: &ClusterFixture, node_index: usize) -> u64 {
+        let clients = bounded(
+            "listing sharded Pub/Sub clients",
+            OPERATION_TIMEOUT,
+            fixture.run_node(node_index, &["CLIENT", "LIST", "TYPE", "PUBSUB"]),
+        )
+        .await
+        .expect("failed to list sharded Pub/Sub clients");
+
+        let ids: Vec<u64> = clients
+            .lines()
+            .filter(|line| {
+                line.split_whitespace().any(|field| {
+                    field
+                        .strip_prefix("ssub=")
+                        .and_then(|count| count.parse::<u64>().ok())
+                        .is_some_and(|count| count > 0)
+                })
+            })
+            .filter_map(|line| {
+                line.split_whitespace().find_map(|field| {
+                    field
+                        .strip_prefix("id=")
+                        .and_then(|id| id.parse::<u64>().ok())
+                })
+            })
+            .collect();
+        assert_eq!(
+            ids.len(),
+            1,
+            "expected exactly one sharded Pub/Sub client on node {node_index}, got {clients:?}"
+        );
+        ids[0]
+    }
+
+    fn node_addr(addr: &str) -> NodeAddr {
+        NodeAddr::parse(addr).unwrap_or_else(|| panic!("invalid fixture node address {addr}"))
+    }
+
+    fn assert_message(message: &PubSubMessage, kind: MessageKind, channel: &str, payload: &[u8]) {
+        assert_eq!(message.kind, kind);
+        assert_eq!(message.channel, channel);
+        assert_eq!(message.payload.as_ref(), payload);
+    }
+
+    /// Exercise both cluster Pub/Sub modes in one dedicated fixture. Regular
+    /// subscriptions must stay on the designated node, while shard channels
+    /// and SPUBLISH must route to their hash-slot owner. Mixed-slot shard
+    /// subscriptions are rejected without sending SSUBSCRIBE to any master.
+    #[tokio::test]
+    #[ignore = "live: starts a dedicated 3-master/3-replica cluster for Pub/Sub routing"]
+    async fn routes_regular_and_sharded_pubsub_and_rejects_cross_slot() {
+        let extracted_channel = "{redis-tower:cluster-pubsub}:extractor";
+        let spublish_frame = SPublish::new(extracted_channel, "payload").to_frame();
+        assert_eq!(
+            redis_tower_cluster::key_extractor::extract_key(&spublish_frame),
+            Some(extracted_channel.as_bytes())
+        );
+        assert_eq!(
+            redis_tower_cluster::key_extractor::pipeline_routing_slot(&spublish_frame)
+                .expect("SPUBLISH should have one valid routing slot"),
+            Some(slot_for_key(extracted_channel.as_bytes()))
+        );
+
+        let fixture = start_fixture().await;
+        let topology = bounded(
+            "reading cluster Pub/Sub topology",
+            OPERATION_TIMEOUT,
+            fixture.topology(),
+        )
+        .await
+        .expect("failed to read cluster Pub/Sub topology");
+        let seed = fixture.seed_addr();
+        let designated = topology
+            .masters()
+            .find(|node| node.addr != seed)
+            .expect("fixture should have a non-seed master")
+            .clone();
+        let client = bounded(
+            "connecting cluster Pub/Sub client",
+            OPERATION_TIMEOUT,
+            MultiplexedClusterClient::connect(&seed),
+        )
+        .await
+        .expect("failed to connect cluster Pub/Sub client");
+
+        let subscribe_before = bounded(
+            "capturing regular subscription commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "subscribe"),
+        )
+        .await;
+        let mut regular = bounded(
+            "opening designated-node Pub/Sub connection",
+            OPERATION_TIMEOUT,
+            client.pubsub_on(node_addr(&designated.addr)),
+        )
+        .await
+        .expect("failed to open designated-node Pub/Sub connection");
+        assert_eq!(regular.current_node().addr_string(), designated.addr);
+        let regular_channel = "redis-tower:cluster-pubsub:regular";
+        bounded(
+            "subscribing on designated cluster node",
+            OPERATION_TIMEOUT,
+            regular.subscribe(&[regular_channel]),
+        )
+        .await
+        .expect("regular cluster subscription failed");
+        let subscribe_after = bounded(
+            "checking regular subscription commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "subscribe"),
+        )
+        .await;
+        assert_commandstat_incremented_only_on(
+            &subscribe_before,
+            &subscribe_after,
+            designated.index,
+            "SUBSCRIBE",
+        );
+        assert!(regular.subscriptions().channels.contains(regular_channel));
+
+        bounded(
+            "publishing regular cluster message",
+            OPERATION_TIMEOUT,
+            client.execute(Publish::new(regular_channel, "regular-payload")),
+        )
+        .await
+        .expect("regular cluster publish failed");
+        let message = bounded(
+            "receiving regular cluster message",
+            OPERATION_TIMEOUT,
+            regular.next_message(),
+        )
+        .await
+        .expect("regular cluster subscription ended");
+        assert_message(
+            &message,
+            MessageKind::Message,
+            regular_channel,
+            b"regular-payload",
+        );
+
+        let shard_slot = [42_u16, 6_000, 12_000]
+            .into_iter()
+            .find(|slot| {
+                topology
+                    .owner_of_slot(*slot)
+                    .is_some_and(|owner| owner.addr != seed)
+            })
+            .expect("fixture should assign a test slot to a non-seed master");
+        let shard_owner = topology
+            .owner_of_slot(shard_slot)
+            .expect("shard slot should have an owner")
+            .clone();
+        let shard_tag = key_for_slot(shard_slot);
+        let shard_channel_a = format!("{shard_tag}:a");
+        let shard_channel_b = format!("{shard_tag}:b");
+        assert_eq!(slot_for_key(shard_channel_a.as_bytes()), shard_slot);
+        assert_eq!(
+            slot_for_key(shard_channel_a.as_bytes()),
+            slot_for_key(shard_channel_b.as_bytes())
+        );
+
+        let mut sharded = bounded(
+            "opening same-slot sharded Pub/Sub connection",
+            OPERATION_TIMEOUT,
+            client.sharded_pubsub(&[&shard_channel_a, &shard_channel_b]),
+        )
+        .await
+        .expect("same-slot sharded subscription failed");
+        assert_eq!(sharded.slot(), shard_slot);
+        assert_eq!(sharded.current_node().addr_string(), shard_owner.addr);
+        assert!(
+            sharded
+                .subscriptions()
+                .shard_channels
+                .contains(&shard_channel_a)
+        );
+        assert!(
+            sharded
+                .subscriptions()
+                .shard_channels
+                .contains(&shard_channel_b)
+        );
+
+        let spublish_before = bounded(
+            "capturing SPUBLISH routing commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "spublish"),
+        )
+        .await;
+        let shard_receivers = bounded(
+            "publishing first sharded cluster message",
+            OPERATION_TIMEOUT,
+            client.execute(SPublish::new(&shard_channel_a, "shard-a")),
+        )
+        .await
+        .expect("first sharded cluster publish failed");
+        assert_eq!(shard_receivers, 1);
+        let spublish_after = bounded(
+            "checking SPUBLISH routing commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "spublish"),
+        )
+        .await;
+        assert_commandstat_incremented_only_on(
+            &spublish_before,
+            &spublish_after,
+            shard_owner.index,
+            "SPUBLISH",
+        );
+        let message = bounded(
+            "receiving first sharded cluster message",
+            OPERATION_TIMEOUT,
+            sharded.next_message(),
+        )
+        .await
+        .expect("first sharded cluster subscription ended");
+        assert_message(
+            &message,
+            MessageKind::SMessage,
+            &shard_channel_a,
+            b"shard-a",
+        );
+
+        let shard_receivers = bounded(
+            "publishing second sharded cluster message",
+            OPERATION_TIMEOUT,
+            client.execute(SPublish::new(&shard_channel_b, "shard-b")),
+        )
+        .await
+        .expect("second sharded cluster publish failed");
+        assert_eq!(shard_receivers, 1);
+        let message = bounded(
+            "receiving second sharded cluster message",
+            OPERATION_TIMEOUT,
+            sharded.next_message(),
+        )
+        .await
+        .expect("second sharded cluster subscription ended");
+        assert_message(
+            &message,
+            MessageKind::SMessage,
+            &shard_channel_b,
+            b"shard-b",
+        );
+
+        let cross_slot_a = key_for_slot(42);
+        let cross_slot_b = key_for_slot(12_000);
+        let ssubscribe_before = bounded(
+            "capturing cross-slot SSUBSCRIBE commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "ssubscribe"),
+        )
+        .await;
+        let error = match bounded(
+            "rejecting cross-slot sharded subscription",
+            OPERATION_TIMEOUT,
+            client.sharded_pubsub(&[&cross_slot_a, &cross_slot_b]),
+        )
+        .await
+        {
+            Ok(_) => panic!("cross-slot sharded subscription unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("CROSSSLOT"),
+            "unexpected cross-slot sharded subscription error: {error}"
+        );
+        let ssubscribe_after = bounded(
+            "checking cross-slot SSUBSCRIBE commandstats",
+            RECOVERY_TIMEOUT,
+            master_commandstat_calls(&fixture, "ssubscribe"),
+        )
+        .await;
+        assert_eq!(
+            ssubscribe_after, ssubscribe_before,
+            "cross-slot validation must reject before SSUBSCRIBE reaches Redis"
+        );
+
+        drop(sharded);
+        drop(regular);
+        bounded(
+            "shutting down cluster Pub/Sub client",
+            OPERATION_TIMEOUT,
+            client.shutdown(),
+        )
+        .await;
+    }
+
+    /// A fixed-node regular subscription must reconnect to that exact node and
+    /// replay its tracked channels. Waiting for the second SUBSCRIBE command
+    /// before publishing makes the at-most-once reconnect gap deterministic.
+    #[tokio::test]
+    #[ignore = "live: kills a designated-node Pub/Sub connection"]
+    async fn regular_pubsub_reconnects_to_designated_node_and_resubscribes() {
+        let fixture = start_fixture().await;
+        let topology = bounded(
+            "reading reconnect Pub/Sub topology",
+            OPERATION_TIMEOUT,
+            fixture.topology(),
+        )
+        .await
+        .expect("failed to read reconnect Pub/Sub topology");
+        let designated = topology
+            .masters()
+            .nth(1)
+            .expect("fixture should have a second master")
+            .clone();
+        let client = bounded(
+            "connecting reconnect Pub/Sub client",
+            OPERATION_TIMEOUT,
+            MultiplexedClusterClient::connect(&fixture.seed_addr()),
+        )
+        .await
+        .expect("failed to connect reconnect Pub/Sub client");
+        let mut subscriber = bounded(
+            "opening reconnecting designated-node subscription",
+            OPERATION_TIMEOUT,
+            client.pubsub_on(node_addr(&designated.addr)),
+        )
+        .await
+        .expect("failed to open reconnecting designated-node subscription");
+        let channel = "redis-tower:cluster-pubsub:reconnect";
+        bounded(
+            "establishing regular subscription before reconnect",
+            OPERATION_TIMEOUT,
+            subscriber.subscribe(&[channel]),
+        )
+        .await
+        .expect("failed to establish regular subscription before reconnect");
+        let subscribe_calls = node_commandstat_calls(&fixture, designated.index, "subscribe").await;
+
+        bounded(
+            "killing designated-node Pub/Sub connection",
+            OPERATION_TIMEOUT,
+            fixture.run_node(designated.index, &["CLIENT", "KILL", "TYPE", "PUBSUB"]),
+        )
+        .await
+        .expect("failed to kill designated-node Pub/Sub connection");
+
+        let (message, ()) = bounded(
+            "reconnecting, replaying, and receiving regular Pub/Sub message",
+            Duration::from_secs(30),
+            async {
+                tokio::join!(
+                    bounded(
+                        "reconnecting and receiving regular Pub/Sub message",
+                        RECOVERY_TIMEOUT,
+                        subscriber.next_message(),
+                    ),
+                    async {
+                        wait_for_commandstat(
+                            &fixture,
+                            designated.index,
+                            "subscribe",
+                            subscribe_calls + 1,
+                        )
+                        .await;
+                        bounded(
+                            "publishing after regular Pub/Sub reconnect",
+                            OPERATION_TIMEOUT,
+                            client.execute(Publish::new(channel, "after-reconnect")),
+                        )
+                        .await
+                        .expect("publish after regular Pub/Sub reconnect failed");
+                    }
+                )
+            },
+        )
+        .await;
+        let message = message.expect("regular Pub/Sub reconnect did not yield a message");
+        assert_message(&message, MessageKind::Message, channel, b"after-reconnect");
+        assert_eq!(subscriber.current_node().addr_string(), designated.addr);
+        assert!(subscriber.subscriptions().channels.contains(channel));
+
+        drop(subscriber);
+        bounded(
+            "shutting down regular reconnect client",
+            OPERATION_TIMEOUT,
+            client.shutdown(),
+        )
+        .await;
+    }
+
+    /// Moving a subscribed shard channel's slot must move the Pub/Sub socket
+    /// and replay SSUBSCRIBE on the new owner. The message is published only
+    /// after commandstats prove the replay completed, avoiding a race with the
+    /// documented at-most-once gap during relocation.
+    #[tokio::test]
+    #[ignore = "live: starts a dedicated cluster and moves a subscribed shard slot"]
+    async fn sharded_pubsub_follows_topology_owner_change_and_resubscribes() {
+        let fixture = start_fixture().await;
+        let before = bounded(
+            "reading pre-reshard Pub/Sub topology",
+            OPERATION_TIMEOUT,
+            fixture.topology(),
+        )
+        .await
+        .expect("failed to read pre-reshard Pub/Sub topology");
+        let slot = 42;
+        let source = before
+            .owner_of_slot(slot)
+            .expect("shard slot should have a source owner")
+            .clone();
+        let target = before
+            .masters()
+            .find(|node| node.id != source.id)
+            .expect("fixture should have another shard master")
+            .clone();
+        let channel = format!("{}:topology", key_for_slot(slot));
+        let client = bounded(
+            "connecting topology-aware Pub/Sub client",
+            OPERATION_TIMEOUT,
+            MultiplexedClusterClient::connect(&fixture.seed_addr()),
+        )
+        .await
+        .expect("failed to connect topology-aware Pub/Sub client");
+        let mut subscriber = bounded(
+            "opening topology-aware sharded subscription",
+            OPERATION_TIMEOUT,
+            client.sharded_pubsub(&[&channel]),
+        )
+        .await
+        .expect("failed to open topology-aware sharded subscription");
+        assert_eq!(subscriber.current_node().addr_string(), source.addr);
+        assert_eq!(subscriber.slot(), slot);
+
+        let receivers = bounded(
+            "publishing baseline sharded message",
+            OPERATION_TIMEOUT,
+            client.execute(SPublish::new(&channel, "before-reshard")),
+        )
+        .await
+        .expect("baseline sharded publish failed");
+        assert_eq!(receivers, 1);
+        let message = bounded(
+            "receiving baseline sharded message",
+            OPERATION_TIMEOUT,
+            subscriber.next_message(),
+        )
+        .await
+        .expect("baseline sharded subscription ended");
+        assert_message(&message, MessageKind::SMessage, &channel, b"before-reshard");
+
+        let target_subscribe_calls =
+            node_commandstat_calls(&fixture, target.index, "ssubscribe").await;
+        let (message, ()) = bounded(
+            "relocating, replaying, and receiving sharded Pub/Sub message",
+            Duration::from_secs(45),
+            async {
+                tokio::join!(
+                    bounded(
+                        "relocating and receiving sharded Pub/Sub message",
+                        RECOVERY_TIMEOUT,
+                        subscriber.next_message(),
+                    ),
+                    async {
+                        bounded(
+                            "moving subscribed shard slot",
+                            OPERATION_TIMEOUT,
+                            fixture.reshard_slot(slot, target.index),
+                        )
+                        .await
+                        .expect("failed to move subscribed shard slot");
+                        bounded(
+                            "waiting for subscribed shard slot owner",
+                            OPERATION_TIMEOUT,
+                            fixture.wait_for_slot_owner(slot, &target.id, OPERATION_TIMEOUT),
+                        )
+                        .await
+                        .expect("new shard owner was not advertised");
+                        bounded(
+                            "refreshing topology after subscribed shard moved",
+                            OPERATION_TIMEOUT,
+                            client.refresh_topology(),
+                        )
+                        .await
+                        .expect("cluster client failed to refresh moved shard topology");
+                        wait_for_commandstat(
+                            &fixture,
+                            target.index,
+                            "ssubscribe",
+                            target_subscribe_calls + 1,
+                        )
+                        .await;
+
+                        let receivers = bounded(
+                            "publishing after sharded Pub/Sub relocation",
+                            OPERATION_TIMEOUT,
+                            client.execute(SPublish::new(&channel, "after-reshard")),
+                        )
+                        .await
+                        .expect("sharded publish after relocation failed");
+                        assert_eq!(receivers, 1);
+                    }
+                )
+            },
+        )
+        .await;
+        let message = message.expect("relocated sharded Pub/Sub did not yield a message");
+        assert_message(&message, MessageKind::SMessage, &channel, b"after-reshard");
+        assert_eq!(subscriber.current_node().addr_string(), target.addr);
+        assert_eq!(subscriber.slot(), slot);
+        assert!(subscriber.subscriptions().shard_channels.contains(&channel));
+        let target_subscriber_id = shard_subscriber_client_id(&fixture, target.index).await;
+
+        // Move the slot back without refreshing the client, then break the
+        // active Pub/Sub socket. The reconnect first reaches the stale owner;
+        // its replayed SSUBSCRIBE returns MOVED, which must update shared
+        // routing and continue the same reconnect campaign on the new owner.
+        let source_subscribe_calls =
+            node_commandstat_calls(&fixture, source.index, "ssubscribe").await;
+        let (message, ()) = bounded(
+            "following a replay-time Pub/Sub MOVED",
+            Duration::from_secs(45),
+            async {
+                tokio::join!(
+                    bounded(
+                        "receiving after replay-time Pub/Sub MOVED",
+                        RECOVERY_TIMEOUT,
+                        subscriber.next_message(),
+                    ),
+                    async {
+                        bounded(
+                            "moving subscribed shard slot back",
+                            OPERATION_TIMEOUT,
+                            fixture.reshard_slot(slot, source.index),
+                        )
+                        .await
+                        .expect("failed to move subscribed shard slot back");
+                        bounded(
+                            "waiting for restored shard slot owner",
+                            OPERATION_TIMEOUT,
+                            fixture.wait_for_slot_owner(slot, &source.id, OPERATION_TIMEOUT),
+                        )
+                        .await
+                        .expect("restored shard owner was not advertised");
+                        let stale = RedisConnection::connect(&target.addr)
+                            .await
+                            .expect("failed to connect to stale shard owner");
+                        let mut stale = PubSubConnection::from_connection(stale)
+                            .expect("failed to open stale-owner Pub/Sub connection");
+                        let stale_error = bounded(
+                            "probing stale-owner SSUBSCRIBE redirect",
+                            OPERATION_TIMEOUT,
+                            stale.ssubscribe(&[&channel]),
+                        )
+                        .await
+                        .expect_err("stale shard owner unexpectedly accepted SSUBSCRIBE");
+                        assert!(
+                            stale_error.is_moved(),
+                            "stale shard owner returned {stale_error} instead of MOVED"
+                        );
+                        let target_subscriber_id = target_subscriber_id.to_string();
+                        let killed = bounded(
+                            "breaking the stale-owner Pub/Sub socket",
+                            OPERATION_TIMEOUT,
+                            fixture.run_node(
+                                target.index,
+                                &["CLIENT", "KILL", "ID", &target_subscriber_id],
+                            ),
+                        )
+                        .await
+                        .expect("failed to break stale-owner Pub/Sub socket");
+                        assert_eq!(
+                            killed.trim(),
+                            "1",
+                            "exact stale-owner Pub/Sub socket was not killed"
+                        );
+                        wait_for_commandstat(
+                            &fixture,
+                            source.index,
+                            "ssubscribe",
+                            source_subscribe_calls + 1,
+                        )
+                        .await;
+                        wait_for_shard_subscribers(&fixture, source.index, &channel, 1).await;
+
+                        let receivers = bounded(
+                            "publishing after replay-time Pub/Sub MOVED",
+                            OPERATION_TIMEOUT,
+                            client.execute(SPublish::new(&channel, "after-replay-moved")),
+                        )
+                        .await
+                        .expect("sharded publish after replay-time MOVED failed");
+                        assert_eq!(receivers, 1);
+                    }
+                )
+            },
+        )
+        .await;
+        let message = message.expect("replay-time MOVED did not yield a message");
+        assert_message(
+            &message,
+            MessageKind::SMessage,
+            &channel,
+            b"after-replay-moved",
+        );
+        assert_eq!(subscriber.current_node().addr_string(), source.addr);
+
+        drop(subscriber);
+        bounded(
+            "shutting down sharded relocation client",
+            OPERATION_TIMEOUT,
+            client.shutdown(),
+        )
+        .await;
+    }
+}

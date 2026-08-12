@@ -186,6 +186,14 @@ MOVED/ASK redirects, single-slot topology patching, TRYAGAIN/CLUSTERDOWN/LOADING
 retries, and failover self-healing (dead-node replacement + pruning) are handled
 automatically.
 
+Cluster subscriptions are explicit about their ownership model. Use
+`pubsub_on(node)` for regular `SUBSCRIBE`/`PSUBSCRIBE` pinned to one designated
+node, or `sharded_pubsub(channels)` for `SSUBSCRIBE` routed to the channels'
+shared slot owner. Both reconnect and replay confirmed subscriptions;
+slot-scoped subscriptions also follow committed owner changes. One sharded
+handle accepts only channels in the same slot, typically by sharing a hash tag
+such as `{orders}`. Messages published during a reconnect gap are not replayed.
+
 ## Sentinel
 
 ```rust,ignore

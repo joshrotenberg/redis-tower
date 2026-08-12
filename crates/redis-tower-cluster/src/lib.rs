@@ -170,6 +170,7 @@ mod connection;
 pub mod key_extractor;
 mod multiplexed;
 pub mod pipeline;
+mod pubsub;
 pub mod scan_stream;
 pub mod slot;
 pub mod topology;
@@ -182,6 +183,7 @@ pub use connection::{
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
 pub use pipeline::ClusterPipeline;
+pub use pubsub::{ClusterPubSubConnection, ShardedClusterPubSubConnection};
 pub use scan_stream::{
     ClusterScan, ClusterScanItem, MAX_MEMBERSHIP_ROUNDS, MAX_SCAN_CONCURRENCY, ScanClusterStream,
 };

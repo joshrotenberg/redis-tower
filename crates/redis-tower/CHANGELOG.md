@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- reconnect-with-backoff support for dedicated Pub/Sub connections, with
+  subscription replay completed before a replacement becomes visible
 - provider-backed `CredentialConnectionFactory` for resilient, multiplexed,
   and retained-pool connections, with per-connection credential fetch,
   authentication before requested protocol negotiation, and one bounded
@@ -40,6 +42,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded TTL/capacity, aggregate statistics, and cache metric events
 
 ### Changed
+
+- Pub/Sub confirmation handling now preserves interleaved messages, validates
+  confirmation kind and channel, rejects empty subscribe calls before I/O, and
+  deduplicates repeated names so the wire remains aligned
 
 - `CachedClient` now uses the same bounded actor and owned tracking lifecycle as
   `CachedMultiplexedClient`, with batching limited to one request for serialized
