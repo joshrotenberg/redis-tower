@@ -119,6 +119,7 @@ fn apply_keepalive(stream: TcpStream, config: &KeepaliveConfig) -> Result<TcpStr
 async fn read_response_from(
     framed: &mut Framed<RedisStream, RespCodec>,
     push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    received_push_tx: &Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
 ) -> Result<Frame, RedisError> {
     loop {
         let frame = framed
@@ -128,8 +129,12 @@ async fn read_response_from(
             .map_err(RedisError::from)?;
 
         if let Frame::Push(_) = &frame {
+            let received_at = std::time::Instant::now();
             if let Some(ref tx) = *push_tx {
-                let _ = tx.send(frame);
+                let _ = tx.send(frame.clone());
+            }
+            if let Some(ref tx) = *received_push_tx {
+                let _ = tx.send(ReceivedPushFrame { received_at, frame });
             }
             continue;
         }
@@ -194,10 +199,27 @@ pub struct RedisConnection {
     framed: Option<Framed<RedisStream, RespCodec>>,
     /// Optional sender for RESP3 push messages. Set via `subscribe_pushes()`.
     push_tx: Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    /// Optional timestamped push feed for exclusive connection owners.
+    received_push_tx: Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
     /// Channel to reclaim the framed transport after a `Service::call` completes.
     inflight: Option<oneshot::Receiver<Framed<RedisStream, RespCodec>>>,
     /// Whether RESP3 has been negotiated via `HELLO 3`. Defaults to RESP2.
     resp3: bool,
+}
+
+/// A RESP3 push frame paired with the instant at which it was decoded.
+///
+/// This feed is intended for an exclusive connection owner that must base a
+/// protocol deadline on receipt time rather than on when it later drains a
+/// notification queue. It is independent of [`RedisConnection::subscribe_pushes`],
+/// so installing it does not replace an application's ordinary push receiver.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct ReceivedPushFrame {
+    /// Monotonic instant captured immediately after the frame was decoded.
+    pub received_at: std::time::Instant,
+    /// The decoded RESP3 push frame.
+    pub frame: Frame,
 }
 
 /// Which RESP protocol version to negotiate when connecting.
@@ -321,6 +343,7 @@ impl RedisConnection {
         Self {
             framed: Some(framed),
             push_tx: None,
+            received_push_tx: None,
             inflight: None,
             resp3: false,
         }
@@ -779,7 +802,7 @@ impl RedisConnection {
         let response = {
             let framed = self.framed.as_mut().expect("connection not in flight");
             framed.send(frame).await.map_err(RedisError::from)?;
-            read_response_from(framed, &self.push_tx).await?
+            read_response_from(framed, &self.push_tx, &self.received_push_tx).await?
         };
         if let Frame::Error(ref e) = response {
             return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
@@ -852,6 +875,24 @@ impl RedisConnection {
         rx
     }
 
+    /// Subscribe to a timestamped copy of every decoded RESP3 push frame.
+    ///
+    /// Unlike [`Self::subscribe_pushes`], this internal feed does not replace
+    /// the application's ordinary push receiver. Calling it again replaces
+    /// only the previous timestamped feed.
+    #[doc(hidden)]
+    pub fn subscribe_received_pushes(
+        &mut self,
+    ) -> tokio::sync::broadcast::Receiver<ReceivedPushFrame> {
+        // This internal feed must remain bounded even when a long-running
+        // command delays the exclusive owner's next drain. Receivers observe
+        // overflow explicitly as `Lagged` and can fail safe by replacing the
+        // connection rather than silently missing a handoff request.
+        let (tx, rx) = tokio::sync::broadcast::channel(64);
+        self.received_push_tx = Some(tx);
+        rx
+    }
+
     /// Wait for one unsolicited RESP3 push frame while the connection is idle.
     ///
     /// The frame is routed to the receiver returned by [`subscribe_pushes`](Self::subscribe_pushes),
@@ -890,8 +931,12 @@ impl RedisConnection {
 
         match frame {
             Frame::Push(_) => {
+                let received_at = std::time::Instant::now();
                 if let Some(push_tx) = &self.push_tx {
-                    let _ = push_tx.send(frame);
+                    let _ = push_tx.send(frame.clone());
+                }
+                if let Some(received_push_tx) = &self.received_push_tx {
+                    let _ = received_push_tx.send(ReceivedPushFrame { received_at, frame });
                 }
                 Ok(())
             }
@@ -943,9 +988,10 @@ impl RedisConnection {
         self.ensure_framed().await?;
         let frame = cmd.to_frame();
         let push_tx = self.push_tx.clone();
+        let received_push_tx = self.received_push_tx.clone();
         let mut framed = self.framed.take().expect("framed transport was ensured");
         framed.send(frame).await.map_err(RedisError::from)?;
-        let response = read_response_from(&mut framed, &push_tx).await?;
+        let response = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
 
         // A complete response restores protocol alignment. Return the
         // transport before mapping Redis/application parse errors.
@@ -966,6 +1012,7 @@ impl RedisConnection {
         self.ensure_framed().await?;
         let count = frames.len();
         let push_tx = self.push_tx.clone();
+        let received_push_tx = self.received_push_tx.clone();
         let mut framed = self.framed.take().expect("framed transport was ensured");
 
         // Send all frames, buffering writes.
@@ -980,7 +1027,7 @@ impl RedisConnection {
         // Read all responses, routing push frames to the channel.
         let mut responses = Vec::with_capacity(count);
         for _ in 0..count {
-            let response = read_response_from(&mut framed, &push_tx).await?;
+            let response = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
             responses.push(response);
         }
 
@@ -998,12 +1045,13 @@ impl RedisConnection {
     ) -> Result<Option<Vec<Frame>>, RedisError> {
         self.ensure_framed().await?;
         let push_tx = self.push_tx.clone();
+        let received_push_tx = self.received_push_tx.clone();
         let mut framed = self.framed.take().expect("framed transport was ensured");
 
         // Send WATCH keys if any.
         for frame in watch_frames {
             framed.send(frame).await.map_err(RedisError::from)?;
-            let response = read_response_from(&mut framed, &push_tx).await?;
+            let response = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
             if let Frame::Error(e) = response {
                 self.framed = Some(framed);
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -1015,7 +1063,7 @@ impl RedisConnection {
             .send(array(vec![bulk("MULTI")]))
             .await
             .map_err(RedisError::from)?;
-        let multi_resp = read_response_from(&mut framed, &push_tx).await?;
+        let multi_resp = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
         if let Frame::Error(e) = multi_resp {
             self.framed = Some(framed);
             return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -1024,14 +1072,16 @@ impl RedisConnection {
         // Send each command, expect QUEUED for each.
         for frame in &command_frames {
             framed.send(frame.clone()).await.map_err(RedisError::from)?;
-            let queued_resp = read_response_from(&mut framed, &push_tx).await?;
+            let queued_resp = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
             match queued_resp {
                 Frame::SimpleString(ref s) if &s[..] == b"QUEUED" => {}
                 Frame::Error(e) => {
                     let error = RedisError::Redis(String::from_utf8_lossy(&e).into_owned());
                     // Abort the transaction on error.
                     let aligned = if framed.send(array(vec![bulk("DISCARD")])).await.is_ok() {
-                        read_response_from(&mut framed, &push_tx).await.is_ok()
+                        read_response_from(&mut framed, &push_tx, &received_push_tx)
+                            .await
+                            .is_ok()
                     } else {
                         false
                     };
@@ -1046,7 +1096,9 @@ impl RedisConnection {
                         actual: format!("{queued_resp:?}"),
                     };
                     let aligned = if framed.send(array(vec![bulk("DISCARD")])).await.is_ok() {
-                        read_response_from(&mut framed, &push_tx).await.is_ok()
+                        read_response_from(&mut framed, &push_tx, &received_push_tx)
+                            .await
+                            .is_ok()
                     } else {
                         false
                     };
@@ -1063,7 +1115,7 @@ impl RedisConnection {
             .send(array(vec![bulk("EXEC")]))
             .await
             .map_err(RedisError::from)?;
-        let exec_resp = read_response_from(&mut framed, &push_tx).await?;
+        let exec_resp = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
 
         // EXEC produced a complete response, so the transaction exchange is
         // aligned even when Redis reports an application-level error.
@@ -1105,7 +1157,7 @@ impl RedisConnection {
             ]))
             .await
             .map_err(RedisError::from)?;
-        let _response = read_response_from(framed, &self.push_tx).await?;
+        let _response = read_response_from(framed, &self.push_tx, &self.received_push_tx).await?;
         // CLIENT SETINFO LIB-VER <version>
         framed
             .send(array(vec![
@@ -1116,7 +1168,7 @@ impl RedisConnection {
             ]))
             .await
             .map_err(RedisError::from)?;
-        let _response = read_response_from(framed, &self.push_tx).await?;
+        let _response = read_response_from(framed, &self.push_tx, &self.received_push_tx).await?;
         Ok(())
     }
 
@@ -1135,7 +1187,8 @@ impl RedisConnection {
                 .send(array(auth_args))
                 .await
                 .map_err(RedisError::from)?;
-            let response = read_response_from(framed, &self.push_tx).await?;
+            let response =
+                read_response_from(framed, &self.push_tx, &self.received_push_tx).await?;
 
             if let Frame::Error(e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -1147,7 +1200,8 @@ impl RedisConnection {
                 .send(array(vec![bulk("SELECT"), bulk(db.to_string())]))
                 .await
                 .map_err(RedisError::from)?;
-            let response = read_response_from(framed, &self.push_tx).await?;
+            let response =
+                read_response_from(framed, &self.push_tx, &self.received_push_tx).await?;
 
             if let Frame::Error(e) = response {
                 return Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned()));
@@ -1206,6 +1260,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
             .take()
             .expect("call() invoked without successful poll_ready()");
         let push_tx = self.push_tx.clone();
+        let received_push_tx = self.received_push_tx.clone();
 
         // Enqueue the frame synchronously (valid after poll_ready returned Ready).
         let frame = cmd.to_frame();
@@ -1234,7 +1289,7 @@ impl<Cmd: Command> tower_service::Service<Cmd> for RedisConnection {
             framed.flush().await.map_err(RedisError::from)?;
 
             // Read response, routing push frames.
-            let response = read_response_from(framed, &push_tx).await?;
+            let response = read_response_from(framed, &push_tx, &received_push_tx).await?;
 
             // A complete response restores protocol alignment. Return the
             // transport before interpreting application or parsing errors so
@@ -1554,6 +1609,7 @@ mod tests {
         let conn = RedisConnection {
             framed: None,
             push_tx: None,
+            received_push_tx: None,
             inflight: None,
             resp3: false,
         };
@@ -1569,6 +1625,7 @@ mod tests {
         let mut conn = RedisConnection {
             framed: None,
             push_tx: None,
+            received_push_tx: None,
             inflight: None,
             resp3: false,
         };
@@ -1586,6 +1643,7 @@ mod tests {
         let mut conn = RedisConnection {
             framed: None,
             push_tx: None,
+            received_push_tx: None,
             inflight: Some(rx),
             resp3: false,
         };
@@ -1607,6 +1665,7 @@ mod tests {
         let mut conn = RedisConnection {
             framed: None,
             push_tx: None,
+            received_push_tx: None,
             inflight: Some(rx),
             resp3: false,
         };
@@ -1809,6 +1868,32 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
+    async fn timestamped_push_feed_coexists_with_the_application_receiver() {
+        let (client, mut server) = stream_pair().await;
+        let mut conn = RedisConnection::from_stream(client);
+        let mut application_pushes = conn.subscribe_pushes();
+        let mut received_pushes = conn.subscribe_received_pushes();
+        let expected = Frame::Push(vec![
+            Frame::SimpleString(b"maintenance"[..].into()),
+            Frame::Integer(7),
+        ]);
+        let before = std::time::Instant::now();
+
+        write_all(
+            &mut server,
+            &redis_tower_protocol::frame_to_bytes(&expected),
+        )
+        .await;
+        conn.read_idle_push().await.unwrap();
+
+        assert_eq!(application_pushes.recv().await.unwrap(), expected);
+        let received = received_pushes.recv().await.unwrap();
+        assert_eq!(received.frame, expected);
+        assert!(received.received_at >= before);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
     async fn idle_push_read_reports_eof_and_unsolicited_responses() {
         let (client, server) = stream_pair().await;
         let mut conn = RedisConnection::from_stream(client);
@@ -1840,6 +1925,7 @@ mod tests {
         let mut conn = RedisConnection {
             framed: None,
             push_tx: None,
+            received_push_tx: None,
             inflight: None,
             resp3: false,
         };

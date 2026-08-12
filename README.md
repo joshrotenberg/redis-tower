@@ -83,6 +83,49 @@ Cluster and Sentinel builders retain `.resp_limits(...)` as a convenience.
 `PubSubConnection` inherits the codec from the connection or factory supplied
 to it.
 
+## Smart Client Handoff maintenance
+
+A factory-backed `MultiplexedClient` can opt into Redis
+[Smart Client Handoff](https://redis.io/docs/latest/develop/clients/sch/)
+maintenance notifications:
+
+```rust,ignore
+use redis_tower::MultiplexedClient;
+use redis_tower::auto_pipeline::{
+    AutoPipelineConfig, AutoPipelineReconnectConfig,
+};
+use redis_tower::reconnect::Resp3AddrConnectionFactory;
+
+let (client, maintenance) =
+    MultiplexedClient::from_factory_with_maintenance(
+        Resp3AddrConnectionFactory::new("127.0.0.1:6379"),
+        AutoPipelineConfig::default(),
+        AutoPipelineReconnectConfig::default(),
+    )
+    .await?;
+
+// Keep `maintenance` alive for as long as handoff handling is required.
+# let _ = client;
+maintenance.shutdown().await;
+```
+
+This constructor requires RESP3 and a successful
+`CLIENT MAINT_NOTIFICATIONS ON moving-endpoint-type none` registration before
+it returns. A valid `MOVING` notification holds newly queued work, lets an
+already active batch finish once, and replaces the connection at half the
+server-supplied TTL through the original factory. No server-supplied endpoint
+is used. `MIGRATING` is observational only; use
+`from_factory_with_maintenance_and_events` when it needs to be observed.
+
+Dropping the returned handle disables future maintenance handling and cancels
+a handoff that has not crossed its half-TTL boundary; the client remains
+usable. `MaintenanceListenerHandle::shutdown().await` additionally waits for
+worker acknowledgement and, if a handoff is already committed, for its
+replacement attempt to connect or terminate. This opt-in covers only the
+factory-backed multiplexed path. It does not add handoff handling to pools,
+Cluster, blocking connections, or Pub/Sub, and it does not implement relaxed
+timeouts or server-directed endpoint switching.
+
 ## Connection pool
 
 ```rust,ignore

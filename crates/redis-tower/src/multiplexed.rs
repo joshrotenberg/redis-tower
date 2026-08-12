@@ -162,6 +162,53 @@ pub struct CachedMultiplexedClient {
 }
 
 impl MultiplexedClient<AutoPipelineService> {
+    /// Build an opt-in Smart Client Handoff maintenance-aware client.
+    ///
+    /// This named constructor requires RESP3 and successful
+    /// `CLIENT MAINT_NOTIFICATIONS` registration before returning. Retain the
+    /// returned owned handle; dropping it disables maintenance handling while
+    /// leaving the client usable. Replacement connections are always created
+    /// through `factory`, preserving its authentication, TLS, URL, and session
+    /// setup.
+    pub async fn from_factory_with_maintenance(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Result<(Self, crate::MaintenanceListenerHandle), RedisError> {
+        let (service, handle) =
+            AutoPipelineService::with_factory_and_maintenance(factory, config, reconnect).await?;
+        Ok((
+            Self {
+                inner: CommandAdapter::new(service),
+            },
+            handle,
+        ))
+    }
+
+    /// Build a maintenance-aware client that also publishes lifecycle events.
+    ///
+    /// Valid `MOVING` and `MIGRATING` notifications and the resulting
+    /// disconnect/reconnect transitions are published on `events` in worker
+    /// order. Subscribe before construction to observe the initial
+    /// [`ConnectionEvent::Connected`](crate::ConnectionEvent::Connected).
+    pub async fn from_factory_with_maintenance_and_events(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Result<(Self, crate::MaintenanceListenerHandle), RedisError> {
+        let (service, handle) = AutoPipelineService::with_factory_and_maintenance_and_events(
+            factory, config, reconnect, events,
+        )
+        .await?;
+        Ok((
+            Self {
+                inner: CommandAdapter::new(service),
+            },
+            handle,
+        ))
+    }
+
     /// Connect to a Redis server at `host:port`.
     pub async fn connect(addr: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect(addr).await?;

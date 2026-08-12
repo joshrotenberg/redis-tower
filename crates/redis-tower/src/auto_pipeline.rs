@@ -27,12 +27,16 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use redis_tower_core::{Frame, RedisConnection, RedisError};
+use redis_tower_core::{Frame, ReceivedPushFrame, RedisConnection, RedisError};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::sync::PollSender;
 use tower_service::Service;
 use tracing::warn;
 
+use crate::maintenance::{
+    MaintenanceControl, MaintenanceListenerHandle, MaintenanceState, ParsedMaintenanceNotification,
+    next_listener_id, parse_maintenance_push, register_connection,
+};
 use crate::metrics_layer::MetricsRecorder;
 use crate::reconnect::{
     ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionFactory,
@@ -181,6 +185,12 @@ enum ConnSource {
         factory: Arc<dyn ConnectionFactory>,
         reconnect: ReconnectConfig,
     },
+}
+
+struct MaintenanceWorker {
+    state: MaintenanceState,
+    control_rx: mpsc::UnboundedReceiver<MaintenanceControl>,
+    push_rx: tokio::sync::broadcast::Receiver<ReceivedPushFrame>,
 }
 
 /// Why the pipeline worker discarded its current connection.
@@ -501,7 +511,7 @@ impl AutoPipelineService {
     /// in a reconnect layer, or use [`Self::with_factory`] to build a
     /// service that rebuilds its own connection on failure.
     pub fn new(conn: RedisConnection, config: AutoPipelineConfig) -> Self {
-        Self::from_parts(Some(conn), config, ConnSource::Fixed, None)
+        Self::from_parts(Some(conn), config, ConnSource::Fixed, None, None)
     }
 
     /// Create a non-reconnecting auto-pipeline service with lifecycle events.
@@ -515,7 +525,7 @@ impl AutoPipelineService {
         config: AutoPipelineConfig,
         events: ConnectionEventBus,
     ) -> Self {
-        Self::from_parts(Some(conn), config, ConnSource::Fixed, Some(events))
+        Self::from_parts(Some(conn), config, ConnSource::Fixed, Some(events), None)
     }
 
     /// Create a new auto-pipelining service that rebuilds its connection on
@@ -553,6 +563,69 @@ impl AutoPipelineService {
         Self::with_factory_inner(factory, config, reconnect, Some(events)).await
     }
 
+    /// Create an explicitly maintenance-aware factory-backed service.
+    ///
+    /// The initial connection is verified as RESP3 and successfully registers
+    /// `CLIENT MAINT_NOTIFICATIONS` before this constructor returns. Retain the
+    /// returned handle to keep handling enabled.
+    pub async fn with_factory_and_maintenance(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+    ) -> Result<(Self, MaintenanceListenerHandle), RedisError> {
+        Self::with_factory_and_maintenance_inner(factory, config, reconnect, None).await
+    }
+
+    /// Create an explicitly maintenance-aware service with lifecycle events.
+    pub async fn with_factory_and_maintenance_and_events(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        events: ConnectionEventBus,
+    ) -> Result<(Self, MaintenanceListenerHandle), RedisError> {
+        Self::with_factory_and_maintenance_inner(factory, config, reconnect, Some(events)).await
+    }
+
+    async fn with_factory_and_maintenance_inner(
+        factory: impl ConnectionFactory,
+        config: AutoPipelineConfig,
+        reconnect: AutoPipelineReconnectConfig,
+        event_bus: Option<ConnectionEventBus>,
+    ) -> Result<(Self, MaintenanceListenerHandle), RedisError> {
+        let factory: Arc<dyn ConnectionFactory> = Arc::new(factory);
+        let (conn, push_rx) =
+            match connect_and_prepare(factory.as_ref(), reconnect.reconnect.connect_timeout, true)
+                .await
+            {
+                Ok((conn, Some(push_rx))) => (conn, push_rx),
+                Ok((_conn, None)) => {
+                    unreachable!("maintenance setup always returns a push receiver")
+                }
+                Err(error) => {
+                    if let Some(events) = &event_bus {
+                        events.publish_with(|| ConnectionEvent::ConnectFailed {
+                            error: Arc::from(error.to_string()),
+                        });
+                    }
+                    return Err(error);
+                }
+            };
+        let listener_id = next_listener_id();
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let source = ConnSource::Factory {
+            factory,
+            reconnect: reconnect.reconnect,
+        };
+        let maintenance = MaintenanceWorker {
+            state: MaintenanceState::new(listener_id),
+            control_rx,
+            push_rx,
+        };
+        let service = Self::from_parts(Some(conn), config, source, event_bus, Some(maintenance));
+        let handle = MaintenanceListenerHandle::new(control_tx, listener_id);
+        Ok((service, handle))
+    }
+
     async fn with_factory_inner(
         factory: impl ConnectionFactory,
         config: AutoPipelineConfig,
@@ -577,7 +650,13 @@ impl AutoPipelineService {
             factory,
             reconnect: reconnect.reconnect,
         };
-        Ok(Self::from_parts(Some(conn), config, source, event_bus))
+        Ok(Self::from_parts(
+            Some(conn),
+            config,
+            source,
+            event_bus,
+            None,
+        ))
     }
 
     /// Create a factory-backed service without opening a connection yet.
@@ -634,7 +713,7 @@ impl AutoPipelineService {
             factory: Arc::new(factory),
             reconnect: reconnect.reconnect,
         };
-        Self::from_parts(None, config, source, event_bus)
+        Self::from_parts(None, config, source, event_bus, None)
     }
 
     fn from_parts(
@@ -642,6 +721,7 @@ impl AutoPipelineService {
         config: AutoPipelineConfig,
         source: ConnSource,
         event_bus: Option<ConnectionEventBus>,
+        maintenance: Option<MaintenanceWorker>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(config.queue_capacity);
         let poll_tx = PollSender::new(tx.clone());
@@ -667,7 +747,13 @@ impl AutoPipelineService {
         let runtime = tokio::runtime::Handle::try_current()
             .expect("AutoPipelineService must be constructed inside an entered Tokio runtime");
         let handle = runtime.spawn(pipeline_worker(
-            rx, conn, config, source, event_bus, lifecycle,
+            rx,
+            conn,
+            config,
+            source,
+            event_bus,
+            lifecycle,
+            maintenance,
         ));
         Self {
             tx,
@@ -866,6 +952,7 @@ async fn pipeline_worker(
     source: ConnSource,
     event_bus: Option<ConnectionEventBus>,
     lifecycle: WorkerLifecycle,
+    maintenance: Option<MaintenanceWorker>,
 ) {
     let WorkerLifecycle {
         control,
@@ -875,7 +962,125 @@ async fn pipeline_worker(
     } = lifecycle;
     let mut outage_reported = false;
     let mut shutting_down = false;
-    loop {
+    let (mut maintenance_state, mut maintenance_control_rx, mut maintenance_push_rx) =
+        match maintenance {
+            Some(maintenance) => (
+                Some(maintenance.state),
+                Some(maintenance.control_rx),
+                Some(maintenance.push_rx),
+            ),
+            None => (None, None, None),
+        };
+    'worker: loop {
+        drain_maintenance_control(
+            &mut maintenance_state,
+            &mut maintenance_control_rx,
+            &mut maintenance_push_rx,
+        );
+        if maintenance_state
+            .as_ref()
+            .and_then(|state| state.pending.as_ref())
+            .is_some()
+        {
+            match wait_for_pending_handoff(
+                &mut conn,
+                &mut maintenance_state,
+                &mut maintenance_control_rx,
+                &mut maintenance_push_rx,
+                event_bus.as_ref(),
+                &mut shutdown,
+            )
+            .await
+            {
+                PendingHandoffOutcome::Cancelled => continue,
+                PendingHandoffOutcome::Shutdown => {
+                    shutting_down = true;
+                    rx.close();
+                    disable_maintenance(
+                        &mut maintenance_state,
+                        &mut maintenance_control_rx,
+                        &mut maintenance_push_rx,
+                    );
+                    continue;
+                }
+                PendingHandoffOutcome::ConnectionFailed(error) => {
+                    clear_pending_handoff(&mut maintenance_state);
+                    connection_health.set(false);
+                    let failure = PipelineFailure::Connection(error);
+                    publish_worker_outage(
+                        event_bus.as_ref(),
+                        &mut outage_reported,
+                        failure.event_reason(),
+                        &control,
+                    );
+                    let ConnSource::Factory { factory, reconnect } = &source else {
+                        fail_queued_requests(&mut rx);
+                        return;
+                    };
+                    let maintenance_enabled = maintenance_state
+                        .as_ref()
+                        .is_some_and(|state| state.enabled);
+                    if !reconnect_worker_connection(
+                        conn.as_mut()
+                            .expect("maintenance listener requires a connection"),
+                        &mut rx,
+                        factory.as_ref(),
+                        reconnect,
+                        event_bus.as_ref(),
+                        &mut shutdown,
+                        &control,
+                        &connection_health,
+                        &mut outage_reported,
+                        &mut maintenance_push_rx,
+                        maintenance_enabled,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+                PendingHandoffOutcome::Ready { sequence } => {
+                    if let Some(state) = &mut maintenance_state {
+                        state.pending = None;
+                    }
+                    connection_health.set(false);
+                    publish_worker_outage(
+                        event_bus.as_ref(),
+                        &mut outage_reported,
+                        ConnectionDisconnectReason::MaintenanceHandoff { sequence },
+                        &control,
+                    );
+                    let ConnSource::Factory { factory, reconnect } = &source else {
+                        fail_queued_requests(&mut rx);
+                        return;
+                    };
+                    let maintenance_enabled = maintenance_state
+                        .as_ref()
+                        .is_some_and(|state| state.enabled);
+                    if !reconnect_worker_connection(
+                        conn.as_mut()
+                            .expect("maintenance listener requires a connection"),
+                        &mut rx,
+                        factory.as_ref(),
+                        reconnect,
+                        event_bus.as_ref(),
+                        &mut shutdown,
+                        &control,
+                        &connection_health,
+                        &mut outage_reported,
+                        &mut maintenance_push_rx,
+                        maintenance_enabled,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                    continue;
+                }
+            }
+        }
+
         // Wait for the first request or final-handle shutdown. Closing the
         // receiver rejects any sender retained outside a public service
         // handle while still allowing already-buffered requests to drain.
@@ -890,6 +1095,62 @@ async fn pipeline_worker(
                         rx.close();
                         break rx.recv().await;
                     }
+                    control_message = recv_maintenance_control(&mut maintenance_control_rx) => {
+                        apply_maintenance_control(
+                            control_message,
+                            &mut maintenance_state,
+                            &mut maintenance_control_rx,
+                            &mut maintenance_push_rx,
+                        );
+                    }
+                    push = recv_maintenance_push(&mut maintenance_push_rx) => {
+                        if handle_maintenance_push_result(
+                            push,
+                            &mut maintenance_state,
+                            &mut maintenance_push_rx,
+                            event_bus.as_ref(),
+                        ).is_err() {
+                            connection_health.set(false);
+                            let failure = PipelineFailure::Connection(
+                                maintenance_feed_error(),
+                            );
+                            publish_worker_outage(
+                                event_bus.as_ref(),
+                                &mut outage_reported,
+                                failure.event_reason(),
+                                &control,
+                            );
+                            let ConnSource::Factory { factory, reconnect } = &source else {
+                                fail_queued_requests(&mut rx);
+                                return;
+                            };
+                            let maintenance_enabled = maintenance_state
+                                .as_ref()
+                                .is_some_and(|state| state.enabled);
+                            if !reconnect_worker_connection(
+                                conn.as_mut().expect("maintenance feed requires a connection"),
+                                &mut rx,
+                                factory.as_ref(),
+                                reconnect,
+                                event_bus.as_ref(),
+                                &mut shutdown,
+                                &control,
+                                &connection_health,
+                                &mut outage_reported,
+                                &mut maintenance_push_rx,
+                                maintenance_enabled,
+                            ).await {
+                                return;
+                            }
+                        }
+                        if maintenance_state
+                            .as_ref()
+                            .and_then(|state| state.pending.as_ref())
+                            .is_some()
+                        {
+                            continue 'worker;
+                        }
+                    }
                     request = rx.recv() => break request,
                     idle_result = read_idle_push_if_connected(&mut conn) => match idle_result {
                         Ok(()) => {
@@ -898,6 +1159,7 @@ async fn pipeline_worker(
                             // over further unsolicited traffic.
                         }
                         Err(error) => {
+                            clear_pending_handoff(&mut maintenance_state);
                             connection_health.set(false);
                             let failure = PipelineFailure::Connection(error);
                             publish_worker_outage(
@@ -919,6 +1181,9 @@ async fn pipeline_worker(
                                     return;
                                 }
                                 ConnSource::Factory { factory, reconnect } => {
+                                    let maintenance_enabled = maintenance_state
+                                        .as_ref()
+                                        .is_some_and(|state| state.enabled);
                                     if !reconnect_worker_connection(
                                         conn.as_mut().expect("idle failure requires a connection"),
                                         &mut rx,
@@ -929,6 +1194,8 @@ async fn pipeline_worker(
                                         &control,
                                         &connection_health,
                                         &mut outage_reported,
+                                        &mut maintenance_push_rx,
+                                        maintenance_enabled,
                                     )
                                     .await
                                     {
@@ -1071,6 +1338,21 @@ async fn pipeline_worker(
         }
 
         if let Err(failure) = flush_result {
+            // A listener disable requested while this batch was in flight
+            // wins over pushes decoded by the failed exchange. That prevents
+            // an obsolete MOVING from extending shutdown through a
+            // maintenance-aware reconnect campaign.
+            drain_maintenance_control(
+                &mut maintenance_state,
+                &mut maintenance_control_rx,
+                &mut maintenance_push_rx,
+            );
+            drain_available_maintenance_pushes(
+                &mut maintenance_state,
+                &mut maintenance_push_rx,
+                event_bus.as_ref(),
+            );
+            clear_pending_handoff(&mut maintenance_state);
             publish_worker_outage(
                 event_bus.as_ref(),
                 &mut outage_reported,
@@ -1086,6 +1368,9 @@ async fn pipeline_worker(
                     // upstream retry layers can notice.
                 }
                 ConnSource::Factory { factory, reconnect } => {
+                    let maintenance_enabled = maintenance_state
+                        .as_ref()
+                        .is_some_and(|state| state.enabled);
                     if !reconnect_worker_connection(
                         conn.as_mut().expect("failed flush requires a connection"),
                         &mut rx,
@@ -1096,6 +1381,8 @@ async fn pipeline_worker(
                         &control,
                         &connection_health,
                         &mut outage_reported,
+                        &mut maintenance_push_rx,
+                        maintenance_enabled,
                     )
                     .await
                     {
@@ -1116,6 +1403,243 @@ async fn read_idle_push_if_connected(conn: &mut Option<RedisConnection>) -> Resu
     match conn {
         Some(conn) => conn.read_idle_push().await,
         None => futures::future::pending().await,
+    }
+}
+
+enum PendingHandoffOutcome {
+    Cancelled,
+    Ready { sequence: u64 },
+    ConnectionFailed(RedisError),
+    Shutdown,
+}
+
+async fn recv_maintenance_control(
+    receiver: &mut Option<mpsc::UnboundedReceiver<MaintenanceControl>>,
+) -> Option<MaintenanceControl> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => futures::future::pending().await,
+    }
+}
+
+async fn recv_maintenance_push(
+    receiver: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+) -> Result<ReceivedPushFrame, tokio::sync::broadcast::error::RecvError> {
+    match receiver {
+        Some(receiver) => receiver.recv().await,
+        None => futures::future::pending().await,
+    }
+}
+
+fn drain_maintenance_control(
+    state: &mut Option<MaintenanceState>,
+    receiver: &mut Option<mpsc::UnboundedReceiver<MaintenanceControl>>,
+    pushes: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+) {
+    loop {
+        let Some(control) = receiver.as_mut() else {
+            return;
+        };
+        match control.try_recv() {
+            Ok(message) => apply_maintenance_control(Some(message), state, receiver, pushes),
+            Err(mpsc::error::TryRecvError::Empty) => return,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                *receiver = None;
+                if let Some(state) = state {
+                    state.enabled = false;
+                    state.pending = None;
+                }
+                *pushes = None;
+                return;
+            }
+        }
+    }
+}
+
+fn clear_pending_handoff(state: &mut Option<MaintenanceState>) {
+    if let Some(state) = state {
+        state.pending = None;
+    }
+}
+
+fn disable_maintenance(
+    state: &mut Option<MaintenanceState>,
+    receiver: &mut Option<mpsc::UnboundedReceiver<MaintenanceControl>>,
+    pushes: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+) {
+    if let Some(state) = state {
+        state.enabled = false;
+        state.pending = None;
+    }
+    *receiver = None;
+    *pushes = None;
+}
+
+fn apply_maintenance_control(
+    message: Option<MaintenanceControl>,
+    state: &mut Option<MaintenanceState>,
+    receiver: &mut Option<mpsc::UnboundedReceiver<MaintenanceControl>>,
+    pushes: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+) {
+    let Some(message) = message else {
+        *receiver = None;
+        return;
+    };
+    match message {
+        MaintenanceControl::Disable { listener_id, ack } => {
+            if state
+                .as_ref()
+                .is_some_and(|state| state.listener_id == listener_id)
+            {
+                disable_maintenance(state, receiver, pushes);
+            }
+            if let Some(ack) = ack {
+                let _ = ack.send(());
+            }
+        }
+    }
+}
+
+fn publish_maintenance_notification(
+    event_bus: Option<&ConnectionEventBus>,
+    notification: ParsedMaintenanceNotification,
+) {
+    if let Some(events) = event_bus {
+        events.publish(ConnectionEvent::MaintenanceNotification {
+            kind: notification.kind(),
+            sequence: notification.sequence(),
+            ttl: notification.ttl(),
+        });
+    }
+}
+
+fn handle_maintenance_push_result(
+    push: Result<ReceivedPushFrame, tokio::sync::broadcast::error::RecvError>,
+    state: &mut Option<MaintenanceState>,
+    receiver: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+    event_bus: Option<&ConnectionEventBus>,
+) -> Result<(), ()> {
+    match push {
+        Ok(push) => {
+            if let Some(state) = state
+                && let Some(received) = parse_maintenance_push(push)
+                && let Some(notification) = state.accept(received)
+            {
+                publish_maintenance_notification(event_bus, notification);
+            }
+            Ok(())
+        }
+        Err(_) => {
+            *receiver = None;
+            Err(())
+        }
+    }
+}
+
+fn drain_available_maintenance_pushes(
+    state: &mut Option<MaintenanceState>,
+    receiver: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+    event_bus: Option<&ConnectionEventBus>,
+) {
+    loop {
+        let Some(pushes) = receiver.as_mut() else {
+            return;
+        };
+        match pushes.try_recv() {
+            Ok(push) => {
+                let _ = handle_maintenance_push_result(Ok(push), state, receiver, event_bus);
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => return,
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {
+                // The connection is already being discarded. Advance to and
+                // record every notification still retained by the bounded
+                // feed so a replay on the replacement is deduplicated.
+            }
+            Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                *receiver = None;
+                return;
+            }
+        }
+    }
+}
+
+fn maintenance_feed_error() -> RedisError {
+    RedisError::UnexpectedResponse {
+        expected: "a complete maintenance-notification push feed",
+        actual: "maintenance push feed closed or overflowed".to_owned(),
+    }
+}
+
+async fn connect_and_prepare(
+    factory: &dyn ConnectionFactory,
+    timeout: Option<Duration>,
+    maintenance_enabled: bool,
+) -> Result<
+    (
+        RedisConnection,
+        Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+    ),
+    RedisError,
+> {
+    let prepare = async {
+        let mut connection = factory.connect().await?;
+        let pushes = if maintenance_enabled {
+            Some(register_connection(&mut connection).await?)
+        } else {
+            None
+        };
+        Ok((connection, pushes))
+    };
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, prepare)
+            .await
+            .map_err(|_| RedisError::ConnectTimeout)?,
+        None => prepare.await,
+    }
+}
+
+async fn wait_for_pending_handoff(
+    conn: &mut Option<RedisConnection>,
+    state: &mut Option<MaintenanceState>,
+    control_rx: &mut Option<mpsc::UnboundedReceiver<MaintenanceControl>>,
+    push_rx: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+    event_bus: Option<&ConnectionEventBus>,
+    shutdown: &mut watch::Receiver<bool>,
+) -> PendingHandoffOutcome {
+    loop {
+        let Some(pending) = state.as_ref().and_then(|state| state.pending.as_ref()) else {
+            return PendingHandoffOutcome::Cancelled;
+        };
+        let deadline = pending.deadline;
+        let sequence = pending.sequence;
+        if deadline <= tokio::time::Instant::now() {
+            return PendingHandoffOutcome::Ready { sequence };
+        }
+
+        tokio::select! {
+            biased;
+            () = wait_for_shutdown(shutdown) => return PendingHandoffOutcome::Shutdown,
+            control = recv_maintenance_control(control_rx) => {
+                apply_maintenance_control(control, state, control_rx, push_rx);
+                if state.as_ref().and_then(|state| state.pending.as_ref()).is_none() {
+                    return PendingHandoffOutcome::Cancelled;
+                }
+            }
+            push = recv_maintenance_push(push_rx) => {
+                if handle_maintenance_push_result(push, state, push_rx, event_bus).is_err() {
+                    return PendingHandoffOutcome::ConnectionFailed(maintenance_feed_error());
+                }
+            }
+            result = read_idle_push_if_connected(conn) => {
+                if let Err(error) = result {
+                    return PendingHandoffOutcome::ConnectionFailed(error);
+                }
+            }
+            () = tokio::time::sleep_until(deadline) => {
+                // Re-read the state on the next loop because another MOVING
+                // notification may have installed an earlier deadline.
+            }
+        }
     }
 }
 
@@ -1141,12 +1665,24 @@ async fn reconnect_worker_connection(
     control: &WorkerControl,
     connection_health: &ConnectionHealthPublisher,
     outage_reported: &mut bool,
+    maintenance_push_rx: &mut Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+    maintenance_enabled: bool,
 ) -> bool {
     let started = Instant::now();
-    match reconnect_with_backoff(factory, reconnect, event_bus, shutdown, control).await {
-        ReconnectOutcome::Connected(new_conn, attempts) => {
+    match reconnect_with_backoff(
+        factory,
+        reconnect,
+        event_bus,
+        shutdown,
+        control,
+        maintenance_enabled,
+    )
+    .await
+    {
+        ReconnectOutcome::Connected(new_conn, new_push_rx, attempts) => {
             let reconnected = control.with_active_handle(|| {
-                *conn = new_conn;
+                *conn = *new_conn;
+                *maintenance_push_rx = new_push_rx;
                 // Publish health before the lifecycle event so observers can
                 // rely on the event/state ordering in either direction.
                 connection_health.set(true);
@@ -1353,7 +1889,11 @@ async fn flush_batch(
 }
 
 enum ReconnectOutcome {
-    Connected(RedisConnection, usize),
+    Connected(
+        Box<RedisConnection>,
+        Option<tokio::sync::broadcast::Receiver<ReceivedPushFrame>>,
+        usize,
+    ),
     Exhausted,
     Shutdown,
 }
@@ -1373,6 +1913,7 @@ async fn reconnect_with_backoff(
     event_bus: Option<&ConnectionEventBus>,
     shutdown: &mut watch::Receiver<bool>,
     control: &WorkerControl,
+    maintenance_enabled: bool,
 ) -> ReconnectOutcome {
     let mut attempt: usize = 0;
     loop {
@@ -1414,7 +1955,7 @@ async fn reconnect_with_backoff(
             }
         }
         attempt += 1;
-        let connect = connect_with_timeout(factory, config.connect_timeout);
+        let connect = connect_and_prepare(factory, config.connect_timeout, maintenance_enabled);
         tokio::pin!(connect);
         let result = tokio::select! {
             biased;
@@ -1422,8 +1963,8 @@ async fn reconnect_with_backoff(
             result = &mut connect => result,
         };
         match result {
-            Ok(conn) => {
-                return ReconnectOutcome::Connected(conn, attempt);
+            Ok((conn, push_rx)) => {
+                return ReconnectOutcome::Connected(Box::new(conn), push_rx, attempt);
             }
             Err(e) => {
                 warn!(attempt, error = %e, "auto_pipeline: reconnect attempt failed");
@@ -1714,8 +2255,15 @@ mod tests {
         let control = WorkerControl::new(shutdown_tx, None);
 
         assert!(matches!(
-            reconnect_with_backoff(&factory, &config, Some(&events), &mut shutdown, &control,)
-                .await,
+            reconnect_with_backoff(
+                &factory,
+                &config,
+                Some(&events),
+                &mut shutdown,
+                &control,
+                false,
+            )
+            .await,
             ReconnectOutcome::Exhausted
         ));
         assert_eq!(
@@ -1754,8 +2302,15 @@ mod tests {
         let control = WorkerControl::new(shutdown_tx, None);
 
         assert!(matches!(
-            reconnect_with_backoff(&factory, &config, Some(&events), &mut shutdown, &control,)
-                .await,
+            reconnect_with_backoff(
+                &factory,
+                &config,
+                Some(&events),
+                &mut shutdown,
+                &control,
+                false,
+            )
+            .await,
             ReconnectOutcome::Exhausted
         ));
 

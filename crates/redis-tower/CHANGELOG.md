@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- opt-in Redis Smart Client Handoff maintenance handling for factory-backed
+  `MultiplexedClient`, with required RESP3 registration, half-TTL `MOVING`
+  replacement through the original factory, observational `MIGRATING` events,
+  queued-work gating, and an owned shutdown handle (#498)
 - reconnect-with-backoff support for dedicated Pub/Sub connections, with
   subscription replay completed before a replacement becomes visible
 - provider-backed `CredentialConnectionFactory` for resilient, multiplexed,
