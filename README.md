@@ -516,6 +516,34 @@ are opt-in: they are disabled by default and, when enabled, are limited to 64
 concrete addresses per client plus `_OTHER`; additional addresses use the
 `_OTHER` label.
 
+Cluster Pub/Sub uses dedicated connections rather than the command workers.
+Regular subscriptions stay pinned to the topology node you select and replay
+there after a transport failure. Sharded subscriptions require one hash slot
+per handle, follow that slot's committed primary owner, and replay after an
+ownership change. `SPUBLISH` uses the ordinary slot-routed command path:
+
+```rust,ignore
+use redis_tower_cluster::MultiplexedClusterClient;
+use redis_tower_commands::SPublish;
+
+let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
+let mut shard = client
+    .sharded_pubsub(&["{orders}:created", "{orders}:updated"])
+    .await?;
+
+client
+    .execute(SPublish::new("{orders}:created", "order-42"))
+    .await?;
+let message = shard.next_message().await?;
+```
+
+Channels passed to one sharded handle must hash to the same slot. During
+reconnect or resubscription there is an at-most-once delivery gap: Redis does
+not retain Pub/Sub messages for disconnected consumers. Keep at least one clone
+of the originating `MultiplexedClusterClient` alive while using a sharded
+handle; after the client shuts down, topology observation and reconnects return
+`ConnectionClosed`.
+
 ## Sentinel
 
 ```rust,ignore

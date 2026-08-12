@@ -38,7 +38,7 @@ use tokio_util::codec::Framed;
 use redis_tower_core::RedisStream;
 use redis_tower_protocol::RespCodec;
 
-use crate::reconnect::ConnectionFactory;
+use crate::reconnect::{ConnectionFactory, ReconnectConfig, connect_with_timeout};
 
 /// A message received on a pub/sub channel.
 #[derive(Debug, Clone)]
@@ -268,15 +268,16 @@ impl PubSubConnection {
         names: &[&str],
         kind: &str,
     ) -> Result<(), RedisError> {
+        let names = Self::unique_names(names)?;
         let mut args = vec![bulk(cmd)];
-        for n in names {
-            args.push(bulk(*n));
+        for name in &names {
+            args.push(bulk(*name));
         }
         self.framed
             .send(array(args))
             .await
             .map_err(RedisError::from)?;
-        self.await_confirmations(names, kind).await
+        self.await_confirmations(&names, kind).await
     }
 
     /// Subscribe to one or more channels.
@@ -347,40 +348,9 @@ impl PubSubConnection {
     ///
     /// If `channels` is empty, unsubscribes from all channels.
     pub async fn unsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("UNSUBSCRIBE")];
-        for ch in channels {
-            args.push(bulk(*ch));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        // Read unsubscribe confirmations. If channels is empty, Redis sends
-        // one confirmation per previously subscribed channel -- we read until
-        // the subscription count reaches 0.
-        if channels.is_empty() {
-            loop {
-                let frame = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-                if Self::is_unsub_complete(&frame) {
-                    break;
-                }
-            }
-        } else {
-            for _ in channels {
-                let _ = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-            }
-        }
+        let tracked: Vec<String> = self.subs.channels.iter().cloned().collect();
+        self.send_unsubscribe("UNSUBSCRIBE", channels, "unsubscribe", &tracked)
+            .await?;
 
         Subscriptions::remove(&mut self.subs.channels, channels);
         Ok(())
@@ -398,37 +368,9 @@ impl PubSubConnection {
     ///
     /// If `channels` is empty, unsubscribes from all shard channels.
     pub async fn sunsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("SUNSUBSCRIBE")];
-        for ch in channels {
-            args.push(bulk(*ch));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        if channels.is_empty() {
-            loop {
-                let frame = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-                if Self::is_unsub_complete(&frame) {
-                    break;
-                }
-            }
-        } else {
-            for _ in channels {
-                let _ = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-            }
-        }
+        let tracked: Vec<String> = self.subs.shard_channels.iter().cloned().collect();
+        self.send_unsubscribe("SUNSUBSCRIBE", channels, "sunsubscribe", &tracked)
+            .await?;
 
         Subscriptions::remove(&mut self.subs.shard_channels, channels);
         Ok(())
@@ -436,37 +378,9 @@ impl PubSubConnection {
 
     /// Unsubscribe from one or more patterns.
     pub async fn punsubscribe(&mut self, patterns: &[&str]) -> Result<(), RedisError> {
-        let mut args = vec![bulk("PUNSUBSCRIBE")];
-        for pat in patterns {
-            args.push(bulk(*pat));
-        }
-        self.framed
-            .send(array(args))
-            .await
-            .map_err(RedisError::from)?;
-
-        if patterns.is_empty() {
-            loop {
-                let frame = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-                if Self::is_unsub_complete(&frame) {
-                    break;
-                }
-            }
-        } else {
-            for _ in patterns {
-                let _ = self
-                    .framed
-                    .next()
-                    .await
-                    .ok_or(RedisError::ConnectionClosed)?
-                    .map_err(RedisError::from)?;
-            }
-        }
+        let tracked: Vec<String> = self.subs.patterns.iter().cloned().collect();
+        self.send_unsubscribe("PUNSUBSCRIBE", patterns, "punsubscribe", &tracked)
+            .await?;
 
         Subscriptions::remove(&mut self.subs.patterns, patterns);
         Ok(())
@@ -521,16 +435,136 @@ impl PubSubConnection {
         factory: &dyn ConnectionFactory,
     ) -> Result<(), RedisError> {
         let conn = factory.connect().await?;
-        self.framed = conn.into_framed()?;
-        self.buffered_frames.clear();
-        self.resubscribe().await
+        self.install_replacement(conn).await
     }
 
-    /// Read the next frame, draining the buffer first.
-    async fn next_frame(&mut self) -> Result<Frame, RedisError> {
-        if let Some(frame) = self.buffered_frames.pop_front() {
-            return Ok(frame);
+    /// Rebuild the underlying connection with the retry, backoff, and timeout
+    /// policy in `config`, then replay every tracked subscription.
+    ///
+    /// Each attempt waits for [`ReconnectConfig::base_delay`] (growing up to
+    /// its configured maximum) and applies the per-attempt connection timeout.
+    /// A successfully-created candidate replays every subscription before it
+    /// replaces the current transport; a failed replay therefore cannot expose
+    /// a partially subscribed session. If a finite retry budget is exhausted,
+    /// the final error is retained as the structured cause of
+    /// [`RedisError::ReconnectFailed`].
+    ///
+    /// As on the other reconnecting surfaces, `connect_timeout` bounds only
+    /// [`ConnectionFactory::connect`]. Subscription-confirmation waits have the
+    /// same caller-controlled lifetime as [`subscribe`](Self::subscribe) and
+    /// [`resubscribe`](Self::resubscribe); wrap this future in an operation
+    /// timeout when the complete reconnect-and-replay sequence needs a deadline.
+    pub async fn reconnect_with_backoff(
+        &mut self,
+        factory: &dyn ConnectionFactory,
+        config: &ReconnectConfig,
+    ) -> Result<(), RedisError> {
+        let mut attempt = 0;
+
+        loop {
+            tokio::time::sleep(config.delay_for_attempt(attempt)).await;
+            let result = match connect_with_timeout(factory, config.connect_timeout).await {
+                Ok(conn) => self.install_replacement(conn).await,
+                Err(error) => Err(error),
+            };
+
+            match result {
+                Ok(()) => return Ok(()),
+                Err(last_error) => {
+                    let attempts = attempt.saturating_add(1);
+                    attempt = attempts;
+                    if config.attempt_exhausted(attempt) {
+                        return Err(RedisError::ReconnectFailed {
+                            attempts,
+                            last_error: std::sync::Arc::new(last_error),
+                        });
+                    }
+                }
+            }
         }
+    }
+
+    /// Prepare, fully resubscribe, then atomically install one replacement.
+    ///
+    /// Keeping the candidate transport local means a failed replay cannot
+    /// leave `self` pointing at a partially subscribed session. Messages that
+    /// arrive while the replay confirmations are read move across with the
+    /// successful candidate's delivery buffer.
+    async fn install_replacement(&mut self, conn: RedisConnection) -> Result<(), RedisError> {
+        let mut replacement = Self {
+            framed: conn.into_framed()?,
+            buffered_frames: VecDeque::new(),
+            subs: self.subs.clone(),
+        };
+        replacement.resubscribe().await?;
+        self.framed = replacement.framed;
+        self.buffered_frames = replacement.buffered_frames;
+        Ok(())
+    }
+
+    /// Send an unsubscribe-family command and await its confirmations without
+    /// discarding messages that arrive between acknowledgements.
+    async fn send_unsubscribe(
+        &mut self,
+        cmd: &str,
+        names: &[&str],
+        kind: &str,
+        tracked: &[String],
+    ) -> Result<(), RedisError> {
+        let unique_names = if names.is_empty() {
+            Vec::new()
+        } else {
+            Self::unique_names(names)?
+        };
+        let mut args = vec![bulk(cmd)];
+        args.extend(unique_names.iter().map(|name| bulk(*name)));
+        self.framed
+            .send(array(args))
+            .await
+            .map_err(RedisError::from)?;
+
+        if !unique_names.is_empty() {
+            return self.await_confirmations(&unique_names, kind).await;
+        }
+
+        // With no arguments Redis acknowledges every subscription of this
+        // family. Match those names instead of waiting for a total count of
+        // zero: subscriptions in the other two families contribute to that
+        // count and may intentionally remain active.
+        if !tracked.is_empty() {
+            let names: Vec<&str> = tracked.iter().map(String::as_str).collect();
+            return self.await_confirmations(&names, kind).await;
+        }
+
+        // Redis still emits one acknowledgement with a null name when there
+        // was nothing of this family to unsubscribe from.
+        self.await_confirmation(kind).await
+    }
+
+    /// Reject an empty subscribe request and retain only the first occurrence
+    /// of each name so the number of expected acknowledgements matches the
+    /// command sent on the wire.
+    fn unique_names<'a>(names: &'a [&'a str]) -> Result<Vec<&'a str>, RedisError> {
+        if names.is_empty() {
+            return Err(RedisError::Redis(
+                "pub/sub subscribe requires at least one name".to_string(),
+            ));
+        }
+
+        let mut seen = HashSet::with_capacity(names.len());
+        Ok(names
+            .iter()
+            .copied()
+            .filter(|name| seen.insert(*name))
+            .collect())
+    }
+
+    /// Read a newly arrived frame directly from the transport.
+    ///
+    /// Confirmation searches deliberately bypass `buffered_frames`: those
+    /// frames predate the command whose acknowledgement is being awaited and
+    /// repeatedly popping and requeueing one would never make wire progress.
+    async fn next_wire_frame(&mut self) -> Result<Frame, RedisError> {
         self.framed
             .next()
             .await
@@ -550,9 +584,17 @@ impl PubSubConnection {
         expected_kind: &str,
     ) -> Result<(), RedisError> {
         let mut pending: HashSet<&str> = names.iter().copied().collect();
+        let mut deferred = VecDeque::new();
 
-        while !pending.is_empty() {
-            let frame = self.next_frame().await?;
+        let result = loop {
+            if pending.is_empty() {
+                break Ok(());
+            }
+
+            let frame = match self.next_wire_frame().await {
+                Ok(frame) => frame,
+                Err(error) => break Err(error),
+            };
 
             match Self::extract_confirmation_channel(&frame, expected_kind) {
                 Some(Ok(channel)) => {
@@ -562,17 +604,42 @@ impl PubSubConnection {
                     }
                     // Confirmation for a channel we did not request in this call.
                     // Buffer it so the caller that IS waiting for it can consume it.
-                    self.buffered_frames.push_back(frame);
+                    deferred.push_back(frame);
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Err(error)) => break Err(error),
                 None => {
                     // Not a confirmation of the expected kind at all. Buffer it.
-                    self.buffered_frames.push_back(frame);
+                    deferred.push_back(frame);
                 }
             }
-        }
+        };
 
-        Ok(())
+        // Existing buffered frames are older than anything read above. Append
+        // deferred wire frames to retain delivery order for the message stream.
+        self.buffered_frames.extend(deferred);
+        result
+    }
+
+    /// Wait for one confirmation of `expected_kind`, preserving every frame
+    /// unrelated to that acknowledgement.
+    async fn await_confirmation(&mut self, expected_kind: &str) -> Result<(), RedisError> {
+        let mut deferred = VecDeque::new();
+
+        let result = loop {
+            let frame = match self.next_wire_frame().await {
+                Ok(frame) => frame,
+                Err(error) => break Err(error),
+            };
+
+            match Self::is_confirmation(&frame, expected_kind) {
+                Some(Ok(())) => break Ok(()),
+                Some(Err(error)) => break Err(error),
+                None => deferred.push_back(frame),
+            }
+        };
+
+        self.buffered_frames.extend(deferred);
+        result
     }
 
     /// Try to extract the channel name from a subscribe confirmation frame.
@@ -600,7 +667,7 @@ impl PubSubConnection {
         }
 
         let kind = match &items[0] {
-            Frame::BulkString(Some(b)) => b,
+            Frame::BulkString(Some(b)) | Frame::SimpleString(b) => b,
             _ => return None,
         };
 
@@ -616,14 +683,37 @@ impl PubSubConnection {
         }
     }
 
-    /// Check if an unsubscribe confirmation indicates zero remaining subscriptions.
-    fn is_unsub_complete(frame: &Frame) -> bool {
+    /// Check whether `frame` is a confirmation of `expected_kind`.
+    ///
+    /// A null name is valid when an unsubscribe command targets an empty
+    /// subscription family.
+    fn is_confirmation(frame: &Frame, expected_kind: &str) -> Option<Result<(), RedisError>> {
         let items = match frame {
             Frame::Array(Some(items)) | Frame::Push(items) => items,
-            _ => return false,
+            Frame::Error(error) => {
+                return Some(Err(RedisError::Redis(
+                    String::from_utf8_lossy(error).into_owned(),
+                )));
+            }
+            _ => return None,
         };
-        // Last element is the subscription count.
-        matches!(items.last(), Some(Frame::Integer(0)))
+        if items.len() < 3 || !matches!(items.last(), Some(Frame::Integer(_))) {
+            return None;
+        }
+
+        let kind = match &items[0] {
+            Frame::BulkString(Some(kind)) | Frame::SimpleString(kind) => kind,
+            _ => return None,
+        };
+        if kind.as_ref() != expected_kind.as_bytes() {
+            return None;
+        }
+
+        match &items[1] {
+            Frame::BulkString(_) | Frame::SimpleString(_) => Some(Ok(())),
+            Frame::Null if expected_kind.ends_with("unsubscribe") => Some(Ok(())),
+            _ => None,
+        }
     }
 
     /// Parse a pub/sub message frame.
@@ -792,10 +882,44 @@ impl Stream for KeyspaceEventStream {
 mod tests {
     use super::*;
     use redis_tower_protocol::helpers::{array, bulk};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Helper to build a subscribe confirmation frame.
     fn sub_confirmation(kind: &str, channel: &str, count: i64) -> Frame {
         array(vec![bulk(kind), bulk(channel), Frame::Integer(count)])
+    }
+
+    fn message(channel: &str, payload: &str) -> Frame {
+        array(vec![bulk("message"), bulk(channel), bulk(payload)])
+    }
+
+    #[cfg(unix)]
+    async fn redis_stream_pair() -> (RedisStream, RedisStream) {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        (RedisStream::Unix(client), RedisStream::Unix(server))
+    }
+
+    #[cfg(not(unix))]
+    async fn redis_stream_pair() -> (RedisStream, RedisStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(addr), listener.accept());
+        let (server, _) = accepted.unwrap();
+        (RedisStream::Tcp(client.unwrap()), RedisStream::Tcp(server))
+    }
+
+    async fn pubsub_pair() -> (
+        PubSubConnection,
+        Framed<RedisStream, redis_tower_protocol::RespCodec>,
+    ) {
+        let (client, server) = redis_stream_pair().await;
+        let connection = RedisConnection::from_stream(client);
+        let pubsub = PubSubConnection::from_connection(connection).unwrap();
+        let server = Framed::new(server, redis_tower_protocol::RespCodec::new());
+        (pubsub, server)
     }
 
     #[test]
@@ -804,6 +928,21 @@ mod tests {
         let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_some());
         assert_eq!(result.unwrap().unwrap(), "events");
+    }
+
+    #[test]
+    fn extract_confirmation_channel_accepts_simple_string_kind() {
+        let frame = array(vec![
+            Frame::SimpleString(Bytes::from_static(b"subscribe")),
+            bulk("events"),
+            Frame::Integer(1),
+        ]);
+        assert_eq!(
+            PubSubConnection::extract_confirmation_channel(&frame, "subscribe")
+                .unwrap()
+                .unwrap(),
+            "events"
+        );
     }
 
     #[test]
@@ -866,15 +1005,345 @@ mod tests {
     }
 
     #[test]
-    fn is_unsub_complete_detects_zero_count() {
+    fn is_confirmation_accepts_zero_count() {
         let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(0)]);
-        assert!(PubSubConnection::is_unsub_complete(&frame));
+        assert!(matches!(
+            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            Some(Ok(()))
+        ));
     }
 
     #[test]
-    fn is_unsub_complete_returns_false_for_nonzero_count() {
+    fn is_confirmation_accepts_nonzero_count() {
         let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(2)]);
-        assert!(!PubSubConnection::is_unsub_complete(&frame));
+        assert!(matches!(
+            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn is_confirmation_accepts_null_unsubscribe_name() {
+        let frame = array(vec![
+            bulk("unsubscribe"),
+            Frame::BulkString(None),
+            Frame::Integer(0),
+        ]);
+        assert!(matches!(
+            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn is_confirmation_accepts_resp3_null_unsubscribe_name() {
+        let frame = Frame::Push(vec![bulk("unsubscribe"), Frame::Null, Frame::Integer(0)]);
+        assert!(matches!(
+            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            Some(Ok(()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn subscribe_bypasses_existing_buffer_and_preserves_wire_messages() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        pubsub
+            .buffered_frames
+            .push_back(message("events", "already-buffered"));
+
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUBSCRIBE"), bulk("new")])
+            );
+            server.send(message("events", "from-wire")).await.unwrap();
+            server
+                .send(sub_confirmation("subscribe", "new", 2))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), pubsub.subscribe(&["new"]))
+            .await
+            .expect("subscribe confirmation search cycled buffered data")
+            .unwrap();
+        server_task.await.unwrap();
+
+        let first = pubsub.next().await.unwrap().unwrap();
+        let second = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(first.payload.as_ref(), b"already-buffered");
+        assert_eq!(second.payload.as_ref(), b"from-wire");
+    }
+
+    #[tokio::test]
+    async fn subscribe_rejects_empty_names_before_wire_io() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+
+        let error = pubsub.subscribe(&[]).await.unwrap_err();
+        assert!(error.to_string().contains("at least one name"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), server.next())
+                .await
+                .is_err(),
+            "empty subscribe unexpectedly wrote a command"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_deduplicates_names_before_wire_and_confirmation_wait() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUBSCRIBE"), bulk("a"), bulk("b")])
+            );
+            server
+                .send(sub_confirmation("subscribe", "a", 1))
+                .await
+                .unwrap();
+            server
+                .send(sub_confirmation("subscribe", "b", 2))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pubsub.subscribe(&["a", "a", "b", "a"]),
+        )
+        .await
+        .expect("duplicate subscribe names left an acknowledgement pending")
+        .unwrap();
+        server_task.await.unwrap();
+        assert_eq!(
+            pubsub
+                .subscriptions()
+                .channels
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_all_matches_family_names_and_preserves_interleaved_message() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        Subscriptions::add(&mut pubsub.subs.channels, &["a", "b"]);
+        Subscriptions::add(&mut pubsub.subs.patterns, &["still-active.*"]);
+
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("UNSUBSCRIBE")])
+            );
+            // The total never reaches zero because a pattern subscription is
+            // intentionally left active.
+            server
+                .send(sub_confirmation("unsubscribe", "a", 2))
+                .await
+                .unwrap();
+            server.send(message("a", "between-acks")).await.unwrap();
+            server
+                .send(sub_confirmation("unsubscribe", "b", 1))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), pubsub.unsubscribe(&[]))
+            .await
+            .expect("unsubscribe waited for an aggregate count of zero")
+            .unwrap();
+        server_task.await.unwrap();
+
+        assert!(pubsub.subscriptions().channels.is_empty());
+        assert_eq!(
+            pubsub
+                .subscriptions()
+                .patterns
+                .iter()
+                .next()
+                .map(String::as_str),
+            Some("still-active.*")
+        );
+        let buffered = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(buffered.payload.as_ref(), b"between-acks");
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_empty_family_accepts_resp3_null_ack_and_preserves_message() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("UNSUBSCRIBE")])
+            );
+            server
+                .send(message("other", "before-null-ack"))
+                .await
+                .unwrap();
+            server
+                .send(Frame::Push(vec![
+                    bulk("unsubscribe"),
+                    Frame::Null,
+                    Frame::Integer(0),
+                ]))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), pubsub.unsubscribe(&[]))
+            .await
+            .unwrap()
+            .unwrap();
+        server_task.await.unwrap();
+
+        let buffered = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(buffered.payload.as_ref(), b"before-null-ack");
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_deduplicates_names_before_wire_and_confirmation_wait() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        Subscriptions::add(&mut pubsub.subs.channels, &["a", "b"]);
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("UNSUBSCRIBE"), bulk("a"), bulk("b")])
+            );
+            server
+                .send(sub_confirmation("unsubscribe", "a", 1))
+                .await
+                .unwrap();
+            server
+                .send(sub_confirmation("unsubscribe", "b", 0))
+                .await
+                .unwrap();
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), pubsub.unsubscribe(&["a", "a", "b"]))
+            .await
+            .expect("duplicate unsubscribe names left an acknowledgement pending")
+            .unwrap();
+        server_task.await.unwrap();
+        assert!(pubsub.subscriptions().channels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_replacement_replay_does_not_install_partial_session() {
+        let (mut pubsub, mut original_server) = pubsub_pair().await;
+        Subscriptions::add(&mut pubsub.subs.channels, &["a", "b"]);
+        pubsub
+            .buffered_frames
+            .push_back(message("old", "old-buffer"));
+
+        let (candidate, candidate_server) = redis_stream_pair().await;
+        let candidate = RedisConnection::from_stream(candidate);
+        let mut candidate_server =
+            Framed::new(candidate_server, redis_tower_protocol::RespCodec::new());
+
+        let candidate_task = tokio::spawn(async move {
+            assert_eq!(
+                candidate_server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUBSCRIBE"), bulk("a"), bulk("b")])
+            );
+            candidate_server
+                .send(sub_confirmation("subscribe", "a", 1))
+                .await
+                .unwrap();
+            candidate_server
+                .send(message("candidate", "must-not-leak"))
+                .await
+                .unwrap();
+            candidate_server
+                .send(Frame::Error(Bytes::from_static(b"ERR replay failed")))
+                .await
+                .unwrap();
+        });
+
+        let error = pubsub.install_replacement(candidate).await.unwrap_err();
+        assert!(error.to_string().contains("replay failed"));
+        candidate_task.await.unwrap();
+
+        original_server
+            .send(message("old", "old-wire"))
+            .await
+            .unwrap();
+        let buffered = pubsub.next().await.unwrap().unwrap();
+        let from_original_wire = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(buffered.payload.as_ref(), b"old-buffer");
+        assert_eq!(from_original_wire.payload.as_ref(), b"old-wire");
+        assert_eq!(pubsub.subscriptions().channels.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_backoff_returns_final_error_after_zero_delay_budget() {
+        let (mut pubsub, _server) = pubsub_pair().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let factory = {
+            let calls = Arc::clone(&calls);
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(Err::<RedisConnection, _>(RedisError::ConnectionClosed))
+            }
+        };
+        let config = ReconnectConfig::default()
+            .max_retries(2)
+            .base_delay(Duration::ZERO)
+            .max_delay(Duration::ZERO)
+            .jitter(false);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            pubsub.reconnect_with_backoff(&factory, &config),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        match error {
+            RedisError::ReconnectFailed {
+                attempts,
+                last_error,
+            } => {
+                assert_eq!(attempts, 3);
+                assert!(matches!(last_error.as_ref(), RedisError::ConnectionClosed));
+            }
+            other => panic!("expected ReconnectFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reconnect_with_backoff_wraps_per_attempt_timeout() {
+        let (mut pubsub, _server) = pubsub_pair().await;
+        let factory =
+            || async { futures::future::pending::<Result<RedisConnection, RedisError>>().await };
+        let config = ReconnectConfig::default()
+            .max_retries(0)
+            .base_delay(Duration::ZERO)
+            .max_delay(Duration::ZERO)
+            .jitter(false)
+            .connect_timeout(Duration::from_millis(10));
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            pubsub.reconnect_with_backoff(&factory, &config),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+
+        match error {
+            RedisError::ReconnectFailed {
+                attempts,
+                last_error,
+            } => {
+                assert_eq!(attempts, 1);
+                assert!(matches!(last_error.as_ref(), RedisError::ConnectTimeout));
+            }
+            other => panic!("expected ReconnectFailed, got {other:?}"),
+        }
     }
 
     // -- subscription tracking (replayed on reconnect) --

@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- dedicated reconnecting Cluster Pub/Sub connections: regular subscriptions
+  pinned to an explicit node, and same-slot sharded subscriptions that follow
+  committed ownership changes; `SPUBLISH` remains on the normal slot-routed
+  command path (#441)
 - node-grouped `ClusterPipeline` execution with per-command redirect handling,
   explicit cross-slot `MGET`/`MSET`/`DEL` helpers, and slot-pinned
   WATCH/MULTI/EXEC support on `ClusterConnection` and `ClusterClient`; keyed
