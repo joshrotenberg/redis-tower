@@ -17,3 +17,4 @@
 # Reference
 
 - [Feature matrix](FEATURE-MATRIX.md)
+- [Test conformance](TEST-CONFORMANCE.md)

@@ -22,6 +22,9 @@ If you are evaluating or adopting the project, start here:
   tracking modes, invalidation races, failure behavior, and cache metrics.
 - The [feature matrix](FEATURE-MATRIX.md) is the canonical, evidence-linked
   comparison with other Redis clients.
+- The [test conformance report](TEST-CONFORMANCE.md) maps generated test
+  inventory, topology and server matrices, and destructive fault coverage to
+  their source and CI evidence.
 
 For the short installation example, complete API tour, workspace layout, and
 compatibility policy, see the
