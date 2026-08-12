@@ -1773,6 +1773,10 @@ mod tests {
             .wait_for_promotion(&promoted.id, Duration::from_secs(20))
             .await
             .unwrap();
+        fixture
+            .wait_for_ready(Duration::from_secs(20))
+            .await
+            .unwrap();
 
         // The target was a replica at startup. Completing this migration must
         // discover it as a current master rather than using the wrapper's stale
