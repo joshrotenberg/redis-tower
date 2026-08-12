@@ -591,16 +591,43 @@ See [`examples/resilience.rs`](examples/resilience.rs) for a runnable tour.
 ## Credential provider
 
 ```rust,ignore
-use redis_tower::credentials::{AuthenticatedConnection, StaticCredentials};
+use redis_tower::{
+    AutoPipelineConfig, ConnectionConfig, CredentialConnectionFactory,
+    MultiplexedClient, ProtocolVersion, StaticCredentials,
+};
+use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
+use redis_tower::reconnect::{ReconnectConfig, ResilientConnection};
 
-let conn = AuthenticatedConnection::connect(
+let factory = CredentialConnectionFactory::new(
     "127.0.0.1:6379",
     StaticCredentials::password("secret"),
+)
+.with_connection_config(
+    ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+);
+
+let resilient = ResilientConnection::new(
+    factory.clone(),
+    ReconnectConfig::default(),
+).await?;
+
+let multiplexed = MultiplexedClient::from_factory(
+    factory,
+    AutoPipelineConfig::default(),
+    AutoPipelineReconnectConfig::default(),
 ).await?;
 ```
 
-Implement `CredentialProvider` for dynamic auth (AWS IAM, Azure Entra ID).
-Call `reauthenticate()` on token rotation.
+Implement `CredentialProvider` for dynamic auth such as AWS IAM or Azure
+Entra ID. Each factory call starts in RESP2, fetches credentials, runs `AUTH`,
+and only then negotiates the protocol requested by `ConnectionConfig`.
+Initial connections and every reconnect therefore fetch credentials again.
+
+If connection-establishment `AUTH` returns `NOAUTH` or `WRONGPASS`, the
+factory calls `force_refresh()` and retries `AUTH` once. That refresh boundary
+does not extend to commands on an established connection: a live
+`NOAUTH`/`WRONGPASS` is returned to the caller without reauthentication or
+command replay.
 
 ## TLS
 

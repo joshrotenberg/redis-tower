@@ -312,7 +312,8 @@ responsible for recreating all required session state on every connection:
 - URL username/password and database selection;
 - TLS roots and client certificates;
 - RESP mode and decode limits;
-- rotating credentials or other initialization performed by a custom factory.
+- rotating credentials supplied by `CredentialConnectionFactory`, or other
+  initialization performed by a custom factory.
 
 ```rust,ignore
 use std::time::Duration;
@@ -354,6 +355,47 @@ let client = MultiplexedClient::from_factory(
     AutoPipelineReconnectConfig::new(reconnect),
 ).await?;
 ```
+
+Use `CredentialConnectionFactory` when authentication comes from a dynamic
+provider rather than a static URL:
+
+```rust,ignore
+use redis_tower::{
+    AutoPipelineConfig, ConnectionConfig, CredentialConnectionFactory,
+    MultiplexedClient, ProtocolVersion, StaticCredentials,
+};
+use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
+
+// Replace StaticCredentials with an application or cloud CredentialProvider.
+let factory = CredentialConnectionFactory::new(
+    "127.0.0.1:6379",
+    StaticCredentials::password("token"),
+)
+.with_connection_config(
+    ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+);
+
+let client = MultiplexedClient::from_factory(
+    factory,
+    AutoPipelineConfig::default(),
+    AutoPipelineReconnectConfig::default(),
+).await?;
+```
+
+The credential factory opens each transport in RESP2, fetches credentials,
+runs `AUTH`, and then negotiates the protocol requested by
+`ConnectionConfig`. The complete sequence runs on initial connection and every
+reconnect, so each fresh socket consults the provider. The same factory also
+implements `PoolFactory`, allowing lazy or replacement pool slots to use the
+same setup.
+
+An authentication rejection during connection establishment is handled
+narrowly: `NOAUTH` or `WRONGPASS` calls the provider's `force_refresh()` and
+retries `AUTH` once. Providers shared by multiple clients or pool slots must
+synchronize concurrent refreshes. If an already-established connection
+returns `NOAUTH` or `WRONGPASS` for a user command, redis-tower returns that
+error without reauthenticating or replaying the command. This avoids silently
+duplicating work and keeps retry policy with the caller.
 
 `max_retries` counts retries after the first reconnect attempt: zero still
 allows one attempt, and `n` allows at most `n + 1` attempts. The initial
