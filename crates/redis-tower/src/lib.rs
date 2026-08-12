@@ -380,6 +380,7 @@ pub mod command_timeout;
 pub mod consumer;
 pub mod credentials;
 mod executor;
+pub mod maintenance;
 pub mod metrics_layer;
 pub mod monitor;
 pub mod multiplexed;
@@ -440,6 +441,7 @@ pub use credentials::{
     RotatingAuthClient, StaticCredentials,
 };
 pub use executor::{ExecutorService, RedisExecutor};
+pub use maintenance::{MaintenanceListenerHandle, MaintenanceNotificationKind};
 pub use metrics_layer::{
     CacheEvent, ClusterRedirectKind, ClusterTopologyRefreshOutcome, MetricsLayer, MetricsRecorder,
     MetricsService,

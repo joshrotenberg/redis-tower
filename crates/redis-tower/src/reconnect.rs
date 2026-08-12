@@ -105,6 +105,11 @@ pub enum ConnectionDisconnectReason {
     /// Redis replied `READONLY`, indicating that a formerly writable node was
     /// demoted to a replica.
     ReadOnly,
+    /// Redis Smart Client Handoff requested a graceful connection replacement.
+    MaintenanceHandoff {
+        /// Server-supplied sequence identifying the `MOVING` notification.
+        sequence: u64,
+    },
     /// A direct connection wrapper was dropped, or the last client/service
     /// handle closed and its background worker stopped cleanly. This terminal
     /// transition is distinct from any earlier outage disconnect.
@@ -125,6 +130,15 @@ pub enum ConnectionDisconnectReason {
 pub enum ConnectionEvent {
     /// The initial connection was established.
     Connected,
+    /// Redis delivered a valid maintenance notification for this connection.
+    MaintenanceNotification {
+        /// Notification kind and its prescribed handling.
+        kind: crate::maintenance::MaintenanceNotificationKind,
+        /// Server-supplied maintenance sequence identifier.
+        sequence: u64,
+        /// Server-supplied maintenance time-to-live.
+        ttl: Duration,
+    },
     /// An initial connection attempt failed.
     ConnectFailed {
         /// Human-readable error text from the failed connection attempt.

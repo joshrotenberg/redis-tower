@@ -36,6 +36,42 @@ Likewise, keep `PubSubConnection` and `MonitorStream` dedicated. Redis changes
 the connection's mode for pub/sub and MONITOR, and MONITOR itself has a large
 server-side throughput cost.
 
+## Plan for Smart Client Handoff maintenance
+
+Planned-maintenance handoff is opt-in for a factory-backed
+`MultiplexedClient`. Construct it with
+`MultiplexedClient::from_factory_with_maintenance` and retain the returned
+`MaintenanceListenerHandle`. The initial connection and every replacement must
+be RESP3 and must accept
+`CLIENT MAINT_NOTIFICATIONS ON moving-endpoint-type none`; construction or
+reconnection fails if registration does not succeed.
+
+For each valid `MOVING` notification, redis-tower waits until half of the
+server-supplied TTL and then creates a replacement through the original
+factory. That factory must reproduce all required authentication, TLS, URL,
+and other per-connection session setup. The `none` endpoint mode means the
+server does not select a destination: service discovery or endpoint changes
+must happen inside the factory. Set its connect timeout and reconnect budget so
+it can establish a usable connection within the remaining half of the TTL.
+
+Once `MOVING` has been accepted, the worker lets any active batch make one
+completion attempt and does not replay it for the handoff. Newly queued work is
+held until replacement succeeds; if the reconnect budget is exhausted, that
+work fails instead of being sent on an unverified connection. Account for this
+pause when choosing queue capacity and end-to-end deadlines.
+
+`MIGRATING` is observational only and does not reconnect. Use
+`from_factory_with_maintenance_and_events` and its lifecycle event bus if the
+application needs the notification metadata. This support does not relax
+command timeouts and does not cover pools, Cluster, blocking connections, or
+Pub/Sub.
+
+Dropping the maintenance handle disables future handling without shutting down
+the client and cancels a half-TTL wait that has not committed. Prefer
+`MaintenanceListenerHandle::shutdown().await` during orderly shutdown: it
+waits for worker acknowledgement and, if replacement has already begun, for a
+connected or terminal result. Shut down the client separately.
+
 ## Establish a baseline before tuning
 
 Capture at least these workload characteristics under realistic concurrency:
