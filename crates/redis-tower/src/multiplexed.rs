@@ -53,6 +53,10 @@ use crate::cache_state::CacheStatistics;
 use crate::caching::{CachedClientConfig, connect_resp3, force_resp3};
 use crate::circuit_breaker::{RedisCircuitBreakerClient, RedisCircuitBreakerConfig};
 use crate::command_adapter::CommandAdapter;
+use crate::credentials::{
+    CredentialReauthenticationHandle, StreamingCredentialProvider,
+    spawn_credential_reauthentication,
+};
 use crate::pipeline::PipelineExecutor;
 use crate::reconnect::{
     AddrConnectionFactory, ConnectionEventBus, ConnectionFactory, Resp3AddrConnectionFactory,
@@ -162,6 +166,27 @@ pub struct CachedMultiplexedClient {
 }
 
 impl MultiplexedClient<AutoPipelineService> {
+    /// Re-authenticate this client's current socket whenever `provider` emits.
+    ///
+    /// The update is submitted through the same worker as user commands, so it
+    /// cannot corrupt RESP framing or interleave inside an atomic transaction
+    /// batch. Reconnects continue to use the client's connection factory; pass
+    /// the same provider to [`CredentialConnectionFactory`](crate::CredentialConnectionFactory)
+    /// so replacement sockets also fetch current credentials.
+    ///
+    /// Dropping the returned handle stops listening without shutting down the
+    /// client.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let client = self.clone();
+        spawn_credential_reauthentication(provider, move |credentials| {
+            let client = client.clone();
+            async move { client.execute(credentials.auth_command()).await }
+        })
+    }
+
     /// Build an opt-in Smart Client Handoff maintenance-aware client.
     ///
     /// This named constructor requires RESP3 and successful

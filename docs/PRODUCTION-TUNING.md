@@ -428,10 +428,17 @@ same setup.
 An authentication rejection during connection establishment is handled
 narrowly: `NOAUTH` or `WRONGPASS` calls the provider's `force_refresh()` and
 retries `AUTH` once. Providers shared by multiple clients or pool slots must
-synchronize concurrent refreshes. If an already-established connection
-returns `NOAUTH` or `WRONGPASS` for a user command, redis-tower returns that
-error without reauthenticating or replaying the command. This avoids silently
-duplicating work and keeps retry policy with the caller.
+synchronize concurrent refreshes. A `StreamingCredentialProvider` can
+proactively send replacement credentials to established standalone,
+multiplexed, pooled, Cluster, and Sentinel data sockets. That update is an
+explicit `AUTH`, never a replay of the command that exposed an authentication
+error. If an already-established connection returns `NOAUTH` or `WRONGPASS`
+for a user command, redis-tower returns the error to the caller.
+
+The companion `redis-tower-auth-aws` and `redis-tower-auth-azure` crates
+implement ElastiCache IAM and Microsoft Entra ID token acquisition, caching,
+and proactive refresh. See [Cloud and rotating credentials](CLOUD-AUTH.md) for
+complete setup and failure semantics.
 
 `max_retries` counts retries after the first reconnect attempt: zero still
 allows one attempt, and `n` allows at most `n + 1` attempts. The initial

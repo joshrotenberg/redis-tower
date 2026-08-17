@@ -30,7 +30,10 @@ use bytes::Bytes;
 use redis_server_wrapper::RedisServer;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::commands::*;
-use redis_tower::credentials::{CredentialConnectionFactory, CredentialProvider, Credentials};
+use redis_tower::credentials::{
+    CredentialConnectionFactory, CredentialProvider, CredentialUpdateStream, Credentials,
+    StreamingCredentialProvider,
+};
 use redis_tower::pool::{ConnectionPool, PoolConfig};
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
@@ -115,6 +118,56 @@ impl CredentialProvider for TestCredentialProvider {
         }
         let credentials = self.credentials();
         Box::pin(async move { Ok(credentials) })
+    }
+}
+
+#[derive(Clone)]
+struct PushTestCredentialProvider {
+    current: Arc<Mutex<Credentials>>,
+    updates: tokio::sync::broadcast::Sender<Credentials>,
+}
+
+impl PushTestCredentialProvider {
+    fn new(credentials: Credentials) -> Self {
+        let (updates, _) = tokio::sync::broadcast::channel(8);
+        Self {
+            current: Arc::new(Mutex::new(credentials)),
+            updates,
+        }
+    }
+
+    fn push(&self, credentials: Credentials) {
+        *self.current.lock().unwrap() = credentials.clone();
+        self.updates
+            .send(credentials)
+            .expect("streaming credential test must have a subscriber");
+    }
+}
+
+impl CredentialProvider for PushTestCredentialProvider {
+    fn get_credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        let credentials = self.current.lock().unwrap().clone();
+        Box::pin(async move { Ok(credentials) })
+    }
+}
+
+impl StreamingCredentialProvider for PushTestCredentialProvider {
+    fn subscribe(self: Arc<Self>) -> CredentialUpdateStream {
+        let mut updates = self.updates.subscribe();
+        Box::pin(async_stream::stream! {
+            loop {
+                match updates.recv().await {
+                    Ok(credentials) => yield Ok(credentials),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        let credentials = { self.current.lock().unwrap().clone() };
+                        yield Ok(credentials);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
     }
 }
 
@@ -369,6 +422,102 @@ async fn multiplexed_password_auth() {
     let val: Option<Bytes> = client.execute(Get::new(k)).await.unwrap();
     assert_eq!(val, Some(Bytes::from("mux")));
     client.execute(Del::new(k)).await.unwrap();
+}
+
+/// A streaming provider must apply an emitted credential to the established
+/// multiplexed socket, rather than waiting for a reconnect or polling timer.
+/// Switching ACL identities makes the AUTH side effect directly observable.
+#[tokio::test]
+async fn multiplexed_streaming_provider_reauthenticates_on_emit() {
+    let addr = auth_addr().await;
+    let username = "streaming-auth-user";
+    let password = "streaming-auth-password";
+    let provider = PushTestCredentialProvider::new(Credentials::new("default", PASSWORD));
+    let factory = CredentialConnectionFactory::new(addr, provider.clone());
+    let client = MultiplexedClient::from_factory(
+        factory,
+        AutoPipelineConfig::default(),
+        AutoPipelineReconnectConfig::default(),
+    )
+    .await
+    .expect("connect initial streaming-provider credential");
+
+    client
+        .execute(
+            AclSetUser::new(username)
+                .rule("on")
+                .rule(format!(">{password}"))
+                .rule("+@all")
+                .rule("~*"),
+        )
+        .await
+        .expect("create the replacement ACL identity");
+    assert_eq!(client.execute(AclWhoAmI::new()).await.unwrap(), "default");
+
+    let streaming_provider: Arc<dyn StreamingCredentialProvider> = Arc::new(provider.clone());
+    let handle = client.spawn_credential_reauthentication(streaming_provider);
+    provider.push(Credentials::new(username, password));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if client.execute(AclWhoAmI::new()).await.unwrap() == username {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("emitted credentials were not applied to the established socket");
+
+    assert_eq!(client.execute(AclDelUser::new(username)).await.unwrap(), 1);
+    handle.shutdown().await;
+    client.shutdown().await;
+}
+
+/// Pool rotation must update every retained slot; checking a run longer than
+/// the pool size catches an update that reached only one round-robin target.
+#[tokio::test]
+async fn pool_streaming_provider_reauthenticates_every_slot() {
+    let addr = auth_addr().await;
+    let username = "streaming-pool-user";
+    let password = "streaming-pool-password";
+    let provider = PushTestCredentialProvider::new(Credentials::new("default", PASSWORD));
+    let factory = CredentialConnectionFactory::new(addr, provider.clone());
+    let pool = ConnectionPool::connect_with_factory(PoolConfig::default().size(2), factory)
+        .await
+        .expect("build provider-backed credential pool");
+
+    pool.execute(
+        AclSetUser::new(username)
+            .rule("on")
+            .rule(format!(">{password}"))
+            .rule("+@all")
+            .rule("~*"),
+    )
+    .await
+    .expect("create the replacement pool identity");
+
+    let streaming_provider: Arc<dyn StreamingCredentialProvider> = Arc::new(provider.clone());
+    let handle = pool.spawn_credential_reauthentication(streaming_provider);
+    provider.push(Credentials::new(username, password));
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let mut all_updated = true;
+            for _ in 0..4 {
+                all_updated &= pool.execute(AclWhoAmI::new()).await.unwrap() == username;
+            }
+            if all_updated {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("emitted credentials did not reach every retained pool slot");
+
+    assert_eq!(pool.execute(AclDelUser::new(username)).await.unwrap(), 1);
+    handle.shutdown().await;
 }
 
 /// A protected RESP3 connection has to authenticate while the socket is still

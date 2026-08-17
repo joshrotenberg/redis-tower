@@ -48,6 +48,10 @@
 //! sentinel hop (connecting to sentinel nodes) and the node hop (connecting to
 //! the discovered master). Sentinels and the master commonly use different
 //! passwords in production.
+//! The node provider is consulted again after failover and reconnect. Shared
+//! and multiplexed clients can retain an owned streaming-credential handle to
+//! apply proactive updates to established master and replica data sockets;
+//! Sentinel discovery sockets are short-lived and fetch on each query.
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {

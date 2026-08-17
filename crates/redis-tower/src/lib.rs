@@ -437,8 +437,10 @@ pub use command_timeout::{
 };
 pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
-    AuthenticatedConnection, CredentialConnectionFactory, CredentialProvider, Credentials,
-    RotatingAuthClient, StaticCredentials,
+    AuthenticatedConnection, CredentialConnectionFactory, CredentialProvider,
+    CredentialReauthenticationHandle, CredentialUpdateStream, Credentials, RotatingAuthClient,
+    StaticCredentials, StreamingCredentialProvider, authenticate_with_refresh, is_auth_rejection,
+    spawn_credential_reauthentication,
 };
 pub use executor::{ExecutorService, RedisExecutor};
 pub use maintenance::{MaintenanceListenerHandle, MaintenanceNotificationKind};

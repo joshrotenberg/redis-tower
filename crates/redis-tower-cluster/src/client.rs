@@ -4,6 +4,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use redis_tower::TransactionExecutor;
+use redis_tower::credentials::{
+    CredentialReauthenticationHandle, Credentials, StreamingCredentialProvider,
+    spawn_credential_reauthentication as spawn_reauthentication_task,
+};
 use redis_tower_core::Frame;
 use redis_tower_core::{Command, RedisError};
 use tokio::sync::Mutex;
@@ -121,6 +125,34 @@ impl ClusterClient {
     pub async fn read_preference(&self) -> ReadPreference {
         let conn = self.inner.lock().await;
         conn.read_preference()
+    }
+
+    /// Re-authenticate every established master and replica connection.
+    ///
+    /// Connections that reject the replacement are discarded and reconnect
+    /// through the configured credential provider when next selected.
+    pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
+        self.inner
+            .lock()
+            .await
+            .reauthenticate_all(credentials)
+            .await
+    }
+
+    /// Apply every credential emitted by `provider` to current cluster nodes.
+    ///
+    /// Dropping the returned handle stops future updates. Configure the
+    /// client's builder with the same provider so newly discovered and
+    /// replacement node connections fetch current credentials.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let client = self.clone();
+        spawn_reauthentication_task(provider, move |credentials| {
+            let client = client.clone();
+            async move { client.reauthenticate_all(&credentials).await }
+        })
     }
 }
 

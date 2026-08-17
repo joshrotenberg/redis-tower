@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   authentication before requested protocol negotiation, and one bounded
   provider refresh when connection-establishment authentication is rejected
   (#475)
+- push-based credential streams and owned reauthentication tasks for
+  established standalone, multiplexed, and pooled connections; credential
+  buffers now zeroize on drop and redact tokens from `Debug` (#475)
 - explicit `Pipeline` execution through the standard `MultiplexedClient`, sent
   as one ordered, cancellation-aware auto-pipeline batch
 - `WithDeadline<Cmd>` end-to-end absolute deadlines honored by deadline-aware

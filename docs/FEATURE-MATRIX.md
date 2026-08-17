@@ -39,7 +39,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | partial (connection-level) | yes |
 | Reconnect with backoff + jitter | yes -- [`reconnect.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/reconnect.rs) | partial | yes |
 | Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | no | partial (tracing feature) |
-| RESP3 protocol | standalone and cluster; Sentinel in progress -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes |
+| RESP3 protocol | standalone, cluster, and Sentinel, including AUTH-before-HELLO setup -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`cluster connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs), [`sentinel discovery.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/discovery.rs) | yes | yes |
 | TLS (rustls + native-tls, mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes |
 | Pub/sub | standalone plus fixed-node and slot-following Cluster subscriptions -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs), [`cluster pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/pubsub.rs) | yes | yes |
 | Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | partial (raw commands) | partial |
@@ -48,7 +48,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Redis Stack modules (JSON/Search/TS/Bloom/Vector) | yes -- [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-modules/src) | partial (JSON via separate crate) | partial (RedisJSON/RediSearch) |
 | Blocking (sync) client | yes -- [`redis-tower-sync`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sync/src/lib.rs) | yes (sync connection) | no |
 | One client over standalone/cluster/sentinel | yes -- [`redis-tower-client`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-client/src/lib.rs) | no | no |
-| Pluggable credential provider (token rotation) | yes -- [`credentials.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/credentials.rs) | partial | partial |
+| Pluggable credential provider (token rotation) | reconnect and push rotation across standalone, pool, cluster, and Sentinel; AWS IAM and Entra providers -- [`credentials.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/credentials.rs), [`cloud auth guide`](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) | partial | partial |
 
 ## redis-tower vs Lettuce, go-redis, StackExchange.Redis, ioredis
 
@@ -67,23 +67,23 @@ comparison is about capability parity across languages, not API shape.
 | Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no (external) | no (external) | no (external) | no (external) |
 | Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | yes | yes (context) | yes | yes |
 | Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
-| RESP3 protocol | standalone and cluster; Sentinel in progress -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes | partial | yes |
+| RESP3 protocol | standalone, cluster, and Sentinel, including authenticated setup -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`cluster connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs), [`sentinel discovery.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/discovery.rs) | yes | yes | partial | yes |
 | TLS (incl. mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes | yes | yes |
 | Pub/sub | standalone plus fixed-node and slot-following Cluster subscriptions -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs), [`cluster pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/pubsub.rs) | yes | yes | yes | yes |
 | Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | yes | partial | partial | partial |
 | Transactions (MULTI/EXEC/WATCH) | yes -- [`transaction.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/transaction.rs) | yes | yes | yes | yes |
 | Lua scripting (EVALSHA-first) | yes -- [`script.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/script.rs) | yes | yes | yes | yes |
 | Redis Stack modules | yes -- [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-modules/src) | partial | partial | partial | partial |
-| Pluggable credential provider | yes -- [`credentials.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/credentials.rs) | yes | partial | partial | partial |
+| Pluggable credential provider | reconnect and push rotation across standalone, pool, cluster, and Sentinel; AWS IAM and Entra providers -- [`cloud auth guide`](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) | yes | partial | partial | partial |
 
 ## Two corrections this page enforces
 
 These are stated explicitly so the page does not drift back into overclaiming:
 
-1. **RESP3 is available on standalone and cluster clients.** Both cluster
-   builders preserve an explicit protocol policy across authenticated
-   discovery, node creation, redirects, topology refreshes, and reconnects.
-   Sentinel protocol negotiation remains in progress.
+1. **RESP3 is available on standalone, cluster, and Sentinel clients.** Cluster
+   and Sentinel builders preserve an explicit protocol policy across
+   authenticated discovery, node creation, redirects, topology refreshes,
+   failover, and reconnects, with authentication before HELLO negotiation.
 2. **Observability includes tracing and metrics.** redis-tower ships a
    `TracingLayer` with OpenTelemetry database semantic conventions and a
    `MetricsRecorder` integration backed by the `metrics` facade. The built-in
