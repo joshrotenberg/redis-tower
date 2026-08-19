@@ -331,6 +331,9 @@ jobs:
       - name: Run universal-client integration tests
         run: cargo test -p redis-tower-client --test '*' --all-features -- --test-threads=1
 
+      - name: Run distributed-primitives integration tests
+        run: cargo test -p redis-tower-primitives --test '*' --all-features -- --test-threads=1
+
       - name: Run cluster integration tests
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
 
@@ -398,6 +401,9 @@ jobs:
 
       - name: Collect universal-client integration coverage
         run: cargo llvm-cov --no-report -p redis-tower-client --test '*' --all-features -- --test-threads=1
+
+      - name: Collect distributed-primitives integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower-primitives --test '*' --all-features -- --test-threads=1
 
       - name: Collect cluster integration coverage
         run: cargo llvm-cov --no-report -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1

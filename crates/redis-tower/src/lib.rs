@@ -142,10 +142,12 @@
 //!
 //! The breaker counts connection, connect-timeout, and command-timeout errors,
 //! while ignoring Redis command errors such as `WRONGTYPE`. For
-//! fault-tolerance primitives this crate does not ship -- rate limiting and
-//! bulkhead isolation -- the
+//! process-local fault-tolerance primitives this crate does not ship -- rate
+//! limiting and bulkhead isolation -- the
 //! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
-//! provides layers that compose into the same builder.
+//! provides layers that compose into the same builder. The companion
+//! `redis-tower-primitives` crate provides fenced distributed locks and a
+//! Redis-time GCRA limiter for shared quota.
 //!
 //! [`RedisError::is_retryable`] classifies which errors are worth retrying
 //! (transient connection errors) versus command errors like WRONGTYPE that are

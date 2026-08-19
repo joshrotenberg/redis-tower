@@ -45,6 +45,7 @@ Legend: yes / no / partial, with a short qualifier where it matters.
 | Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | partial (raw commands) | partial |
 | Pipeline + transactions (MULTI/EXEC/WATCH) | yes -- [`pipeline.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pipeline.rs), [`transaction.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/transaction.rs) | yes | yes |
 | Lua scripting (EVALSHA-first) | yes -- [`script.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/script.rs) | yes | yes |
+| Distributed locks and shared rate limits | fenced lock and Redis-time GCRA -- [`redis-tower-primitives`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-primitives/src) | no (external crates available) | no (external crates available) |
 | Redis Stack modules (JSON/Search/TS/Bloom/Vector) | yes -- [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-modules/src) | partial (JSON via separate crate) | partial (RedisJSON/RediSearch) |
 | Blocking (sync) client | yes -- [`redis-tower-sync`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sync/src/lib.rs) | yes (sync connection) | no |
 | One client over standalone/cluster/sentinel | yes -- [`redis-tower-client`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-client/src/lib.rs) | no | no |

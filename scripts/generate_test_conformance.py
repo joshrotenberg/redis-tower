@@ -41,6 +41,7 @@ SURFACES = (
     Surface("redis-tower-cluster", "Cluster"),
     Surface("redis-tower-sentinel", "Sentinel"),
     Surface("redis-tower-modules", "Modules"),
+    Surface("redis-tower-primitives", "Distributed primitives"),
     Surface("redis-chaos-tests", "Fault injection"),
 )
 SCOREBOARD_PACKAGES = {
@@ -48,6 +49,7 @@ SCOREBOARD_PACKAGES = {
     "redis-tower-cluster",
     "redis-tower-sentinel",
     "redis-tower-modules",
+    "redis-tower-primitives",
 }
 SURFACE_BY_PACKAGE = {surface.package: surface for surface in SURFACES}
 SURFACE_ORDER = {surface.package: index for index, surface in enumerate(SURFACES)}
