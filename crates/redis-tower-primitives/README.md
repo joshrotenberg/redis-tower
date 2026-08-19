@@ -6,6 +6,12 @@ Auditable distributed coordination primitives for `redis-tower`:
   compare-and-extend renewal, and a monotonic `INCR` fencing token.
 - `GcraRateLimiter` uses Redis `TIME` and one sliding sorted-set key for
   shared-quota admission without client-clock skew.
+- `LeaderElection` returns an owned renewal handle plus observable elected,
+  renewal-failed, and demoted events.
+- `ExpirableSemaphore` restores capacity when crashed holders' permit TTLs
+  expire.
+- `CountDownLatch` provides atomic countdown and an explicit polling wait with
+  caller-selected timing.
 
 Every Lua program is a documented public constant and executes through
 `redis_tower::Script`, which tries EVALSHA before its NOSCRIPT fallback.
@@ -45,18 +51,25 @@ if !decision.is_allowed() {
 # async fn update_invoice(_fencing_token: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
 ```
 
-## Renewal lifecycle
+## Owned lifecycles
 
 No task starts during lock construction or acquisition. Renewal starts only
 when `LockLease::spawn_renewal` consumes a lease. The returned owned handle
 stops renewal on drop; `shutdown().await` stops it cleanly and returns the lease
 for explicit release.
 
+Leader election likewise starts no task until `campaign()` succeeds. Its
+`Leadership` handle owns renewal. `abdicate().await` performs and confirms
+compare-and-delete cleanup; drop requests the same cleanup asynchronously and
+the required TTL remains the final bound if cleanup cannot run. Leadership
+events can be split from the handle for independent observation.
+
 ## Cluster keys
 
-The rate limiter touches one key and is cluster-safe as-is. Lock acquisition
-touches two keys, so the lock and fencing keys must share a Redis Cluster hash
-tag, such as `{invoice:42}:lock` and `{invoice:42}:fence`.
+Leader election, semaphores, latches, and the rate limiter each touch one key
+and are cluster-safe as-is. Lock acquisition touches two keys, so the lock and
+fencing keys must share a Redis Cluster hash tag, such as
+`{invoice:42}:lock` and `{invoice:42}:fence`.
 
 ## Failure model
 
@@ -72,3 +85,8 @@ script may already have consumed quota. Pair the shared limiter with a local
 [`tower-resilience-ratelimiter`](https://docs.rs/tower-resilience-ratelimiter)
 `RateLimiterLayer` in backpressure mode when a process also needs admission
 pressure before Redis.
+
+Leadership and semaphore leases have the same pause/partition limitation as a
+lock: expiry can admit a replacement while stale work resumes. Latch expiry is
+reported separately from count-zero release. All connection failures remain
+indeterminate, so callers must choose retry and stale-work policies explicitly.

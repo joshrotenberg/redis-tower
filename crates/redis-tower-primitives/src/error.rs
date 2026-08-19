@@ -53,6 +53,27 @@ pub enum ConfigurationError {
         /// Configured lock TTL.
         ttl: Duration,
     },
+
+    /// A leader-election renewal interval was not shorter than its lease TTL.
+    #[error("renewal interval {interval:?} must be shorter than leadership TTL {ttl:?}")]
+    LeadershipRenewalIntervalNotShorter {
+        /// Requested renewal interval.
+        interval: Duration,
+        /// Configured leadership TTL.
+        ttl: Duration,
+    },
+
+    /// A semaphore was configured without any permits.
+    #[error("permit limit must be greater than zero")]
+    ZeroPermitLimit,
+
+    /// A countdown latch was configured with an already-released count.
+    #[error("initial count must be greater than zero")]
+    ZeroInitialCount,
+
+    /// A countdown latch count exceeded Redis's signed integer range.
+    #[error("initial count exceeds Redis's signed integer range")]
+    InitialCountTooLarge,
 }
 
 pub(crate) fn require_key(
