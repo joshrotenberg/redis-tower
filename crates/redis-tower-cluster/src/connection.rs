@@ -7,8 +7,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use redis_tower::credentials::{CredentialProvider, StaticCredentials};
-use redis_tower_commands::Auth;
+use redis_tower::credentials::{
+    CredentialProvider, Credentials, StaticCredentials, authenticate_with_refresh,
+};
 use redis_tower_core::{
     Command, ConnectionConfig, Frame, ProtocolVersion, RedisConnection, RedisError, RespLimits,
     parse_redis_url,
@@ -462,6 +463,38 @@ impl ClusterConnection {
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls,
         })
+    }
+
+    /// Re-authenticate every established master and replica connection.
+    ///
+    /// A socket whose `AUTH` fails is discarded so the next command rebuilds
+    /// it through the configured credential provider. All current nodes are
+    /// attempted before the first error is returned.
+    pub async fn reauthenticate_all(
+        &mut self,
+        credentials: &Credentials,
+    ) -> Result<(), RedisError> {
+        let addresses: Vec<String> = self.nodes.keys().cloned().collect();
+        let mut first_error = None;
+        for address in addresses {
+            let Some(mut connection) = self.nodes.remove(&address) else {
+                continue;
+            };
+            match connection.execute(credentials.auth_command()).await {
+                Ok(()) => {
+                    self.nodes.insert(address, connection);
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Execute a command, routing it to the correct cluster node.
@@ -1082,7 +1115,7 @@ impl ClusterNodeConnector {
         readonly: bool,
     ) -> Result<RedisConnection, RedisError> {
         if let Some(provider) = self.credentials.as_deref() {
-            authenticate(&mut conn, provider).await?;
+            authenticate_with_refresh(&mut conn, provider).await?;
         }
         conn.negotiate_protocol(self.connection_config.protocol())
             .await?;
@@ -1099,31 +1132,6 @@ impl ClusterNodeConnector {
         }
 
         Ok(conn)
-    }
-}
-
-/// Authenticate a freshly opened node connection using the credential provider.
-///
-/// Shared by every cluster node connection (seed, masters, replicas, and
-/// reconnects), so an ACL-protected Cloud/Enterprise cluster is reachable.
-pub(crate) async fn authenticate(
-    conn: &mut RedisConnection,
-    provider: &dyn CredentialProvider,
-) -> Result<(), RedisError> {
-    let creds = provider.get_credentials().await?;
-    let auth_cmd = match creds.username.as_deref() {
-        Some(user) => Auth::credentials(user, &creds.password),
-        None => Auth::password(&creds.password),
-    };
-    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
-    match responses.into_iter().next() {
-        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
-        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
-        Some(other) => Err(RedisError::UnexpectedResponse {
-            expected: "OK",
-            actual: format!("{other:?}"),
-        }),
-        None => Err(RedisError::ConnectionClosed),
     }
 }
 
@@ -1247,6 +1255,27 @@ mod tests {
             panic!("expected bulk-string command name, got {frame:?}");
         };
         command.as_ref()
+    }
+
+    #[cfg(unix)]
+    struct RefreshingProvider {
+        refreshes: Arc<AtomicUsize>,
+    }
+
+    #[cfg(unix)]
+    impl CredentialProvider for RefreshingProvider {
+        fn get_credentials(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            Box::pin(async { Ok(Credentials::password("stale")) })
+        }
+
+        fn force_refresh(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            self.refreshes.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(Credentials::password("fresh")) })
+        }
     }
 
     #[cfg(unix)]
@@ -2316,15 +2345,17 @@ mod tests {
 
         let server_task = tokio::spawn(async move {
             let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
-            let frame = framed.next().await.unwrap().unwrap();
-            assert_eq!(command_name(&frame), b"AUTH");
-            framed
-                .send(Frame::Error(b"WRONGPASS invalid credentials"[..].into()))
-                .await
-                .unwrap();
+            for _ in 0..2 {
+                let frame = framed.next().await.unwrap().unwrap();
+                assert_eq!(command_name(&frame), b"AUTH");
+                framed
+                    .send(Frame::Error(b"WRONGPASS invalid credentials"[..].into()))
+                    .await
+                    .unwrap();
+            }
             assert!(
                 framed.next().await.is_none(),
-                "HELLO must not be sent after AUTH fails"
+                "HELLO must not be sent after initial and refreshed AUTH fail"
             );
         });
 
@@ -2335,6 +2366,94 @@ mod tests {
         };
         assert!(matches!(error, RedisError::Redis(message) if message.contains("WRONGPASS")));
         server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn node_setup_force_refreshes_once_before_resp3_negotiation() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let refreshes = Arc::new(AtomicUsize::new(0));
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+            Some(Arc::new(RefreshingProvider {
+                refreshes: Arc::clone(&refreshes),
+            })),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            None,
+        );
+
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            let stale = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&stale), b"AUTH");
+            framed
+                .send(Frame::Error(b"WRONGPASS stale"[..].into()))
+                .await
+                .unwrap();
+            let fresh = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&fresh), b"AUTH");
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+            let hello = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&hello), b"HELLO");
+            framed
+                .send(Frame::Map(vec![(bulk("proto"), Frame::Integer(3))]))
+                .await
+                .unwrap();
+        });
+
+        let conn = RedisConnection::from_stream(RedisStream::Unix(client));
+        let conn = connector.finish_setup(conn, false).await.unwrap();
+        assert!(conn.is_resp3());
+        assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pushed_credentials_reach_all_nodes_and_discard_rejections() {
+        let (accepted_client, accepted_server) = tokio::net::UnixStream::pair().unwrap();
+        let (rejected_client, rejected_server) = tokio::net::UnixStream::pair().unwrap();
+        let mut cluster = ClusterConnection::empty_for_test();
+        cluster.nodes.insert(
+            "127.0.0.1:7000".to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(accepted_client)),
+        );
+        cluster.nodes.insert(
+            "127.0.0.1:7001".to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(rejected_client)),
+        );
+
+        let accepted = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(accepted_server), RespCodec::new());
+            let auth = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&auth), b"AUTH");
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+        });
+        let rejected = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(rejected_server), RespCodec::new());
+            let auth = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&auth), b"AUTH");
+            framed
+                .send(Frame::Error(b"WRONGPASS rejected"[..].into()))
+                .await
+                .unwrap();
+        });
+
+        let error = cluster
+            .reauthenticate_all(&Credentials::new("alice", "fresh"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RedisError::Redis(message) if message.contains("WRONGPASS")));
+        accepted.await.unwrap();
+        rejected.await.unwrap();
+        assert!(cluster.nodes.contains_key("127.0.0.1:7000"));
+        assert!(!cluster.nodes.contains_key("127.0.0.1:7001"));
     }
 
     #[tokio::test]

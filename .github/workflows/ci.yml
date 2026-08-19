@@ -194,10 +194,55 @@ jobs:
             --save-baseline candidate
 
       - name: Compare results
+        id: compare
         run: |
           critcmp main candidate --list | tee benchmark-comparison.txt
+          set +e
           python3 scripts/check_criterion_regressions.py \
             --baseline main --candidate candidate --threshold 10
+          status=$?
+          set -e
+          if [[ "$status" -eq 1 ]]; then
+            echo "needs_confirmation=true" >> "$GITHUB_OUTPUT"
+            echo "Initial regression requires a reversed-order confirmation run."
+          elif [[ "$status" -eq 0 ]]; then
+            echo "needs_confirmation=false" >> "$GITHUB_OUTPUT"
+          else
+            exit "$status"
+          fi
+
+      - name: Confirm benchmark pull request first
+        if: steps.compare.outputs.needs_confirmation == 'true'
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout --detach "$CANDIDATE_SHA"
+          cargo bench -p redis-tower-protocol --bench codec -- \
+            --warm-up-time 1 --measurement-time 2 --sample-size 50 \
+            --save-baseline candidate-confirm
+
+      - name: Confirm benchmark main second
+        if: steps.compare.outputs.needs_confirmation == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git checkout --detach "$BASE_SHA"
+          cargo bench -p redis-tower-protocol --bench codec -- \
+            --warm-up-time 1 --measurement-time 2 --sample-size 50 \
+            --save-baseline main-confirm
+
+      - name: Compare confirmation results
+        if: steps.compare.outputs.needs_confirmation == 'true'
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git checkout --detach "$CANDIDATE_SHA"
+          printf '\nReversed-order confirmation:\n' | tee -a benchmark-comparison.txt
+          critcmp main-confirm candidate-confirm --list | tee -a benchmark-comparison.txt
+          python3 scripts/check_criterion_regressions.py \
+            --baseline main --candidate candidate --threshold 10 \
+            --confirmation-baseline main-confirm \
+            --confirmation-candidate candidate-confirm
 
       - name: Upload comparison
         if: always()

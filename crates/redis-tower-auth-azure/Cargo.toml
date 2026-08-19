@@ -1,0 +1,27 @@
+[package]
+name = "redis-tower-auth-azure"
+version = "0.1.0"
+description = "Microsoft Entra managed identity credential provider for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["redis", "azure", "entra", "identity", "authentication"]
+categories = ["authentication", "database"]
+
+[dependencies]
+async-stream = { workspace = true }
+azure_core = "1.0"
+azure_identity = "1.0"
+redis-tower = { workspace = true, default-features = false }
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+
+[dev-dependencies]
+async-trait = "0.1"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

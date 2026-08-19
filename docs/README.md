@@ -14,6 +14,9 @@ If you are evaluating or adopting the project, start here:
 - [Production tuning](PRODUCTION-TUNING.md) explains client selection,
   pipeline and pool sizing, timeouts, backpressure, reconnects, observability,
   and graceful shutdown.
+- [Cloud and rotating credentials](CLOUD-AUTH.md) covers AWS ElastiCache IAM,
+  Microsoft Entra ID, reconnect-time refresh, proactive reauthentication, and
+  token-handling boundaries.
 - [Serverless and scale-to-zero](SERVERLESS.md) covers deferred connection,
   cold-start lifecycle semantics, invocation deadlines, and shutdown.
 - [Pool health probing design](POOL-HEALTH-PROBING.md) records why active

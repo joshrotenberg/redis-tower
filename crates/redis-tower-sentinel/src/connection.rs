@@ -6,7 +6,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use redis_tower::credentials::CredentialProvider;
+use redis_tower::credentials::{CredentialProvider, Credentials};
 use redis_tower::{
     NodeAddr, ReadPreference, ReadRoutingStrategy, RoundRobinRouting, is_readonly_command,
 };
@@ -400,6 +400,45 @@ impl SentinelConnection {
         result
     }
 
+    /// Re-authenticate the current master and every connected replica.
+    ///
+    /// A failed master update marks the connection for ROLE-verified
+    /// rediscovery on the next command. Failed replicas are removed so stale
+    /// credentials cannot remain selectable.
+    pub async fn reauthenticate_all(
+        &mut self,
+        credentials: &Credentials,
+    ) -> Result<(), RedisError> {
+        let mut first_error = None;
+        if let Err(error) = self.conn.execute(credentials.auth_command()).await {
+            self.needs_rediscovery = true;
+            first_error = Some(error);
+        }
+
+        let addresses: Vec<String> = self.replicas.keys().cloned().collect();
+        for address in addresses {
+            let result = self
+                .replicas
+                .get_mut(&address)
+                .expect("address came from the replica map")
+                .execute(credentials.auth_command())
+                .await;
+            if let Err(error) = result {
+                self.replicas.remove(&address);
+                self.replica_addrs
+                    .retain(|candidate| candidate.addr_string() != address);
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// Select a replica to read from, using the configured routing strategy.
     ///
     /// `slot` is always `0`: sentinel monitors one shard, not a cluster's
@@ -531,7 +570,83 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for SentinelConnection 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use redis_tower::credentials::StaticCredentials;
+    #[cfg(unix)]
+    use futures::{SinkExt, StreamExt};
+    use redis_tower::credentials::{Credentials, StaticCredentials};
+    #[cfg(unix)]
+    use redis_tower_core::{Frame, RedisStream};
+    #[cfg(unix)]
+    use redis_tower_protocol::RespCodec;
+    #[cfg(unix)]
+    use tokio_util::codec::Framed;
+
+    #[cfg(unix)]
+    fn command_name(frame: &Frame) -> &[u8] {
+        let Frame::Array(Some(parts)) = frame else {
+            panic!("expected command array, got {frame:?}");
+        };
+        let Some(Frame::BulkString(Some(command))) = parts.first() else {
+            panic!("expected bulk-string command name, got {frame:?}");
+        };
+        command.as_ref()
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pushed_credentials_reach_master_and_discard_rejected_replicas() {
+        let (master_client, master_server) = tokio::net::UnixStream::pair().unwrap();
+        let (replica_client, replica_server) = tokio::net::UnixStream::pair().unwrap();
+        let replica_address = "127.0.0.1:6380".to_string();
+        let mut connection = SentinelConnection {
+            conn: RedisConnection::from_stream(RedisStream::Unix(master_client)),
+            sentinel_addrs: vec!["127.0.0.1:26379".to_string()],
+            master_name: "mymaster".to_string(),
+            current_addr: "127.0.0.1:6379".to_string(),
+            needs_rediscovery: false,
+            config: SentinelConfig::default(),
+            read_preference: ReadPreference::PreferReplica,
+            read_routing: Arc::new(RoundRobinRouting::new()),
+            replicas: HashMap::from([(
+                replica_address.clone(),
+                RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+            )]),
+            replica_addrs: vec![NodeAddr {
+                host: "127.0.0.1".to_string(),
+                port: 6380,
+            }],
+            last_replica_read: None,
+        };
+
+        let master = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(master_server), RespCodec::new());
+            let auth = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&auth), b"AUTH");
+            framed
+                .send(Frame::SimpleString(b"OK"[..].into()))
+                .await
+                .unwrap();
+        });
+        let replica = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(replica_server), RespCodec::new());
+            let auth = framed.next().await.unwrap().unwrap();
+            assert_eq!(command_name(&auth), b"AUTH");
+            framed
+                .send(Frame::Error(b"WRONGPASS rejected"[..].into()))
+                .await
+                .unwrap();
+        });
+
+        let error = connection
+            .reauthenticate_all(&Credentials::new("alice", "fresh"))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, RedisError::Redis(message) if message.contains("WRONGPASS")));
+        master.await.unwrap();
+        replica.await.unwrap();
+        assert!(!connection.needs_rediscovery);
+        assert!(!connection.replicas.contains_key(&replica_address));
+        assert!(connection.replica_addrs.is_empty());
+    }
 
     #[test]
     fn builder_defaults_to_standard_resp_limits() {

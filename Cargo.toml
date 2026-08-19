@@ -10,6 +10,8 @@ members = [
     "crates/redis-tower-sync",
     "crates/redis-tower-modules",
     "crates/redis-tower-client",
+    "crates/redis-tower-auth-aws",
+    "crates/redis-tower-auth-azure",
     "crates/redis-test-harness",
     "crates/redis-chaos-tests",
     "crates/cluster-bench",
@@ -60,6 +62,7 @@ tower-resilience-circuitbreaker = { version = "0.10.0", features = ["tracing"] }
 
 # Error handling
 thiserror = "2.0"
+zeroize = { version = "1.8", features = ["derive"] }
 
 # Tracing
 tracing = "0.1"

@@ -689,16 +689,23 @@ let multiplexed = MultiplexedClient::from_factory(
 ).await?;
 ```
 
-Implement `CredentialProvider` for dynamic auth such as AWS IAM or Azure
-Entra ID. Each factory call starts in RESP2, fetches credentials, runs `AUTH`,
-and only then negotiates the protocol requested by `ConnectionConfig`.
-Initial connections and every reconnect therefore fetch credentials again.
+Implement `CredentialProvider` for dynamic auth, or use the companion
+`redis-tower-auth-aws` and `redis-tower-auth-azure` crates for ElastiCache IAM
+and Microsoft Entra ID. Each factory call starts in RESP2, fetches credentials,
+runs `AUTH`, and only then negotiates the protocol requested by
+`ConnectionConfig`. Initial connections and every reconnect therefore fetch
+credentials again.
 
 If connection-establishment `AUTH` returns `NOAUTH` or `WRONGPASS`, the
-factory calls `force_refresh()` and retries `AUTH` once. That refresh boundary
-does not extend to commands on an established connection: a live
-`NOAUTH`/`WRONGPASS` is returned to the caller without reauthentication or
-command replay.
+factory calls `force_refresh()` and retries `AUTH` once. A
+`StreamingCredentialProvider` can also proactively reauthenticate established
+standalone, multiplexed, pooled, Cluster, and Sentinel data connections. Its
+owned handle stops the subscription when dropped. Neither path replays a user
+command after a live `NOAUTH` or `WRONGPASS`.
+
+Credential values redact their secret from `Debug` and zeroize their owned
+buffers on drop. See [Cloud and rotating credentials](docs/CLOUD-AUTH.md) for
+provider and topology examples, expiry behavior, and security boundaries.
 
 ## TLS
 
@@ -842,6 +849,8 @@ redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
+redis-tower-auth-aws     AWS ElastiCache IAM SigV4 credential provider
+redis-tower-auth-azure   Microsoft Entra ID credential provider
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
 redis-chaos-tests        Docker-backed compatibility and fault-injection tests
 soak-bench               Hours-long constant-memory stability and chaos harness

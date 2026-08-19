@@ -42,20 +42,42 @@
 //! # }
 //! ```
 
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use futures::{Stream, StreamExt};
 use redis_tower_commands::Auth;
 use redis_tower_core::{Command, ConnectionConfig, ProtocolVersion, RedisConnection, RedisError};
+use tokio_util::sync::CancellationToken;
+
+/// A push stream of fresh credentials.
+///
+/// Providers yield only after the credentials used by an established
+/// connection have changed. Each item is either the replacement credentials
+/// or a refresh error. Providers must apply their own retry delay after an
+/// error so consumers cannot enter a busy loop.
+pub type CredentialUpdateStream =
+    Pin<Box<dyn Stream<Item = Result<Credentials, RedisError>> + Send + 'static>>;
 
 /// Credentials for Redis authentication.
-#[derive(Debug, Clone)]
+#[derive(Clone, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 pub struct Credentials {
     /// Optional username (Redis 6+ ACL). `None` for password-only auth.
     pub username: Option<String>,
     /// Password or auth token.
     pub password: String,
+}
+
+impl fmt::Debug for Credentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Credentials")
+            .field("username", &self.username.as_deref())
+            .field("password", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Credentials {
@@ -75,8 +97,24 @@ impl Credentials {
         }
     }
 
-    /// Build an AUTH command from these credentials.
-    pub(crate) fn to_auth_command(&self) -> Auth {
+    /// Return the ACL username, if this is a two-argument credential.
+    pub fn username(&self) -> Option<&str> {
+        self.username.as_deref()
+    }
+
+    /// Return the password or short-lived auth token.
+    ///
+    /// Treat the returned value as secret material. It is borrowed so callers
+    /// do not create an additional plaintext allocation merely to authenticate.
+    pub fn password_value(&self) -> &str {
+        &self.password
+    }
+
+    /// Build the typed Redis `AUTH` command for these credentials.
+    ///
+    /// This is primarily useful when applying a value from a
+    /// [`CredentialUpdateStream`] to an established client.
+    pub fn auth_command(&self) -> Auth {
         match &self.username {
             Some(user) => Auth::credentials(user, &self.password),
             None => Auth::password(&self.password),
@@ -112,6 +150,96 @@ pub trait CredentialProvider: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
         self.get_credentials()
     }
+}
+
+/// A credential provider that can push replacements for established sockets.
+///
+/// Implementations return an independent stream for each subscription. The
+/// first item must represent a credential newer than the one used during the
+/// connection's initial [`CredentialProvider::get_credentials`] call. The
+/// `Arc<Self>` receiver lets the stream retain the provider without requiring
+/// the concrete type to be `Clone` and keeps the trait object-safe.
+pub trait StreamingCredentialProvider: CredentialProvider {
+    /// Subscribe to future credential replacements.
+    fn subscribe(self: Arc<Self>) -> CredentialUpdateStream;
+}
+
+/// Owned task that applies credentials emitted by a streaming provider.
+///
+/// Dropping the handle cancels the subscription. Call [`shutdown`](Self::shutdown)
+/// to cancel it and wait for the task to finish. The task logs provider and
+/// reauthentication errors and keeps consuming later updates; it never
+/// replays a user command.
+#[must_use = "dropping the handle stops push-based credential reauthentication"]
+pub struct CredentialReauthenticationHandle {
+    cancellation: CancellationToken,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl CredentialReauthenticationHandle {
+    fn new(cancellation: CancellationToken, task: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            cancellation,
+            task: Some(task),
+        }
+    }
+
+    /// Stop consuming credential updates and wait for the task to exit.
+    pub async fn shutdown(mut self) {
+        self.cancellation.cancel();
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for CredentialReauthenticationHandle {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+/// Start applying pushed credentials with an asynchronous callback.
+///
+/// The callback should send one `AUTH` command to every established connection
+/// represented by its target. It must not retry a user command after an
+/// authentication error.
+pub fn spawn_credential_reauthentication<F, Fut>(
+    provider: Arc<dyn StreamingCredentialProvider>,
+    reauthenticate: F,
+) -> CredentialReauthenticationHandle
+where
+    F: Fn(Credentials) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<(), RedisError>> + Send + 'static,
+{
+    let mut updates = Arc::clone(&provider).subscribe();
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        loop {
+            let update = tokio::select! {
+                () = task_cancellation.cancelled() => break,
+                update = updates.next() => update,
+            };
+            let Some(update) = update else {
+                break;
+            };
+            match update {
+                Ok(credentials) => {
+                    if let Err(error) = reauthenticate(credentials).await {
+                        tracing::warn!(error = %error, "credential reauthentication failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "credential refresh stream failed");
+                }
+            }
+        }
+    });
+    CredentialReauthenticationHandle::new(cancellation, task)
 }
 
 /// A simple provider that always returns the same credentials.
@@ -308,21 +436,29 @@ impl crate::pool::PoolFactory for CredentialConnectionFactory {
     }
 }
 
-async fn authenticate_with_refresh(
+/// Authenticate one freshly opened connection and refresh once when Redis
+/// rejects cached credentials.
+///
+/// This helper is shared by standalone, Cluster, and Sentinel setup paths so
+/// every topology applies the same bounded retry rule. It is intended only for
+/// connection establishment; it never retries a user command.
+pub async fn authenticate_with_refresh(
     conn: &mut RedisConnection,
     provider: &dyn CredentialProvider,
 ) -> Result<(), RedisError> {
     let credentials = provider.get_credentials().await?;
-    match conn.execute(credentials.to_auth_command()).await {
+    match conn.execute(credentials.auth_command()).await {
         Err(error) if is_auth_rejection(&error) => {
             let credentials = provider.force_refresh().await?;
-            conn.execute(credentials.to_auth_command()).await
+            conn.execute(credentials.auth_command()).await
         }
         result => result,
     }
 }
 
-fn is_auth_rejection(error: &RedisError) -> bool {
+/// Return whether Redis rejected authentication because credentials were
+/// missing or invalid.
+pub fn is_auth_rejection(error: &RedisError) -> bool {
     let RedisError::Redis(message) = error else {
         return false;
     };
@@ -351,7 +487,7 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
     pub async fn connect(addr: &str, provider: P) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(addr).await?;
         let creds = provider.get_credentials().await?;
-        conn.execute(creds.to_auth_command()).await?;
+        conn.execute(creds.auth_command()).await?;
         Ok(Self { conn, provider })
     }
 
@@ -359,7 +495,7 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
     pub async fn connect_url(url: &str, provider: P) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect_url(url).await?;
         let creds = provider.get_credentials().await?;
-        conn.execute(creds.to_auth_command()).await?;
+        conn.execute(creds.auth_command()).await?;
         Ok(Self { conn, provider })
     }
 
@@ -369,7 +505,7 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
     /// token expiry.
     pub async fn reauthenticate(&mut self) -> Result<(), RedisError> {
         let creds = self.provider.get_credentials().await?;
-        self.conn.execute(creds.to_auth_command()).await
+        self.conn.execute(creds.auth_command()).await
     }
 
     /// Execute a command.
@@ -418,7 +554,8 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
 pub struct RotatingAuthClient<P> {
     conn: std::sync::Arc<tokio::sync::Mutex<RedisConnection>>,
     provider: std::sync::Arc<P>,
-    _refresh_task: tokio::task::JoinHandle<()>,
+    timer_task: Option<tokio::task::JoinHandle<()>>,
+    _streaming_task: Option<CredentialReauthenticationHandle>,
 }
 
 impl<P: CredentialProvider> RotatingAuthClient<P> {
@@ -434,7 +571,7 @@ impl<P: CredentialProvider> RotatingAuthClient<P> {
     ) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(addr).await?;
         let creds = provider.get_credentials().await?;
-        conn.execute(creds.to_auth_command()).await?;
+        conn.execute(creds.auth_command()).await?;
 
         let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
         let provider = std::sync::Arc::new(provider);
@@ -449,7 +586,7 @@ impl<P: CredentialProvider> RotatingAuthClient<P> {
                 match refresh_provider.get_credentials().await {
                     Ok(creds) => {
                         let mut c = refresh_conn.lock().await;
-                        let _ = c.execute(creds.to_auth_command()).await;
+                        let _ = c.execute(creds.auth_command()).await;
                     }
                     Err(_) => {
                         // Best-effort: next tick will retry.
@@ -461,7 +598,8 @@ impl<P: CredentialProvider> RotatingAuthClient<P> {
         Ok(Self {
             conn,
             provider,
-            _refresh_task: task,
+            timer_task: Some(task),
+            _streaming_task: None,
         })
     }
 
@@ -479,7 +617,44 @@ impl<P: CredentialProvider> RotatingAuthClient<P> {
 
 impl<P> Drop for RotatingAuthClient<P> {
     fn drop(&mut self) {
-        self._refresh_task.abort();
+        if let Some(task) = self.timer_task.take() {
+            task.abort();
+        }
+        // `CredentialReauthenticationHandle::drop` cancels and aborts the
+        // streaming task after this method returns.
+    }
+}
+
+impl<P: StreamingCredentialProvider> RotatingAuthClient<P> {
+    /// Connect, authenticate, and re-authenticate whenever `provider` emits.
+    ///
+    /// Unlike [`Self::connect`], this has no polling interval. The provider
+    /// controls refresh timing from the actual credential lifetime, and the
+    /// owned task stops when this client is dropped.
+    pub async fn connect_streaming(addr: &str, provider: P) -> Result<Self, RedisError> {
+        let mut conn = RedisConnection::connect(addr).await?;
+        let credentials = provider.get_credentials().await?;
+        conn.execute(credentials.auth_command()).await?;
+
+        let conn = Arc::new(tokio::sync::Mutex::new(conn));
+        let provider = Arc::new(provider);
+        let streaming_provider: Arc<dyn StreamingCredentialProvider> = provider.clone();
+        let refresh_conn = Arc::clone(&conn);
+        let streaming_task =
+            spawn_credential_reauthentication(streaming_provider, move |credentials| {
+                let refresh_conn = Arc::clone(&refresh_conn);
+                async move {
+                    let mut conn = refresh_conn.lock().await;
+                    conn.execute(credentials.auth_command()).await
+                }
+            });
+
+        Ok(Self {
+            conn,
+            provider,
+            timer_task: None,
+            _streaming_task: Some(streaming_task),
+        })
     }
 }
 
@@ -488,10 +663,37 @@ mod tests {
     use super::*;
     use redis_tower_protocol::helpers::{array, bulk};
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use zeroize::Zeroize;
 
     struct RefreshAwareProvider {
         get_calls: Arc<AtomicUsize>,
         refresh_calls: Arc<AtomicUsize>,
+    }
+
+    struct OneShotStreamingProvider;
+
+    #[test]
+    fn credentials_zeroize_owned_material() {
+        let mut credentials = Credentials::new("alice", "secret-token");
+        credentials.zeroize();
+        assert!(credentials.username.is_none());
+        assert!(credentials.password.is_empty());
+    }
+
+    impl CredentialProvider for OneShotStreamingProvider {
+        fn get_credentials(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            Box::pin(async { Ok(Credentials::password("initial")) })
+        }
+    }
+
+    impl StreamingCredentialProvider for OneShotStreamingProvider {
+        fn subscribe(self: Arc<Self>) -> CredentialUpdateStream {
+            Box::pin(futures::stream::once(async {
+                Ok(Credentials::password("pushed"))
+            }))
+        }
     }
 
     impl CredentialProvider for RefreshAwareProvider {
@@ -516,7 +718,7 @@ mod tests {
         assert!(creds.username.is_none());
         assert_eq!(creds.password, "secret");
 
-        let auth = creds.to_auth_command();
+        let auth = creds.auth_command();
         let frame = auth.to_frame();
         assert_eq!(frame, array(vec![bulk("AUTH"), bulk("secret")]));
     }
@@ -527,12 +729,20 @@ mod tests {
         assert_eq!(creds.username.as_deref(), Some("admin"));
         assert_eq!(creds.password, "pass123");
 
-        let auth = creds.to_auth_command();
+        let auth = creds.auth_command();
         let frame = auth.to_frame();
         assert_eq!(
             frame,
             array(vec![bulk("AUTH"), bulk("admin"), bulk("pass123")])
         );
+    }
+
+    #[test]
+    fn credentials_debug_redacts_password() {
+        let debug = format!("{:?}", Credentials::new("admin", "super-secret-token"));
+        assert!(debug.contains("admin"));
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("super-secret-token"));
     }
 
     #[test]
@@ -623,6 +833,32 @@ mod tests {
         assert_connection_factory::<CredentialConnectionFactory>();
         assert_pool_factory::<CredentialConnectionFactory>();
         assert_send_sync::<CredentialConnectionFactory>();
+    }
+
+    #[tokio::test]
+    async fn push_helper_applies_emitted_credentials_and_shuts_down() {
+        let provider: Arc<dyn StreamingCredentialProvider> = Arc::new(OneShotStreamingProvider);
+        let applied = Arc::new(tokio::sync::Notify::new());
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let handle = spawn_credential_reauthentication(provider, {
+            let applied = Arc::clone(&applied);
+            let observed = Arc::clone(&observed);
+            move |credentials| {
+                let applied = Arc::clone(&applied);
+                let observed = Arc::clone(&observed);
+                async move {
+                    *observed.lock().unwrap() = Some(credentials.password.clone());
+                    applied.notify_one();
+                    Ok(())
+                }
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), applied.notified())
+            .await
+            .expect("pushed credential was not applied");
+        assert_eq!(observed.lock().unwrap().as_deref(), Some("pushed"));
+        handle.shutdown().await;
     }
 
     #[test]

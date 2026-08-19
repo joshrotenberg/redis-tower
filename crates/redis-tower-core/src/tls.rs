@@ -291,7 +291,15 @@ impl TlsConfig {
 
         // Choose the server-cert verifier; both arms yield a builder awaiting
         // the client-auth choice, so client certs are applied uniformly below.
-        let builder = rustls::ClientConfig::builder();
+        // redis-tower enables rustls' ring backend explicitly. Select it on
+        // this builder as well: downstream SDKs may enable aws-lc-rs through
+        // Cargo feature unification, in which case rustls cannot infer one
+        // process-wide default provider and `ClientConfig::builder()` panics.
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .map_err(|error| RedisError::from(std::io::Error::other(error)))?;
         let builder = if self.accept_invalid_certs {
             builder
                 .dangerous()
@@ -449,10 +457,14 @@ aHzx7UOqMKxs4Csh4kTiDRmwUoIq9DISRM1uYUR5dR9MjoMk/NEt3Jxp\n\
         // The full mTLS client config (custom roots + client cert) builds.
         let certs = parse_certs_pem(TEST_CERT.as_bytes()).unwrap();
         let key = parse_private_key_pem(TEST_KEY.as_bytes()).unwrap();
-        rustls::ClientConfig::builder()
-            .with_root_certificates(tls.rustls_root_store().unwrap())
-            .with_client_auth_cert(certs, key)
-            .expect("mTLS client config should build");
+        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(tls.rustls_root_store().unwrap())
+        .with_client_auth_cert(certs, key)
+        .expect("mTLS client config should build");
     }
 
     #[cfg(feature = "tls-rustls")]

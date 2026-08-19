@@ -135,11 +135,13 @@
 //!
 //! # Authentication
 //!
-//! [`MultiplexedClusterClient`] and [`CachedMultiplexedClusterClient`] accept a
+//! The direct, multiplexed, and cached builders accept a
 //! [`CredentialProvider`](redis_tower::credentials::CredentialProvider) via
-//! `.credentials(provider)` on its builder. The provider is consulted on
-//! initial connect and on every reconnect, so credential rotation flows
-//! through automatically.
+//! `.credentials(provider)`. It is consulted on initial connect and every
+//! reconnect. [`ClusterClient`] and [`MultiplexedClusterClient`] also accept a
+//! [`StreamingCredentialProvider`](redis_tower::credentials::StreamingCredentialProvider)
+//! through their owned reauthentication handles so established node sockets
+//! receive proactive updates.
 //!
 //! # Protocol configuration
 //!

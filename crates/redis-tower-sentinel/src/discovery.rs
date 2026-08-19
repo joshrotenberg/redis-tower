@@ -5,9 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use redis_tower::NodeAddr;
-use redis_tower::credentials::{CredentialProvider, Credentials};
-use redis_tower_commands::Auth;
-use redis_tower_core::{Command, ConnectionConfig, Frame, RedisConnection, RedisError};
+use redis_tower::credentials::{CredentialProvider, authenticate_with_refresh};
+use redis_tower_core::{ConnectionConfig, Frame, ProtocolVersion, RedisConnection, RedisError};
 use redis_tower_protocol::RespLimits;
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -45,38 +44,14 @@ pub struct SentinelConfig {
     pub(crate) node_tls: Option<Arc<redis_tower_core::tls::TlsConfig>>,
 }
 
-/// Authenticate a freshly opened connection using the given credential provider.
-///
-/// Sends `AUTH [user] password` and checks for `+OK`. Returns `Ok(())` on
-/// success, or a `RedisError` on auth failure or unexpected response.
-pub(crate) async fn authenticate(
-    conn: &mut RedisConnection,
-    provider: &dyn CredentialProvider,
-) -> Result<(), RedisError> {
-    let creds: Credentials = provider.get_credentials().await?;
-    let auth_cmd = match creds.username.as_deref() {
-        Some(user) => Auth::credentials(user, &creds.password),
-        None => Auth::password(&creds.password),
-    };
-    let responses = conn.execute_pipeline(vec![auth_cmd.to_frame()]).await?;
-    match responses.into_iter().next() {
-        Some(Frame::SimpleString(s)) if &s[..] == b"OK" => Ok(()),
-        Some(Frame::Error(e)) => Err(RedisError::Redis(String::from_utf8_lossy(&e).into_owned())),
-        Some(other) => Err(RedisError::UnexpectedResponse {
-            expected: "OK",
-            actual: format!("{other:?}"),
-        }),
-        None => Err(RedisError::ConnectionClosed),
-    }
-}
-
 /// Open a connection to `addr`, optionally using TLS and/or authenticating.
 ///
 /// When a TLS feature is enabled and `tls` is `Some`, the connection is
 /// upgraded via `RedisConnection::connect_tls_with_config`. Otherwise a plain
 /// TCP connection is made. The configured RESP limits apply before any
-/// connection setup response is decoded. If `credentials` is `Some`, `AUTH`
-/// is sent immediately after the connection is established.
+/// connection setup response is decoded. The transport starts in RESP2;
+/// optional `AUTH` completes before automatic RESP3 negotiation so a protected
+/// server cannot make `HELLO` silently fall back to RESP2.
 pub(crate) async fn connect_hop(
     addr: &str,
     credentials: Option<&Arc<dyn CredentialProvider>>,
@@ -85,9 +60,11 @@ pub(crate) async fn connect_hop(
         &Arc<redis_tower_core::tls::TlsConfig>,
     >,
 ) -> Result<RedisConnection, RedisError> {
-    let connection_config = ConnectionConfig::new().with_resp_limits(resp_limits);
+    let connection_config = ConnectionConfig::new()
+        .with_resp_limits(resp_limits)
+        .with_protocol(ProtocolVersion::Resp2);
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-    let mut conn = match tls {
+    let conn = match tls {
         Some(tls_cfg) => {
             let hostname = addr
                 .rsplit_once(':')
@@ -100,11 +77,19 @@ pub(crate) async fn connect_hop(
         None => RedisConnection::connect_with_config(addr, &connection_config).await?,
     };
     #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
-    let mut conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
+    let conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
 
+    finish_hop_setup(conn, credentials).await
+}
+
+async fn finish_hop_setup(
+    mut conn: RedisConnection,
+    credentials: Option<&Arc<dyn CredentialProvider>>,
+) -> Result<RedisConnection, RedisError> {
     if let Some(provider) = credentials {
-        authenticate(&mut conn, provider.as_ref()).await?;
+        authenticate_with_refresh(&mut conn, provider.as_ref()).await?;
     }
+    conn.negotiate_protocol(ProtocolVersion::Auto).await?;
     Ok(conn)
 }
 
@@ -567,6 +552,43 @@ pub(crate) async fn connect_verified_master_with_config(
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn protected_hop_authenticates_before_resp3_negotiation() {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower::credentials::StaticCredentials;
+        use redis_tower_core::RedisStream;
+        use redis_tower_protocol::RespCodec;
+        use tokio_util::codec::Framed;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let provider: Arc<dyn CredentialProvider> = Arc::new(StaticCredentials::password("secret"));
+        let server_task = tokio::spawn(async move {
+            let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
+            let auth = framed.next().await.unwrap().unwrap();
+            assert_eq!(auth.as_array().unwrap()[0].as_str(), Some("AUTH"));
+            framed
+                .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+                .await
+                .unwrap();
+
+            let hello = framed.next().await.unwrap().unwrap();
+            assert_eq!(hello.as_array().unwrap()[0].as_str(), Some("HELLO"));
+            framed
+                .send(Frame::Map(vec![(
+                    Frame::BulkString(Some(Bytes::from_static(b"proto"))),
+                    Frame::Integer(3),
+                )]))
+                .await
+                .unwrap();
+        });
+
+        let connection = RedisConnection::from_stream(RedisStream::Unix(client));
+        let connection = finish_hop_setup(connection, Some(&provider)).await.unwrap();
+        assert!(connection.is_resp3());
+        server_task.await.unwrap();
+    }
 
     #[test]
     fn role_reports_master_detects_master() {

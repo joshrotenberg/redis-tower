@@ -47,7 +47,10 @@ use redis_tower::auto_pipeline::{
     AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService,
 };
 use redis_tower::command_adapter::CommandAdapter;
-use redis_tower::credentials::CredentialProvider;
+use redis_tower::credentials::{
+    CredentialProvider, CredentialReauthenticationHandle, Credentials, StreamingCredentialProvider,
+    spawn_credential_reauthentication as spawn_reauthentication_task,
+};
 use redis_tower::{
     ConnectionEvent, ConnectionEventBus, NodeAddr, ReadPreference, ReadRoutingStrategy,
     RoundRobinRouting, is_readonly_command,
@@ -482,6 +485,48 @@ pub struct MultiplexedSentinelClient<S = AutoPipelineService> {
 }
 
 impl MultiplexedSentinelClient<AutoPipelineService> {
+    /// Re-authenticate the current master worker and all replica workers.
+    ///
+    /// Updates are serialized through each worker, preserving RESP framing and
+    /// atomic pipeline boundaries. All workers are attempted before the first
+    /// error is returned.
+    pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
+        let mut first_error =
+            execute_with_deadline(self.inner.clone(), credentials.auth_command(), None)
+                .await
+                .err();
+
+        for service in self.replicas.values() {
+            if let Err(error) =
+                execute_with_deadline(service.clone(), credentials.auth_command(), None).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply every credential emitted by `provider` to current data workers.
+    ///
+    /// Short-lived Sentinel discovery sockets fetch credentials during each
+    /// query and are not retained. Dropping the returned handle stops future
+    /// master/replica updates.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let client = self.clone();
+        spawn_reauthentication_task(provider, move |credentials| {
+            let client = client.clone();
+            async move { client.reauthenticate_all(&credentials).await }
+        })
+    }
+
     /// Create a builder for configuring the client.
     ///
     /// Use the builder to set sentinel credentials, node credentials, TLS, and

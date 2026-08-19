@@ -81,6 +81,36 @@ def compare_estimates(
     return comparisons, added, removed
 
 
+def print_comparisons(
+    comparisons: list[Comparison],
+    added: list[str],
+    removed: list[str],
+    threshold_percent: float,
+) -> None:
+    """Print one human-readable comparison set."""
+
+    for comparison in comparisons:
+        confidence = (
+            "overlap"
+            if comparison.confidence_intervals_overlap
+            else "non-overlapping"
+        )
+        marker = (
+            "REGRESSION"
+            if comparison.is_regression(threshold_percent)
+            else "ok"
+        )
+        print(
+            f"{marker:10} {comparison.change_percent:+8.2f}%  "
+            f"{confidence:15}  {comparison.name}"
+        )
+
+    for name in added:
+        print(f"new benchmark (not gated): {name}")
+    for name in removed:
+        print(f"removed benchmark: {name}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -97,10 +127,22 @@ def main(argv: list[str] | None = None) -> int:
         default=10.0,
         help="Allowed mean-time increase as a percentage (default: 10)",
     )
+    parser.add_argument(
+        "--confirmation-baseline",
+        help="Optional reversed-order confirmation baseline",
+    )
+    parser.add_argument(
+        "--confirmation-candidate",
+        help="Optional reversed-order confirmation candidate",
+    )
     args = parser.parse_args(argv)
 
     if args.threshold < 0:
         parser.error("--threshold must be non-negative")
+    if bool(args.confirmation_baseline) != bool(args.confirmation_candidate):
+        parser.error(
+            "--confirmation-baseline and --confirmation-candidate must be used together"
+        )
 
     baseline = load_estimates(args.criterion_dir, args.baseline)
     candidate = load_estimates(args.criterion_dir, args.candidate)
@@ -129,36 +171,80 @@ def main(argv: list[str] | None = None) -> int:
         f"Criterion regression gate: {args.baseline} -> {args.candidate} "
         f"(limit: +{args.threshold:g}%)"
     )
-    for comparison in comparisons:
-        confidence = (
-            "overlap"
-            if comparison.confidence_intervals_overlap
-            else "non-overlapping"
-        )
-        marker = (
-            "REGRESSION"
-            if comparison.is_regression(args.threshold)
-            else "ok"
-        )
-        print(
-            f"{marker:10} {comparison.change_percent:+8.2f}%  "
-            f"{confidence:15}  {comparison.name}"
-        )
+    print_comparisons(comparisons, added, removed, args.threshold)
 
-    for name in added:
-        print(f"new benchmark (not gated): {name}")
-    for name in removed:
-        print(f"removed benchmark: {name}")
+    if args.confirmation_baseline and args.confirmation_candidate:
+        confirmation_baseline = load_estimates(
+            args.criterion_dir, args.confirmation_baseline
+        )
+        confirmation_candidate = load_estimates(
+            args.criterion_dir, args.confirmation_candidate
+        )
+        if not confirmation_baseline:
+            print(
+                "error: no Criterion estimates found for "
+                f"{args.confirmation_baseline!r}",
+                file=sys.stderr,
+            )
+            return 2
+        if not confirmation_candidate:
+            print(
+                "error: no Criterion estimates found for "
+                f"{args.confirmation_candidate!r}",
+                file=sys.stderr,
+            )
+            return 2
+
+        (
+            confirmation_comparisons,
+            confirmation_added,
+            confirmation_removed,
+        ) = compare_estimates(confirmation_baseline, confirmation_candidate)
+        if not confirmation_comparisons:
+            print(
+                "error: the confirmation baselines have no benchmarks in common",
+                file=sys.stderr,
+            )
+            return 2
+
+        print(
+            "\nReversed-order confirmation: "
+            f"{args.confirmation_baseline} -> {args.confirmation_candidate}"
+        )
+        print_comparisons(
+            confirmation_comparisons,
+            confirmation_added,
+            confirmation_removed,
+            args.threshold,
+        )
+        confirmation_regression_names = {
+            comparison.name
+            for comparison in confirmation_comparisons
+            if comparison.is_regression(args.threshold)
+        }
+        regressions = [
+            comparison
+            for comparison in regressions
+            if comparison.name in confirmation_regression_names
+        ]
 
     if regressions:
+        qualifier = (
+            "reproducibly "
+            if args.confirmation_baseline and args.confirmation_candidate
+            else ""
+        )
         print(
-            f"\n{len(regressions)} benchmark(s) exceeded +{args.threshold:g}% "
-            "with non-overlapping confidence intervals.",
+            f"\n{len(regressions)} benchmark(s) {qualifier}exceeded "
+            f"+{args.threshold:g}% with non-overlapping confidence intervals.",
             file=sys.stderr,
         )
         return 1
 
-    print("\nNo statistically clear performance regressions found.")
+    if args.confirmation_baseline and args.confirmation_candidate:
+        print("\nNo reproducible performance regressions found.")
+    else:
+        print("\nNo statistically clear performance regressions found.")
     return 0
 
 

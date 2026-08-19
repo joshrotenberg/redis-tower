@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use redis_tower::credentials::CredentialProvider;
+use redis_tower::credentials::{
+    CredentialProvider, CredentialReauthenticationHandle, Credentials, StreamingCredentialProvider,
+    spawn_credential_reauthentication as spawn_reauthentication_task,
+};
 use redis_tower::{ReadPreference, ReadRoutingStrategy};
 use redis_tower_commands::Ping;
 use redis_tower_core::{Command, RedisError};
@@ -177,6 +180,32 @@ pub struct SentinelClient {
 }
 
 impl SentinelClient {
+    /// Re-authenticate the currently connected master and replicas.
+    pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
+        self.inner
+            .lock()
+            .await
+            .reauthenticate_all(credentials)
+            .await
+    }
+
+    /// Apply every credential emitted by `provider` to current data sockets.
+    ///
+    /// Sentinel discovery connections are short-lived and fetch from their
+    /// configured provider each time; the stream is therefore applied only to
+    /// the established master and replica sockets. Dropping the returned
+    /// handle stops future updates.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let client = self.clone();
+        spawn_reauthentication_task(provider, move |credentials| {
+            let client = client.clone();
+            async move { client.reauthenticate_all(&credentials).await }
+        })
+    }
+
     /// Create a builder for configuring the client.
     ///
     /// Use the builder to set sentinel credentials, node credentials, TLS, and

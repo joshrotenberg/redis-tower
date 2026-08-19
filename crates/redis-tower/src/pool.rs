@@ -43,13 +43,17 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use redis_tower_commands::{Info, Ping, Role};
-use redis_tower_core::{Command, Frame, RedisError};
+use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 #[cfg(test)]
 use tokio::sync::MappedMutexGuard;
 use tokio::sync::{Mutex, MutexGuard, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
 
+use crate::credentials::{
+    CredentialReauthenticationHandle, Credentials, StreamingCredentialProvider,
+    spawn_credential_reauthentication as spawn_reauthentication_task,
+};
 use crate::executor::RedisExecutor;
 use crate::metrics_layer::MetricsRecorder;
 
@@ -1889,6 +1893,57 @@ where
             cancel,
             task: Some(task),
         }
+    }
+}
+
+impl ConnectionPool<RedisConnection> {
+    /// Send `AUTH` with `credentials` to every active pool connection.
+    ///
+    /// Slots are locked one at a time, so a credential update never races a
+    /// command on the same socket. Other slots remain available while the
+    /// update progresses. A connection created concurrently through a
+    /// provider-backed factory fetches the provider's current credentials and
+    /// therefore does not need to be revisited by this pass.
+    pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
+        let mut first_error = None;
+        for slot in &self.inner.connections {
+            if !slot.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let mut connection = slot.connection.lock().await;
+            if !slot.active.load(Ordering::Acquire) {
+                continue;
+            }
+            let Some(connection) = connection.as_mut() else {
+                continue;
+            };
+            if let Err(error) = connection.execute(credentials.auth_command()).await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply every credential emitted by `provider` to all active slots.
+    ///
+    /// Dropping the returned handle stops future updates without closing the
+    /// pool. Use the same provider in the pool's
+    /// [`CredentialConnectionFactory`](crate::CredentialConnectionFactory) so
+    /// replacement and newly grown slots authenticate with current material.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let pool = self.clone();
+        spawn_reauthentication_task(provider, move |credentials| {
+            let pool = pool.clone();
+            async move { pool.reauthenticate_all(&credentials).await }
+        })
     }
 }
 

@@ -76,7 +76,10 @@ use redis_tower::AutoPipelineService;
 use redis_tower::PipelineExecutor;
 use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
-use redis_tower::credentials::CredentialProvider;
+use redis_tower::credentials::{
+    CredentialProvider, CredentialReauthenticationHandle, Credentials, StreamingCredentialProvider,
+    spawn_credential_reauthentication as spawn_reauthentication_task,
+};
 use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
@@ -704,6 +707,83 @@ impl MultiplexedClusterClientBuilder {
 }
 
 impl MultiplexedClusterClient {
+    /// Re-authenticate every established master and replica worker.
+    ///
+    /// Each `AUTH` is serialized through its node's auto-pipeline worker. A
+    /// worker that rejects the replacement credential is removed from routing
+    /// so the next command reconnects through the configured provider.
+    pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
+        // Gate routing and topology replacement for the duration of the pass.
+        // Besides preventing mixed old/new routing after this method returns,
+        // this ensures an AUTH failure cannot remove a newer worker that a
+        // concurrent topology refresh installed at the same address.
+        let mut inner = self.inner.write().await;
+        let services: Vec<(String, bool, AutoPipelineService)> = inner
+            .masters
+            .iter()
+            .map(|(address, service)| (address.clone(), false, service.clone()))
+            .chain(
+                inner
+                    .replicas
+                    .iter()
+                    .map(|(address, service)| (address.clone(), true, service.clone())),
+            )
+            .collect();
+
+        let auth = credentials.auth_command();
+        let frame = auth.to_frame();
+        let mut failed = Vec::new();
+        let mut first_error = None;
+        for (address, replica, mut service) in services {
+            let result = match call_service(&mut service, frame.clone()).await {
+                Ok(Frame::SimpleString(value)) if &value[..] == b"OK" => Ok(()),
+                Ok(Frame::Error(error)) => Err(RedisError::Redis(
+                    String::from_utf8_lossy(&error).into_owned(),
+                )),
+                Ok(other) => Err(RedisError::UnexpectedResponse {
+                    expected: "OK",
+                    actual: format!("{other:?}"),
+                }),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                failed.push((address, replica));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+
+        for (address, replica) in failed {
+            if replica {
+                inner.replicas.remove(&address);
+            } else {
+                inner.masters.remove(&address);
+            }
+        }
+
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply each pushed credential to all current cluster node workers.
+    ///
+    /// Dropping the returned handle stops future reauthentication. Configure
+    /// this client with the same provider so new nodes and reconnects also use
+    /// the provider's current credentials.
+    pub fn spawn_credential_reauthentication(
+        &self,
+        provider: Arc<dyn StreamingCredentialProvider>,
+    ) -> CredentialReauthenticationHandle {
+        let client = self.clone();
+        spawn_reauthentication_task(provider, move |credentials| {
+            let client = client.clone();
+            async move { client.reauthenticate_all(&credentials).await }
+        })
+    }
+
     /// Connect to a cluster using a seed node address.
     pub async fn connect(seed_addr: &str) -> Result<Self, RedisError> {
         Self::connect_inner(

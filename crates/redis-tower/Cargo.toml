@@ -44,6 +44,7 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 tracing = { workspace = true }
 metrics = { workspace = true, optional = true }
 tower-layer = { workspace = true }

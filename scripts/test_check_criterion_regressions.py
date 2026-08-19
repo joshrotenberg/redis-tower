@@ -62,11 +62,76 @@ class CriterionRegressionTests(unittest.TestCase):
 
             self.assertEqual(main(["--criterion-dir", str(root)]), 1)
 
+    def test_confirmation_requires_the_same_benchmark_to_regress(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._write_estimate(root, "main", 100.0, 98.0, 102.0, "codec/decode")
+            self._write_estimate(
+                root, "candidate", 120.0, 117.0, 123.0, "codec/decode"
+            )
+            self._write_estimate(
+                root, "main-confirm", 100.0, 98.0, 102.0, "codec/decode"
+            )
+            self._write_estimate(
+                root, "candidate-confirm", 101.0, 99.0, 103.0, "codec/decode"
+            )
+            self._write_estimate(root, "main", 100.0, 98.0, 102.0, "codec/encode")
+            self._write_estimate(
+                root, "candidate", 101.0, 99.0, 103.0, "codec/encode"
+            )
+            self._write_estimate(
+                root, "main-confirm", 100.0, 98.0, 102.0, "codec/encode"
+            )
+            self._write_estimate(
+                root, "candidate-confirm", 120.0, 117.0, 123.0, "codec/encode"
+            )
+
+            self.assertEqual(
+                main(
+                    [
+                        "--criterion-dir",
+                        str(root),
+                        "--confirmation-baseline",
+                        "main-confirm",
+                        "--confirmation-candidate",
+                        "candidate-confirm",
+                    ]
+                ),
+                0,
+            )
+
+    def test_confirmation_fails_for_reproducible_regression(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for baseline in ("main", "main-confirm"):
+                self._write_estimate(root, baseline, 100.0, 98.0, 102.0)
+            for candidate in ("candidate", "candidate-confirm"):
+                self._write_estimate(root, candidate, 120.0, 117.0, 123.0)
+
+            self.assertEqual(
+                main(
+                    [
+                        "--criterion-dir",
+                        str(root),
+                        "--confirmation-baseline",
+                        "main-confirm",
+                        "--confirmation-candidate",
+                        "candidate-confirm",
+                    ]
+                ),
+                1,
+            )
+
     @staticmethod
     def _write_estimate(
-        root: Path, baseline: str, point: float, lower: float, upper: float
+        root: Path,
+        baseline: str,
+        point: float,
+        lower: float,
+        upper: float,
+        name: str = "codec/decode",
     ) -> None:
-        path = root / "codec" / "decode" / baseline / "estimates.json"
+        path = root / name / baseline / "estimates.json"
         path.parent.mkdir(parents=True)
         path.write_text(
             json.dumps(

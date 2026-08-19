@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- provider-backed setup now force-refreshes once after an authentication
+  rejection, and direct/shared multiplexed Cluster clients can apply streamed
+  credentials to every established node connection (#475)
 - dedicated reconnecting Cluster Pub/Sub connections: regular subscriptions
   pinned to an explicit node, and same-slot sharded subscriptions that follow
   committed ownership changes; `SPUBLISH` remains on the normal slot-routed

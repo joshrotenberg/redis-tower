@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- provider-backed Sentinel and data-node setup now force-refreshes once after
+  an authentication rejection, negotiates RESP only after authentication, and
+  direct/multiplexed clients can apply streamed credentials to established
+  master and replica data connections (#475)
 - end-to-end typed command deadlines across layered readiness and multiplexed
   dispatch
 - bounded connection lifecycle events with automatic failover notification
