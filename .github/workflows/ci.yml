@@ -299,7 +299,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install OpenSSL dev headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: |
+          if ! dpkg-query -W -f='${Status}' libssl-dev 2>/dev/null | grep -q 'ok installed'; then
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev
+          fi
 
       - name: Cache Redis build
         uses: actions/cache@v4
@@ -364,7 +368,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install OpenSSL dev headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: |
+          if ! dpkg-query -W -f='${Status}' libssl-dev 2>/dev/null | grep -q 'ok installed'; then
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev
+          fi
 
       - name: Cache Redis build
         uses: actions/cache@v4
