@@ -11,6 +11,7 @@
 
 - [Cloud and rotating credentials](CLOUD-AUTH.md)
 - [Client-side caching](CLIENT-SIDE-CACHING.md)
+- [Distributed primitives](PRIMITIVES.md)
 - [Production tuning](PRODUCTION-TUNING.md)
 - [Serverless and scale-to-zero](SERVERLESS.md)
 - [Pool health probing design](POOL-HEALTH-PROBING.md)

@@ -638,9 +638,11 @@ checks, and idempotent-aware retry composition. `CircuitBreakerLayer` and its
 config/service names remain as deprecated aliases for one compatibility
 release.
 
-`RedisError::is_retryable()` classifies which errors are worth retrying. Rate
-limiting and bulkhead isolation remain available from the tower-resilience
-crate family.
+`RedisError::is_retryable()` classifies which errors are worth retrying.
+Process-local rate limiting and bulkhead isolation remain available from the
+tower-resilience crate family. The companion `redis-tower-primitives` crate
+adds fenced distributed locks and Redis-time GCRA admission for shared quota;
+see the [distributed primitives guide](docs/PRIMITIVES.md).
 
 Other resilience building blocks:
 
@@ -849,6 +851,7 @@ redis-tower-sentinel     Sentinel discovery and failover
 redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
 redis-tower-sync         Blocking wrapper
 redis-tower-client       UniversalClient over standalone/cluster/sentinel
+redis-tower-primitives   Fenced distributed locks and Redis-time GCRA rate limiting
 redis-tower-auth-aws     AWS ElastiCache IAM SigV4 credential provider
 redis-tower-auth-azure   Microsoft Entra ID credential provider
 redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures

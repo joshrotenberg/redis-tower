@@ -1,0 +1,29 @@
+[package]
+name = "redis-tower-primitives"
+version = "0.1.0"
+description = "Auditable distributed locks and rate limiting for redis-tower"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+keywords = ["redis", "lock", "rate-limit", "distributed", "tower"]
+categories = ["algorithms", "asynchronous", "concurrency"]
+
+[dependencies]
+rand = "0.9"
+redis-tower = { workspace = true, default-features = false }
+redis-tower-core = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+redis-server-wrapper = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

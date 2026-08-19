@@ -299,7 +299,11 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install OpenSSL dev headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: |
+          if ! dpkg-query -W -f='${Status}' libssl-dev 2>/dev/null | grep -q 'ok installed'; then
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev
+          fi
 
       - name: Cache Redis build
         uses: actions/cache@v4
@@ -331,6 +335,9 @@ jobs:
       - name: Run universal-client integration tests
         run: cargo test -p redis-tower-client --test '*' --all-features -- --test-threads=1
 
+      - name: Run distributed-primitives integration tests
+        run: cargo test -p redis-tower-primitives --test '*' --all-features -- --test-threads=1
+
       - name: Run cluster integration tests
         run: cargo test -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1
 
@@ -361,7 +368,11 @@ jobs:
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: Install OpenSSL dev headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev
+        run: |
+          if ! dpkg-query -W -f='${Status}' libssl-dev 2>/dev/null | grep -q 'ok installed'; then
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev
+          fi
 
       - name: Cache Redis build
         uses: actions/cache@v4
@@ -398,6 +409,9 @@ jobs:
 
       - name: Collect universal-client integration coverage
         run: cargo llvm-cov --no-report -p redis-tower-client --test '*' --all-features -- --test-threads=1
+
+      - name: Collect distributed-primitives integration coverage
+        run: cargo llvm-cov --no-report -p redis-tower-primitives --test '*' --all-features -- --test-threads=1
 
       - name: Collect cluster integration coverage
         run: cargo llvm-cov --no-report -p redis-tower-cluster --test cluster_integration --all-features -- --ignored --test-threads=1

@@ -23,6 +23,9 @@ If you are evaluating or adopting the project, start here:
   probing and idle reaping are pool-native, explicitly spawned tasks.
 - [Client-side caching](CLIENT-SIDE-CACHING.md) covers cloneable cached clients,
   tracking modes, invalidation races, failure behavior, and cache metrics.
+- [Distributed primitives](PRIMITIVES.md) covers fenced expiring locks, explicit
+  renewal ownership, Redis-time GCRA rate limiting, cluster keys, and failure
+  behavior.
 - The [feature matrix](FEATURE-MATRIX.md) is the canonical, evidence-linked
   comparison with other Redis clients.
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test
