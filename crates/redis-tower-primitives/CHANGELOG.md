@@ -15,3 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `GcraRateLimiter` with required quota/window, Redis server time, single-key
   sorted-set state, and server-computed remaining/retry/reset values (#490)
 - public, line-documented Lua constants and live Redis safety coverage (#490)
+- `LeaderElection` with owned renewal, explicit abdication, and separable
+  elected/renewal-failed/demoted events (#491)
+- `ExpirableSemaphore` with Redis-time lease pruning and token-checked renew
+  and release operations (#491)
+- `CountDownLatch` with initialize-if-absent, non-negative atomic countdown,
+  and explicit timeout/expiry-aware polling (#491)

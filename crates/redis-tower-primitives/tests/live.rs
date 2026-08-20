@@ -6,7 +6,10 @@ use std::time::Duration;
 use redis_server_wrapper::RedisServer;
 use redis_tower::commands::Del;
 use redis_tower::{MultiplexedClient, RedisConnection};
-use redis_tower_primitives::{DistributedLock, GcraRateLimiter, RenewalOutcome};
+use redis_tower_primitives::{
+    CountDownLatch, DistributedLock, ExpirableSemaphore, GcraRateLimiter, LatchCountDown,
+    LatchWaitOutcome, LeaderElection, LeadershipEvent, LeadershipOutcome, RenewalOutcome,
+};
 use tokio::sync::OnceCell;
 
 static REDIS: OnceCell<redis_server_wrapper::RedisServerHandle> = OnceCell::const_new();
@@ -55,6 +58,21 @@ fn lock(ttl: Duration) -> DistributedLock {
 fn limiter(quota: u32, window: Duration) -> GcraRateLimiter {
     let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
     GcraRateLimiter::new(format!("primitives:{id}:rate"), quota, window).unwrap()
+}
+
+fn election(ttl: Duration, renewal_interval: Duration) -> LeaderElection {
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    LeaderElection::new(format!("primitives:{id}:leader"), ttl, renewal_interval).unwrap()
+}
+
+fn semaphore(limit: u32, ttl: Duration) -> ExpirableSemaphore {
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    ExpirableSemaphore::new(format!("primitives:{id}:semaphore"), limit, ttl).unwrap()
+}
+
+fn latch(count: u64, ttl: Duration) -> CountDownLatch {
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    CountDownLatch::new(format!("primitives:{id}:latch"), count, ttl).unwrap()
 }
 
 #[tokio::test]
@@ -240,4 +258,215 @@ async fn gcra_recovers_capacity_after_server_computed_delay() {
 
     tokio::time::sleep(denied.retry_after() + Duration::from_millis(20)).await;
     assert!(limiter.check(&mut connection).await.unwrap().is_allowed());
+}
+
+#[tokio::test]
+async fn leader_election_is_exclusive_and_abdication_is_observable() {
+    let election = election(Duration::from_millis(120), Duration::from_millis(25));
+    let owner = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let contender = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+
+    let campaign = election
+        .campaign(owner)
+        .await
+        .unwrap()
+        .expect("first candidate should be elected");
+    let (leadership, mut events) = campaign.into_parts();
+    assert_eq!(events.recv().await, Some(LeadershipEvent::Elected));
+    assert!(election.campaign(contender).await.unwrap().is_none());
+
+    assert!(matches!(
+        leadership.abdicate().await.unwrap(),
+        LeadershipOutcome::Abdicated
+    ));
+    assert_eq!(events.recv().await, Some(LeadershipEvent::Demoted));
+
+    let replacement_client = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let replacement = election
+        .campaign(replacement_client)
+        .await
+        .unwrap()
+        .expect("abdication should make the election immediately available");
+    let (replacement, _) = replacement.into_parts();
+    assert!(matches!(
+        replacement.abdicate().await.unwrap(),
+        LeadershipOutcome::Abdicated
+    ));
+}
+
+#[tokio::test]
+async fn dropping_leadership_requests_abdication() {
+    let election = election(Duration::from_millis(150), Duration::from_millis(30));
+    let owner = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let campaign = election.campaign(owner).await.unwrap().unwrap();
+    let (leadership, mut events) = campaign.into_parts();
+    assert_eq!(events.recv().await, Some(LeadershipEvent::Elected));
+
+    drop(leadership);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_millis(200), events.recv())
+            .await
+            .expect("drop abdication should finish before the TTL"),
+        Some(LeadershipEvent::Demoted)
+    );
+
+    let replacement_client = MultiplexedClient::connect(redis_addr().await)
+        .await
+        .unwrap();
+    let replacement = election
+        .campaign(replacement_client)
+        .await
+        .unwrap()
+        .expect("drop abdication should release the election key");
+    let (replacement, _) = replacement.into_parts();
+    let _ = replacement.abdicate().await.unwrap();
+}
+
+#[tokio::test]
+async fn semaphore_enforces_capacity_and_release_recovers_it() {
+    let semaphore = semaphore(2, Duration::from_millis(200));
+    let mut first_connection = connection().await;
+    let mut second_connection = connection().await;
+
+    let first = semaphore
+        .try_acquire(&mut first_connection)
+        .await
+        .unwrap()
+        .expect("first permit should be available");
+    let second = semaphore
+        .try_acquire(&mut second_connection)
+        .await
+        .unwrap()
+        .expect("second permit should be available");
+    assert_eq!(first.remaining_at_acquire(), 1);
+    assert_eq!(second.remaining_at_acquire(), 0);
+    assert!(
+        semaphore
+            .try_acquire(&mut first_connection)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    assert!(first.release(&mut first_connection).await.unwrap());
+    let replacement = semaphore
+        .try_acquire(&mut first_connection)
+        .await
+        .unwrap()
+        .expect("released capacity should be immediately reusable");
+    assert!(second.release(&mut second_connection).await.unwrap());
+    assert!(replacement.release(&mut first_connection).await.unwrap());
+}
+
+#[tokio::test]
+async fn semaphore_expiry_recovers_from_crashed_holder() {
+    let semaphore = semaphore(1, Duration::from_millis(60));
+    let mut stale_connection = connection().await;
+    let mut replacement_connection = connection().await;
+    let stale = semaphore
+        .try_acquire(&mut stale_connection)
+        .await
+        .unwrap()
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let replacement = semaphore
+        .try_acquire(&mut replacement_connection)
+        .await
+        .unwrap()
+        .expect("expired holder should no longer consume capacity");
+    assert!(!stale.renew(&mut stale_connection).await.unwrap());
+    assert!(!stale.release(&mut stale_connection).await.unwrap());
+    assert!(
+        replacement
+            .renew(&mut replacement_connection)
+            .await
+            .unwrap()
+    );
+    assert!(
+        replacement
+            .release(&mut replacement_connection)
+            .await
+            .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn latch_initializes_once_and_waits_for_release() {
+    let latch = latch(2, Duration::from_secs(1));
+    let mut waiter_connection = connection().await;
+    let mut countdown_connection = connection().await;
+    assert!(latch.initialize(&mut waiter_connection).await.unwrap());
+    assert!(!latch.initialize(&mut waiter_connection).await.unwrap());
+    assert_eq!(
+        latch.count_down(&mut countdown_connection).await.unwrap(),
+        LatchCountDown::Waiting { remaining: 1 }
+    );
+
+    let countdown_latch = latch.clone();
+    let countdown = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        countdown_latch
+            .count_down(&mut countdown_connection)
+            .await
+            .unwrap()
+    });
+    assert_eq!(
+        latch
+            .wait(
+                &mut waiter_connection,
+                Duration::from_millis(5),
+                Duration::from_millis(300),
+            )
+            .await
+            .unwrap(),
+        LatchWaitOutcome::Released
+    );
+    assert_eq!(countdown.await.unwrap(), LatchCountDown::Released);
+    assert_eq!(
+        latch.current(&mut waiter_connection).await.unwrap(),
+        Some(0)
+    );
+}
+
+#[tokio::test]
+async fn latch_distinguishes_timeout_from_expiry() {
+    let timed = latch(1, Duration::from_secs(1));
+    let mut timed_connection = connection().await;
+    assert!(timed.initialize(&mut timed_connection).await.unwrap());
+    assert_eq!(
+        timed
+            .wait(
+                &mut timed_connection,
+                Duration::from_millis(5),
+                Duration::from_millis(30),
+            )
+            .await
+            .unwrap(),
+        LatchWaitOutcome::TimedOut { remaining: 1 }
+    );
+
+    let expiring = latch(1, Duration::from_millis(40));
+    let mut expiring_connection = connection().await;
+    assert!(expiring.initialize(&mut expiring_connection).await.unwrap());
+    tokio::time::sleep(Duration::from_millis(70)).await;
+    assert_eq!(
+        expiring
+            .wait(
+                &mut expiring_connection,
+                Duration::from_millis(5),
+                Duration::from_millis(100),
+            )
+            .await
+            .unwrap(),
+        LatchWaitOutcome::Expired
+    );
 }
