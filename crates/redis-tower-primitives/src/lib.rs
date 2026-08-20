@@ -1,9 +1,10 @@
 //! Distributed coordination primitives built on `redis-tower`.
 //!
 //! This crate provides expiring locks, leader election, expirable semaphores,
-//! countdown latches, and Redis-time rate limiting. Every primitive executes
-//! published Lua through [`redis_tower::Script`], so calls use EVALSHA first
-//! and fall back to EVAL only when Redis reports `NOSCRIPT`.
+//! countdown latches, delayed queues, block-allocated IDs, and Redis-time rate
+//! limiting. Scripted primitives execute published Lua through
+//! [`redis_tower::Script`], so calls use EVALSHA first and fall back to EVAL
+//! only when Redis reports `NOSCRIPT`.
 //!
 //! # Failure model
 //!
@@ -12,21 +13,28 @@
 //! replicated. Lock users must pass [`LockLease::fencing_token`] to the guarded
 //! resource and have that resource reject stale tokens. Leader and semaphore
 //! users must likewise tolerate work resumed by an expired holder. Latch
-//! expiry is reported separately from release, and rate-limit calls return
-//! Redis failures to the caller; applications must choose recovery and
-//! fail-open or fail-closed behavior explicitly.
+//! expiry is reported separately from release. Delayed claims are at-most-once,
+//! and ID uniqueness depends on a persistent counter that failover cannot roll
+//! back. Rate-limit calls return Redis failures to the caller; applications
+//! must choose recovery and fail-open or fail-closed behavior explicitly.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod delayed_queue;
 mod error;
+pub mod id_generator;
 pub mod latch;
 pub mod leader;
 pub mod lock;
 pub mod rate_limiter;
 pub mod semaphore;
 
+pub use delayed_queue::{
+    CLAIM_DUE_SCRIPT, ClaimBatch, DelayedQueue, DelayedQueueError, ENQUEUE_DELAYED_SCRIPT,
+};
 pub use error::ConfigurationError;
+pub use id_generator::{ID_ALLOCATION_COMMAND, IdBlock, IdGenerator};
 pub use latch::{
     COUNT_DOWN_SCRIPT, CountDownLatch, INITIALIZE_LATCH_SCRIPT, LatchCountDown, LatchWaitError,
     LatchWaitOutcome, READ_LATCH_SCRIPT,

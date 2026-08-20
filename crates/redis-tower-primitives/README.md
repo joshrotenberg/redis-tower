@@ -12,6 +12,10 @@ Auditable distributed coordination primitives for `redis-tower`:
   expire.
 - `CountDownLatch` provides atomic countdown and an explicit polling wait with
   caller-selected timing.
+- `DelayedQueue` stores binary messages at Redis-time deadlines and leaves the
+  bounded at-most-once claim loop to the caller.
+- `IdGenerator` reserves persistent contiguous ID blocks with one `INCRBY` and
+  no hidden I/O while the block is consumed.
 
 Every Lua program is a documented public constant and executes through
 `redis_tower::Script`, which tries EVALSHA before its NOSCRIPT fallback.
@@ -66,10 +70,10 @@ events can be split from the handle for independent observation.
 
 ## Cluster keys
 
-Leader election, semaphores, latches, and the rate limiter each touch one key
-and are cluster-safe as-is. Lock acquisition touches two keys, so the lock and
-fencing keys must share a Redis Cluster hash tag, such as
-`{invoice:42}:lock` and `{invoice:42}:fence`.
+Leader election, semaphores, latches, delayed queues, ID generation, and the
+rate limiter each touch one key and are cluster-safe as-is. Lock acquisition
+touches two keys, so the lock and fencing keys must share a Redis Cluster hash
+tag, such as `{invoice:42}:lock` and `{invoice:42}:fence`.
 
 ## Failure model
 
@@ -90,3 +94,7 @@ Leadership and semaphore leases have the same pause/partition limitation as a
 lock: expiry can admit a replacement while stale work resumes. Latch expiry is
 reported separately from count-zero release. All connection failures remain
 indeterminate, so callers must choose retry and stale-work policies explicitly.
+
+Delayed claims are at-most-once and can be lost with their response. ID counter
+rollback or deletion can reissue identifiers; deployment durability and key
+ownership must match the required uniqueness guarantee.

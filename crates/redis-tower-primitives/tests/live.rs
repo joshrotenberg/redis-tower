@@ -7,8 +7,9 @@ use redis_server_wrapper::RedisServer;
 use redis_tower::commands::Del;
 use redis_tower::{MultiplexedClient, RedisConnection};
 use redis_tower_primitives::{
-    CountDownLatch, DistributedLock, ExpirableSemaphore, GcraRateLimiter, LatchCountDown,
-    LatchWaitOutcome, LeaderElection, LeadershipEvent, LeadershipOutcome, RenewalOutcome,
+    CountDownLatch, DelayedQueue, DistributedLock, ExpirableSemaphore, GcraRateLimiter,
+    IdGenerator, LatchCountDown, LatchWaitOutcome, LeaderElection, LeadershipEvent,
+    LeadershipOutcome, RenewalOutcome,
 };
 use tokio::sync::OnceCell;
 
@@ -73,6 +74,16 @@ fn semaphore(limit: u32, ttl: Duration) -> ExpirableSemaphore {
 fn latch(count: u64, ttl: Duration) -> CountDownLatch {
     let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
     CountDownLatch::new(format!("primitives:{id}:latch"), count, ttl).unwrap()
+}
+
+fn delayed_queue(retention: Duration) -> DelayedQueue {
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    DelayedQueue::new(format!("primitives:{id}:delayed"), retention).unwrap()
+}
+
+fn id_generator(block_size: u64) -> IdGenerator {
+    let id = NEXT_KEY.fetch_add(1, Ordering::Relaxed);
+    IdGenerator::new(format!("primitives:{id}:ids"), block_size).unwrap()
 }
 
 #[tokio::test]
@@ -469,4 +480,100 @@ async fn latch_distinguishes_timeout_from_expiry() {
             .unwrap(),
         LatchWaitOutcome::Expired
     );
+}
+
+#[tokio::test]
+async fn delayed_queue_preserves_binary_duplicates_and_deadlines() {
+    let queue = delayed_queue(Duration::from_secs(1));
+    let mut connection = connection().await;
+    let duplicate = [0, 255, 42];
+
+    let first_deadline = queue
+        .enqueue(&mut connection, duplicate, Duration::ZERO)
+        .await
+        .unwrap();
+    let second_deadline = queue
+        .enqueue(&mut connection, duplicate, Duration::ZERO)
+        .await
+        .unwrap();
+    let later_deadline = queue
+        .enqueue(&mut connection, b"later", Duration::from_millis(80))
+        .await
+        .unwrap();
+    assert!(second_deadline >= first_deadline);
+    assert!(later_deadline > second_deadline);
+
+    let first = queue.claim_due(&mut connection, 1).await.unwrap();
+    let second = queue.claim_due(&mut connection, 1).await.unwrap();
+    assert_eq!(first.expired(), 0);
+    assert_eq!(first.payloads(), &[duplicate.to_vec()]);
+    assert_eq!(second.payloads(), &[duplicate.to_vec()]);
+    assert!(
+        queue
+            .claim_due(&mut connection, 10)
+            .await
+            .unwrap()
+            .payloads()
+            .is_empty()
+    );
+
+    tokio::time::sleep(Duration::from_millis(110)).await;
+    assert_eq!(
+        queue
+            .claim_due(&mut connection, 10)
+            .await
+            .unwrap()
+            .into_payloads(),
+        vec![b"later".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn delayed_queue_reports_retention_pruning() {
+    let queue = delayed_queue(Duration::from_millis(50));
+    let mut connection = connection().await;
+    queue
+        .enqueue(&mut connection, b"stale", Duration::ZERO)
+        .await
+        .unwrap();
+    queue
+        .enqueue(&mut connection, b"future", Duration::from_millis(200))
+        .await
+        .unwrap();
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let claim = queue.claim_due(&mut connection, 10).await.unwrap();
+    assert_eq!(claim.expired(), 1);
+    assert!(claim.payloads().is_empty());
+
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(
+        queue
+            .claim_due(&mut connection, 10)
+            .await
+            .unwrap()
+            .into_payloads(),
+        vec![b"future".to_vec()]
+    );
+}
+
+#[tokio::test]
+async fn id_generator_allocates_disjoint_local_blocks() {
+    let generator = id_generator(3);
+    let mut first_connection = connection().await;
+    let mut second_connection = connection().await;
+    first_connection
+        .execute(Del::new(generator.key()))
+        .await
+        .unwrap();
+
+    let first = generator.allocate(&mut first_connection).await.unwrap();
+    assert_eq!(first.first_id(), 1);
+    assert_eq!(first.last_id(), 3);
+    assert_eq!(first.collect::<Vec<_>>(), vec![1, 2, 3]);
+
+    let second = generator.allocate(&mut second_connection).await.unwrap();
+    assert_eq!(second.first_id(), 4);
+    assert_eq!(second.last_id(), 6);
+    assert_eq!(second.collect::<Vec<_>>(), vec![4, 5, 6]);
 }

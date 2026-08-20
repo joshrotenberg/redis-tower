@@ -21,3 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and release operations (#491)
 - `CountDownLatch` with initialize-if-absent, non-negative atomic countdown,
   and explicit timeout/expiry-aware polling (#491)
+- `DelayedQueue` with binary-safe duplicate messages, Redis-time deadlines,
+  required retention, and caller-owned bounded at-most-once claims (#492)
+- `IdGenerator` with persistent block allocation through one documented
+  `INCRBY` and local contiguous-range iteration (#492)
