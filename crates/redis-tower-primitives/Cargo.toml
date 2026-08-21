@@ -13,6 +13,7 @@ keywords = ["redis", "lock", "rate-limit", "distributed", "tower"]
 categories = ["algorithms", "asynchronous", "concurrency"]
 
 [dependencies]
+hex = { workspace = true }
 rand = "0.9"
 redis-tower = { workspace = true, default-features = false }
 redis-tower-core = { workspace = true }

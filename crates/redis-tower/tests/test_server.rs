@@ -642,7 +642,9 @@ fn hello_field(frame: &Frame, key: &str) -> Option<Frame> {
             .find(|(k, _)| k.as_str() == Some(key))
             .map(|(_, v)| v.clone()),
         Frame::Array(Some(items)) => items
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .find(|pair| pair[0].as_str() == Some(key))
             .map(|pair| pair[1].clone()),
         _ => None,

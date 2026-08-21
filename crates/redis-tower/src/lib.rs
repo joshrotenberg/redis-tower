@@ -147,7 +147,8 @@
 //! [tower-resilience](https://crates.io/crates/tower-resilience) crate family
 //! provides layers that compose into the same builder. The companion
 //! `redis-tower-primitives` crate provides fenced locks, leader election,
-//! expirable semaphores, countdown latches, and a Redis-time GCRA limiter.
+//! expirable semaphores, countdown latches, delayed queues, block-allocated
+//! IDs, and a Redis-time GCRA limiter.
 //!
 //! [`RedisError::is_retryable`] classifies which errors are worth retrying
 //! (transient connection errors) versus command errors like WRONGTYPE that are

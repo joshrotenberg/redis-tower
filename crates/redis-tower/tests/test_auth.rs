@@ -186,7 +186,9 @@ fn hello_protocol(frame: &Frame) -> Option<i64> {
             .find(|(key, _)| key.as_str() == Some("proto"))
             .and_then(|(_, value)| value.as_integer()),
         Frame::Array(Some(items)) => items
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .find(|pair| pair[0].as_str() == Some("proto"))
             .and_then(|pair| pair[1].as_integer()),
         _ => None,

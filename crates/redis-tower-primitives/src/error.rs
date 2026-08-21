@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 // Redis's Lua 5.1 numbers are IEEE-754 doubles. Reserve half the exact-integer
-// range for the server's epoch timestamp before adding a GCRA window.
+// range for the server's epoch timestamp before adding a local duration.
+const MAX_SAFE_LUA_DURATION_MILLIS: u128 = 1_u128 << 52;
 const MAX_SAFE_LUA_DURATION_MICROS: u128 = 1_u128 << 52;
 
 /// Invalid primitive configuration detected before Redis is contacted.
@@ -74,6 +75,18 @@ pub enum ConfigurationError {
     /// A countdown latch count exceeded Redis's signed integer range.
     #[error("initial count exceeds Redis's signed integer range")]
     InitialCountTooLarge,
+
+    /// A delayed-queue claim was configured without any result capacity.
+    #[error("maximum claimed items must be greater than zero")]
+    ZeroClaimLimit,
+
+    /// An ID generator was configured with an empty allocation block.
+    #[error("ID block size must be greater than zero")]
+    ZeroIdBlockSize,
+
+    /// An ID allocation block exceeded Redis's signed integer range.
+    #[error("ID block size exceeds Redis's signed integer range")]
+    IdBlockSizeTooLarge,
 }
 
 pub(crate) fn require_key(
@@ -95,9 +108,23 @@ pub(crate) fn duration_millis(
         return Err(ConfigurationError::ZeroDuration { parameter });
     }
 
+    duration_millis_inner(duration, parameter)
+}
+
+pub(crate) fn duration_millis_allow_zero(
+    duration: Duration,
+    parameter: &'static str,
+) -> Result<u64, ConfigurationError> {
+    duration_millis_inner(duration, parameter)
+}
+
+fn duration_millis_inner(
+    duration: Duration,
+    parameter: &'static str,
+) -> Result<u64, ConfigurationError> {
     let millis = duration.as_millis();
     let rounded = millis + u128::from(!duration.subsec_nanos().is_multiple_of(1_000_000));
-    if rounded > i64::MAX as u128 {
+    if rounded > MAX_SAFE_LUA_DURATION_MILLIS {
         return Err(ConfigurationError::DurationTooLarge { parameter });
     }
     Ok(rounded as u64)
@@ -142,6 +169,12 @@ mod tests {
 
     #[test]
     fn lua_duration_reserves_exact_integer_space_for_server_time() {
+        let millis = ((1_u64 << 52) / 1_000) + 1;
+        assert_eq!(
+            duration_millis(Duration::from_secs(millis), "ttl"),
+            Err(ConfigurationError::DurationTooLarge { parameter: "ttl" })
+        );
+
         let seconds = ((1_u64 << 52) / 1_000_000) + 1;
         assert_eq!(
             duration_micros(Duration::from_secs(seconds), "window"),

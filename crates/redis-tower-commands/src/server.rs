@@ -3749,7 +3749,9 @@ fn hotkeys_field_pairs(frame: &Frame) -> Result<Vec<(&Frame, &Frame)>, RedisErro
                 });
             }
             Ok(items
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| (&pair[0], &pair[1]))
                 .collect())
         }
@@ -3825,7 +3827,9 @@ fn parse_hotkey_measurements(
     }
 
     items
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             Ok((
                 hotkeys_bytes(&pair[0], "HOTKEYS key")?,

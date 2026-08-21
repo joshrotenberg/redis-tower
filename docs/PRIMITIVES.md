@@ -1,11 +1,11 @@
 # Distributed primitives
 
 The `redis-tower-primitives` crate builds locks, leader election, expirable
-semaphores, countdown latches, and shared rate limits on the generic
-`RedisExecutor` interface. It works with standalone, multiplexed, pooled,
-resilient, cluster, Sentinel, and universal clients that implement that
-interface. Every script is a public, line-documented constant and runs through
-the EVALSHA-first `Script` helper.
+semaphores, countdown latches, delayed queues, block-allocated IDs, and shared
+rate limits on the generic `RedisExecutor` interface. It works with standalone,
+multiplexed, pooled, resilient, cluster, Sentinel, and universal clients that
+implement that interface. Every script is a public, line-documented constant
+and runs through the EVALSHA-first `Script` helper.
 
 ## Distributed lock
 
@@ -183,6 +183,88 @@ The TTL is an abandonment bound, not a successful release signal. Waiters
 receive `Expired` for a missing key and must decide how to recover. A lost
 countdown response is indeterminate because the decrement may already have
 committed; retrying can release the latch earlier than intended.
+
+## Delayed queue
+
+`DelayedQueue::new(key, retention)` requires the post-deadline interval during
+which a message remains claimable. `enqueue` accepts binary payloads and a
+caller-selected delay, then uses Redis `TIME` to calculate its sorted-set score.
+Random member prefixes preserve duplicate payloads. `claim_due` atomically
+removes a bounded batch in deadline order and starts no poll task.
+
+```rust,ignore
+use std::time::Duration;
+use redis_tower::MultiplexedClient;
+use redis_tower_primitives::DelayedQueue;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+let queue = DelayedQueue::new(
+    "{mail}:delayed",
+    Duration::from_secs(60),
+)?;
+queue
+    .enqueue(&mut client, b"message-42", Duration::from_secs(5))
+    .await?;
+
+let claim = queue.claim_due(&mut client, 32).await?;
+for payload in claim.payloads() {
+    deliver(payload).await?;
+}
+record_expired(claim.expired());
+# Ok(())
+# }
+# async fn deliver(_payload: &[u8]) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+# fn record_expired(_count: u64) {}
+```
+
+The queue touches one key and is cluster-safe. Every participant sharing that
+key must use the same retention. The key TTL tracks the latest scheduled
+deadline plus retention; a claim also reports messages it actively pruned for
+exceeding retention. Redis may expire the whole key without a later claim, so
+that reported count is diagnostic rather than a complete loss counter.
+
+### Delayed-queue failure mode
+
+Claims are deliberately at-most-once: selected messages are removed before the
+script returns. A lost claim response can therefore lose the batch. A lost
+enqueue response is indeterminate and retrying can create a duplicate. The
+caller owns polling, processing, retries, and any dead-letter policy; use Redis
+Streams or another acknowledged queue when at-least-once delivery is required.
+
+## Block-allocated ID generator
+
+`IdGenerator::new(key, block_size)` reserves a contiguous positive range with
+exactly one `INCRBY`. `IdBlock` then yields those IDs locally without more Redis
+I/O or a background task.
+
+```rust,ignore
+use redis_tower::MultiplexedClient;
+use redis_tower_primitives::IdGenerator;
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+let generator = IdGenerator::new("{orders}:id", 1_000)?;
+let mut block = generator.allocate(&mut client).await?;
+
+while let Some(id) = block.next() {
+    create_order(id).await?;
+}
+# Ok(())
+# }
+# async fn create_order(_id: u64) -> Result<(), Box<dyn std::error::Error>> { Ok(()) }
+```
+
+The counter intentionally has no TTL. The key must be reserved for compatible
+ID generators and kept for at least as long as issued IDs can matter.
+
+### ID-generator failure mode
+
+A lost `INCRBY` response makes one block indeterminate. Allocating another
+block is uniqueness-safe but leaves a gap; callers must never infer the unknown
+range. Deleting, expiring, or restoring an older counter can reissue IDs, and
+Redis failover can roll back an increment when durability permits it. Configure
+persistence and replication for the required uniqueness boundary.
 
 ## GCRA rate limiter
 
