@@ -128,10 +128,42 @@
 //!
 //! When reads are directed to replicas, the [`ReadRoutingStrategy`] trait
 //! determines which replica is selected. Built-in strategies include
-//! [`RoundRobinRouting`] (default), [`RandomRouting`], and
-//! [`FirstReplicaRouting`]. Custom strategies can be provided through the two
-//! ordinary clients' builders; the master-only cached builder does not expose
-//! replica routing.
+//! [`RoundRobinRouting`] (default), [`RandomRouting`], [`FirstReplicaRouting`],
+//! and [`AdaptiveReplicaRouting`]. The adaptive strategy composes caller-owned
+//! availability-zone metadata, inverse-EWMA latency weighting, consecutive
+//! transport-failure ejection, lazy timed recovery, and a configurable
+//! minimum-candidate floor. Both ordinary clients report replica attempt
+//! outcomes to the selected strategy; writes and master reads never enter this
+//! feedback path. Custom strategies can be provided through the same builders;
+//! the master-only cached builder does not expose replica routing.
+//!
+//! Redis `CLUSTER SLOTS` responses do not contain availability-zone metadata,
+//! so AZ mappings are explicit application configuration. Map the final node
+//! addresses seen after `host_override` or `address_map` rewriting. Unmapped
+//! replicas remain eligible as cross-AZ fallback candidates.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower_cluster::{AdaptiveReplicaRouting, MultiplexedClusterClient, NodeAddr};
+//!
+//! let routing = AdaptiveReplicaRouting::builder()
+//!     .local_zone("us-east-1a")
+//!     .replica_zone(NodeAddr::new("10.0.1.10", 6379), "us-east-1a")
+//!     .replica_zone(NodeAddr::new("10.0.2.10", 6379), "us-east-1b")
+//!     .failure_threshold(3)
+//!     .ejection_duration(Duration::from_secs(30))
+//!     .minimum_healthy_replicas(1)
+//!     .build()?;
+//! let client = MultiplexedClusterClient::builder("10.0.0.10:6379")
+//!     .read_preference(redis_tower_cluster::ReadPreference::PreferReplica)
+//!     .read_routing(routing)
+//!     .connect()
+//!     .await?;
+//! # let _ = client;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! # Authentication
 //!
@@ -180,8 +212,9 @@ pub mod topology;
 pub use caching::{CachedMultiplexedClusterClient, CachedMultiplexedClusterClientBuilder};
 pub use client::ClusterClient;
 pub use connection::{
+    AdaptiveReplicaRouting, AdaptiveReplicaRoutingBuilder, AdaptiveReplicaRoutingConfigError,
     ClusterConnection, ClusterConnectionBuilder, FirstReplicaRouting, RandomRouting,
-    ReadPreference, ReadRoutingStrategy, RoundRobinRouting,
+    ReadPreference, ReadRoutingStrategy, ReplicaRoutingOutcome, RoundRobinRouting,
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
 pub use pipeline::ClusterPipeline;

@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- shared adaptive replica routing with explicit AZ affinity, inverse-EWMA
+  latency weighting, consecutive-failure ejection, lazy timed recovery, and a
+  configurable minimum-candidate floor (#485)
 - opt-in Redis Smart Client Handoff maintenance handling for factory-backed
   `MultiplexedClient`, with required RESP3 registration, half-TTL `MOVING`
   replacement through the original factory, observational `MIGRATING` events,

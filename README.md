@@ -520,6 +520,41 @@ tokio::spawn(async move {
 });
 ```
 
+Replica selection can combine availability-zone affinity, observed response
+latency, and health ejection. Zone data is explicit because Redis topology
+responses do not report it; use the final address after any cluster address
+mapping:
+
+```rust,ignore
+use std::time::Duration;
+use redis_tower_cluster::{
+    AdaptiveReplicaRouting, MultiplexedClusterClient, NodeAddr, ReadPreference,
+};
+
+let routing = AdaptiveReplicaRouting::builder()
+    .local_zone("us-east-1a")
+    .replica_zone(NodeAddr::new("10.0.1.10", 6379), "us-east-1a")
+    .replica_zone(NodeAddr::new("10.0.2.10", 6379), "us-east-1b")
+    .failure_threshold(3)
+    .ejection_duration(Duration::from_secs(30))
+    .minimum_healthy_replicas(1)
+    .build()?;
+
+let client = MultiplexedClusterClient::builder("10.0.0.10:6379")
+    .read_preference(ReadPreference::PreferReplica)
+    .read_routing(routing)
+    .connect().await?;
+```
+
+Healthy same-AZ replicas are preferred. New or recovered candidates are
+sampled round-robin; measured candidates use inverse-EWMA weighting, so faster
+replicas receive more reads without permanently starving slower ones. Only
+transport, protocol, reconnect, and deadline failures count toward ejection;
+Redis command errors prove the node answered and reset the consecutive-failure
+count. Recovery is lazy and creates no task. The minimum-candidate floor can
+re-admit the soonest-recovering ejected replica rather than leave a strict
+replica read with no target. Writes and master reads are unaffected.
+
 Explicit cluster pipelines pin commands to their owning masters, preserve
 submission order within each master batch, dispatch different master batches
 concurrently, and restore the original result order. There is no total
