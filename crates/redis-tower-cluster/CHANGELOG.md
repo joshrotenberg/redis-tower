@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- adaptive replica-read routing across direct and multiplexed clients, with
+  explicit AZ mappings, EWMA latency feedback, health-aware ejection, timed
+  recovery, and a max-ejection floor; writes and master reads are unchanged
+  (#485)
 - provider-backed setup now force-refreshes once after an authentication
   rejection, and direct/shared multiplexed Cluster clients can apply streamed
   credentials to every established node connection (#475)

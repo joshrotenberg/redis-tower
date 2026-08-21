@@ -470,8 +470,9 @@ pub use pubsub::{
     PubSubMessage,
 };
 pub use read_routing::{
+    AdaptiveReplicaRouting, AdaptiveReplicaRoutingBuilder, AdaptiveReplicaRoutingConfigError,
     FirstReplicaRouting, NodeAddr, RandomRouting, ReadPreference, ReadRoutingStrategy,
-    RoundRobinRouting, is_readonly_command,
+    ReplicaRoutingOutcome, RoundRobinRouting, is_readonly_command,
 };
 pub use reconnect::{
     ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionEventRecvError,

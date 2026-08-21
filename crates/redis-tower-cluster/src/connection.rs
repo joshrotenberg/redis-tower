@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Instant;
 
 use redis_tower::credentials::{
     CredentialProvider, Credentials, StaticCredentials, authenticate_with_refresh,
@@ -24,11 +25,14 @@ use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
 ///
 /// Implement this trait to provide custom replica selection logic.
 /// Built-in implementations include [`RoundRobinRouting`], [`RandomRouting`],
-/// and [`FirstReplicaRouting`].
+/// [`FirstReplicaRouting`], and [`AdaptiveReplicaRouting`].
 ///
 /// Defined in `redis-tower` (shared with `redis-tower-sentinel`'s replica
 /// routing) and re-exported here under its original path.
-pub use redis_tower::ReadRoutingStrategy;
+pub use redis_tower::{
+    AdaptiveReplicaRouting, AdaptiveReplicaRoutingBuilder, AdaptiveReplicaRoutingConfigError,
+    ReadRoutingStrategy, ReplicaRoutingOutcome,
+};
 
 /// Round-robin across replicas (default).
 ///
@@ -47,6 +51,76 @@ pub use redis_tower::RandomRouting;
 /// Useful for testing or when replicas are ordered by preference
 /// (e.g., closest datacenter first).
 pub use redis_tower::FirstReplicaRouting;
+
+/// One in-flight attempt against a replica selected by a routing strategy.
+///
+/// Dropping an unfinished attempt means its future was cancelled (most often
+/// by a command deadline), so cancellation is reported as a health failure.
+pub(crate) struct ReplicaRoutingAttempt {
+    routing: Arc<dyn ReadRoutingStrategy>,
+    replica: Option<NodeAddr>,
+    started: Instant,
+}
+
+impl ReplicaRoutingAttempt {
+    pub(crate) fn new(routing: Arc<dyn ReadRoutingStrategy>, replica: Option<NodeAddr>) -> Self {
+        Self {
+            routing,
+            replica,
+            started: Instant::now(),
+        }
+    }
+
+    pub(crate) fn finish(mut self, outcome: ReplicaRoutingOutcome) {
+        if let Some(replica) = self.replica.take() {
+            self.routing
+                .record_outcome(&replica, self.started.elapsed(), outcome);
+        }
+    }
+
+    pub(crate) fn discard(mut self) {
+        self.replica = None;
+    }
+}
+
+impl Drop for ReplicaRoutingAttempt {
+    fn drop(&mut self) {
+        if let Some(replica) = self.replica.take() {
+            self.routing.record_outcome(
+                &replica,
+                self.started.elapsed(),
+                ReplicaRoutingOutcome::Failure,
+            );
+        }
+    }
+}
+
+pub(crate) fn replica_outcome_for_result<T>(
+    result: &Result<T, RedisError>,
+) -> Option<ReplicaRoutingOutcome> {
+    match result {
+        Err(error)
+            if error.is_retryable()
+                || matches!(
+                    error,
+                    RedisError::ConnectTimeout
+                        | RedisError::CommandTimeout
+                        | RedisError::ReconnectFailed { .. }
+                ) =>
+        {
+            Some(ReplicaRoutingOutcome::Failure)
+        }
+        Ok(_) | Err(RedisError::Redis(_) | RedisError::UnexpectedResponse { .. }) => {
+            Some(ReplicaRoutingOutcome::Success)
+        }
+        Err(_) => None,
+    }
+}
+
+struct RoutedNode {
+    addr: String,
+    replica: Option<NodeAddr>,
+}
 
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
@@ -526,13 +600,17 @@ impl ClusterConnection {
     ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
         let strict_replica_slot = strict_replica_read_slot(self.read_preference, &cmd_frame);
-        let initial_node = self.route_command(&cmd_frame)?.to_string();
+        let initial_route = self.route_command(&cmd_frame)?;
 
-        let mut target_node = initial_node;
+        let mut target_node = initial_route.addr;
+        let mut target_replica = initial_route.replica;
         let mut send_asking = false;
         let mut followups_used = 0usize;
 
         loop {
+            let attempt = target_replica.clone().map(|replica| {
+                ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
+            });
             // A previous command deadline may have quarantined this node's
             // socket while a reply was outstanding. Reconnect lazily before
             // routing the next command to it.
@@ -555,6 +633,9 @@ impl ClusterConnection {
                     .next()
                     .ok_or(RedisError::ConnectionClosed)?
             };
+            if let Some(attempt) = attempt {
+                attempt.finish(ReplicaRoutingOutcome::Success);
+            }
 
             match parse_redirect(&response) {
                 Some(Redirect::Moved { slot, addr }) => {
@@ -575,6 +656,7 @@ impl ClusterConnection {
                     self.ensure_connection(&addr).await?;
                     self.update_slot_owner(slot, &addr);
                     target_node = addr;
+                    target_replica = None;
                     send_asking = false;
                     continue;
                 }
@@ -591,6 +673,7 @@ impl ClusterConnection {
                     followups_used += 1;
                     let addr = self.remap_addr(&addr);
                     target_node = addr;
+                    target_replica = None;
                     send_asking = true;
                     continue;
                 }
@@ -606,7 +689,9 @@ impl ClusterConnection {
                             // The cluster view may be stale (election / moved
                             // slots); refresh best-effort and re-route the key.
                             let _ = self.refresh_topology().await;
-                            target_node = self.route_command(&cmd_frame)?.to_string();
+                            let route = self.route_command(&cmd_frame)?;
+                            target_node = route.addr;
+                            target_replica = route.replica;
                             send_asking = false;
                         }
                         tracing::debug!(?transient, node = %target_node, "transient cluster error; retrying");
@@ -697,7 +782,7 @@ impl ClusterConnection {
 
     /// Determine which node should handle a command based on its key
     /// and read preference.
-    fn route_command(&self, frame: &Frame) -> Result<&str, RedisError> {
+    fn route_command(&self, frame: &Frame) -> Result<RoutedNode, RedisError> {
         if let Some(key) = key_extractor::extract_key(frame) {
             let slot = slot_for_key(key);
 
@@ -705,8 +790,8 @@ impl ClusterConnection {
             if self.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
-                if let Some(addr) = self.pick_replica(slot) {
-                    return Ok(addr);
+                if let Some(route) = self.pick_replica(slot) {
+                    return Ok(route);
                 }
                 if self.read_preference == ReadPreference::Replica {
                     return Err(replica_unavailable(slot));
@@ -718,16 +803,22 @@ impl ClusterConnection {
                 let addr_str = addr.addr_string();
                 for node_key in self.nodes.keys() {
                     if *node_key == addr_str {
-                        return Ok(node_key);
+                        return Ok(RoutedNode {
+                            addr: node_key.clone(),
+                            replica: None,
+                        });
                     }
                 }
             }
         }
-        Ok(&self.default_node)
+        Ok(RoutedNode {
+            addr: self.default_node.clone(),
+            replica: None,
+        })
     }
 
     /// Pick a replica for a given slot using the configured read routing strategy.
-    fn pick_replica(&self, slot: u16) -> Option<&str> {
+    fn pick_replica(&self, slot: u16) -> Option<RoutedNode> {
         let replicas = self.topology.replicas_for_slot(slot).unwrap_or(&[]);
         let is_connected = |replica: &NodeAddr| self.nodes.contains_key(&replica.addr_string());
         let available = if replicas.iter().all(&is_connected) {
@@ -744,13 +835,14 @@ impl ClusterConnection {
                     .collect(),
             )
         };
-        let selected_addr = self
-            .read_routing
-            .select_replica(slot, &available)?
-            .addr_string();
+        let selected = self.read_routing.select_replica(slot, &available)?.clone();
+        let selected_addr = selected.addr_string();
         self.nodes
             .get_key_value(&selected_addr)
-            .map(|(addr, _connection)| addr.as_str())
+            .map(|(addr, _connection)| RoutedNode {
+                addr: addr.clone(),
+                replica: Some(selected),
+            })
     }
 
     /// Remap an address using the address map or host override.
@@ -955,14 +1047,35 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
 
     fn call(&mut self, cmd: Cmd) -> Self::Future {
         let cmd_frame = cmd.to_frame();
-        let node_addr = match self.route_command(&cmd_frame) {
-            Ok(addr) => addr.to_string(),
+        let route = match self.route_command(&cmd_frame) {
+            Ok(route) => route,
             Err(error) => return Box::pin(async move { Err(error) }),
         };
+        let attempt = route.replica.clone().map(|replica| {
+            ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
+        });
 
-        match self.nodes.get_mut(&node_addr) {
-            Some(conn) => <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd),
-            None => Box::pin(async { Err(RedisError::ConnectionClosed) }),
+        match self.nodes.get_mut(&route.addr) {
+            Some(conn) => {
+                let future = <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd);
+                Box::pin(async move {
+                    let result = future.await;
+                    if let Some(attempt) = attempt {
+                        match replica_outcome_for_result(&result) {
+                            Some(outcome) => attempt.finish(outcome),
+                            None => attempt.discard(),
+                        }
+                    }
+                    result
+                })
+            }
+            None => Box::pin(async move {
+                let result = Err(RedisError::ConnectionClosed);
+                if let Some(attempt) = attempt {
+                    attempt.finish(ReplicaRoutingOutcome::Failure);
+                }
+                result
+            }),
         }
     }
 }
@@ -1358,6 +1471,30 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct OutcomeRecordingRouting {
+        outcomes: Arc<Mutex<Vec<(NodeAddr, ReplicaRoutingOutcome)>>>,
+    }
+
+    #[cfg(unix)]
+    impl ReadRoutingStrategy for OutcomeRecordingRouting {
+        fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+            replicas.first()
+        }
+
+        fn record_outcome(
+            &self,
+            replica: &NodeAddr,
+            _latency: std::time::Duration,
+            outcome: ReplicaRoutingOutcome,
+        ) {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .push((replica.clone(), outcome));
+        }
+    }
+
     #[tokio::test]
     async fn already_expired_command_never_reaches_direct_node() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1517,6 +1654,48 @@ mod tests {
         assert_no_wire_request(&mut master_server).await;
         assert_eq!(routing_calls.load(Ordering::SeqCst), 1);
         assert_eq!(*routing_candidates.lock().unwrap(), vec![connected_replica]);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn direct_replica_deadline_records_a_health_failure() {
+        let master_addr = "127.0.0.1:7000";
+        let replica_addr = "127.0.0.1:7001";
+        let (master_client, mut master_server) = tokio::net::UnixStream::pair().unwrap();
+        let (replica_client, mut replica_server) = tokio::net::UnixStream::pair().unwrap();
+        let replica = NodeAddr::new("127.0.0.1", 7001);
+        let mut topology = topology_for_addr(master_addr, 0, 16_383);
+        topology.slot_ranges_mut()[0].replicas = vec![replica.clone()];
+        let mut cluster = cluster_over_stream(master_addr, master_client, topology);
+        cluster.nodes.insert(
+            replica_addr.to_string(),
+            RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+        );
+        cluster.read_preference = ReadPreference::Replica;
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        cluster.read_routing = Arc::new(OutcomeRecordingRouting {
+            outcomes: Arc::clone(&outcomes),
+        });
+
+        let replica_task = tokio::spawn(async move {
+            read_until_contains(&mut replica_server, b"GET").await;
+            futures::future::pending::<()>().await;
+        });
+        let error = cluster
+            .execute(WithDeadline::new(
+                Get::new("foo"),
+                tokio::time::Instant::now() + std::time::Duration::from_millis(25),
+            ))
+            .await
+            .expect_err("replica read unexpectedly completed without a response");
+
+        assert!(matches!(error, RedisError::CommandTimeout));
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![(replica, ReplicaRoutingOutcome::Failure)]
+        );
+        assert_no_wire_request(&mut master_server).await;
+        replica_task.abort();
     }
 
     #[tokio::test]
