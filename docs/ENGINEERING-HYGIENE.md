@@ -50,6 +50,11 @@ cargo mutants --package redis-tower-core --jobs 2
 python3 scripts/mutation_score.py mutants.out --minimum-score 0.70
 ```
 
+The scheduled workflow derives its package list from `cargo metadata`. It runs
+small crates as a single job and splits the two largest crates into deterministic
+round-robin shards, then requires every shard before producing each package
+artifact and the workspace headline score.
+
 ## CI wall clock and flake signal
 
 The scheduled report reads the latest 50 completed, non-cancelled runs of the

@@ -104,29 +104,30 @@ jobs:
           --exclude cluster-bench
           --exclude soak-bench
 
-  mutation:
-    name: Mutation score (${{ matrix.package }})
+  mutation-plan:
+    name: Mutation execution plan
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      packages: ${{ steps.plan.outputs.packages }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build publishable package matrix
+        id: plan
+        run: python3 scripts/mutation_plan.py --github-output "$GITHUB_OUTPUT"
+
+  mutation:
+    name: Mutation shard (${{ matrix.package }} ${{ matrix.shard }}/${{ matrix.shards }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: mutation-plan
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 3
-      matrix:
-        package:
-          - redis-tower
-          - redis-tower-auth-aws
-          - redis-tower-auth-azure
-          - redis-tower-client
-          - redis-tower-cluster
-          - redis-tower-commands
-          - redis-tower-core
-          - redis-tower-modules
-          - redis-tower-primitives
-          - redis-tower-protocol
-          - redis-tower-sentinel
-          - redis-tower-sync
-          - redis-tower-test
+      max-parallel: 12
+      matrix: ${{ fromJSON(needs.mutation-plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
 
@@ -148,11 +149,19 @@ jobs:
         shell: bash
         env:
           MUTATION_PACKAGE: ${{ matrix.package }}
+          MUTATION_SHARD: ${{ matrix.shard }}
+          MUTATION_SHARDS: ${{ matrix.shards }}
         run: |
-          mkdir -p mutation-results
+          MUTATION_OUTPUT="mutation-results/$MUTATION_PACKAGE/shard-$MUTATION_SHARD"
+          mkdir -p "$MUTATION_OUTPUT"
+          shard_args=()
+          if (( MUTATION_SHARDS > 1 )); then
+            shard_args=(--shard "$MUTATION_SHARD/$MUTATION_SHARDS" --sharding round-robin)
+          fi
           set +e
           cargo mutants --package "$MUTATION_PACKAGE" --jobs 2 \
-            --timeout-multiplier 5 --output "mutation-results/$MUTATION_PACKAGE"
+            --timeout-multiplier 5 --output "$MUTATION_OUTPUT" \
+            "${shard_args[@]}"
           status=$?
           set -e
           echo "exit_code=$status" >> "$GITHUB_OUTPUT"
@@ -161,21 +170,47 @@ jobs:
             *) exit "$status" ;;
           esac
 
+      - name: Upload shard mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-shard-${{ matrix.package }}-${{ matrix.shard }}
+          path: mutation-results/${{ matrix.package }}/shard-${{ matrix.shard }}
+          retention-days: 90
+          if-no-files-found: error
+
+  mutation-package:
+    name: Mutation package score (${{ matrix.package }})
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs:
+      - mutation-plan
+      - mutation
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.mutation-plan.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download package mutation shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-shard-${{ matrix.package }}-*
+          path: mutation-shards/${{ matrix.package }}
+
       - name: Render package mutation score
-        if: always() && steps.mutants.outcome == 'success'
-        shell: bash
-        env:
-          MUTATION_PACKAGE: ${{ matrix.package }}
         run: |
           python3 scripts/mutation_score.py \
-            "mutation-results/$MUTATION_PACKAGE" \
+            "mutation-shards/${{ matrix.package }}" \
+            --expected-reports "${{ matrix.shards }}" \
+            --package-name "${{ matrix.package }}" \
             --minimum-score 0.70 \
-            --json-output "mutation-results/$MUTATION_PACKAGE/score.json" \
-            --markdown-output "mutation-results/$MUTATION_PACKAGE/score.md"
-          cat "mutation-results/$MUTATION_PACKAGE/score.md" >> "$GITHUB_STEP_SUMMARY"
+            --outcomes-output "mutation-results/${{ matrix.package }}/mutants.out/outcomes.json" \
+            --json-output "mutation-results/${{ matrix.package }}/score.json" \
+            --markdown-output "mutation-results/${{ matrix.package }}/score.md"
+          cat "mutation-results/${{ matrix.package }}/score.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload package mutation evidence
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: mutation-${{ matrix.package }}
@@ -186,7 +221,7 @@ jobs:
   mutation-summary:
     name: Mutation headline score
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: mutation
+    needs: mutation-package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -194,7 +229,7 @@ jobs:
       - name: Download package mutation evidence
         uses: actions/download-artifact@v4
         with:
-          pattern: mutation-*
+          pattern: mutation-redis-tower*
           path: mutation-results
 
       - name: Render headline score

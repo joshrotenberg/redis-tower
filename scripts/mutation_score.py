@@ -79,6 +79,29 @@ def report(paths: list[Path]) -> dict[str, object]:
     }
 
 
+def collapse_package(payload: dict[str, object], name: str) -> dict[str, object]:
+    """Collapse one or more shard reports into a single package row."""
+    total = payload["total"]
+    assert isinstance(total, dict)
+    return {
+        "schema_version": payload["schema_version"],
+        "packages": {name: total},
+        "total": total,
+    }
+
+
+def write_outcomes(path: Path, payload: dict[str, object]) -> None:
+    """Write aggregate counts using cargo-mutants' outcomes schema."""
+    total = payload["total"]
+    assert isinstance(total, dict)
+    counts = {
+        name: total[name]
+        for name in ("caught", "missed", "timeout", "unviable")
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(counts, indent=2, sort_keys=True) + "\n")
+
+
 def markdown(payload: dict[str, object], minimum_score: float) -> str:
     lines = [
         "# Mutation testing score",
@@ -132,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("inputs", nargs="+", type=Path)
     parser.add_argument("--json-output", type=Path)
     parser.add_argument("--markdown-output", type=Path)
+    parser.add_argument("--outcomes-output", type=Path)
+    parser.add_argument("--package-name")
+    parser.add_argument("--expected-reports", type=int)
     parser.add_argument("--minimum-score", type=float, default=0.0)
     parser.add_argument("--enforce", action="store_true")
     args = parser.parse_args(argv)
@@ -139,7 +165,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--minimum-score must be between 0 and 1")
 
     try:
-        payload = report(find_outcomes(args.inputs))
+        paths = find_outcomes(args.inputs)
+        if args.expected_reports is not None and len(paths) != args.expected_reports:
+            raise ValueError(
+                f"expected {args.expected_reports} mutation reports, found {len(paths)}"
+            )
+        payload = report(paths)
+        if args.package_name:
+            payload = collapse_package(payload, args.package_name)
     except (OSError, ValueError, json.JSONDecodeError) as error:
         print(error, file=sys.stderr)
         return 2
@@ -158,6 +191,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.markdown_output:
         args.markdown_output.parent.mkdir(parents=True, exist_ok=True)
         args.markdown_output.write_text(rendered)
+    if args.outcomes_output:
+        write_outcomes(args.outcomes_output, payload)
     print(rendered, end="")
 
     if args.enforce and (score is None or score < args.minimum_score):

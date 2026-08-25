@@ -53,6 +53,39 @@ class MutationScoreTests(unittest.TestCase):
             )
             self.assertEqual(mutation_score.find_outcomes([root]), [expected])
 
+    def test_collapses_shards_and_writes_aggregate_outcomes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = self.write_outcomes(
+                root, "shard-1", caught=3, missed=1, timeout=0, unviable=2
+            )
+            second = self.write_outcomes(
+                root, "shard-2", caught=2, missed=0, timeout=1, unviable=1
+            )
+            payload = mutation_score.collapse_package(
+                mutation_score.report([first, second]), "redis-tower"
+            )
+            output = root / "package" / "mutants.out" / "outcomes.json"
+
+            mutation_score.write_outcomes(output, payload)
+
+            self.assertEqual(list(payload["packages"]), ["redis-tower"])
+            self.assertEqual(payload["total"]["caught"], 5)
+            self.assertEqual(
+                json.loads(output.read_text()),
+                {"caught": 5, "missed": 1, "timeout": 1, "unviable": 3},
+            )
+
+    def test_cli_rejects_missing_shard_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.write_outcomes(
+                root, "shard-1", caught=1, missed=0, timeout=0, unviable=0
+            )
+            self.assertEqual(
+                mutation_score.main([str(root), "--expected-reports", "2"]), 2
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
