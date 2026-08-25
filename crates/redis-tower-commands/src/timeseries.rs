@@ -1404,19 +1404,19 @@ impl Command for TsQueryIndex {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::Array(Some(frames)) => frames
+            Frame::Array(Some(frames)) | Frame::Set(frames) | Frame::StreamedSet(frames) => frames
                 .into_iter()
                 .map(|f| match f {
-                    Frame::BulkString(Some(data)) => Ok(data),
+                    Frame::BulkString(Some(data)) | Frame::SimpleString(data) => Ok(data),
                     other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string",
+                        expected: "bulk or simple string",
                         actual: format!("{other:?}"),
                     }),
                 })
                 .collect(),
             Frame::Array(None) => Ok(Vec::new()),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or set",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1597,6 +1597,34 @@ mod tests {
         assert!(TsGet::new("k").idempotent());
         // Mutating commands keep the default (false).
         assert!(!TsAdd::new("k", 1i64, 1.0).idempotent());
+    }
+
+    #[test]
+    fn ts_queryindex_accepts_resp2_array_and_resp3_sets() {
+        let command = TsQueryIndex::new("sensor=temperature");
+        let expected = vec![Bytes::from_static(b"ts:a"), Bytes::from_static(b"ts:b")];
+
+        assert_eq!(
+            command
+                .parse_response(Frame::Array(Some(vec![bulk("ts:a"), bulk("ts:b")])))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            command
+                .parse_response(Frame::Set(vec![
+                    Frame::SimpleString(Bytes::from_static(b"ts:a")),
+                    bulk("ts:b"),
+                ]))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            command
+                .parse_response(Frame::StreamedSet(vec![bulk("ts:a"), bulk("ts:b")]))
+                .unwrap(),
+            expected
+        );
     }
 
     #[test]

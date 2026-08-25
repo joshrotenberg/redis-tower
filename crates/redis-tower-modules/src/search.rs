@@ -631,14 +631,14 @@ fn parse_search_results<T: DeserializeOwned>(
     }
 }
 
-fn deserialize_search_doc<T: DeserializeOwned>(
-    fields: impl IntoIterator<Item = (Frame, Frame)>,
+fn deserialize_search_doc<'a, T: DeserializeOwned>(
+    fields: impl IntoIterator<Item = (&'a Frame, &'a Frame)>,
 ) -> Result<T, RedisError> {
     let mut map = serde_json::Map::new();
     for (key, value) in fields {
         map.insert(
-            frame_to_string(&key)?,
-            serde_json::Value::String(frame_to_string(&value)?),
+            frame_to_string(key)?,
+            serde_json::Value::String(frame_to_string(value)?),
         );
     }
 
@@ -708,8 +708,9 @@ fn parse_resp2_search_results<T: DeserializeOwned>(
 
         let doc = deserialize_search_doc(
             fields
-                .chunks_exact(2)
-                .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
+                .chunks(2)
+                .filter(|chunk| chunk.len() == 2)
+                .map(|chunk| (&chunk[0], &chunk[1])),
         )?;
 
         docs.push(SearchDoc { key, doc, score });
@@ -810,7 +811,7 @@ fn parse_resp3_search_results<T: DeserializeOwned>(
                 });
             }
         };
-        let doc = deserialize_search_doc(fields)?;
+        let doc = deserialize_search_doc(fields.iter().map(|(key, value)| (key, value)))?;
         docs.push(SearchDoc { key, doc, score });
     }
 

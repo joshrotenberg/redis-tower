@@ -16,7 +16,7 @@
 
 use redis_tower_core::RedisConnection;
 use redis_tower_modules::timeseries::{
-    TimeSeriesClient, TsKeyConfig, TsRangeQuery, TsSample, TsTimestamp,
+    TimeSeriesClient, TsKeyConfig, TsMRangeQuery, TsRangeQuery, TsSample, TsTimestamp,
 };
 
 async fn connect() -> RedisConnection {
@@ -38,7 +38,10 @@ fn unique_suffix() -> u128 {
 #[ignore = "requires a live Redis Stack server with RedisTimeSeries"]
 async fn timeseries_add_and_range() {
     let mut conn = connect().await;
-    let key = format!("test:ts:{}", unique_suffix());
+    let suffix = unique_suffix();
+    let key = format!("test:ts:{suffix}");
+    let test_id = suffix.to_string();
+    let filter = format!("test_id={test_id}");
 
     {
         let mut ts = TimeSeriesClient::new(&mut conn);
@@ -48,7 +51,8 @@ async fn timeseries_add_and_range() {
             &key,
             TsKeyConfig::new()
                 .retention(3_600_000)
-                .label("sensor", "temperature"),
+                .label("sensor", "temperature")
+                .label("test_id", &test_id),
         )
         .await
         .unwrap();
@@ -88,9 +92,28 @@ async fn timeseries_add_and_range() {
         // TS.INFO reflects the sample count and the configured label.
         let info = ts.info(&key).await.unwrap();
         assert_eq!(info.total_samples, 2);
-        assert_eq!(info.labels.len(), 1);
-        assert_eq!(info.labels[0].key, "sensor");
-        assert_eq!(info.labels[0].value, "temperature");
+        assert!(
+            info.labels
+                .iter()
+                .any(|label| label.key == "sensor" && label.value == "temperature")
+        );
+
+        // RESP3 uses a set for TS.QUERYINDEX and maps for the multi-key reads.
+        let matching_keys = ts.query_index(&filter).await.unwrap();
+        assert_eq!(matching_keys, vec![key.clone()]);
+
+        let mget = ts.mget(&filter, true).await.unwrap();
+        assert_eq!(mget.len(), 1);
+        assert_eq!(mget[0].key, key);
+        assert_eq!(mget[0].samples.last(), last.as_ref());
+
+        let mrange = ts
+            .mrange(TsMRangeQuery::new(TsRangeQuery::all(), &filter).withlabels())
+            .await
+            .unwrap();
+        assert_eq!(mrange.len(), 1);
+        assert_eq!(mrange[0].key, key);
+        assert_eq!(mrange[0].samples, samples);
     }
 
     use redis_tower::commands::Del;

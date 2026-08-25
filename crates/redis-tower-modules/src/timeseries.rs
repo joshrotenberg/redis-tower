@@ -405,16 +405,26 @@ fn parse_get(frame: Frame) -> Result<Option<TsSample>, RedisError> {
     }
 }
 
-/// Parse a `[[label_k, label_v], ...]` frame into `Vec<TsLabel>`.
+fn parse_label(key: Frame, value: Frame) -> Result<TsLabel, RedisError> {
+    Ok(TsLabel {
+        key: frame_to_string(key)?,
+        value: match value {
+            Frame::Null => String::new(),
+            value => frame_to_string(value)?,
+        },
+    })
+}
+
+/// Parse RESP2 label pairs or a RESP3 label map into `Vec<TsLabel>`.
 fn parse_labels(frame: Frame) -> Result<Vec<TsLabel>, RedisError> {
     match frame {
         Frame::Array(Some(frames)) => frames
             .into_iter()
             .map(|f| match f {
                 Frame::Array(Some(mut kv)) if kv.len() == 2 => {
-                    let value = frame_to_string(kv.pop().unwrap())?;
-                    let key = frame_to_string(kv.pop().unwrap())?;
-                    Ok(TsLabel { key, value })
+                    let value = kv.pop().unwrap();
+                    let key = kv.pop().unwrap();
+                    parse_label(key, value)
                 }
                 other => Err(RedisError::UnexpectedResponse {
                     expected: "[label_key, label_value] pair",
@@ -423,8 +433,12 @@ fn parse_labels(frame: Frame) -> Result<Vec<TsLabel>, RedisError> {
             })
             .collect(),
         Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_label(key, value))
+            .collect(),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "labels array",
+            expected: "labels array or map",
             actual: format!("{other:?}"),
         }),
     }
@@ -454,13 +468,41 @@ fn parse_mrange_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
     }
 }
 
+/// Parse one RESP3 TS.MRANGE / TS.MREVRANGE map entry.
+///
+/// RESP3 returns `key => [labels, metadata, samples]`. The metadata currently
+/// contains aggregation details that are not represented by [`TsKeyResult`].
+fn parse_resp3_mrange_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResult, RedisError> {
+    match frame {
+        Frame::Array(Some(mut elems)) if elems.len() == 3 => {
+            let samples_frame = elems.pop().unwrap();
+            let _metadata_frame = elems.pop().unwrap();
+            let labels_frame = elems.pop().unwrap();
+
+            Ok(TsKeyResult {
+                key: frame_to_string(key_frame)?,
+                labels: parse_labels(labels_frame)?,
+                samples: parse_samples(samples_frame)?,
+            })
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "[labels, metadata, samples] map value",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Parse TS.MRANGE / TS.MREVRANGE response.
 fn parse_mrange(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
     match frame {
         Frame::Array(Some(entries)) => entries.into_iter().map(parse_mrange_entry).collect(),
         Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_resp3_mrange_entry(key, value))
+            .collect(),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "array of mrange entries",
+            expected: "array or map of mrange entries",
             actual: format!("{other:?}"),
         }),
     }
@@ -494,13 +536,38 @@ fn parse_mget_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
     }
 }
 
+/// Parse one RESP3 TS.MGET map entry: `key => [labels, sample]`.
+fn parse_resp3_mget_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResult, RedisError> {
+    match frame {
+        Frame::Array(Some(mut elems)) if elems.len() == 2 => {
+            let sample_frame = elems.pop().unwrap();
+            let labels_frame = elems.pop().unwrap();
+            let samples = parse_get(sample_frame)?.into_iter().collect();
+
+            Ok(TsKeyResult {
+                key: frame_to_string(key_frame)?,
+                labels: parse_labels(labels_frame)?,
+                samples,
+            })
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "[labels, sample] map value",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Parse TS.MGET response.
 fn parse_mget(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
     match frame {
         Frame::Array(Some(entries)) => entries.into_iter().map(parse_mget_entry).collect(),
         Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_resp3_mget_entry(key, value))
+            .collect(),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "array of mget entries",
+            expected: "array or map of mget entries",
             actual: format!("{other:?}"),
         }),
     }
@@ -1085,6 +1152,52 @@ mod tests {
         assert_eq!(results[0].samples[0].value, 22.0);
     }
 
+    #[tokio::test]
+    async fn mrange_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![(
+            bulk("sensors:temp"),
+            Frame::Array(Some(vec![
+                Frame::Map(vec![(bulk("sensor"), bulk("temperature"))]),
+                Frame::Map(vec![(bulk("aggregators"), Frame::Array(Some(vec![])))]),
+                Frame::Array(Some(vec![Frame::Array(Some(vec![
+                    int(1_700_000_000_000),
+                    Frame::Double(22.0),
+                ]))])),
+            ])),
+        )])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let results = ts
+            .mrange(TsMRangeQuery::new(TsRangeQuery::all(), "sensor=temperature").withlabels())
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "sensors:temp");
+        assert_eq!(results[0].labels[0].value, "temperature");
+        assert_eq!(results[0].samples[0].value, 22.0);
+    }
+
+    #[tokio::test]
+    async fn mget_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::StreamedMap(vec![(
+            bulk("sensors:temp"),
+            Frame::Array(Some(vec![
+                Frame::StreamedMap(vec![(bulk("sensor"), Frame::Null)]),
+                Frame::Array(Some(vec![int(1_700_000_000_000), Frame::Double(22.0)])),
+            ])),
+        )])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let results = ts.mget("sensor=temperature", true).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "sensors:temp");
+        assert_eq!(results[0].labels[0].key, "sensor");
+        assert_eq!(results[0].labels[0].value, "");
+        assert_eq!(results[0].samples[0].value, 22.0);
+    }
+
     // --- madd ---------------------------------------------------------------
 
     #[tokio::test]
@@ -1185,10 +1298,7 @@ mod tests {
             (bulk("duplicatePolicy"), Frame::Null),
             (
                 bulk("labels"),
-                Frame::Array(Some(vec![Frame::Array(Some(vec![
-                    bulk("sensor"),
-                    bulk("temperature"),
-                ]))])),
+                Frame::Map(vec![(bulk("sensor"), bulk("temperature"))]),
             ),
         ])]);
         let mut ts = TimeSeriesClient::new(&mut mock);
