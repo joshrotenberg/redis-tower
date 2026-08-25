@@ -46,9 +46,14 @@ stable baseline before deciding whether to enforce it.
 For a focused local run:
 
 ```bash
-cargo mutants --package redis-tower-core --in-place --jobs 2
+cargo mutants --package redis-tower-core --jobs 2
 python3 scripts/mutation_score.py mutants.out --minimum-score 0.70
 ```
+
+The scheduled workflow derives its package list from `cargo metadata`. It runs
+small crates as a single job and splits the two largest crates into deterministic
+round-robin shards, then requires every shard before producing each package
+artifact and the workspace headline score.
 
 ## CI wall clock and flake signal
 
