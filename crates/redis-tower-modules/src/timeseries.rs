@@ -325,6 +325,7 @@ fn frame_to_i64(frame: Frame) -> Result<i64, RedisError> {
 
 fn frame_to_f64(frame: Frame) -> Result<f64, RedisError> {
     match frame {
+        Frame::Double(value) => Ok(value),
         Frame::BulkString(Some(b)) => {
             let s = std::str::from_utf8(&b).map_err(|_| RedisError::TypeMismatch {
                 expected: "f64 as UTF-8",
@@ -334,7 +335,7 @@ fn frame_to_f64(frame: Frame) -> Result<f64, RedisError> {
         }
         Frame::Integer(n) => Ok(n as f64),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "bulk string (f64)",
+            expected: "double, integer, or bulk string (f64)",
             actual: format!("{other:?}"),
         }),
     }
@@ -404,16 +405,26 @@ fn parse_get(frame: Frame) -> Result<Option<TsSample>, RedisError> {
     }
 }
 
-/// Parse a `[[label_k, label_v], ...]` frame into `Vec<TsLabel>`.
+fn parse_label(key: Frame, value: Frame) -> Result<TsLabel, RedisError> {
+    Ok(TsLabel {
+        key: frame_to_string(key)?,
+        value: match value {
+            Frame::Null => String::new(),
+            value => frame_to_string(value)?,
+        },
+    })
+}
+
+/// Parse RESP2 label pairs or a RESP3 label map into `Vec<TsLabel>`.
 fn parse_labels(frame: Frame) -> Result<Vec<TsLabel>, RedisError> {
     match frame {
         Frame::Array(Some(frames)) => frames
             .into_iter()
             .map(|f| match f {
                 Frame::Array(Some(mut kv)) if kv.len() == 2 => {
-                    let value = frame_to_string(kv.pop().unwrap())?;
-                    let key = frame_to_string(kv.pop().unwrap())?;
-                    Ok(TsLabel { key, value })
+                    let value = kv.pop().unwrap();
+                    let key = kv.pop().unwrap();
+                    parse_label(key, value)
                 }
                 other => Err(RedisError::UnexpectedResponse {
                     expected: "[label_key, label_value] pair",
@@ -422,8 +433,12 @@ fn parse_labels(frame: Frame) -> Result<Vec<TsLabel>, RedisError> {
             })
             .collect(),
         Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_label(key, value))
+            .collect(),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "labels array",
+            expected: "labels array or map",
             actual: format!("{other:?}"),
         }),
     }
@@ -453,13 +468,41 @@ fn parse_mrange_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
     }
 }
 
+/// Parse one RESP3 TS.MRANGE / TS.MREVRANGE map entry.
+///
+/// RESP3 returns `key => [labels, metadata, samples]`. The metadata currently
+/// contains aggregation details that are not represented by [`TsKeyResult`].
+fn parse_resp3_mrange_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResult, RedisError> {
+    match frame {
+        Frame::Array(Some(mut elems)) if elems.len() == 3 => {
+            let samples_frame = elems.pop().unwrap();
+            let _metadata_frame = elems.pop().unwrap();
+            let labels_frame = elems.pop().unwrap();
+
+            Ok(TsKeyResult {
+                key: frame_to_string(key_frame)?,
+                labels: parse_labels(labels_frame)?,
+                samples: parse_samples(samples_frame)?,
+            })
+        }
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "[labels, metadata, samples] map value",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Parse TS.MRANGE / TS.MREVRANGE response.
 fn parse_mrange(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
     match frame {
         Frame::Array(Some(entries)) => entries.into_iter().map(parse_mrange_entry).collect(),
         Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_resp3_mrange_entry(key, value))
+            .collect(),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "array of mrange entries",
+            expected: "array or map of mrange entries",
             actual: format!("{other:?}"),
         }),
     }
@@ -493,41 +536,71 @@ fn parse_mget_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
     }
 }
 
-/// Parse TS.MGET response.
-fn parse_mget(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
+/// Parse one RESP3 TS.MGET map entry: `key => [labels, sample]`.
+fn parse_resp3_mget_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResult, RedisError> {
     match frame {
-        Frame::Array(Some(entries)) => entries.into_iter().map(parse_mget_entry).collect(),
-        Frame::Array(None) => Ok(Vec::new()),
+        Frame::Array(Some(mut elems)) if elems.len() == 2 => {
+            let sample_frame = elems.pop().unwrap();
+            let labels_frame = elems.pop().unwrap();
+            let samples = parse_get(sample_frame)?.into_iter().collect();
+
+            Ok(TsKeyResult {
+                key: frame_to_string(key_frame)?,
+                labels: parse_labels(labels_frame)?,
+                samples,
+            })
+        }
         other => Err(RedisError::UnexpectedResponse {
-            expected: "array of mget entries",
+            expected: "[labels, sample] map value",
             actual: format!("{other:?}"),
         }),
     }
 }
 
-/// Parse a flat `[key_bulk, value, key_bulk, value, ...]` TS.INFO response.
+/// Parse TS.MGET response.
+fn parse_mget(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
+    match frame {
+        Frame::Array(Some(entries)) => entries.into_iter().map(parse_mget_entry).collect(),
+        Frame::Array(None) => Ok(Vec::new()),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .into_iter()
+            .map(|(key, value)| parse_resp3_mget_entry(key, value))
+            .collect(),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array or map of mget entries",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Parse an RESP2 flat array or RESP3 map returned by TS.INFO.
 fn parse_info(frame: Frame) -> Result<TsInfoResult, RedisError> {
-    let pairs = match frame {
-        Frame::Array(Some(frames)) => frames,
+    let entries = match frame {
+        Frame::Array(Some(frames)) => {
+            if frames.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even-length array from TS.INFO",
+                    actual: format!("odd length: {}", frames.len()),
+                });
+            }
+            let mut entries = Vec::with_capacity(frames.len() / 2);
+            let mut frames = frames.into_iter();
+            while let (Some(key), Some(value)) = (frames.next(), frames.next()) {
+                entries.push((key, value));
+            }
+            entries
+        }
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries,
         other => {
             return Err(RedisError::UnexpectedResponse {
-                expected: "flat key-value array from TS.INFO",
+                expected: "flat key-value array or map from TS.INFO",
                 actual: format!("{other:?}"),
             });
         }
     };
 
-    if pairs.len() % 2 != 0 {
-        return Err(RedisError::UnexpectedResponse {
-            expected: "even-length array from TS.INFO",
-            actual: format!("odd length: {}", pairs.len()),
-        });
-    }
-
     let mut result = TsInfoResult::default();
-    let mut iter = pairs.into_iter();
-
-    while let (Some(key_frame), Some(val_frame)) = (iter.next(), iter.next()) {
+    for (key_frame, val_frame) in entries {
         let key = frame_to_string(key_frame)?;
         match key.as_str() {
             "totalSamples" => result.total_samples = frame_to_i64(val_frame)?,
@@ -994,6 +1067,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn get_accepts_resp3_double_sample() {
+        let mut mock = MockRedis::new(vec![Frame::Array(Some(vec![
+            int(1_700_000_000_000),
+            Frame::Double(21.5),
+        ]))]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let result = ts.get("sensors:temp").await.unwrap();
+
+        assert_eq!(
+            result,
+            Some(TsSample {
+                timestamp: 1_700_000_000_000,
+                value: 21.5,
+            })
+        );
+    }
+
     // --- range --------------------------------------------------------------
 
     #[tokio::test]
@@ -1057,6 +1149,52 @@ mod tests {
         assert_eq!(results[0].labels[0].key, "sensor");
         assert_eq!(results[0].labels[0].value, "temperature");
         assert_eq!(results[0].samples.len(), 1);
+        assert_eq!(results[0].samples[0].value, 22.0);
+    }
+
+    #[tokio::test]
+    async fn mrange_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![(
+            bulk("sensors:temp"),
+            Frame::Array(Some(vec![
+                Frame::Map(vec![(bulk("sensor"), bulk("temperature"))]),
+                Frame::Map(vec![(bulk("aggregators"), Frame::Array(Some(vec![])))]),
+                Frame::Array(Some(vec![Frame::Array(Some(vec![
+                    int(1_700_000_000_000),
+                    Frame::Double(22.0),
+                ]))])),
+            ])),
+        )])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let results = ts
+            .mrange(TsMRangeQuery::new(TsRangeQuery::all(), "sensor=temperature").withlabels())
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "sensors:temp");
+        assert_eq!(results[0].labels[0].value, "temperature");
+        assert_eq!(results[0].samples[0].value, 22.0);
+    }
+
+    #[tokio::test]
+    async fn mget_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::StreamedMap(vec![(
+            bulk("sensors:temp"),
+            Frame::Array(Some(vec![
+                Frame::StreamedMap(vec![(bulk("sensor"), Frame::Null)]),
+                Frame::Array(Some(vec![int(1_700_000_000_000), Frame::Double(22.0)])),
+            ])),
+        )])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let results = ts.mget("sensor=temperature", true).await.unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "sensors:temp");
+        assert_eq!(results[0].labels[0].key, "sensor");
+        assert_eq!(results[0].labels[0].value, "");
         assert_eq!(results[0].samples[0].value, 22.0);
     }
 
@@ -1145,6 +1283,33 @@ mod tests {
         let info = ts.info("key").await.unwrap();
         assert_eq!(info.duplicate_policy, None);
         assert!(info.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn info_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![
+            (bulk("totalSamples"), int(2)),
+            (bulk("memoryUsage"), int(4096)),
+            (bulk("firstTimestamp"), int(1_000)),
+            (bulk("lastTimestamp"), int(2_000)),
+            (bulk("retentionTime"), int(3_600_000)),
+            (bulk("chunkCount"), int(1)),
+            (bulk("chunkSize"), int(4096)),
+            (bulk("duplicatePolicy"), Frame::Null),
+            (
+                bulk("labels"),
+                Frame::Map(vec![(bulk("sensor"), bulk("temperature"))]),
+            ),
+        ])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let info = ts.info("sensors:temp").await.unwrap();
+
+        assert_eq!(info.total_samples, 2);
+        assert_eq!(info.last_timestamp, 2_000);
+        assert_eq!(info.labels.len(), 1);
+        assert_eq!(info.labels[0].key, "sensor");
+        assert_eq!(info.labels[0].value, "temperature");
     }
 
     // --- del_range ----------------------------------------------------------
