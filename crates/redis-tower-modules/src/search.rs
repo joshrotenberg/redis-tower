@@ -606,25 +606,50 @@ fn frame_to_f64(frame: &Frame) -> Option<f64> {
 
 /// Parse an `FT.SEARCH` reply into typed search results.
 ///
-/// `FT.SEARCH` returns:
+/// With RESP2, `FT.SEARCH` returns:
 /// `[total, key1, [field1, val1, ...], key2, [...], ...]`
 ///
 /// With `WITHSCORES` a score is interleaved after each key:
 /// `[total, key1, score1, [field1, val1, ...], ...]`
+///
+/// With RESP3, the top-level response is a map containing `total_results`
+/// and a `results` array. Each result is itself a map containing `id`,
+/// `extra_attributes`, and optionally `score`.
 fn parse_search_results<T: DeserializeOwned>(
     frame: Frame,
     withscores: bool,
 ) -> Result<SearchResults<T>, RedisError> {
-    let items = match frame {
-        Frame::Array(Some(items)) => items,
-        other => {
-            return Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            });
+    match frame {
+        Frame::Array(Some(items)) => parse_resp2_search_results(items, withscores),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => {
+            parse_resp3_search_results(entries, withscores)
         }
-    };
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "array or map",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
 
+fn deserialize_search_doc<T: DeserializeOwned>(
+    fields: impl IntoIterator<Item = (Frame, Frame)>,
+) -> Result<T, RedisError> {
+    let mut map = serde_json::Map::new();
+    for (key, value) in fields {
+        map.insert(
+            frame_to_string(&key)?,
+            serde_json::Value::String(frame_to_string(&value)?),
+        );
+    }
+
+    serde_json::from_value(serde_json::Value::Object(map))
+        .map_err(|e| RedisError::Redis(format!("deserialize error: {e}")))
+}
+
+fn parse_resp2_search_results<T: DeserializeOwned>(
+    items: Vec<Frame>,
+    withscores: bool,
+) -> Result<SearchResults<T>, RedisError> {
     if items.is_empty() {
         return Err(RedisError::UnexpectedResponse {
             expected: "non-empty array with total count",
@@ -681,19 +706,111 @@ fn parse_search_results<T: DeserializeOwned>(
         };
         i += 1;
 
-        let mut map = serde_json::Map::new();
-        for chunk in fields.chunks(2) {
-            if chunk.len() < 2 {
-                continue;
+        let doc = deserialize_search_doc(
+            fields
+                .chunks_exact(2)
+                .map(|chunk| (chunk[0].clone(), chunk[1].clone())),
+        )?;
+
+        docs.push(SearchDoc { key, doc, score });
+    }
+
+    Ok(SearchResults { total, docs })
+}
+
+fn parse_resp3_search_results<T: DeserializeOwned>(
+    entries: Vec<(Frame, Frame)>,
+    withscores: bool,
+) -> Result<SearchResults<T>, RedisError> {
+    let mut response = HashMap::new();
+    for (key, value) in entries {
+        response.insert(frame_to_string(&key)?, value);
+    }
+
+    let total = match response.remove("total_results") {
+        Some(Frame::Integer(total)) => total,
+        Some(other) => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "integer total_results",
+                actual: format!("{other:?}"),
+            });
+        }
+        None => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "total_results field",
+                actual: "field not found".to_string(),
+            });
+        }
+    };
+
+    let results = match response.remove("results") {
+        Some(Frame::Array(Some(results))) | Some(Frame::StreamedArray(results)) => results,
+        Some(other) => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "results array",
+                actual: format!("{other:?}"),
+            });
+        }
+        None => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "results field",
+                actual: "field not found".to_string(),
+            });
+        }
+    };
+
+    let mut docs = Vec::with_capacity(results.len());
+    for result in results {
+        let entries = match result {
+            Frame::Map(entries) | Frame::StreamedMap(entries) => entries,
+            other => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "result map",
+                    actual: format!("{other:?}"),
+                });
             }
-            let k = frame_to_string(&chunk[0])?;
-            let v = frame_to_string(&chunk[1])?;
-            map.insert(k, serde_json::Value::String(v));
+        };
+        let mut result = HashMap::new();
+        for (key, value) in entries {
+            result.insert(frame_to_string(&key)?, value);
         }
 
-        let doc: T = serde_json::from_value(serde_json::Value::Object(map))
-            .map_err(|e| RedisError::Redis(format!("deserialize error: {e}")))?;
+        let key = result
+            .remove("id")
+            .ok_or_else(|| RedisError::UnexpectedResponse {
+                expected: "result id field",
+                actual: "field not found".to_string(),
+            })
+            .and_then(|frame| frame_to_string(&frame))?;
 
+        let score = if withscores {
+            Some(
+                result
+                    .remove("score")
+                    .as_ref()
+                    .and_then(frame_to_f64)
+                    .unwrap_or(0.0),
+            )
+        } else {
+            None
+        };
+
+        let fields = match result.remove("extra_attributes") {
+            Some(Frame::Map(fields)) | Some(Frame::StreamedMap(fields)) => fields,
+            Some(other) => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "extra_attributes map",
+                    actual: format!("{other:?}"),
+                });
+            }
+            None => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "extra_attributes field",
+                    actual: "field not found".to_string(),
+                });
+            }
+        };
+        let doc = deserialize_search_doc(fields)?;
         docs.push(SearchDoc { key, doc, score });
     }
 
@@ -956,6 +1073,66 @@ mod tests {
             bs("0.75"),
             Frame::Array(Some(vec![bs("name"), bs("Widget")])),
         ]))]);
+        let mut client = SearchClient::new(&mut mock);
+
+        let results: SearchResults<Doc> = client
+            .search(SearchQuery::new("idx", "*").withscores())
+            .await
+            .unwrap();
+
+        assert_eq!(results.total, 1);
+        assert_eq!(results.docs.len(), 1);
+        assert!((results.docs[0].score.unwrap() - 0.75).abs() < f64::EPSILON);
+        assert_eq!(results.docs[0].doc.name, "Widget");
+    }
+
+    #[tokio::test]
+    async fn search_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![
+            (ss("attributes"), Frame::Array(Some(vec![]))),
+            (ss("format"), ss("STRING")),
+            (
+                ss("results"),
+                Frame::Array(Some(vec![Frame::Map(vec![
+                    (ss("id"), bs("doc:1")),
+                    (
+                        ss("extra_attributes"),
+                        Frame::Map(vec![(bs("name"), bs("Widget"))]),
+                    ),
+                    (ss("values"), Frame::Array(Some(vec![]))),
+                ])])),
+            ),
+            (ss("total_results"), Frame::Integer(1)),
+            (ss("warning"), Frame::Array(Some(vec![]))),
+        ])]);
+        let mut client = SearchClient::new(&mut mock);
+
+        let results: SearchResults<Doc> =
+            client.search(SearchQuery::new("idx", "*")).await.unwrap();
+
+        assert_eq!(results.total, 1);
+        assert_eq!(results.docs.len(), 1);
+        assert_eq!(results.docs[0].key, "doc:1");
+        assert_eq!(results.docs[0].doc.name, "Widget");
+        assert!(results.docs[0].score.is_none());
+    }
+
+    #[tokio::test]
+    async fn search_resp3_map_withscores() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![
+            (
+                ss("results"),
+                Frame::Array(Some(vec![Frame::Map(vec![
+                    (ss("id"), bs("doc:1")),
+                    (ss("score"), Frame::Double(0.75)),
+                    (
+                        ss("extra_attributes"),
+                        Frame::Map(vec![(bs("name"), bs("Widget"))]),
+                    ),
+                ])])),
+            ),
+            (ss("total_results"), Frame::Integer(1)),
+        ])]);
         let mut client = SearchClient::new(&mut mock);
 
         let results: SearchResults<Doc> = client
