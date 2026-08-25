@@ -325,6 +325,7 @@ fn frame_to_i64(frame: Frame) -> Result<i64, RedisError> {
 
 fn frame_to_f64(frame: Frame) -> Result<f64, RedisError> {
     match frame {
+        Frame::Double(value) => Ok(value),
         Frame::BulkString(Some(b)) => {
             let s = std::str::from_utf8(&b).map_err(|_| RedisError::TypeMismatch {
                 expected: "f64 as UTF-8",
@@ -334,7 +335,7 @@ fn frame_to_f64(frame: Frame) -> Result<f64, RedisError> {
         }
         Frame::Integer(n) => Ok(n as f64),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "bulk string (f64)",
+            expected: "double, integer, or bulk string (f64)",
             actual: format!("{other:?}"),
         }),
     }
@@ -505,29 +506,34 @@ fn parse_mget(frame: Frame) -> Result<Vec<TsKeyResult>, RedisError> {
     }
 }
 
-/// Parse a flat `[key_bulk, value, key_bulk, value, ...]` TS.INFO response.
+/// Parse an RESP2 flat array or RESP3 map returned by TS.INFO.
 fn parse_info(frame: Frame) -> Result<TsInfoResult, RedisError> {
-    let pairs = match frame {
-        Frame::Array(Some(frames)) => frames,
+    let entries = match frame {
+        Frame::Array(Some(frames)) => {
+            if frames.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even-length array from TS.INFO",
+                    actual: format!("odd length: {}", frames.len()),
+                });
+            }
+            let mut entries = Vec::with_capacity(frames.len() / 2);
+            let mut frames = frames.into_iter();
+            while let (Some(key), Some(value)) = (frames.next(), frames.next()) {
+                entries.push((key, value));
+            }
+            entries
+        }
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries,
         other => {
             return Err(RedisError::UnexpectedResponse {
-                expected: "flat key-value array from TS.INFO",
+                expected: "flat key-value array or map from TS.INFO",
                 actual: format!("{other:?}"),
             });
         }
     };
 
-    if pairs.len() % 2 != 0 {
-        return Err(RedisError::UnexpectedResponse {
-            expected: "even-length array from TS.INFO",
-            actual: format!("odd length: {}", pairs.len()),
-        });
-    }
-
     let mut result = TsInfoResult::default();
-    let mut iter = pairs.into_iter();
-
-    while let (Some(key_frame), Some(val_frame)) = (iter.next(), iter.next()) {
+    for (key_frame, val_frame) in entries {
         let key = frame_to_string(key_frame)?;
         match key.as_str() {
             "totalSamples" => result.total_samples = frame_to_i64(val_frame)?,
@@ -994,6 +1000,25 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn get_accepts_resp3_double_sample() {
+        let mut mock = MockRedis::new(vec![Frame::Array(Some(vec![
+            int(1_700_000_000_000),
+            Frame::Double(21.5),
+        ]))]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let result = ts.get("sensors:temp").await.unwrap();
+
+        assert_eq!(
+            result,
+            Some(TsSample {
+                timestamp: 1_700_000_000_000,
+                value: 21.5,
+            })
+        );
+    }
+
     // --- range --------------------------------------------------------------
 
     #[tokio::test]
@@ -1145,6 +1170,36 @@ mod tests {
         let info = ts.info("key").await.unwrap();
         assert_eq!(info.duplicate_policy, None);
         assert!(info.labels.is_empty());
+    }
+
+    #[tokio::test]
+    async fn info_accepts_resp3_map() {
+        let mut mock = MockRedis::new(vec![Frame::Map(vec![
+            (bulk("totalSamples"), int(2)),
+            (bulk("memoryUsage"), int(4096)),
+            (bulk("firstTimestamp"), int(1_000)),
+            (bulk("lastTimestamp"), int(2_000)),
+            (bulk("retentionTime"), int(3_600_000)),
+            (bulk("chunkCount"), int(1)),
+            (bulk("chunkSize"), int(4096)),
+            (bulk("duplicatePolicy"), Frame::Null),
+            (
+                bulk("labels"),
+                Frame::Array(Some(vec![Frame::Array(Some(vec![
+                    bulk("sensor"),
+                    bulk("temperature"),
+                ]))])),
+            ),
+        ])]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+
+        let info = ts.info("sensors:temp").await.unwrap();
+
+        assert_eq!(info.total_samples, 2);
+        assert_eq!(info.last_timestamp, 2_000);
+        assert_eq!(info.labels.len(), 1);
+        assert_eq!(info.labels[0].key, "sensor");
+        assert_eq!(info.labels[0].value, "temperature");
     }
 
     // --- del_range ----------------------------------------------------------
