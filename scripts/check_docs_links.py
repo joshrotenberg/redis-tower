@@ -12,9 +12,14 @@ from urllib.parse import unquote, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs"
+REPOSITORY_PATH = "/joshrotenberg/redis-tower"
 
 FENCED_CODE = re.compile(r"^\s*(```|~~~).*?^\s*\1\s*$", re.MULTILINE | re.DOTALL)
 INLINE_LINK = re.compile(r"!?\[[^]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
+LINKED_IMAGE = re.compile(
+    r"\[\s*!\[[^]]*\]\(\s*(?:<[^>]+>|[^\s)]+)\s*\)\s*\]"
+    r"\(\s*(?:<([^>]+)>|([^\s)]+))"
+)
 REFERENCE_LINK = re.compile(r"^\s*\[[^]]+\]:\s*(?:<([^>]+)>|([^\s]+))", re.MULTILINE)
 ATX_HEADING = re.compile(r"^ {0,3}#{1,6}(?:[ \t]+|$)(.*)$")
 SETEXT_UNDERLINE = re.compile(r"^ {0,3}(?:=+|-+)[ \t]*$")
@@ -29,12 +34,34 @@ def markdown_text(source: Path) -> str:
     return FENCED_CODE.sub("", source.read_text(encoding="utf-8"))
 
 
-def markdown_targets(source: Path) -> list[str]:
-    """Return inline and reference-style link targets outside fenced code."""
+def targets_from_markdown(text: str) -> list[str]:
+    """Return inline, linked-image, and reference-style link targets."""
 
-    text = markdown_text(source)
-    matches = [*INLINE_LINK.finditer(text), *REFERENCE_LINK.finditer(text)]
+    matches = [
+        *LINKED_IMAGE.finditer(text),
+        *INLINE_LINK.finditer(text),
+        *REFERENCE_LINK.finditer(text),
+    ]
     return [(match.group(1) or match.group(2)).strip() for match in matches]
+
+
+def markdown_targets(source: Path) -> list[str]:
+    """Return Markdown link targets outside fenced code."""
+
+    return targets_from_markdown(markdown_text(source))
+
+
+def canonical_repository_target(parsed_path: str) -> Path | None:
+    """Map this repository's canonical GitHub URLs back to local paths."""
+
+    path = parsed_path.rstrip("/")
+    if path == REPOSITORY_PATH:
+        return ROOT / "README.md"
+
+    for marker in (f"{REPOSITORY_PATH}/blob/main/", f"{REPOSITORY_PATH}/tree/main/"):
+        if parsed_path.startswith(marker):
+            return ROOT / unquote(parsed_path.removeprefix(marker))
+    return None
 
 
 def local_target(source: Path, raw_target: str) -> tuple[Path, str | None] | None:
@@ -42,6 +69,11 @@ def local_target(source: Path, raw_target: str) -> tuple[Path, str | None] | Non
 
     parsed = urlsplit(raw_target)
     if parsed.scheme or parsed.netloc or raw_target.startswith("//"):
+        if parsed.scheme == "https" and parsed.netloc == "github.com":
+            target = canonical_repository_target(parsed.path)
+            if target is not None:
+                fragment = unquote(parsed.fragment) if parsed.fragment else None
+                return target.resolve(), fragment
         return None
 
     if parsed.path:
@@ -137,6 +169,18 @@ def self_test() -> None:
         "cross",
     )
     assert local_target(source, "https://example.com/page#external") is None
+    assert targets_from_markdown("[![CI](badge.svg)](LICENSE)") == [
+        "LICENSE",
+        "badge.svg",
+    ]
+    assert local_target(
+        source,
+        "https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-MIT",
+    ) == (ROOT / "LICENSE-MIT", None)
+    assert local_target(
+        source,
+        "https://github.com/joshrotenberg/redis-tower#license",
+    ) == (ROOT / "README.md", "license")
 
     assert heading_slug("Cargo.toml") == "cargotoml"
     assert heading_slug("Arbitrary / not-yet-typed commands") == (
@@ -160,7 +204,13 @@ def main() -> int:
         print(f"usage: {Path(sys.argv[0]).name} [--self-test]", file=sys.stderr)
         return 2
 
-    sources = [ROOT / "README.md", *sorted(DOCS.rglob("*.md"))]
+    sources = sorted(
+        {
+            ROOT / "README.md",
+            *ROOT.glob("crates/*/README.md"),
+            *DOCS.rglob("*.md"),
+        }
+    )
     checked = 0
     checked_fragments = 0
     failures: list[str] = []

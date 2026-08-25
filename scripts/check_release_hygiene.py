@@ -9,6 +9,9 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
+
+from check_docs_links import markdown_targets
 
 
 @dataclass(frozen=True)
@@ -80,6 +83,46 @@ def audit_package(package: Package) -> list[str]:
         errors.append(f"{package.name}: src/lib.rs is missing")
     elif "#![deny(missing_docs)]" not in lib.read_text():
         errors.append(f"{package.name}: src/lib.rs must deny missing_docs")
+    errors.extend(audit_release_readme(package))
+    return errors
+
+
+def audit_release_readme(package: Package) -> list[str]:
+    """Reject repository-relative links that break in packaged READMEs."""
+
+    metadata = package.manifest.get("package")
+    assert isinstance(metadata, dict)
+    readme_value = metadata.get("readme")
+    if not isinstance(readme_value, str):
+        return []
+
+    readme = (package.root / readme_value).resolve()
+    if not readme.is_file():
+        return [f"{package.name}: release README is missing: {readme_value}"]
+
+    errors = []
+    for target in markdown_targets(readme):
+        parsed = urlsplit(target)
+        if not parsed.scheme and not parsed.netloc and parsed.path:
+            errors.append(
+                f"{package.name}: release README target {target!r} is repository-relative; "
+                "use a canonical URL"
+            )
+    return errors
+
+
+def audit_repository_license(root: Path) -> list[str]:
+    """Verify the workspace dual-license expression and source texts."""
+
+    manifest = load_toml(root / "Cargo.toml")
+    workspace = manifest.get("workspace")
+    package = workspace.get("package") if isinstance(workspace, dict) else None
+    errors = []
+    if not isinstance(package, dict) or package.get("license") != "MIT OR Apache-2.0":
+        errors.append("workspace package license must be 'MIT OR Apache-2.0'")
+    for filename in ("LICENSE-MIT", "LICENSE-APACHE"):
+        if not (root / filename).is_file():
+            errors.append(f"repository is missing {filename}")
     return errors
 
 
@@ -113,7 +156,7 @@ def audit(root: Path, *, package_contents: bool) -> tuple[list[Package], list[st
     packages = publishable_packages(root)
     if not packages:
         return [], ["no publishable redis-tower packages were found"]
-    errors = []
+    errors = audit_repository_license(root)
     for package in packages:
         errors.extend(audit_package(package))
         if package_contents:
