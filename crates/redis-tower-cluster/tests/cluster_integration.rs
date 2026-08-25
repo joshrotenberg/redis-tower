@@ -12,7 +12,7 @@ use redis_tower::pool::ConnectionPool;
 use redis_tower::{CacheTrackingMode, CachedClientConfig, Transaction};
 use redis_tower_cluster::{
     CachedMultiplexedClusterClient, ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan,
-    ClusterScanItem, MultiplexedClusterClient, ScanClusterStream, slot_for_key,
+    ClusterScanItem, MultiplexedClusterClient, ReadPreference, ScanClusterStream, slot_for_key,
 };
 use redis_tower_commands::*;
 use redis_tower_test::cluster::{ClusterFixture, ClusterNodeRole, key_for_slot};
@@ -52,6 +52,62 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
     MultiplexedClusterClient::connect(&cluster.addr())
         .await
         .expect("failed to connect to multiplexed cluster")
+}
+
+#[tokio::test]
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster"]
+async fn strict_replica_client_routes_every_fixture_range_repeatedly() {
+    let fixture = ClusterFixture::start()
+        .await
+        .expect("failed to start replica-ready fixture");
+    let fixture_topology = fixture
+        .topology()
+        .await
+        .expect("failed to inspect fixture topology");
+    let slots = [42_u16, 6_000, 12_000];
+    let mut keys = Vec::new();
+
+    for slot in slots {
+        let key = key_for_slot(slot);
+        let owner = fixture_topology
+            .owner_of_slot(slot)
+            .expect("test slot should have an owner");
+        fixture
+            .run_node(owner.index, &["SET", &key, "replica-ready"])
+            .await
+            .expect("failed to seed strict replica key");
+        let acknowledgements = fixture
+            .run_node(owner.index, &["WAIT", "1", "5000"])
+            .await
+            .expect("failed to wait for replica acknowledgement");
+        assert_eq!(acknowledgements.trim(), "1");
+        keys.push(key);
+    }
+
+    let client = MultiplexedClusterClient::builder(fixture.seed_addr())
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .expect("failed to connect strict replica client");
+    assert!(
+        client
+            .topology()
+            .await
+            .slot_ranges()
+            .iter()
+            .all(|range| !range.replicas.is_empty()),
+        "client topology omitted a fixture replica"
+    );
+
+    for _ in 0..10 {
+        for key in &keys {
+            assert_eq!(
+                client.execute(Get::new(key)).await.unwrap(),
+                Some(Bytes::from_static(b"replica-ready"))
+            );
+        }
+    }
+    client.shutdown().await;
 }
 
 fn commandstat_calls(info: &str, command: &str) -> u64 {

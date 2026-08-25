@@ -1286,6 +1286,22 @@ class ManifestTests(unittest.TestCase):
 
 
 class RunnerContractTests(unittest.TestCase):
+    def test_weekly_benchmark_retains_failure_diagnostics(self) -> None:
+        workflow = (
+            SCRIPT_DIR.parent.parent / ".github/workflows/benchmarks.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn(
+            "2> benchmark-results/${{ matrix.package }}.log",
+            workflow,
+        )
+        self.assertIn(
+            "2> benchmark-results/cluster-bench-replica.log",
+            workflow,
+        )
+        upload = workflow[workflow.index("      - name: Upload benchmark results") :]
+        self.assertIn("        if: always()", upload)
+        self.assertIn("          if-no-files-found: warn", upload)
+
     def test_runner_has_privacy_sleep_and_mode_guards(self) -> None:
         runner = (SCRIPT_DIR / "run_publication.sh").read_text(encoding="utf-8")
         fingerprint = (SCRIPT_DIR / "execution_fingerprint.py").read_text(
