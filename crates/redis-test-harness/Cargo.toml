@@ -20,6 +20,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }
 bytes = { workspace = true }
-redis-server-wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+redis-server-wrapper = { workspace = true }

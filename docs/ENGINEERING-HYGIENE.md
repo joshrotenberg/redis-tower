@@ -10,9 +10,11 @@ Every pull request runs three classes of checks:
 - `cargo-semver-checks` compares all publishable crate APIs with the pull
   request target revision under a patch-compatible policy. Intentional API
   breaks must therefore be explicit rather than arriving as collateral edits.
-- Library tests run with every feature on macOS arm64, Windows x64, and Linux
-  arm64. The all-feature builds exercise native TLS on each host; Unix-socket
-  tests run on the Unix hosts.
+- Publishable library tests run with every feature on macOS arm64, Windows x64,
+  and Linux arm64. The matrix excludes Unix-only benchmark packages, and the
+  reusable cluster fixture is compiled only on Unix because its process
+  lifecycle depends on POSIX signals. The all-feature builds exercise native
+  TLS on each host; Unix-socket tests run on the Unix hosts.
 - `check_release_hygiene.py` discovers every publishable `redis-tower*` crate
   from the workspace manifest. It requires `#![deny(missing_docs)]`, complete
   docs.rs metadata, standard package metadata, and expected package contents.

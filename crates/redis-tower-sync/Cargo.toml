@@ -20,8 +20,10 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [dev-dependencies]
 bytes = { workspace = true }
-redis-server-wrapper = { workspace = true }
 redis-tower-test = { path = "../redis-test-harness" }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

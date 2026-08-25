@@ -22,8 +22,10 @@ tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-util = { workspace = true }
 
 [dev-dependencies]
-redis-server-wrapper = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

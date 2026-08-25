@@ -21,8 +21,10 @@ redis-tower-sentinel = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 redis-tower-commands = { workspace = true }
-redis-server-wrapper = { workspace = true }
 bytes = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

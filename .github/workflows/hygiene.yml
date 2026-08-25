@@ -96,7 +96,12 @@ jobs:
           shared-key: hygiene-${{ matrix.runner }}
 
       - name: Build and run library tests with every feature
-        run: cargo test --workspace --lib --all-features
+        run: >-
+          cargo test --workspace --lib --all-features
+          --exclude standalone-bench
+          --exclude sentinel-bench
+          --exclude cluster-bench
+          --exclude soak-bench
 
   mutation:
     name: Mutation score (${{ matrix.package }})
