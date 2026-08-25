@@ -98,10 +98,13 @@ use crate::caching::{
     CacheDispatchMode, ClusterCacheBackend, ClusterCacheHooks, ClusterCacheMaster,
     ClusterCacheNodeSnapshot, ClusterCacheRequest,
 };
+#[cfg(test)]
+use crate::connection::ReplicaRoutingOutcome;
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
-    RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError, parse_cluster_url, parse_redirect,
-    remap_topology, remap_topology_with_map, replica_unavailable, strict_replica_read_slot,
+    ReplicaRoutingAttempt, RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError,
+    parse_cluster_url, parse_redirect, remap_topology, remap_topology_with_map,
+    replica_outcome_for_result, replica_unavailable, strict_replica_read_slot,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
@@ -1312,6 +1315,13 @@ impl MultiplexedClusterClient {
         mode: CacheDispatchMode,
         asking: bool,
     ) -> Result<Frame, RedisError> {
+        let attempt = match target.replica.clone() {
+            Some(replica) => {
+                let routing = Arc::clone(&self.inner.read().await.read_routing);
+                Some(ReplicaRoutingAttempt::new(routing, Some(replica)))
+            }
+            None => None,
+        };
         let result = async {
             match (asking, mode) {
                 (false, CacheDispatchMode::Plain) => call_service(&mut target.svc, frame).await,
@@ -1348,6 +1358,12 @@ impl MultiplexedClusterClient {
 
         if let Err(error) = &result {
             self.observe_node_error(&target.addr, error);
+        }
+        if let Some(attempt) = attempt {
+            match replica_outcome_for_result(&result) {
+                Some(outcome) => attempt.finish(outcome),
+                None => attempt.discard(),
+            }
         }
         result
     }
@@ -2038,12 +2054,16 @@ impl MultiplexedClusterClient {
             if inner.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
-                if let Some(addr) = pick_replica(&inner, slot)
+                if let Some((addr, replica)) = pick_replica(&inner, slot)
                     && let Some(svc) = inner.replicas.get(&addr)
                     && replica_service_is_usable(svc)
                 {
                     let svc = svc.clone();
-                    return Ok(Target { svc, addr });
+                    return Ok(Target {
+                        svc,
+                        addr,
+                        replica: Some(replica),
+                    });
                 }
                 if inner.read_preference == ReadPreference::Replica {
                     return Err(replica_unavailable(slot));
@@ -2057,6 +2077,7 @@ impl MultiplexedClusterClient {
                     return Ok(Target {
                         svc: svc.clone(),
                         addr: addr_str,
+                        replica: None,
                     });
                 }
             }
@@ -2069,7 +2090,11 @@ impl MultiplexedClusterClient {
             .get(&default)
             .cloned()
             .ok_or(RedisError::ConnectionClosed)?;
-        Ok(Target { svc, addr: default })
+        Ok(Target {
+            svc,
+            addr: default,
+            replica: None,
+        })
     }
 
     async fn master_service(&self, addr: &str) -> Result<Target, RedisError> {
@@ -2082,6 +2107,7 @@ impl MultiplexedClusterClient {
         Ok(Target {
             svc,
             addr: addr.to_string(),
+            replica: None,
         })
     }
 
@@ -2314,6 +2340,7 @@ impl ClusterCacheBackend for MultiplexedClusterClient {
 struct Target {
     svc: AutoPipelineService,
     addr: String,
+    replica: Option<NodeAddr>,
 }
 
 fn parse_prefixed_response(
@@ -2354,7 +2381,7 @@ fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError
     }
 }
 
-fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
+fn pick_replica(inner: &Inner, slot: u16) -> Option<(String, NodeAddr)> {
     let replicas = inner.topology.replicas_for_slot(slot).unwrap_or(&[]);
     let is_usable = |replica: &NodeAddr| {
         inner
@@ -2376,10 +2403,11 @@ fn pick_replica(inner: &Inner, slot: u16) -> Option<String> {
                 .collect(),
         )
     };
-    inner
+    let replica = inner
         .read_routing
         .select_replica(slot, &available)
-        .map(NodeAddr::addr_string)
+        .cloned()?;
+    Some((replica.addr_string(), replica))
 }
 
 fn replica_service_is_usable(service: &AutoPipelineService) -> bool {
@@ -3219,6 +3247,28 @@ mod observability_tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             replicas.clone_into(&mut self.candidates.lock().unwrap());
             replicas.first()
+        }
+    }
+
+    struct OutcomeRecordingRouting {
+        outcomes: Arc<Mutex<Vec<(NodeAddr, ReplicaRoutingOutcome)>>>,
+    }
+
+    impl ReadRoutingStrategy for OutcomeRecordingRouting {
+        fn select_replica<'a>(&self, _slot: u16, replicas: &'a [NodeAddr]) -> Option<&'a NodeAddr> {
+            replicas.first()
+        }
+
+        fn record_outcome(
+            &self,
+            replica: &NodeAddr,
+            _latency: Duration,
+            outcome: ReplicaRoutingOutcome,
+        ) {
+            self.outcomes
+                .lock()
+                .unwrap()
+                .push((replica.clone(), outcome));
         }
     }
 
@@ -4522,6 +4572,50 @@ mod observability_tests {
         assert!(!master_saw_wire.load(Ordering::Relaxed));
         assert_eq!(routing_calls.load(Ordering::SeqCst), 1);
         assert_eq!(*routing_candidates.lock().unwrap(), vec![connected_replica]);
+    }
+
+    #[tokio::test]
+    async fn multiplexed_replica_success_records_latency_health_outcome() {
+        let (master_addr, master_service, master_saw_wire, master_server) = quiet_service().await;
+        let (replica_addr, replica_service, replica_server) =
+            scripted_service(vec![b"GET"], b"$7\r\nreplica\r\n".to_vec()).await;
+        let replica = node_addr(&replica_addr);
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(&master_addr),
+            replicas: vec![replica.clone()],
+        }]);
+        let recorder = Arc::new(RecordingMetrics::default());
+        let client = test_client(
+            master_addr.clone(),
+            topology,
+            HashMap::from([(master_addr, master_service)]),
+            recorder,
+            false,
+        );
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        {
+            let mut inner = client.inner.write().await;
+            inner.read_preference = ReadPreference::Replica;
+            inner.read_routing = Arc::new(OutcomeRecordingRouting {
+                outcomes: Arc::clone(&outcomes),
+            });
+            inner.replicas.insert(replica_addr, replica_service);
+        }
+
+        assert_eq!(
+            client.execute(Get::new("foo")).await.unwrap(),
+            Some(Bytes::from_static(b"replica"))
+        );
+        assert_eq!(
+            *outcomes.lock().unwrap(),
+            vec![(replica, ReplicaRoutingOutcome::Success)]
+        );
+        client.shutdown().await;
+        replica_server.await.unwrap();
+        master_server.await.unwrap();
+        assert!(!master_saw_wire.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

@@ -559,6 +559,24 @@ budget, read preference, credentials, TLS, and RESP limits.
 - Leave `ReadPreference::Master` in place unless the application accepts
   replica staleness. `Replica` and `PreferReplica` change consistency, not only
   performance.
+- Use `AdaptiveReplicaRouting` when replica reads should compose locality,
+  latency, and health. Redis does not advertise availability zones through
+  `CLUSTER SLOTS`; configure `local_zone` and each `replica_zone` explicitly,
+  using the post-`host_override`/`address_map` address. Unmapped replicas remain
+  cross-AZ fallback candidates.
+- Adaptive routing samples new and recovered candidates round-robin, then uses
+  inverse-EWMA weighting. Lower alpha smooths transient latency spikes; higher
+  alpha reacts faster. Measure with production traffic before changing the
+  default `0.2`.
+- Consecutive transport, protocol, reconnect, and deadline failures drive
+  ejection. Redis command errors are healthy responses and reset the failure
+  count. Recovery is evaluated lazily after `ejection_duration`; there is no
+  probe task to retain. `minimum_healthy_replicas` is a max-ejection floor: if
+  every candidate would otherwise be excluded, the soonest-recovering entries
+  are made eligible. The default floor of one favors availability and can
+  continue trying a failing singleton replica; set it to zero with
+  `PreferReplica` when master fallback is more important than retaining a
+  replica target.
 - `max_redirects` bounds both latency and repeated work during resharding.
   Raising it can hide unstable topology while increasing tail latency; monitor
   `MOVED`, `ASK`, and topology refresh metrics first.
