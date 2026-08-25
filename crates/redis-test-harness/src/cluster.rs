@@ -14,6 +14,8 @@ use std::time::Duration;
 
 use redis_server_wrapper::chaos;
 use redis_server_wrapper::{RedisCluster, RedisClusterHandle, RedisServerHandle};
+use redis_tower_core::{Frame, RedisConnection};
+use redis_tower_protocol::helpers::{array, bulk};
 use tokio::time::{Instant, sleep, timeout};
 
 /// Number of masters in every fixture.
@@ -676,6 +678,7 @@ impl ClusterFixture {
                 && self
                     .replication_links_ready_before(&topology, deadline, wait)
                     .await
+                && self.client_slot_replicas_ready_before(deadline).await
             {
                 return Ok(topology);
             }
@@ -918,6 +921,56 @@ impl ClusterFixture {
         }
         true
     }
+
+    /// Require the client-facing `CLUSTER SLOTS` view on every node to expose
+    /// at least one parseable replica for every advertised slot range.
+    /// `CLUSTER NODES` and `INFO replication` can converge slightly earlier,
+    /// which otherwise lets a strict replica client discover an empty replica
+    /// list immediately after fixture startup.
+    async fn client_slot_replicas_ready_before(&self, deadline: Instant) -> bool {
+        for index in 0..NODE_COUNT {
+            let Some(remaining) = remaining_before(deadline) else {
+                return false;
+            };
+            let probes_left = (NODE_COUNT - index) as u32;
+            let probe_timeout = self.operation_timeout.min(remaining / probes_left);
+            let address = self.node(index).addr();
+            let probe = async {
+                let mut connection = RedisConnection::connect(&address).await?;
+                connection
+                    .execute_pipeline(vec![array(vec![bulk("CLUSTER"), bulk("SLOTS")])])
+                    .await
+            };
+            let Ok(Ok(responses)) = timeout(probe_timeout, probe).await else {
+                return false;
+            };
+            if responses.len() != 1 || !cluster_slots_have_replicas(&responses[0]) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+fn cluster_slots_have_replicas(frame: &Frame) -> bool {
+    let Frame::Array(Some(ranges)) = frame else {
+        return false;
+    };
+    !ranges.is_empty()
+        && ranges.iter().all(|range| {
+            let Frame::Array(Some(fields)) = range else {
+                return false;
+            };
+            fields.len() > 3 && fields[3..].iter().any(cluster_slots_node_is_parseable)
+        })
+}
+
+fn cluster_slots_node_is_parseable(frame: &Frame) -> bool {
+    let Frame::Array(Some(fields)) = frame else {
+        return false;
+    };
+    matches!(fields.first(), Some(Frame::BulkString(Some(_))))
+        && matches!(fields.get(1), Some(Frame::Integer(port)) if u16::try_from(*port).is_ok())
 }
 
 impl Drop for ClusterFixture {
@@ -1506,6 +1559,41 @@ mod tests {
         for slot in [0, 1, 42, 5_460, 5_461, 10_922, 10_923, 16_383] {
             assert_eq!(hash_slot(key_for_slot(slot).as_bytes()), slot);
         }
+    }
+
+    #[test]
+    fn client_slot_readiness_requires_parseable_replica_per_range() {
+        let node = |port| {
+            array(vec![
+                bulk("127.0.0.1"),
+                Frame::Integer(port),
+                bulk("node-id"),
+            ])
+        };
+        let ready = array(vec![array(vec![
+            Frame::Integer(0),
+            Frame::Integer(16_383),
+            node(17_000),
+            node(17_003),
+        ])]);
+        let missing_replica = array(vec![array(vec![
+            Frame::Integer(0),
+            Frame::Integer(16_383),
+            node(17_000),
+        ])]);
+        let malformed_replica = array(vec![array(vec![
+            Frame::Integer(0),
+            Frame::Integer(16_383),
+            node(17_000),
+            array(vec![bulk("127.0.0.1"), bulk("not-a-port")]),
+        ])]);
+
+        assert!(cluster_slots_have_replicas(&ready));
+        assert!(!cluster_slots_have_replicas(&missing_replica));
+        assert!(!cluster_slots_have_replicas(&malformed_replica));
+        assert!(!cluster_slots_have_replicas(&Frame::Array(Some(vec![
+            Frame::Integer(0),
+        ]))));
     }
 
     #[test]

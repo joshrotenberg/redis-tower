@@ -22,28 +22,65 @@ use redis_tower_core::{Frame, RedisError};
 // Private helpers
 // ---------------------------------------------------------------------------
 
+fn parse_kv_key(frame: Frame) -> Result<String, RedisError> {
+    let bytes = match frame {
+        Frame::BulkString(Some(bytes)) | Frame::SimpleString(bytes) => bytes,
+        other => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "bulk or simple string key",
+                actual: format!("{other:?}"),
+            });
+        }
+    };
+
+    String::from_utf8(bytes.to_vec()).map_err(|_| RedisError::UnexpectedResponse {
+        expected: "valid UTF-8 key",
+        actual: format!("{bytes:?}"),
+    })
+}
+
+fn parse_kv_entries(
+    entries: impl IntoIterator<Item = (Frame, Frame)>,
+) -> Result<HashMap<String, Frame>, RedisError> {
+    let mut map = HashMap::new();
+    for (key, value) in entries {
+        let key = parse_kv_key(key)?;
+        if map.insert(key.clone(), value).is_some() {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "unique key-value fields",
+                actual: format!("duplicate field `{key}`"),
+            });
+        }
+    }
+    Ok(map)
+}
+
 fn parse_flat_kv_frame(frame: Frame) -> Result<HashMap<String, Frame>, RedisError> {
     match frame {
         Frame::Array(Some(items)) => {
-            let mut map = HashMap::new();
-            let mut iter = items.into_iter();
-            while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
-                let key = match k {
-                    Frame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
-                    Frame::SimpleString(b) => String::from_utf8_lossy(&b).into_owned(),
-                    other => {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "bulk or simple string key",
-                            actual: format!("{other:?}"),
-                        });
-                    }
-                };
-                map.insert(key, v);
+            if items.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even-length flat key-value array",
+                    actual: format!("{items:?}"),
+                });
             }
-            Ok(map)
+
+            let mut entries = Vec::with_capacity(items.len() / 2);
+            let mut items = items.into_iter();
+            while let Some(key) = items.next() {
+                let Some(value) = items.next() else {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "even-length flat key-value array",
+                        actual: "missing value for final key".to_string(),
+                    });
+                };
+                entries.push((key, value));
+            }
+            parse_kv_entries(entries)
         }
+        Frame::Map(entries) | Frame::StreamedMap(entries) => parse_kv_entries(entries),
         other => Err(RedisError::UnexpectedResponse {
-            expected: "flat key-value array",
+            expected: "flat key-value array or map",
             actual: format!("{other:?}"),
         }),
     }
@@ -882,6 +919,75 @@ mod tests {
         assert_eq!(info.num_filters, 1);
         assert_eq!(info.num_items_inserted, 0);
         assert_eq!(info.expansion_rate, 2);
+    }
+
+    #[tokio::test]
+    async fn bloom_info_parses_resp3_map() {
+        let frame = Frame::Map(vec![
+            (
+                Frame::SimpleString(Bytes::from_static(b"Capacity")),
+                Frame::Integer(1000),
+            ),
+            (
+                Frame::SimpleString(Bytes::from_static(b"Size")),
+                Frame::Integer(2048),
+            ),
+            (
+                Frame::SimpleString(Bytes::from_static(b"Number of filters")),
+                Frame::Integer(1),
+            ),
+            (
+                Frame::SimpleString(Bytes::from_static(b"Number of items inserted")),
+                Frame::Integer(4),
+            ),
+            (
+                Frame::SimpleString(Bytes::from_static(b"Expansion rate")),
+                Frame::Integer(2),
+            ),
+        ]);
+        let mut mock = MockExecutor::new(vec![frame]);
+        let mut bf = BloomFilter::new(&mut mock, "test:bf");
+        let info = bf.info().await.unwrap();
+        assert_eq!(info.capacity, 1000);
+        assert_eq!(info.size, 2048);
+        assert_eq!(info.num_filters, 1);
+        assert_eq!(info.num_items_inserted, 4);
+        assert_eq!(info.expansion_rate, 2);
+    }
+
+    #[test]
+    fn info_parser_rejects_odd_resp2_array() {
+        let frame = Frame::Array(Some(vec![Frame::SimpleString(Bytes::from_static(
+            b"Capacity",
+        ))]));
+        let error = parse_flat_kv_frame(frame).unwrap_err();
+        assert!(error.to_string().contains("even-length"));
+    }
+
+    #[test]
+    fn info_parser_rejects_duplicate_resp3_fields() {
+        let frame = Frame::Map(vec![
+            (
+                Frame::SimpleString(Bytes::from_static(b"Capacity")),
+                Frame::Integer(1000),
+            ),
+            (
+                Frame::BulkString(Some(Bytes::from_static(b"Capacity"))),
+                Frame::Integer(2000),
+            ),
+        ]);
+        let error = parse_flat_kv_frame(frame).unwrap_err();
+        assert!(error.to_string().contains("duplicate field `Capacity`"));
+    }
+
+    #[test]
+    fn info_parser_rejects_invalid_utf8_key() {
+        let frame = Frame::Map(vec![(
+            Frame::SimpleString(Bytes::from_static(b"\xff")),
+            Frame::Integer(1),
+        )]);
+        let error = parse_flat_kv_frame(frame).unwrap_err();
+        assert!(error.to_string().contains("valid UTF-8 key"));
     }
 
     // -----------------------------------------------------------------------

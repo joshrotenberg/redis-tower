@@ -504,6 +504,78 @@ impl VSim {
     }
 }
 
+fn parse_vector_result_name(frame: Frame) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(data)) | Frame::SimpleString(data) => Ok(data),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "bulk or simple string",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_vector_result_score(frame: Frame) -> Result<f64, RedisError> {
+    match frame {
+        Frame::BulkString(Some(data)) | Frame::SimpleString(data) => {
+            let score = String::from_utf8_lossy(&data);
+            score
+                .parse::<f64>()
+                .map_err(|_| RedisError::UnexpectedResponse {
+                    expected: "float string",
+                    actual: score.into_owned(),
+                })
+        }
+        Frame::Double(score) => Ok(score),
+        Frame::Integer(score) => Ok(score as f64),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "string, double, or integer score",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn parse_vector_results(
+    frame: Frame,
+    withscores: bool,
+) -> Result<Vec<(Bytes, Option<f64>)>, RedisError> {
+    match frame {
+        Frame::Array(Some(frames)) if withscores => {
+            if frames.len() % 2 != 0 {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "even number of elements for WITHSCORES",
+                    actual: format!("got {} elements", frames.len()),
+                });
+            }
+            let mut result = Vec::with_capacity(frames.len() / 2);
+            let mut frames = frames.into_iter();
+            while let (Some(name), Some(score)) = (frames.next(), frames.next()) {
+                result.push((
+                    parse_vector_result_name(name)?,
+                    Some(parse_vector_result_score(score)?),
+                ));
+            }
+            Ok(result)
+        }
+        Frame::Array(Some(frames)) => frames
+            .into_iter()
+            .map(|name| Ok((parse_vector_result_name(name)?, None)))
+            .collect(),
+        Frame::Map(entries) | Frame::StreamedMap(entries) if withscores => entries
+            .into_iter()
+            .map(|(name, score)| {
+                Ok((
+                    parse_vector_result_name(name)?,
+                    Some(parse_vector_result_score(score)?),
+                ))
+            })
+            .collect(),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: if withscores { "array or map" } else { "array" },
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 impl Command for VSim {
     type Response = Vec<(Bytes, Option<f64>)>;
 
@@ -554,67 +626,7 @@ impl Command for VSim {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) => {
-                if self.withscores {
-                    // Pairs: [element, score, element, score, ...]
-                    if frames.len() % 2 != 0 {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "even number of elements for WITHSCORES",
-                            actual: format!("got {} elements", frames.len()),
-                        });
-                    }
-                    let mut result = Vec::with_capacity(frames.len() / 2);
-                    let mut iter = frames.into_iter();
-                    while let Some(name_frame) = iter.next() {
-                        let score_frame = iter.next().unwrap();
-                        let name = match name_frame {
-                            Frame::BulkString(Some(data)) => data,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        let score = match score_frame {
-                            Frame::BulkString(Some(data)) => {
-                                let s = String::from_utf8_lossy(&data);
-                                s.parse::<f64>()
-                                    .map_err(|_| RedisError::UnexpectedResponse {
-                                        expected: "float string",
-                                        actual: format!("{s}"),
-                                    })?
-                            }
-                            Frame::Double(d) => d,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string or double",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        result.push((name, Some(score)));
-                    }
-                    Ok(result)
-                } else {
-                    frames
-                        .into_iter()
-                        .map(|f| match f {
-                            Frame::BulkString(Some(data)) => Ok((data, None)),
-                            other => Err(RedisError::UnexpectedResponse {
-                                expected: "bulk string",
-                                actual: format!("{other:?}"),
-                            }),
-                        })
-                        .collect()
-                }
-            }
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            }),
-        }
+        parse_vector_results(frame, self.withscores)
     }
 
     fn name(&self) -> &str {
@@ -1028,66 +1040,7 @@ impl Command for VLinks {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) => {
-                if self.withscores {
-                    if frames.len() % 2 != 0 {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "even number of elements for WITHSCORES",
-                            actual: format!("got {} elements", frames.len()),
-                        });
-                    }
-                    let mut result = Vec::with_capacity(frames.len() / 2);
-                    let mut iter = frames.into_iter();
-                    while let Some(name_frame) = iter.next() {
-                        let score_frame = iter.next().unwrap();
-                        let name = match name_frame {
-                            Frame::BulkString(Some(data)) => data,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        let score = match score_frame {
-                            Frame::BulkString(Some(data)) => {
-                                let s = String::from_utf8_lossy(&data);
-                                s.parse::<f64>()
-                                    .map_err(|_| RedisError::UnexpectedResponse {
-                                        expected: "float string",
-                                        actual: format!("{s}"),
-                                    })?
-                            }
-                            Frame::Double(d) => d,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string or double",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        result.push((name, Some(score)));
-                    }
-                    Ok(result)
-                } else {
-                    frames
-                        .into_iter()
-                        .map(|f| match f {
-                            Frame::BulkString(Some(data)) => Ok((data, None)),
-                            other => Err(RedisError::UnexpectedResponse {
-                                expected: "bulk string",
-                                actual: format!("{other:?}"),
-                            }),
-                        })
-                        .collect()
-                }
-            }
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            }),
-        }
+        parse_vector_results(frame, self.withscores)
     }
 
     fn name(&self) -> &str {
@@ -1136,6 +1089,55 @@ mod tests {
             command
                 .parse_response(Frame::BulkString(Some(Bytes::from_static(b"1"))))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn vector_score_replies_accept_resp2_arrays_and_resp3_maps() {
+        let resp2 = Frame::Array(Some(vec![
+            bulk("a"),
+            bulk("1.0"),
+            Frame::SimpleString(Bytes::from_static(b"b")),
+            Frame::Double(0.5),
+        ]));
+        let resp3 = Frame::Map(vec![
+            (bulk("a"), Frame::Double(1.0)),
+            (
+                Frame::SimpleString(Bytes::from_static(b"b")),
+                Frame::Integer(1),
+            ),
+        ]);
+        let expected = vec![
+            (Bytes::from_static(b"a"), Some(1.0)),
+            (Bytes::from_static(b"b"), Some(0.5)),
+        ];
+
+        assert_eq!(
+            VSim::by_element("vectors", "a")
+                .withscores()
+                .parse_response(resp2)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            VSim::by_element("vectors", "a")
+                .withscores()
+                .parse_response(resp3.clone())
+                .unwrap(),
+            vec![
+                (Bytes::from_static(b"a"), Some(1.0)),
+                (Bytes::from_static(b"b"), Some(1.0)),
+            ]
+        );
+        assert_eq!(
+            VLinks::new("vectors", "a")
+                .withscores()
+                .parse_response(resp3)
+                .unwrap(),
+            vec![
+                (Bytes::from_static(b"a"), Some(1.0)),
+                (Bytes::from_static(b"b"), Some(1.0)),
+            ]
         );
     }
 

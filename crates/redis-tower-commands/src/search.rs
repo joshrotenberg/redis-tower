@@ -366,18 +366,18 @@ impl Command for FtList {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::Array(Some(frames)) => frames
+            Frame::Array(Some(frames)) | Frame::Set(frames) | Frame::StreamedSet(frames) => frames
                 .into_iter()
                 .map(|f| match f {
-                    Frame::BulkString(Some(data)) => Ok(data),
+                    Frame::BulkString(Some(data)) | Frame::SimpleString(data) => Ok(data),
                     other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string",
+                        expected: "bulk or simple string",
                         actual: format!("{other:?}"),
                     }),
                 })
                 .collect(),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
+                expected: "array or set",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1901,6 +1901,40 @@ mod tests {
         assert!(FtSearch::new("idx", "*").idempotent());
         // Mutating commands keep the default (false).
         assert!(!FtCreate::new("idx").idempotent());
+    }
+
+    #[test]
+    fn ft_list_accepts_resp2_array_and_resp3_sets() {
+        let command = FtList::new();
+        let expected = vec![
+            Bytes::from_static(b"index-a"),
+            Bytes::from_static(b"index-b"),
+        ];
+
+        assert_eq!(
+            command
+                .parse_response(Frame::Array(Some(vec![bulk("index-a"), bulk("index-b")])))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            command
+                .parse_response(Frame::Set(vec![
+                    Frame::SimpleString(Bytes::from_static(b"index-a")),
+                    Frame::SimpleString(Bytes::from_static(b"index-b")),
+                ]))
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            command
+                .parse_response(Frame::StreamedSet(vec![
+                    Frame::SimpleString(Bytes::from_static(b"index-a")),
+                    Frame::BulkString(Some(Bytes::from_static(b"index-b"))),
+                ]))
+                .unwrap(),
+            expected
+        );
     }
 
     #[test]

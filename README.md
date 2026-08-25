@@ -3,7 +3,9 @@
 [![Crates.io](https://img.shields.io/crates/v/redis-tower.svg)](https://crates.io/crates/redis-tower)
 [![Documentation](https://docs.rs/redis-tower/badge.svg)](https://docs.rs/redis-tower)
 [![CI](https://github.com/joshrotenberg/redis-tower/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/redis-tower/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/redis-tower.svg)](LICENSE)
+=======
+[![codecov](https://codecov.io/gh/joshrotenberg/redis-tower/branch/main/graph/badge.svg)](https://codecov.io/gh/joshrotenberg/redis-tower)
+[![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/redis-tower.svg)](https://github.com/joshrotenberg/redis-tower#license)
 
 A Redis client for Rust where every connection is a `tower::Service`.
 
@@ -14,13 +16,13 @@ behind feature flags.
 
 **Documentation:** Read the
 [redis-tower guide](https://joshrotenberg.com/redis-tower/) for migration
-and production guidance, or browse its [Markdown source](docs/README.md).
+and production guidance, or browse its [Markdown source](https://github.com/joshrotenberg/redis-tower/blob/main/docs/README.md).
 
 **Coming from another Rust client?** See the migration guides for
-[redis-rs](docs/MIGRATING-FROM-REDIS-RS.md) and
-[Fred](docs/MIGRATING-FROM-FRED.md).
+[redis-rs](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-REDIS-RS.md) and
+[Fred](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-FRED.md).
 
-**Comparing clients?** The [feature matrix](docs/FEATURE-MATRIX.md) weighs
+**Comparing clients?** The [feature matrix](https://github.com/joshrotenberg/redis-tower/blob/main/docs/FEATURE-MATRIX.md) weighs
 redis-tower against redis-rs, fred, Lettuce, go-redis, StackExchange.Redis, and
 ioredis, with every redis-tower cell linked to the code that backs it.
 
@@ -277,7 +279,7 @@ request snapshots as gauges with a generic count unit; exporters therefore do
 not preserve OpenTelemetry's specialized instrument kinds and `{connection}` /
 `{request}` units. These conventions are currently development status and may
 evolve before stabilization. The
-[`prometheus`](examples/prometheus.rs) and [`otel`](examples/otel.rs) examples
+[`prometheus`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/prometheus.rs) and [`otel`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/otel.rs) examples
 show complete exporter setup against a local Redis server:
 
 ```shell
@@ -448,7 +450,7 @@ invalidations the client cannot prove complete. It also requires a finite
 so Redis invalidations alone cannot bound the lifetime of every old-owner
 entry. Standalone cached clients may still explicitly choose `None`.
 
-See the [client-side caching guide](docs/CLIENT-SIDE-CACHING.md) for failure
+See the [client-side caching guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md) for failure
 semantics, bounds, and metrics.
 
 ## JSON API
@@ -678,7 +680,7 @@ tower-resilience crate family. The companion `redis-tower-primitives` crate
 adds fenced distributed locks, leader election, expirable semaphores,
 countdown latches, delayed queues, block-allocated IDs, and Redis-time GCRA
 admission for shared quota; see the [distributed primitives
-guide](docs/PRIMITIVES.md).
+guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md).
 
 Other resilience building blocks:
 
@@ -695,7 +697,7 @@ Other resilience building blocks:
   `is_moved()` / `is_ask()`, and `is_wrongtype()` classify failures so callers
   can respond appropriately.
 
-See [`examples/resilience.rs`](examples/resilience.rs) for a runnable tour.
+See [`examples/resilience.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/resilience.rs) for a runnable tour.
 
 ## Credential provider
 
@@ -742,7 +744,7 @@ owned handle stops the subscription when dropped. Neither path replays a user
 command after a live `NOAUTH` or `WRONGPASS`.
 
 Credential values redact their secret from `Debug` and zeroize their owned
-buffers on drop. See [Cloud and rotating credentials](docs/CLOUD-AUTH.md) for
+buffers on drop. See [Cloud and rotating credentials](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) for
 provider and topology examples, expiry behavior, and security boundaries.
 
 ## TLS
@@ -806,8 +808,8 @@ client.execute(Set::new("key", "hello"))?;
 The comparison runners cover redis-tower, redis-rs, and fred across 64 B,
 1 KiB, and 16 KiB values, configurable concurrency, repeated HDR latency
 samples, and machine-readable output. See
-[`crates/cluster-bench`](crates/cluster-bench/) and
-[`crates/standalone-bench`](crates/standalone-bench/) for the exact matrix and
+[`crates/cluster-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/cluster-bench) and
+[`crates/standalone-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/standalone-bench) for the exact matrix and
 reproduction controls.
 
 The cluster benchmark also has opt-in live topology-churn modes. They compare
@@ -855,14 +857,14 @@ BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
 ```
 
 Release evidence uses the resumable
-[`scripts/benchmarks/run_publication.sh`](scripts/benchmarks/run_publication.sh)
-runner and its [publication protocol](scripts/benchmarks/README.md). It records
+[`scripts/benchmarks/run_publication.sh`](https://github.com/joshrotenberg/redis-tower/blob/main/scripts/benchmarks/run_publication.sh)
+runner and its [publication protocol](https://github.com/joshrotenberg/redis-tower/blob/main/scripts/benchmarks/README.md). It records
 three explicit non-Cartesian sweeps: GET/SET payload-by-concurrency, pipeline
 depth-by-payload at concurrency 1, and pipeline concurrency at a fixed 1 KiB /
 100-command batch. Publication mode requires the validated four-hour soak;
 `--matrix-only` is visibly incomplete development output.
 
-For hours-long stability and recovery evidence, [`crates/soak-bench`](crates/soak-bench/)
+For hours-long stability and recovery evidence, [`crates/soak-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/soak-bench)
 keeps per-worker HDR histograms at constant memory, emits per-minute human or
 JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current
 owner of a key's slot in a managed six-node cluster. Its README documents the
@@ -871,7 +873,7 @@ reconnect and recovery accounting and reproducible four-hour commands.
 Resource-cost comparisons against redis-rs and Fred use separate subject
 processes for RSS per connection and CPU at a fixed offered rate, plus isolated
 cold builds for compile time and stripped binary size. See
-[`crates/resource-bench`](crates/resource-bench/) for the methodology and
+[`crates/resource-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/resource-bench) for the methodology and
 machine-readable commands. Treat hosted-runner results as probe smoke tests;
 publish comparisons only from an otherwise-idle dedicated host.
 
@@ -897,7 +899,7 @@ resource-bench           Process-isolated RSS, CPU, compile-time, and binary-siz
 ```
 
 Typed command conformance against the pinned Redis 8.8 documentation metadata
-is tracked in [`COMMAND_COVERAGE.md`](COMMAND_COVERAGE.md). The report is
+is tracked in [`COMMAND_COVERAGE.md`](https://github.com/joshrotenberg/redis-tower/blob/main/COMMAND_COVERAGE.md). The report is
 generated from the command implementations and checked in CI. Search, Vector
 Set, and the Redis 8.8 Array data type have typed builders for every scoped
 command name. The server and operations sweep includes MIGRATE, module and
@@ -909,12 +911,12 @@ ring-buffer workflows.
 
 ## Testing
 
-The [test conformance report](docs/TEST-CONFORMANCE.md) maps the generated test
+The [test conformance report](https://github.com/joshrotenberg/redis-tower/blob/main/docs/TEST-CONFORMANCE.md) maps the generated test
 inventory, client/protocol and server-version matrices, destructive fault
 coverage, execution cadence, and known gaps to their source and workflow
 evidence.
 
-The [engineering-hygiene guide](docs/ENGINEERING-HYGIENE.md) documents the
+The [engineering-hygiene guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/ENGINEERING-HYGIENE.md) documents the
 public-API compatibility gate, cross-platform matrix, scheduled mutation score,
 CI wall-clock/rerun budgets, release metadata audit, and retained resource and
 build-footprint evidence.
@@ -1005,22 +1007,22 @@ Breaking changes are called out in the changelog.
 
 ## Security
 
-See [SECURITY.md](SECURITY.md) for the vulnerability disclosure policy. Every
+See [SECURITY.md](https://github.com/joshrotenberg/redis-tower/blob/main/SECURITY.md) for the vulnerability disclosure policy. Every
 pull request runs `cargo deny` and `cargo audit` against the RustSec advisory
 database, and the workspace contains no `unsafe` code -- every crate sets
 `#![forbid(unsafe_code)]`.
 
 ## Contributing
 
-Contributions are welcome -- see [CONTRIBUTING.md](CONTRIBUTING.md) for the
+Contributions are welcome -- see [CONTRIBUTING.md](https://github.com/joshrotenberg/redis-tower/blob/main/CONTRIBUTING.md) for the
 development setup, the pre-PR checklist, and conventions.
 
 ## License
 
 Licensed under either of
 
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
 
 at your option.
 

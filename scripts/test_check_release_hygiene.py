@@ -10,6 +10,9 @@ import check_release_hygiene
 ROOT_MANIFEST = """
 [workspace]
 members = ["crates/good", "crates/private"]
+
+[workspace.package]
+license = "MIT OR Apache-2.0"
 """
 
 GOOD_MANIFEST = """
@@ -46,6 +49,9 @@ class ReleaseHygieneTests(unittest.TestCase):
             (package / "src").mkdir(parents=True)
             (package / "Cargo.toml").write_text(manifest)
             (package / "src" / "lib.rs").write_text("#![deny(missing_docs)]\n//! docs\n")
+            (package / "README.md").write_text("[Guide](https://example.com/guide)\n")
+        (root / "LICENSE-MIT").write_text("MIT\n")
+        (root / "LICENSE-APACHE").write_text("Apache-2.0\n")
         return temporary, root
 
     def test_audit_accepts_complete_publishable_crate_and_ignores_private_crate(self) -> None:
@@ -64,6 +70,26 @@ class ReleaseHygieneTests(unittest.TestCase):
         _, errors = check_release_hygiene.audit(root, package_contents=False)
         self.assertTrue(any("metadata.docs.rs" in error for error in errors))
         self.assertTrue(any("deny missing_docs" in error for error in errors))
+
+    def test_audit_rejects_repository_relative_release_readme_links(self) -> None:
+        temporary, root = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        (root / "crates" / "good" / "README.md").write_text(
+            "[![License](https://img.example/license.svg)](../../LICENSE-MIT)\n"
+        )
+
+        _, errors = check_release_hygiene.audit(root, package_contents=False)
+
+        self.assertTrue(any("repository-relative" in error for error in errors))
+
+    def test_audit_requires_dual_license_expression_and_files(self) -> None:
+        temporary, root = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        (root / "LICENSE-APACHE").unlink()
+
+        _, errors = check_release_hygiene.audit(root, package_contents=False)
+
+        self.assertIn("repository is missing LICENSE-APACHE", errors)
 
 
 if __name__ == "__main__":

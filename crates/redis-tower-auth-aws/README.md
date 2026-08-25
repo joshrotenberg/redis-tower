@@ -28,5 +28,5 @@ let client = MultiplexedClient::from_factory(
 let auth_handle = client.spawn_credential_reauthentication(Arc::new(provider));
 ```
 
-See the workspace [cloud-auth guide](../../docs/CLOUD-AUTH.md) for Cluster,
+See the workspace [cloud-auth guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) for Cluster,
 Sentinel, and pool setup plus security and failure behavior.
