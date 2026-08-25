@@ -355,6 +355,9 @@ mod tests {
         }
     }
 
+    // `std::time::Instant` has a much wider representable range on Windows,
+    // so even `Duration::MAX / 2` does not exercise checked-add overflow there.
+    #[cfg(not(windows))]
     #[test]
     fn ignores_moving_deadline_overflow_without_poisoning_dedup_state() {
         let mut state = MaintenanceState::new(1);
