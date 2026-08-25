@@ -361,7 +361,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -448,14 +447,6 @@ jobs:
             lcov.info
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload coverage to Codecov
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
-        with:
-          files: lcov.info
-          use_oidc: true
-          fail_ci_if_error: true
 
   features:
     name: Feature Checks

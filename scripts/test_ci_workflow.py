@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
-CODECOV_ACTION = "codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f"
+README = ROOT / "README.md"
 
 
 def coverage_job() -> str:
@@ -17,23 +17,14 @@ def coverage_job() -> str:
 
 
 class CiWorkflowTests(unittest.TestCase):
-    def test_coverage_job_uses_oidc_and_fails_eligible_upload_errors(self) -> None:
+    def test_coverage_job_does_not_depend_on_unconfigured_codecov(self) -> None:
         job = coverage_job()
-        self.assertIn("    permissions:\n      contents: read\n      id-token: write\n", job)
-        self.assertIn(f"uses: {CODECOV_ACTION} # v7.0.0", job)
-        self.assertIn("use_oidc: true", job)
-        self.assertIn("fail_ci_if_error: true", job)
+        self.assertIn("    permissions:\n      contents: read\n", job)
+        self.assertNotIn("codecov", job.lower())
         self.assertNotIn("CODECOV_TOKEN", job)
 
-    def test_fork_pull_requests_skip_only_external_publication(self) -> None:
-        job = coverage_job()
-        condition = (
-            "if: github.event_name != 'pull_request' || "
-            "github.event.pull_request.head.repo.full_name == github.repository"
-        )
-        self.assertIn(condition, job)
-        self.assertLess(job.index("Generate lcov report"), job.index(condition))
-        self.assertLess(job.index("Retain coverage evidence"), job.index(condition))
+    def test_readme_does_not_advertise_unconfigured_codecov(self) -> None:
+        self.assertNotIn("codecov", README.read_text().lower())
 
     def test_native_summary_and_artifact_are_retained(self) -> None:
         job = coverage_job()
