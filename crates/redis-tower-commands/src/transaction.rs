@@ -9,6 +9,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 pub struct Multi;
 
 impl Multi {
+    /// Create a new [`Multi`] command.
     pub fn new() -> Self {
         Self
     }
@@ -51,6 +52,7 @@ impl Command for Multi {
 pub struct Exec;
 
 impl Exec {
+    /// Create a new [`Exec`] command.
     pub fn new() -> Self {
         Self
     }
@@ -93,6 +95,7 @@ impl Command for Exec {
 pub struct Discard;
 
 impl Discard {
+    /// Create a new [`Discard`] command.
     pub fn new() -> Self {
         Self
     }
@@ -136,12 +139,14 @@ pub struct Watch {
 }
 
 impl Watch {
+    /// Create a new [`Watch`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`Watch`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -182,6 +187,7 @@ impl Command for Watch {
 pub struct Unwatch;
 
 impl Unwatch {
+    /// Create a new [`Unwatch`] command.
     pub fn new() -> Self {
         Self
     }

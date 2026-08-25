@@ -13,6 +13,7 @@ pub struct SAdd {
 }
 
 impl SAdd {
+    /// Create a new [`SAdd`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -20,6 +21,7 @@ impl SAdd {
         }
     }
 
+    /// Create the [`SAdd`] command for the supplied members.
     pub fn members(
         key: impl Into<String>,
         members: impl IntoIterator<Item = impl Into<String>>,
@@ -68,6 +70,7 @@ pub struct SRem {
 }
 
 impl SRem {
+    /// Create a new [`SRem`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -75,6 +78,7 @@ impl SRem {
         }
     }
 
+    /// Create the [`SRem`] command for the supplied members.
     pub fn members(
         key: impl Into<String>,
         members: impl IntoIterator<Item = impl Into<String>>,
@@ -121,6 +125,7 @@ pub struct SMembers {
 }
 
 impl SMembers {
+    /// Create a new [`SMembers`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -181,6 +186,7 @@ pub struct SIsMember {
 }
 
 impl SIsMember {
+    /// Create a new [`SIsMember`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -229,6 +235,7 @@ pub struct SCard {
 }
 
 impl SCard {
+    /// Create a new [`SCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -270,12 +277,14 @@ pub struct SInter {
 }
 
 impl SInter {
+    /// Create a new [`SInter`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`SInter`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -344,6 +353,7 @@ pub struct SRandMember {
 }
 
 impl SRandMember {
+    /// Create a new [`SRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -351,6 +361,7 @@ impl SRandMember {
         }
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, count: i64) -> Self {
         self.count = Some(count);
         self
@@ -411,6 +422,7 @@ pub struct SPop {
 }
 
 impl SPop {
+    /// Create a new [`SPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -418,6 +430,7 @@ impl SPop {
         }
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
@@ -472,12 +485,14 @@ pub struct SDiff {
 }
 
 impl SDiff {
+    /// Create a new [`SDiff`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`SDiff`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -546,6 +561,7 @@ pub struct SDiffStore {
 }
 
 impl SDiffStore {
+    /// Create a new [`SDiffStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -593,12 +609,14 @@ pub struct SUnion {
 }
 
 impl SUnion {
+    /// Create a new [`SUnion`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`SUnion`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -666,6 +684,7 @@ pub struct SUnionStore {
 }
 
 impl SUnionStore {
+    /// Create a new [`SUnionStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -716,6 +735,7 @@ pub struct SMove {
 }
 
 impl SMove {
+    /// Create a new [`SMove`] command.
     pub fn new(
         source: impl Into<String>,
         destination: impl Into<String>,
@@ -768,6 +788,7 @@ pub struct SMisMember {
 }
 
 impl SMisMember {
+    /// Create a new [`SMisMember`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -775,6 +796,7 @@ impl SMisMember {
         }
     }
 
+    /// Create the [`SMisMember`] command for the supplied members.
     pub fn members(
         key: impl Into<String>,
         members: impl IntoIterator<Item = impl Into<String>>,
@@ -838,6 +860,7 @@ pub struct SInterStore {
 }
 
 impl SInterStore {
+    /// Create a new [`SInterStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -887,6 +910,7 @@ pub struct SInterCard {
 }
 
 impl SInterCard {
+    /// Create a new [`SInterCard`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),

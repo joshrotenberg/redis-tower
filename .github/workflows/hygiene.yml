@@ -1,0 +1,246 @@
+name: Engineering Hygiene
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: engineering-hygiene-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  release-hygiene:
+    name: Release hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Audit publishable crates and package contents
+        run: python3 scripts/check_release_hygiene.py --check-package-contents
+
+      - name: Test hygiene reporters
+        run: |
+          python3 scripts/test_check_release_hygiene.py -v
+          python3 scripts/test_mutation_score.py -v
+          python3 scripts/test_ci_health.py -v
+
+  semver:
+    name: Public API compatibility
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check publishable APIs against the target branch
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+        with:
+          baseline-rev: ${{ github.event.pull_request.base.sha }}
+          release-type: patch
+          feature-group: all-features
+          package: >-
+            redis-tower,
+            redis-tower-auth-aws,
+            redis-tower-auth-azure,
+            redis-tower-client,
+            redis-tower-cluster,
+            redis-tower-commands,
+            redis-tower-core,
+            redis-tower-modules,
+            redis-tower-primitives,
+            redis-tower-protocol,
+            redis-tower-sentinel,
+            redis-tower-sync,
+            redis-tower-test
+
+  cross-platform:
+    name: ${{ matrix.name }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+          - name: Windows x64
+            runner: windows-2025
+          - name: Linux arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: hygiene-${{ matrix.runner }}
+
+      - name: Build and run library tests with every feature
+        run: >-
+          cargo test --workspace --lib --all-features
+          --exclude standalone-bench
+          --exclude sentinel-bench
+          --exclude cluster-bench
+          --exclude soak-bench
+
+  mutation:
+    name: Mutation score (${{ matrix.package }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        package:
+          - redis-tower
+          - redis-tower-auth-aws
+          - redis-tower-auth-azure
+          - redis-tower-client
+          - redis-tower-cluster
+          - redis-tower-commands
+          - redis-tower-core
+          - redis-tower-modules
+          - redis-tower-primitives
+          - redis-tower-protocol
+          - redis-tower-sentinel
+          - redis-tower-sync
+          - redis-tower-test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-mutants
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: mutation-${{ matrix.package }}
+
+      - name: Run library mutation suite
+        id: mutants
+        shell: bash
+        env:
+          MUTATION_PACKAGE: ${{ matrix.package }}
+        run: |
+          set +e
+          cargo mutants --package "$MUTATION_PACKAGE" --in-place --jobs 2 \
+            --timeout-multiplier 5 --output "mutation-results/$MUTATION_PACKAGE"
+          status=$?
+          set -e
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          case "$status" in
+            0|2|3) ;;
+            *) exit "$status" ;;
+          esac
+
+      - name: Render package mutation score
+        if: always() && steps.mutants.outcome == 'success'
+        shell: bash
+        env:
+          MUTATION_PACKAGE: ${{ matrix.package }}
+        run: |
+          python3 scripts/mutation_score.py \
+            "mutation-results/$MUTATION_PACKAGE" \
+            --minimum-score 0.70 \
+            --json-output "mutation-results/$MUTATION_PACKAGE/score.json" \
+            --markdown-output "mutation-results/$MUTATION_PACKAGE/score.md"
+          cat "mutation-results/$MUTATION_PACKAGE/score.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload package mutation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-${{ matrix.package }}
+          path: mutation-results/${{ matrix.package }}
+          retention-days: 90
+          if-no-files-found: error
+
+  mutation-summary:
+    name: Mutation headline score
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    needs: mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download package mutation evidence
+        uses: actions/download-artifact@v4
+        with:
+          pattern: mutation-*
+          path: mutation-results
+
+      - name: Render headline score
+        run: |
+          python3 scripts/mutation_score.py mutation-results \
+            --minimum-score 0.70 \
+            --json-output mutation-results/score.json \
+            --markdown-output mutation-results/score.md
+          cat mutation-results/score.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload headline mutation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-score-${{ github.run_id }}
+          path: |
+            mutation-results/score.json
+            mutation-results/score.md
+          retention-days: 90
+
+  ci-health:
+    name: CI wall-clock and flake budget
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Measure the latest CI runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 scripts/ci_health.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --workflow ci.yml \
+            --window 50 \
+            --max-p95-minutes 15 \
+            --max-rerun-rate 0.10 \
+            --enforce \
+            --json-output ci-health.json \
+            --markdown-output ci-health.md
+          cat ci-health.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload CI health evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-health-${{ github.run_id }}
+          path: |
+            ci-health.json
+            ci-health.md
+          retention-days: 90
+          if-no-files-found: error

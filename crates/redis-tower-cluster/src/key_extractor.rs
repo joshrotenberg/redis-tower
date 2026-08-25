@@ -83,33 +83,49 @@ pub enum KeyExtractionError {
     /// A required argument is absent.
     #[error("malformed {command} command: missing argument {index} ({expected})")]
     MissingArgument {
+        /// Uppercase Redis command name.
         command: String,
+        /// Zero-based position of the missing argument.
         index: usize,
+        /// Human-readable description of the required argument.
         expected: &'static str,
     },
     /// An argument has the wrong RESP type.
     #[error("malformed {command} command: argument {index} must be {expected}")]
     InvalidArgument {
+        /// Uppercase Redis command name.
         command: String,
+        /// Zero-based position of the invalid argument.
         index: usize,
+        /// Human-readable description of the required argument type.
         expected: &'static str,
     },
     /// A `numkeys` argument is not a valid non-negative integer.
     #[error("malformed {command} command: argument {index} is not a valid numkeys value")]
-    InvalidNumKeys { command: String, index: usize },
+    InvalidNumKeys {
+        /// Uppercase Redis command name.
+        command: String,
+        /// Zero-based position of the invalid `numkeys` argument.
+        index: usize,
+    },
     /// The frame contains fewer key arguments than its declared count.
     #[error(
         "malformed {command} command: declares {declared} keys but only {available} are present"
     )]
     KeyCountMismatch {
+        /// Uppercase Redis command name.
         command: String,
+        /// Number of keys declared by the command.
         declared: usize,
+        /// Number of key arguments actually present.
         available: usize,
     },
     /// A command-specific dynamic layout is invalid.
     #[error("malformed {command} command: {detail}")]
     InvalidLayout {
+        /// Uppercase Redis command name.
         command: String,
+        /// Static explanation of the malformed layout.
         detail: &'static str,
     },
 }
@@ -124,10 +140,18 @@ pub enum SlotExtractionError {
     #[error(
         "cannot determine every Redis key for unknown command {command}; slot pinning is unsafe"
     )]
-    UnknownCommand { command: String },
+    UnknownCommand {
+        /// Command name exactly as serialized by the caller.
+        command: String,
+    },
     /// At least two keys hash to different cluster slots.
     #[error("CROSSSLOT keys in request hash to different slots ({first} and {second})")]
-    CrossSlot { first: u16, second: u16 },
+    CrossSlot {
+        /// First conflicting hash slot.
+        first: u16,
+        /// Second conflicting hash slot.
+        second: u16,
+    },
 }
 
 /// Extract every Redis key addressed by `frame`.

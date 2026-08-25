@@ -21,10 +21,12 @@ pub struct Ping {
 }
 
 impl Ping {
+    /// Create a new [`Ping`] command.
     pub fn new() -> Self {
         Self { message: None }
     }
 
+    /// Create the [`Ping`] command using the `with_message` form.
     pub fn with_message(message: impl Into<String>) -> Self {
         Self {
             message: Some(message.into()),
@@ -119,21 +121,27 @@ pub struct FlushDb {
 }
 
 #[derive(Clone)]
+/// Execution mode for this Redis command.
 pub enum FlushMode {
+    /// Select the `Async` mode.
     Async,
+    /// Select the `Sync` mode.
     Sync,
 }
 
 impl FlushDb {
+    /// Create a new [`FlushDb`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
 
+    /// Configure the `async_mode` option.
     pub fn async_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Async);
         self
     }
 
+    /// Configure the `sync_mode` option.
     pub fn sync_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Sync);
         self
@@ -181,6 +189,7 @@ impl Command for FlushDb {
 pub struct DbSize;
 
 impl DbSize {
+    /// Create a new [`DbSize`] command.
     pub fn new() -> Self {
         Self
     }
@@ -223,6 +232,7 @@ pub struct Select {
 }
 
 impl Select {
+    /// Create a new [`Select`] command.
     pub fn new(db: u16) -> Self {
         Self { db }
     }
@@ -521,6 +531,7 @@ impl Command for Info {
 pub struct Time;
 
 impl Time {
+    /// Create a new [`Time`] command.
     pub fn new() -> Self {
         Self
     }
@@ -639,6 +650,7 @@ impl Command for CommandOverview {
 pub struct CommandCount;
 
 impl CommandCount {
+    /// Create a new [`CommandCount`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1075,6 +1087,7 @@ pub struct BgSave {
 }
 
 impl BgSave {
+    /// Create a new [`BgSave`] command.
     pub fn new() -> Self {
         Self { schedule: false }
     }
@@ -1125,6 +1138,7 @@ impl Command for BgSave {
 pub struct BgRewriteAof;
 
 impl BgRewriteAof {
+    /// Create a new [`BgRewriteAof`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1165,6 +1179,7 @@ impl Command for BgRewriteAof {
 pub struct LastSave;
 
 impl LastSave {
+    /// Create a new [`LastSave`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1262,6 +1277,7 @@ pub struct SwapDb {
 }
 
 impl SwapDb {
+    /// Create a new [`SwapDb`] command.
     pub fn new(db1: u16, db2: u16) -> Self {
         Self { db1, db2 }
     }
@@ -1402,6 +1418,7 @@ pub struct Wait {
 }
 
 impl Wait {
+    /// Create a new [`Wait`] command.
     pub fn new(numreplicas: i64, timeout: i64) -> Self {
         Self {
             numreplicas,
@@ -1449,6 +1466,7 @@ pub struct WaitAof {
 }
 
 impl WaitAof {
+    /// Create a new [`WaitAof`] command.
     pub fn new(numlocal: i64, numreplicas: i64, timeout: i64) -> Self {
         Self {
             numlocal,
@@ -1516,6 +1534,7 @@ impl Command for WaitAof {
 pub struct ClientId;
 
 impl ClientId {
+    /// Create a new [`ClientId`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1557,6 +1576,7 @@ impl Command for ClientId {
 pub struct ClientGetName;
 
 impl ClientGetName {
+    /// Create a new [`ClientGetName`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1600,6 +1620,7 @@ pub struct ClientSetName {
 }
 
 impl ClientSetName {
+    /// Create a new [`ClientSetName`] command.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
@@ -1634,9 +1655,13 @@ impl Command for ClientSetName {
 /// Filter type for CLIENT LIST.
 #[derive(Clone)]
 pub enum ClientListType {
+    /// Select the `Normal` mode.
     Normal,
+    /// Select the `Master` mode.
     Master,
+    /// Select the `Replica` mode.
     Replica,
+    /// Select the `Pubsub` mode.
     Pubsub,
 }
 
@@ -1661,6 +1686,7 @@ pub struct ClientList {
 }
 
 impl ClientList {
+    /// Create a new [`ClientList`] command.
     pub fn new() -> Self {
         Self { client_type: None }
     }
@@ -1720,6 +1746,7 @@ pub struct ClientKill {
 }
 
 impl ClientKill {
+    /// Create a new [`ClientKill`] command.
     pub fn new() -> Self {
         Self {
             id: None,
@@ -1817,6 +1844,7 @@ impl Command for ClientKill {
 pub struct ClientInfo;
 
 impl ClientInfo {
+    /// Create a new [`ClientInfo`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1862,6 +1890,7 @@ pub struct ClientNoEvict {
 }
 
 impl ClientNoEvict {
+    /// Create a new [`ClientNoEvict`] command.
     pub fn new(enabled: bool) -> Self {
         Self { enabled }
     }
@@ -1904,6 +1933,7 @@ pub struct ClientNoTouch {
 }
 
 impl ClientNoTouch {
+    /// Create a new [`ClientNoTouch`] command.
     pub fn new(enabled: bool) -> Self {
         Self { enabled }
     }
@@ -1963,6 +1993,7 @@ pub struct ClientPause {
 }
 
 impl ClientPause {
+    /// Create a new [`ClientPause`] command.
     pub fn new(timeout: u64) -> Self {
         Self {
             timeout,
@@ -2014,6 +2045,7 @@ impl Command for ClientPause {
 pub struct ClientUnpause;
 
 impl ClientUnpause {
+    /// Create a new [`ClientUnpause`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2061,6 +2093,7 @@ pub struct ConfigGet {
 }
 
 impl ConfigGet {
+    /// Create a new [`ConfigGet`] command.
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -2208,6 +2241,7 @@ impl Command for ConfigSet {
 pub struct ConfigResetStat;
 
 impl ConfigResetStat {
+    /// Create a new [`ConfigResetStat`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2248,6 +2282,7 @@ impl Command for ConfigResetStat {
 pub struct ConfigRewrite;
 
 impl ConfigRewrite {
+    /// Create a new [`ConfigRewrite`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2291,6 +2326,7 @@ pub struct ClientSetInfoLibName {
 }
 
 impl ClientSetInfoLibName {
+    /// Create a new [`ClientSetInfoLibName`] command.
     pub fn new(name: impl Into<String>) -> Self {
         Self { name: name.into() }
     }
@@ -2333,6 +2369,7 @@ pub struct ClientSetInfoLibVer {
 }
 
 impl ClientSetInfoLibVer {
+    /// Create a new [`ClientSetInfoLibVer`] command.
     pub fn new(version: impl Into<String>) -> Self {
         Self {
             version: version.into(),
@@ -2376,6 +2413,7 @@ pub struct Echo {
 }
 
 impl Echo {
+    /// Create a new [`Echo`] command.
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
@@ -2414,15 +2452,18 @@ pub struct FlushAll {
 }
 
 impl FlushAll {
+    /// Create a new [`FlushAll`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
 
+    /// Configure the `async_mode` option.
     pub fn async_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Async);
         self
     }
 
+    /// Configure the `sync_mode` option.
     pub fn sync_mode(mut self) -> Self {
         self.mode = Some(FlushMode::Sync);
         self
@@ -2470,6 +2511,7 @@ impl Command for FlushAll {
 pub struct Save;
 
 impl Save {
+    /// Create a new [`Save`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2526,6 +2568,7 @@ pub struct Shutdown {
 }
 
 impl Shutdown {
+    /// Create a new [`Shutdown`] command.
     pub fn new() -> Self {
         Self {
             mode: None,
@@ -2613,6 +2656,7 @@ impl Command for Shutdown {
 pub struct Role;
 
 impl Role {
+    /// Create a new [`Role`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2653,6 +2697,7 @@ pub struct Hello {
 }
 
 impl Hello {
+    /// Create a new [`Hello`] command.
     pub fn new() -> Self {
         Self {
             protover: None,
@@ -2723,6 +2768,7 @@ impl Command for Hello {
 pub struct Reset;
 
 impl Reset {
+    /// Create a new [`Reset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2766,6 +2812,7 @@ pub struct CommandInfo {
 }
 
 impl CommandInfo {
+    /// Create a new [`CommandInfo`] command.
     pub fn new(cmd: impl Into<String>) -> Self {
         Self {
             commands: vec![cmd.into()],
@@ -2809,6 +2856,7 @@ pub struct CommandGetKeys {
 }
 
 impl CommandGetKeys {
+    /// Create a new [`CommandGetKeys`] command.
     pub fn new(cmd: impl Into<String>) -> Self {
         Self {
             command: cmd.into(),
@@ -2990,8 +3038,11 @@ impl Command for CommandGetKeysAndFlags {
 /// Reply mode for CLIENT REPLY.
 #[derive(Clone)]
 pub enum ClientReplyMode {
+    /// Select the `On` mode.
     On,
+    /// Select the `Off` mode.
     Off,
+    /// Select the `Skip` mode.
     Skip,
 }
 
@@ -3015,6 +3066,7 @@ pub struct ClientReply {
 }
 
 impl ClientReply {
+    /// Create a new [`ClientReply`] command.
     pub fn new(mode: ClientReplyMode) -> Self {
         Self { mode }
     }
@@ -3054,6 +3106,7 @@ impl Command for ClientReply {
 pub struct ClientTrackingInfo;
 
 impl ClientTrackingInfo {
+    /// Create a new [`ClientTrackingInfo`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3084,7 +3137,9 @@ impl Command for ClientTrackingInfo {
 /// Mode for CLIENT UNBLOCK.
 #[derive(Clone)]
 pub enum UnblockMode {
+    /// Select the `Timeout` mode.
     Timeout,
+    /// Select the `Error` mode.
     Error,
 }
 
@@ -3108,6 +3163,7 @@ pub struct ClientUnblock {
 }
 
 impl ClientUnblock {
+    /// Create a new [`ClientUnblock`] command.
     pub fn new(client_id: i64) -> Self {
         Self {
             client_id,
@@ -3162,6 +3218,7 @@ pub struct ClientCaching {
 }
 
 impl ClientCaching {
+    /// Create a new [`ClientCaching`] command.
     pub fn new(yes: bool) -> Self {
         Self { yes }
     }
@@ -3202,6 +3259,7 @@ impl Command for ClientCaching {
 pub struct ClientGetRedir;
 
 impl ClientGetRedir {
+    /// Create a new [`ClientGetRedir`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3374,6 +3432,7 @@ impl Command for HotkeysStart {
 pub struct HotkeysStop;
 
 impl HotkeysStop {
+    /// Create a new [`HotkeysStop`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3411,21 +3470,27 @@ impl Command for HotkeysStop {
 /// Inclusive Redis Cluster hash-slot range reported by [`HotkeysGet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HotkeysSlotRange {
+    /// First hash slot in the inclusive range.
     pub start: u16,
+    /// Last hash slot in the inclusive range.
     pub end: u16,
 }
 
 /// A key and its measured CPU time in microseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyCpuTime {
+    /// Sampled key.
     pub key: Bytes,
+    /// CPU time attributed to the key, in microseconds.
     pub microseconds: i64,
 }
 
 /// A key and its measured network traffic in bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeyNetBytes {
+    /// Sampled key.
     pub key: Bytes,
+    /// Network traffic attributed to the key, in bytes.
     pub bytes: i64,
 }
 
@@ -3435,21 +3500,37 @@ pub struct HotkeyNetBytes {
 /// corresponding START option was not enabled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HotkeysStats {
+    /// Whether the server is currently collecting hot-key samples.
     pub tracking_active: bool,
+    /// Configured command-sampling ratio.
     pub sample_ratio: i64,
+    /// Cluster hash-slot ranges included in collection.
     pub selected_slots: Vec<HotkeysSlotRange>,
+    /// CPU time for sampled commands in selected slots, in microseconds.
     pub sampled_commands_selected_slots_us: Option<i64>,
+    /// CPU time for all commands in selected slots, in microseconds.
     pub all_commands_selected_slots_us: Option<i64>,
+    /// CPU time for all commands in all slots, in microseconds.
     pub all_commands_all_slots_us: i64,
+    /// Network bytes for sampled commands in selected slots.
     pub net_bytes_sampled_commands_selected_slots: Option<i64>,
+    /// Network bytes for all commands in selected slots.
     pub net_bytes_all_commands_selected_slots: Option<i64>,
+    /// Network bytes for all commands in all slots.
     pub net_bytes_all_commands_all_slots: i64,
+    /// Collection start time as Unix epoch milliseconds.
     pub collection_start_time_unix_ms: i64,
+    /// Elapsed collection time in milliseconds.
     pub collection_duration_ms: i64,
+    /// Total user-mode CPU time, in milliseconds, when requested.
     pub total_cpu_time_user_ms: Option<i64>,
+    /// Total system-mode CPU time, in milliseconds, when requested.
     pub total_cpu_time_sys_ms: Option<i64>,
+    /// Total network traffic, in bytes, when requested.
     pub total_net_bytes: Option<i64>,
+    /// Sampled keys ordered by attributed CPU time, when requested.
     pub by_cpu_time_us: Option<Vec<HotkeyCpuTime>>,
+    /// Sampled keys ordered by attributed network traffic, when requested.
     pub by_net_bytes: Option<Vec<HotkeyNetBytes>>,
 }
 
@@ -3463,6 +3544,7 @@ pub struct HotkeysStats {
 pub struct HotkeysGet;
 
 impl HotkeysGet {
+    /// Create a new [`HotkeysGet`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3502,6 +3584,7 @@ impl Command for HotkeysGet {
 pub struct HotkeysReset;
 
 impl HotkeysReset {
+    /// Create a new [`HotkeysReset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3542,6 +3625,7 @@ impl Command for HotkeysReset {
 pub struct HotkeysHelp;
 
 impl HotkeysHelp {
+    /// Create a new [`HotkeysHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3873,6 +3957,7 @@ fn required_hotkeys_field<T>(value: Option<T>, field: &'static str) -> Result<T,
 pub struct ClientHelp;
 
 impl ClientHelp {
+    /// Create a new [`ClientHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3911,6 +3996,7 @@ impl Command for ClientHelp {
 pub struct CommandHelp;
 
 impl CommandHelp {
+    /// Create a new [`CommandHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3949,6 +4035,7 @@ impl Command for CommandHelp {
 pub struct ConfigHelp;
 
 impl ConfigHelp {
+    /// Create a new [`ConfigHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -3987,6 +4074,7 @@ impl Command for ConfigHelp {
 pub struct ModuleHelp;
 
 impl ModuleHelp {
+    /// Create a new [`ModuleHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -4029,6 +4117,7 @@ pub struct Lolwut {
 }
 
 impl Lolwut {
+    /// Create a new [`Lolwut`] command.
     pub fn new() -> Self {
         Self { version: None }
     }

@@ -9,18 +9,31 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Aggregation type for TimeSeries range and multi-range queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsAggregation {
+    /// Select the `Avg` mode.
     Avg,
+    /// Select the `Sum` mode.
     Sum,
+    /// Select the `Min` mode.
     Min,
+    /// Select the `Max` mode.
     Max,
+    /// Select the `Range` mode.
     Range,
+    /// Select the `Count` mode.
     Count,
+    /// Select the `First` mode.
     First,
+    /// Select the `Last` mode.
     Last,
+    /// Select the `StdP` mode.
     StdP,
+    /// Select the `StdS` mode.
     StdS,
+    /// Select the `VarP` mode.
     VarP,
+    /// Select the `VarS` mode.
     VarS,
+    /// Select the `Twa` mode.
     Twa,
 }
 
@@ -47,11 +60,17 @@ impl TsAggregation {
 /// Duplicate policy for TimeSeries keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsDuplicatePolicy {
+    /// Select the `Block` mode.
     Block,
+    /// Select the `First` mode.
     First,
+    /// Select the `Last` mode.
     Last,
+    /// Select the `Min` mode.
     Min,
+    /// Select the `Max` mode.
     Max,
+    /// Select the `Sum` mode.
     Sum,
 }
 
@@ -71,7 +90,9 @@ impl TsDuplicatePolicy {
 /// Encoding for TimeSeries keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TsEncoding {
+    /// Select the `Compressed` mode.
     Compressed,
+    /// Select the `Uncompressed` mode.
     Uncompressed,
 }
 
@@ -117,6 +138,7 @@ pub struct TsCreate {
 }
 
 impl TsCreate {
+    /// Create a new [`TsCreate`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -217,6 +239,7 @@ pub struct TsAlter {
 }
 
 impl TsAlter {
+    /// Create a new [`TsAlter`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -304,6 +327,7 @@ pub struct TsDel {
 }
 
 impl TsDel {
+    /// Create a new [`TsDel`] command.
     pub fn new(key: impl Into<String>, from: i64, to: i64) -> Self {
         Self {
             key: key.into(),
@@ -387,6 +411,7 @@ pub struct TsAdd {
 }
 
 impl TsAdd {
+    /// Create a new [`TsAdd`] command.
     pub fn new(key: impl Into<String>, timestamp: impl Into<TsTimestamp>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -490,6 +515,7 @@ pub struct TsMAdd {
 }
 
 impl TsMAdd {
+    /// Create a new [`TsMAdd`] command.
     pub fn new() -> Self {
         Self {
             samples: Vec::new(),
@@ -560,6 +586,7 @@ pub struct TsIncrBy {
 }
 
 impl TsIncrBy {
+    /// Create a new [`TsIncrBy`] command.
     pub fn new(key: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -639,6 +666,7 @@ pub struct TsDecrBy {
 }
 
 impl TsDecrBy {
+    /// Create a new [`TsDecrBy`] command.
     pub fn new(key: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -719,6 +747,7 @@ pub struct TsGet {
 }
 
 impl TsGet {
+    /// Create a new [`TsGet`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -773,6 +802,7 @@ pub struct TsMGet {
 }
 
 impl TsMGet {
+    /// Create a new [`TsMGet`] command.
     pub fn new(filter: impl Into<String>) -> Self {
         Self {
             latest: false,
@@ -1295,6 +1325,7 @@ pub struct TsInfo {
 }
 
 impl TsInfo {
+    /// Create a new [`TsInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1346,6 +1377,7 @@ pub struct TsQueryIndex {
 }
 
 impl TsQueryIndex {
+    /// Create a new [`TsQueryIndex`] command.
     pub fn new(filter: impl Into<String>) -> Self {
         Self {
             filters: vec![filter.into()],
@@ -1433,6 +1465,7 @@ pub struct TsCreateRule {
 }
 
 impl TsCreateRule {
+    /// Create a new [`TsCreateRule`] command.
     pub fn new(
         source_key: impl Into<String>,
         dest_key: impl Into<String>,
@@ -1517,6 +1550,7 @@ pub struct TsDeleteRule {
 }
 
 impl TsDeleteRule {
+    /// Create a new [`TsDeleteRule`] command.
     pub fn new(source_key: impl Into<String>, dest_key: impl Into<String>) -> Self {
         Self {
             source_key: source_key.into(),

@@ -299,21 +299,30 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
+    async fn close_after_request(stream: tokio::net::TcpStream) {
+        let mut request = [0; 64];
+        loop {
+            stream.readable().await.unwrap();
+            match stream.try_read(&mut request) {
+                Ok(0) => return,
+                Ok(_) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(error) => panic!("failed to read mock request: {error}"),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn frame_service_events_cover_disconnect_and_reconnect() {
-        use tokio::sync::oneshot;
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (first_closed_tx, first_closed_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (first, _) = listener.accept().await.unwrap();
-            drop(first);
-            let _ = first_closed_tx.send(());
+            close_after_request(first).await;
 
             let (second, _) = listener.accept().await.unwrap();
-            let _second = second;
             futures::future::pending::<()>().await;
+            drop(second);
         });
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -348,7 +357,6 @@ mod tests {
             ConnectionEvent::Connected
         );
 
-        first_closed_rx.await.unwrap();
         futures::future::poll_fn(|cx| service.poll_ready(cx))
             .await
             .unwrap();
@@ -410,15 +418,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconnect_factory_timeout_exhausts_with_complete_event_order() {
-        use tokio::sync::oneshot;
-
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (closed_tx, closed_rx) = oneshot::channel();
         let server = tokio::spawn(async move {
             let (first, _) = listener.accept().await.unwrap();
-            drop(first);
-            let _ = closed_tx.send(());
+            close_after_request(first).await;
         });
 
         let calls = Arc::new(AtomicUsize::new(0));
@@ -448,14 +452,15 @@ mod tests {
             base_delay: Duration::ZERO,
             max_delay: Duration::ZERO,
             jitter: false,
-            connect_timeout: Some(Duration::from_millis(10)),
+            // Windows' timer granularity can exceed the 10 ms used by the
+            // Linux-only CI that originally covered this path.
+            connect_timeout: Some(Duration::from_millis(100)),
         };
         let mut service = ReconnectService::new_with_events(factory, config, events)
             .await
             .unwrap();
         assert_eq!(stream.recv().await.unwrap(), ConnectionEvent::Connected);
 
-        closed_rx.await.unwrap();
         futures::future::poll_fn(|cx| service.poll_ready(cx))
             .await
             .unwrap();
@@ -466,10 +471,13 @@ mod tests {
                 .is_err()
         );
         let reconnect = futures::future::poll_fn(|cx| service.poll_ready(cx)).await;
-        assert!(matches!(
-            reconnect,
-            Err(RedisError::ReconnectFailed { attempts: 1, .. })
-        ));
+        assert!(
+            matches!(
+                reconnect,
+                Err(RedisError::ReconnectFailed { attempts: 1, .. })
+            ),
+            "unexpected reconnect result: {reconnect:?}"
+        );
 
         assert!(matches!(
             stream.recv().await.unwrap(),

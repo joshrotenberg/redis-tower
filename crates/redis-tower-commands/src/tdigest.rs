@@ -69,6 +69,7 @@ pub struct TdigestCreate {
 }
 
 impl TdigestCreate {
+    /// Create a new [`TdigestCreate`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -120,6 +121,7 @@ pub struct TdigestAdd {
 }
 
 impl TdigestAdd {
+    /// Create a new [`TdigestAdd`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -167,6 +169,7 @@ pub struct TdigestMerge {
 }
 
 impl TdigestMerge {
+    /// Create a new [`TdigestMerge`] command.
     pub fn new(
         destination: impl Into<String>,
         sources: impl IntoIterator<Item = impl Into<String>>,
@@ -239,6 +242,7 @@ pub struct TdigestCdf {
 }
 
 impl TdigestCdf {
+    /// Create a new [`TdigestCdf`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -281,6 +285,7 @@ pub struct TdigestQuantile {
 }
 
 impl TdigestQuantile {
+    /// Create a new [`TdigestQuantile`] command.
     pub fn new(key: impl Into<String>, quantiles: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -322,6 +327,7 @@ pub struct TdigestMin {
 }
 
 impl TdigestMin {
+    /// Create a new [`TdigestMin`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -356,6 +362,7 @@ pub struct TdigestMax {
 }
 
 impl TdigestMax {
+    /// Create a new [`TdigestMax`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -390,6 +397,7 @@ pub struct TdigestInfo {
 }
 
 impl TdigestInfo {
+    /// Create a new [`TdigestInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -424,6 +432,7 @@ pub struct TdigestReset {
 }
 
 impl TdigestReset {
+    /// Create a new [`TdigestReset`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -462,6 +471,7 @@ pub struct TdigestTrimmedMean {
 }
 
 impl TdigestTrimmedMean {
+    /// Create a new [`TdigestTrimmedMean`] command.
     pub fn new(key: impl Into<String>, low_quantile: f64, high_quantile: f64) -> Self {
         Self {
             key: key.into(),
@@ -502,6 +512,7 @@ pub struct TdigestRank {
 }
 
 impl TdigestRank {
+    /// Create a new [`TdigestRank`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -544,6 +555,7 @@ pub struct TdigestRevRank {
 }
 
 impl TdigestRevRank {
+    /// Create a new [`TdigestRevRank`] command.
     pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
@@ -586,6 +598,7 @@ pub struct TdigestByRank {
 }
 
 impl TdigestByRank {
+    /// Create a new [`TdigestByRank`] command.
     pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),
@@ -628,6 +641,7 @@ pub struct TdigestByRevRank {
 }
 
 impl TdigestByRevRank {
+    /// Create a new [`TdigestByRevRank`] command.
     pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),

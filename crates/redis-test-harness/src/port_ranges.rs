@@ -9,8 +9,11 @@
 //! silently reused the Sentinel fixtures' 6390-6395 block, so writes could
 //! land on a Sentinel-managed read-only replica depending on run order).
 //!
-//! [`SYNC_PORT_BASE`], [`SENTINEL_HEALTHY_MASTER_PORT`], and
-//! [`SENTINEL_FAILOVER_MASTER_PORT`] are the source of truth: the fixtures
+//! [`SYNC_PORT_BASE`](crate::port_ranges::SYNC_PORT_BASE),
+//! [`SENTINEL_HEALTHY_MASTER_PORT`](crate::port_ranges::SENTINEL_HEALTHY_MASTER_PORT),
+//! and
+//! [`SENTINEL_FAILOVER_MASTER_PORT`](crate::port_ranges::SENTINEL_FAILOVER_MASTER_PORT)
+//! are the source of truth: the fixtures
 //! that collided in #655 import them directly instead of re-declaring the
 //! literal, so they cannot drift back apart. The rest of the table documents
 //! blocks that stayed hardcoded in their own test/bench file; keep it in sync
@@ -19,8 +22,11 @@
 /// A named, half-open `[start, start + len)` block of ports one fixture owns.
 #[derive(Debug, Clone, Copy)]
 pub struct FixturePortRange {
+    /// Stable name of the fixture that owns the range.
     pub name: &'static str,
+    /// First port in the reserved range.
     pub start: u16,
+    /// Number of consecutive reserved ports.
     pub len: u16,
 }
 
@@ -38,19 +44,24 @@ impl FixturePortRange {
 /// Base port for the `redis-tower-sync` live fixture (`sync_integration.rs`).
 /// Six consecutive ports, one per test (`PORT_BASE..PORT_BASE + 6`).
 pub const SYNC_PORT_BASE: u16 = 6410;
+/// Number of consecutive ports reserved by the sync fixture.
 pub const SYNC_PORT_COUNT: u16 = 6;
 
 /// Healthy Sentinel topology (`sentinel_integration.rs`): one master, two
 /// replicas, three sentinels.
 pub const SENTINEL_HEALTHY_MASTER_PORT: u16 = 6390;
+/// First replica port in the healthy Sentinel fixture.
 pub const SENTINEL_HEALTHY_REPLICA_BASE_PORT: u16 = 6391;
+/// First Sentinel port in the healthy Sentinel fixture.
 pub const SENTINEL_HEALTHY_SENTINEL_BASE_PORT: u16 = 26389;
 
 /// Destructive Sentinel failover topology (`sentinel_failover.rs`): its own
 /// master/replica/sentinel block so the destructive phases never degrade the
 /// healthy suite above (see #509).
 pub const SENTINEL_FAILOVER_MASTER_PORT: u16 = 6393;
+/// First replica port in the destructive failover fixture.
 pub const SENTINEL_FAILOVER_REPLICA_BASE_PORT: u16 = 6394;
+/// First Sentinel port in the destructive failover fixture.
 pub const SENTINEL_FAILOVER_SENTINEL_BASE_PORT: u16 = 26392;
 
 /// Every fixed port block a live-server test or bench fixture reserves.

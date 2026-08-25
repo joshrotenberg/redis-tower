@@ -91,3 +91,7 @@ proptest = "1"
 
 # Benchmarking
 hdrhistogram = "7.5"
+
+[profile.mutants]
+inherits = "test"
+debug = "none"

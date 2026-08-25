@@ -11,6 +11,7 @@ pub struct Get {
 }
 
 impl Get {
+    /// Create a new [`Get`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -67,6 +68,7 @@ pub enum SetCondition {
 }
 
 impl Set {
+    /// Create a new [`Set`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -167,6 +169,7 @@ pub struct Incr {
 }
 
 impl Incr {
+    /// Create a new [`Incr`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -554,6 +557,7 @@ pub struct MGet {
 }
 
 impl MGet {
+    /// Create a new [`MGet`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -612,6 +616,7 @@ pub struct Append {
 }
 
 impl Append {
+    /// Create a new [`Append`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -655,6 +660,7 @@ pub struct MSet {
 }
 
 impl MSet {
+    /// Create a new [`MSet`] command.
     pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
         Self {
             pairs: pairs
@@ -855,6 +861,7 @@ pub struct GetEx {
 }
 
 impl GetEx {
+    /// Create a new [`GetEx`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -972,6 +979,7 @@ pub struct GetDel {
 }
 
 impl GetDel {
+    /// Create a new [`GetDel`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1154,6 +1162,7 @@ pub struct SetEx {
 }
 
 impl SetEx {
+    /// Create a new [`SetEx`] command.
     pub fn new(key: impl Into<String>, seconds: u64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1201,6 +1210,7 @@ pub struct PSetEx {
 }
 
 impl PSetEx {
+    /// Create a new [`PSetEx`] command.
     pub fn new(key: impl Into<String>, milliseconds: u64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1248,6 +1258,7 @@ pub struct SetNx {
 }
 
 impl SetNx {
+    /// Create a new [`SetNx`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1294,6 +1305,7 @@ pub struct IncrByFloat {
 }
 
 impl IncrByFloat {
+    /// Create a new [`IncrByFloat`] command.
     pub fn new(key: impl Into<String>, increment: f64) -> Self {
         Self {
             key: key.into(),
@@ -1347,6 +1359,7 @@ pub struct Decr {
 }
 
 impl Decr {
+    /// Create a new [`Decr`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1384,6 +1397,7 @@ pub struct DecrBy {
 }
 
 impl DecrBy {
+    /// Create a new [`DecrBy`] command.
     pub fn new(key: impl Into<String>, decrement: i64) -> Self {
         Self {
             key: key.into(),
@@ -1430,6 +1444,7 @@ pub struct GetRange {
 }
 
 impl GetRange {
+    /// Create a new [`GetRange`] command.
     pub fn new(key: impl Into<String>, start: i64, end: i64) -> Self {
         Self {
             key: key.into(),
@@ -1483,6 +1498,7 @@ pub struct SetRange {
 }
 
 impl SetRange {
+    /// Create a new [`SetRange`] command.
     pub fn new(key: impl Into<String>, offset: i64, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1529,6 +1545,7 @@ pub struct StrLen {
 }
 
 impl StrLen {
+    /// Create a new [`StrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1571,6 +1588,7 @@ pub struct IncrBy {
 }
 
 impl IncrBy {
+    /// Create a new [`IncrBy`] command.
     pub fn new(key: impl Into<String>, increment: i64) -> Self {
         Self {
             key: key.into(),
@@ -1616,6 +1634,7 @@ pub struct MSetNx {
 }
 
 impl MSetNx {
+    /// Create a new [`MSetNx`] command.
     pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
         Self {
             pairs: pairs
@@ -1664,7 +1683,9 @@ pub enum LcsMode {
     /// Return match indices. Optionally filter by minimum match length and
     /// include match lengths.
     Idx {
+        /// Optional minimum length for reported matches.
         min_match_len: Option<u64>,
+        /// Whether each reported match should include its length.
         with_match_len: bool,
     },
 }
@@ -1799,6 +1820,7 @@ pub struct GetSet {
 }
 
 impl GetSet {
+    /// Create a new [`GetSet`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),

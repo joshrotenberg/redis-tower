@@ -41,6 +41,7 @@ pub struct BfAdd {
 }
 
 impl BfAdd {
+    /// Create a new [`BfAdd`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -86,6 +87,7 @@ pub struct BfExists {
 }
 
 impl BfExists {
+    /// Create a new [`BfExists`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -136,6 +138,7 @@ pub struct BfMAdd {
 }
 
 impl BfMAdd {
+    /// Create a new [`BfMAdd`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -174,6 +177,7 @@ pub struct BfMExists {
 }
 
 impl BfMExists {
+    /// Create a new [`BfMExists`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -220,6 +224,7 @@ pub struct BfReserve {
 }
 
 impl BfReserve {
+    /// Create a new [`BfReserve`] command.
     pub fn new(key: impl Into<String>, error_rate: f64, capacity: i64) -> Self {
         Self {
             key: key.into(),
@@ -288,6 +293,7 @@ pub struct BfInfo {
 }
 
 impl BfInfo {
+    /// Create a new [`BfInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -330,6 +336,7 @@ pub struct BfInsert {
 }
 
 impl BfInsert {
+    /// Create a new [`BfInsert`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -427,6 +434,7 @@ pub struct CfAdd {
 }
 
 impl CfAdd {
+    /// Create a new [`CfAdd`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -473,6 +481,7 @@ pub struct CfAddNx {
 }
 
 impl CfAddNx {
+    /// Create a new [`CfAddNx`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -518,6 +527,7 @@ pub struct CfExists {
 }
 
 impl CfExists {
+    /// Create a new [`CfExists`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -567,6 +577,7 @@ pub struct CfMExists {
 }
 
 impl CfMExists {
+    /// Create a new [`CfMExists`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -610,6 +621,7 @@ pub struct CfDel {
 }
 
 impl CfDel {
+    /// Create a new [`CfDel`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -655,6 +667,7 @@ pub struct CfCount {
 }
 
 impl CfCount {
+    /// Create a new [`CfCount`] command.
     pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -707,6 +720,7 @@ pub struct CfReserve {
 }
 
 impl CfReserve {
+    /// Create a new [`CfReserve`] command.
     pub fn new(key: impl Into<String>, capacity: i64) -> Self {
         Self {
             key: key.into(),
@@ -784,6 +798,7 @@ pub struct CfInfo {
 }
 
 impl CfInfo {
+    /// Create a new [`CfInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -822,6 +837,7 @@ pub struct CfInsert {
 }
 
 impl CfInsert {
+    /// Create a new [`CfInsert`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -885,6 +901,7 @@ pub struct CfInsertNx {
 }
 
 impl CfInsertNx {
+    /// Create a new [`CfInsertNx`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -983,6 +1000,7 @@ pub struct BfCard {
 }
 
 impl BfCard {
+    /// Create a new [`BfCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1050,6 +1068,7 @@ pub struct BfScanDump {
 }
 
 impl BfScanDump {
+    /// Create a new [`BfScanDump`] command.
     pub fn new(key: impl Into<String>, iterator: u64) -> Self {
         Self {
             key: key.into(),
@@ -1094,6 +1113,7 @@ pub struct BfLoadChunk {
 }
 
 impl BfLoadChunk {
+    /// Create a new [`BfLoadChunk`] command.
     pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),
@@ -1142,6 +1162,7 @@ pub struct CfScanDump {
 }
 
 impl CfScanDump {
+    /// Create a new [`CfScanDump`] command.
     pub fn new(key: impl Into<String>, iterator: u64) -> Self {
         Self {
             key: key.into(),
@@ -1186,6 +1207,7 @@ pub struct CfLoadChunk {
 }
 
 impl CfLoadChunk {
+    /// Create a new [`CfLoadChunk`] command.
     pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),

@@ -7,7 +7,9 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// A stream entry: an ID and a list of field-value pairs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamEntry {
+    /// Redis stream entry ID.
     pub id: String,
+    /// Ordered field-value pairs stored in the entry.
     pub fields: Vec<(String, Bytes)>,
 }
 
@@ -270,6 +272,7 @@ pub struct XLen {
 }
 
 impl XLen {
+    /// Create a new [`XLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -374,6 +377,7 @@ pub struct XRevRange {
 }
 
 impl XRevRange {
+    /// Create the [`XRevRange`] command using the `all` form.
     pub fn all(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -383,6 +387,7 @@ impl XRevRange {
         }
     }
 
+    /// Create a new [`XRevRange`] command.
     pub fn new(key: impl Into<String>, end: impl Into<String>, start: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -392,6 +397,7 @@ impl XRevRange {
         }
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -434,6 +440,7 @@ pub struct XDel {
 }
 
 impl XDel {
+    /// Create a new [`XDel`] command.
     pub fn new(key: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -441,6 +448,7 @@ impl XDel {
         }
     }
 
+    /// Create the [`XDel`] command for the supplied ids.
     pub fn ids(key: impl Into<String>, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -486,6 +494,7 @@ pub struct XTrim {
 }
 
 impl XTrim {
+    /// Create the [`XTrim`] command using the `maxlen` form.
     pub fn maxlen(key: impl Into<String>, count: u64) -> Self {
         Self {
             key: key.into(),
@@ -494,6 +503,7 @@ impl XTrim {
         }
     }
 
+    /// Create the [`XTrim`] command using the `maxlen_approx` form.
     pub fn maxlen_approx(key: impl Into<String>, count: u64) -> Self {
         Self {
             key: key.into(),
@@ -502,6 +512,7 @@ impl XTrim {
         }
     }
 
+    /// Create the [`XTrim`] command using the `minid` form.
     pub fn minid(key: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -559,6 +570,7 @@ pub struct XAck {
 }
 
 impl XAck {
+    /// Create a new [`XAck`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -567,6 +579,7 @@ impl XAck {
         }
     }
 
+    /// Create the [`XAck`] command for the supplied ids.
     pub fn ids(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -800,6 +813,7 @@ pub struct XAckDel {
 }
 
 impl XAckDel {
+    /// Create a new [`XAckDel`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -880,6 +894,7 @@ pub struct XDelEx {
 }
 
 impl XDelEx {
+    /// Create a new [`XDelEx`] command.
     pub fn new(key: impl Into<String>, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -992,6 +1007,7 @@ pub struct XGroupDestroy {
 }
 
 impl XGroupDestroy {
+    /// Create a new [`XGroupDestroy`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1156,11 +1172,13 @@ impl XRead {
         self
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
     }
 
+    /// Configure the `block` option.
     pub fn block(mut self, ms: u64) -> Self {
         self.block = Some(ms);
         self
@@ -1217,6 +1235,7 @@ pub struct XGroupSetId {
 }
 
 impl XGroupSetId {
+    /// Create a new [`XGroupSetId`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1265,6 +1284,7 @@ pub struct XGroupCreateConsumer {
 }
 
 impl XGroupCreateConsumer {
+    /// Create a new [`XGroupCreateConsumer`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1317,6 +1337,7 @@ pub struct XGroupDelConsumer {
 }
 
 impl XGroupDelConsumer {
+    /// Create a new [`XGroupDelConsumer`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1376,6 +1397,7 @@ pub struct XClaim {
 }
 
 impl XClaim {
+    /// Create a new [`XClaim`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1475,8 +1497,11 @@ impl Command for XClaim {
 /// Result from XAUTOCLAIM: \[next-start-id, \[entries...\], \[deleted-ids...\]\]
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutoClaimResult {
+    /// Cursor to use as the next `XAUTOCLAIM` start ID.
     pub next_start_id: String,
+    /// Entries transferred to the requesting consumer.
     pub entries: Vec<StreamEntry>,
+    /// Pending IDs whose stream entries no longer exist.
     pub deleted_ids: Vec<String>,
 }
 
@@ -1494,6 +1519,7 @@ pub struct XAutoClaim {
 }
 
 impl XAutoClaim {
+    /// Create a new [`XAutoClaim`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1549,9 +1575,13 @@ impl Command for XAutoClaim {
 /// Summary from XPENDING (no range): count, min-id, max-id, and per-consumer counts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingSummary {
+    /// Total entries in the group pending-entry list.
     pub count: i64,
+    /// Smallest pending entry ID, or `None` when the list is empty.
     pub min_id: Option<String>,
+    /// Largest pending entry ID, or `None` when the list is empty.
     pub max_id: Option<String>,
+    /// Pending-entry count for each consumer.
     pub consumers: Vec<(String, i64)>,
 }
 
@@ -1565,6 +1595,7 @@ pub struct XPendingSummary {
 }
 
 impl XPendingSummary {
+    /// Create a new [`XPendingSummary`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1596,9 +1627,13 @@ impl Command for XPendingSummary {
 /// A pending entry detail from XPENDING range form.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingEntry {
+    /// Pending stream entry ID.
     pub id: String,
+    /// Consumer that currently owns the entry.
     pub consumer: String,
+    /// Milliseconds since the entry was last delivered.
     pub idle_ms: i64,
+    /// Number of times the entry has been delivered.
     pub delivery_count: i64,
 }
 
@@ -1617,6 +1652,7 @@ pub struct XPendingRange {
 }
 
 impl XPendingRange {
+    /// Create a new [`XPendingRange`] command.
     pub fn new(
         key: impl Into<String>,
         group: impl Into<String>,
@@ -1682,12 +1718,19 @@ impl Command for XPendingRange {
 /// Stream info from XINFO STREAM.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamInfo {
+    /// Number of entries in the stream.
     pub length: i64,
+    /// Number of keys in the stream radix tree.
     pub radix_tree_keys: i64,
+    /// Number of nodes in the stream radix tree.
     pub radix_tree_nodes: i64,
+    /// Most recently generated stream entry ID.
     pub last_generated_id: String,
+    /// Number of consumer groups attached to the stream.
     pub groups: i64,
+    /// First stream entry, when the stream is non-empty.
     pub first_entry: Option<StreamEntry>,
+    /// Last stream entry, when the stream is non-empty.
     pub last_entry: Option<StreamEntry>,
 }
 
@@ -1700,6 +1743,7 @@ pub struct XInfoStream {
 }
 
 impl XInfoStream {
+    /// Create a new [`XInfoStream`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1724,9 +1768,13 @@ impl Command for XInfoStream {
 /// Consumer group info from XINFO GROUPS.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupInfo {
+    /// Consumer-group name.
     pub name: String,
+    /// Number of consumers registered with the group.
     pub consumers: i64,
+    /// Number of entries in the group's pending-entry list.
     pub pending: i64,
+    /// Last stream entry ID delivered to the group.
     pub last_delivered_id: String,
 }
 
@@ -1739,6 +1787,7 @@ pub struct XInfoGroups {
 }
 
 impl XInfoGroups {
+    /// Create a new [`XInfoGroups`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1763,8 +1812,11 @@ impl Command for XInfoGroups {
 /// Consumer info from XINFO CONSUMERS.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsumerInfo {
+    /// Consumer name.
     pub name: String,
+    /// Number of entries currently pending for the consumer.
     pub pending: i64,
+    /// Milliseconds since the consumer last interacted with the group.
     pub idle: i64,
 }
 
@@ -1778,6 +1830,7 @@ pub struct XInfoConsumers {
 }
 
 impl XInfoConsumers {
+    /// Create a new [`XInfoConsumers`] command.
     pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -2473,6 +2526,7 @@ impl Command for XSetId {
 pub struct XInfoHelp;
 
 impl XInfoHelp {
+    /// Create a new [`XInfoHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -2511,6 +2565,7 @@ impl Command for XInfoHelp {
 pub struct XGroupHelp;
 
 impl XGroupHelp {
+    /// Create a new [`XGroupHelp`] command.
     pub fn new() -> Self {
         Self
     }

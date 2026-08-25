@@ -45,8 +45,10 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 redis-tower-commands = { workspace = true, default-features = false, features = ["vector-sets"] }
 redis-tower-test = { path = "../redis-test-harness" }
-redis-server-wrapper = { workspace = true }
 tokio-util = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }
 
 [package.metadata.docs.rs]
 all-features = true

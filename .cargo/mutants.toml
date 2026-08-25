@@ -1,0 +1,7 @@
+# Keep the default local and CI run focused on library behavior. Live Redis
+# integration suites are exercised separately and are not hermetic mutation
+# targets.
+all_features = true
+additional_cargo_test_args = ["--lib"]
+profile = "mutants"
+minimum_test_timeout = 30

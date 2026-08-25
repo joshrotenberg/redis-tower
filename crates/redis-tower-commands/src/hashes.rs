@@ -13,6 +13,7 @@ pub struct HGet {
 }
 
 impl HGet {
+    /// Create a new [`HGet`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -63,6 +64,7 @@ pub struct HSet {
 }
 
 impl HSet {
+    /// Create a new [`HSet`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -145,6 +147,7 @@ pub struct HDel {
 }
 
 impl HDel {
+    /// Create a new [`HDel`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -152,6 +155,7 @@ impl HDel {
         }
     }
 
+    /// Create the [`HDel`] command for the supplied fields.
     pub fn fields(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -199,6 +203,7 @@ pub struct HExists {
 }
 
 impl HExists {
+    /// Create a new [`HExists`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -248,6 +253,7 @@ pub struct HGetAll {
 }
 
 impl HGetAll {
+    /// Create a new [`HGetAll`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -347,6 +353,7 @@ pub struct HIncrBy {
 }
 
 impl HIncrBy {
+    /// Create a new [`HIncrBy`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, increment: i64) -> Self {
         Self {
             key: key.into(),
@@ -392,6 +399,7 @@ pub struct HKeys {
 }
 
 impl HKeys {
+    /// Create a new [`HKeys`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -441,6 +449,7 @@ pub struct HVals {
 }
 
 impl HVals {
+    /// Create a new [`HVals`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -490,6 +499,7 @@ pub struct HLen {
 }
 
 impl HLen {
+    /// Create a new [`HLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -558,6 +568,7 @@ pub struct HExpire {
 }
 
 impl HExpire {
+    /// Create a new [`HExpire`] command.
     pub fn new(
         key: impl Into<String>,
         seconds: i64,
@@ -609,6 +620,7 @@ pub struct HExpireAt {
 }
 
 impl HExpireAt {
+    /// Create a new [`HExpireAt`] command.
     pub fn new(
         key: impl Into<String>,
         timestamp: i64,
@@ -660,6 +672,7 @@ pub struct HPExpire {
 }
 
 impl HPExpire {
+    /// Create a new [`HPExpire`] command.
     pub fn new(
         key: impl Into<String>,
         milliseconds: i64,
@@ -711,6 +724,7 @@ pub struct HPExpireAt {
 }
 
 impl HPExpireAt {
+    /// Create a new [`HPExpireAt`] command.
     pub fn new(
         key: impl Into<String>,
         timestamp: i64,
@@ -761,6 +775,7 @@ pub struct HTtl {
 }
 
 impl HTtl {
+    /// Create a new [`HTtl`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -812,6 +827,7 @@ pub struct HPTtl {
 }
 
 impl HPTtl {
+    /// Create a new [`HPTtl`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -863,6 +879,7 @@ pub struct HPersist {
 }
 
 impl HPersist {
+    /// Create a new [`HPersist`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -912,6 +929,7 @@ pub struct HSetNx {
 }
 
 impl HSetNx {
+    /// Create a new [`HSetNx`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -961,6 +979,7 @@ pub struct HIncrByFloat {
 }
 
 impl HIncrByFloat {
+    /// Create a new [`HIncrByFloat`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>, increment: f64) -> Self {
         Self {
             key: key.into(),
@@ -1017,6 +1036,7 @@ pub struct HRandField {
 }
 
 impl HRandField {
+    /// Create a new [`HRandField`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1085,6 +1105,7 @@ pub struct HExpireTime {
 }
 
 impl HExpireTime {
+    /// Create a new [`HExpireTime`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -1137,6 +1158,7 @@ pub struct HMGet {
 }
 
 impl HMGet {
+    /// Create a new [`HMGet`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1144,6 +1166,7 @@ impl HMGet {
         }
     }
 
+    /// Create the [`HMGet`] command for the supplied fields.
     pub fn fields(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -1212,6 +1235,7 @@ pub struct HStrLen {
 }
 
 impl HStrLen {
+    /// Create a new [`HStrLen`] command.
     pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1261,6 +1285,7 @@ pub struct HPExpireTime {
 }
 
 impl HPExpireTime {
+    /// Create a new [`HPExpireTime`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -1328,6 +1353,7 @@ pub struct HGetDel {
 }
 
 impl HGetDel {
+    /// Create a new [`HGetDel`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -1414,6 +1440,7 @@ pub struct HGetEx {
 }
 
 impl HGetEx {
+    /// Create a new [`HGetEx`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = impl Into<String>>,
@@ -1582,6 +1609,7 @@ pub struct HSetEx {
 }
 
 impl HSetEx {
+    /// Create a new [`HSetEx`] command.
     pub fn new(
         key: impl Into<String>,
         fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,

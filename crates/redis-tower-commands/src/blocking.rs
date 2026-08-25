@@ -80,6 +80,7 @@ pub struct BRPop {
 }
 
 impl BRPop {
+    /// Create a new [`BRPop`] command.
     pub fn new(key: impl Into<String>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
@@ -87,6 +88,7 @@ impl BRPop {
         }
     }
 
+    /// Create the [`BRPop`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -135,7 +137,9 @@ pub struct BLMove {
 /// Direction for blocking list move.
 #[derive(Debug, Clone, Copy)]
 pub enum ListDir {
+    /// Select the `Left` mode.
     Left,
+    /// Select the `Right` mode.
     Right,
 }
 
@@ -149,6 +153,7 @@ impl ListDir {
 }
 
 impl BLMove {
+    /// Create a new [`BLMove`] command.
     pub fn new(
         source: impl Into<String>,
         destination: impl Into<String>,
@@ -210,6 +215,7 @@ pub struct BZPopMin {
 }
 
 impl BZPopMin {
+    /// Create a new [`BZPopMin`] command.
     pub fn new(key: impl Into<String>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
@@ -217,6 +223,7 @@ impl BZPopMin {
         }
     }
 
+    /// Create the [`BZPopMin`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -260,6 +267,7 @@ pub struct BZPopMax {
 }
 
 impl BZPopMax {
+    /// Create a new [`BZPopMax`] command.
     pub fn new(key: impl Into<String>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
@@ -267,6 +275,7 @@ impl BZPopMax {
         }
     }
 
+    /// Create the [`BZPopMax`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),

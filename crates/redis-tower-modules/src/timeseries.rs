@@ -53,14 +53,18 @@ pub use redis_tower::commands::{TsAggregation, TsDuplicatePolicy, TsEncoding, Ts
 /// a floating-point value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TsSample {
+    /// Sample timestamp in milliseconds since the Unix epoch.
     pub timestamp: i64,
+    /// Sample value.
     pub value: f64,
 }
 
 /// A label key-value pair attached to a TimeSeries key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TsLabel {
+    /// Label name.
     pub key: String,
+    /// Label value.
     pub value: String,
 }
 
@@ -69,10 +73,15 @@ pub struct TsLabel {
 /// All fields are optional; unset fields are omitted from the command.
 #[derive(Debug, Clone, Default)]
 pub struct TsKeyConfig {
+    /// Optional retention period in milliseconds.
     pub retention_ms: Option<u64>,
+    /// Optional sample encoding.
     pub encoding: Option<TsEncoding>,
+    /// Optional storage chunk size in bytes.
     pub chunk_size: Option<u64>,
+    /// Optional duplicate-sample policy.
     pub duplicate_policy: Option<TsDuplicatePolicy>,
+    /// Labels attached to the time-series key.
     pub labels: Vec<TsLabel>,
 }
 
@@ -119,8 +128,11 @@ impl TsKeyConfig {
 /// Options for [`TimeSeriesClient::incrby`] and [`TimeSeriesClient::decrby`].
 #[derive(Debug, Clone, Default)]
 pub struct TsIncrOptions {
+    /// Optional explicit sample timestamp.
     pub timestamp: Option<TsTimestamp>,
+    /// Optional retention period in milliseconds.
     pub retention_ms: Option<u64>,
+    /// Labels to attach when Redis creates the key.
     pub labels: Vec<TsLabel>,
 }
 
@@ -156,22 +168,34 @@ impl TsIncrOptions {
 /// `TS.MGET` — one per matched key.
 #[derive(Debug, Clone)]
 pub struct TsKeyResult {
+    /// Time-series key.
     pub key: String,
+    /// Labels returned for the key.
     pub labels: Vec<TsLabel>,
+    /// Samples returned for the key.
     pub samples: Vec<TsSample>,
 }
 
 /// Typed statistics from `TS.INFO`.
 #[derive(Debug, Clone, Default)]
 pub struct TsInfoResult {
+    /// Total number of samples stored.
     pub total_samples: i64,
+    /// Memory used by the time series in bytes.
     pub memory_usage: i64,
+    /// Timestamp of the first sample.
     pub first_timestamp: i64,
+    /// Timestamp of the last sample.
     pub last_timestamp: i64,
+    /// Configured retention period in milliseconds.
     pub retention_time: i64,
+    /// Number of storage chunks.
     pub chunk_count: i64,
+    /// Configured chunk size in bytes.
     pub chunk_size: i64,
+    /// Configured duplicate-sample policy, when reported.
     pub duplicate_policy: Option<String>,
+    /// Labels attached to the time-series key.
     pub labels: Vec<TsLabel>,
 }
 

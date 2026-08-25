@@ -717,10 +717,21 @@ mod tests {
         assert_eq!(left.errors, 2);
     }
 
+    #[cfg(unix)]
     #[test]
     fn usage_snapshot_has_nonzero_cpu_or_rss() {
         let usage = usage_snapshot().expect("getrusage should work on the test host");
         assert!(usage.peak_rss_bytes > 0 || usage.cpu_seconds > 0.0);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn usage_snapshot_reports_unsupported_host() {
+        let error = match usage_snapshot() {
+            Ok(_) => panic!("resource usage sampling unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "resource-bench currently supports Unix hosts");
     }
 
     #[test]
