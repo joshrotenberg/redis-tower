@@ -71,7 +71,9 @@ jobs:
         run: mdbook test
 
       - name: Check local documentation links
-        run: python3 scripts/check_docs_links.py
+        run: |
+          python3 scripts/test_check_docs_links.py -v
+          python3 scripts/check_docs_links.py
 
   command-coverage:
     name: Command Coverage

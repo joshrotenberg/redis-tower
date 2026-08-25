@@ -20,5 +20,5 @@ let auth_handle = client.spawn_credential_reauthentication(Arc::new(provider));
 
 `EntraIdProvider::new` also accepts any Azure SDK `TokenCredential` for
 workload identity or service-principal authentication. See the workspace
-[cloud-auth guide](../../docs/CLOUD-AUTH.md) for topology setup and failure
+[cloud-auth guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) for topology setup and failure
 behavior.

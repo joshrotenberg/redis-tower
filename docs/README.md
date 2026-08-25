@@ -34,7 +34,7 @@ If you are evaluating or adopting the project, start here:
 
 For the short installation example, complete API tour, workspace layout, and
 compatibility policy, see the
-[repository README](https://github.com/joshrotenberg/redis-tower#readme).
+[repository README](https://github.com/joshrotenberg/redis-tower).
 Typed API reference documentation will be published on
 [docs.rs](https://docs.rs/redis-tower) with the first crate release.
 
