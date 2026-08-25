@@ -70,17 +70,21 @@ jobs:
           redis-server --version > benchmark-results/redis-version.txt
           rustc -Vv > benchmark-results/rust-version.txt
           cargo run -p ${{ matrix.package }} --release -- --json \
-            > benchmark-results/${{ matrix.package }}.json
+            > benchmark-results/${{ matrix.package }}.json \
+            2> benchmark-results/${{ matrix.package }}.log
           if [ "${{ matrix.package }}" = "cluster-bench" ]; then
             BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json \
-              > benchmark-results/cluster-bench-replica.json
+              > benchmark-results/cluster-bench-replica.json \
+              2> benchmark-results/cluster-bench-replica.log
           fi
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.package }}-${{ github.run_id }}
           path: benchmark-results
+          if-no-files-found: warn
           retention-days: 90
 
   resource-footprint:
