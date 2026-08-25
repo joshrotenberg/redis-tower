@@ -81,6 +81,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test CI workflow contract
+        run: python3 scripts/test_ci_workflow.py
+
       - name: Test coverage generator
         run: python3 scripts/test_generate_command_coverage.py
 
@@ -358,6 +361,8 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -424,13 +429,26 @@ jobs:
       - name: Generate lcov report
         run: cargo llvm-cov report --lcov --output-path lcov.info
 
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+      - name: Summarize coverage
+        run: |
+          cargo llvm-cov report --summary-only > coverage-summary.txt
+          {
+            echo "### Coverage summary"
+            echo
+            echo '```text'
+            sed -n '1,200p' coverage-summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain coverage evidence
+        uses: actions/upload-artifact@v4
         with:
-          files: lcov.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          name: coverage-lcov-${{ github.sha }}
+          path: |
+            coverage-summary.txt
+            lcov.info
+          if-no-files-found: error
+          retention-days: 30
 
   features:
     name: Feature Checks
