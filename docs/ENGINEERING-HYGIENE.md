@@ -46,7 +46,7 @@ stable baseline before deciding whether to enforce it.
 For a focused local run:
 
 ```bash
-cargo mutants --package redis-tower-core --in-place --jobs 2
+cargo mutants --package redis-tower-core --jobs 2
 python3 scripts/mutation_score.py mutants.out --minimum-score 0.70
 ```
 

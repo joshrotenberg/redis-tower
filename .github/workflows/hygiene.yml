@@ -36,6 +36,7 @@ jobs:
       - name: Test hygiene reporters
         run: |
           python3 scripts/test_check_release_hygiene.py -v
+          python3 scripts/test_hygiene_workflow.py -v
           python3 scripts/test_mutation_score.py -v
           python3 scripts/test_ci_health.py -v
 
@@ -135,7 +136,7 @@ jobs:
       - name: Install cargo-mutants
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants
+          tool: cargo-mutants@27.1.0
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -149,7 +150,7 @@ jobs:
           MUTATION_PACKAGE: ${{ matrix.package }}
         run: |
           set +e
-          cargo mutants --package "$MUTATION_PACKAGE" --in-place --jobs 2 \
+          cargo mutants --package "$MUTATION_PACKAGE" --jobs 2 \
             --timeout-multiplier 5 --output "mutation-results/$MUTATION_PACKAGE"
           status=$?
           set -e
