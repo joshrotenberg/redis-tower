@@ -32,6 +32,7 @@ pub struct VAdd {
 }
 
 impl VAdd {
+    /// Create a new [`VAdd`] command.
     pub fn new(
         key: impl Into<String>,
         vector: impl Into<Vec<f32>>,
@@ -159,6 +160,7 @@ pub struct VRem {
 }
 
 impl VRem {
+    /// Create a new [`VRem`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -204,6 +206,7 @@ pub struct VCard {
 }
 
 impl VCard {
+    /// Create a new [`VCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -240,6 +243,7 @@ pub struct VDim {
 }
 
 impl VDim {
+    /// Create a new [`VDim`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -335,6 +339,7 @@ pub struct VEmb {
 }
 
 impl VEmb {
+    /// Create a new [`VEmb`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -627,6 +632,7 @@ pub struct VRandMember {
 }
 
 impl VRandMember {
+    /// Create a new [`VRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -776,6 +782,7 @@ pub struct VGetAttr {
 }
 
 impl VGetAttr {
+    /// Create a new [`VGetAttr`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -831,6 +838,7 @@ pub struct VSetAttr {
 }
 
 impl VSetAttr {
+    /// Create a new [`VSetAttr`] command.
     pub fn new(
         key: impl Into<String>,
         element: impl Into<String>,
@@ -887,6 +895,7 @@ pub struct VDelAttr {
 }
 
 impl VDelAttr {
+    /// Create a new [`VDelAttr`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -938,6 +947,7 @@ pub struct VInfo {
 }
 
 impl VInfo {
+    /// Create a new [`VInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -986,6 +996,7 @@ pub struct VLinks {
 }
 
 impl VLinks {
+    /// Create a new [`VLinks`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),

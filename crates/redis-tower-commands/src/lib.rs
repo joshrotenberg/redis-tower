@@ -55,6 +55,7 @@
 //! All command structs are re-exported at the crate root for convenience.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 // -- Core Redis commands (always available) --

@@ -23,6 +23,7 @@ tmp/
 /fuzz/corpus/
 /fuzz/coverage/
 /fuzz/target/
+/mutants.out*
 __pycache__/
 *.py[cod]
 

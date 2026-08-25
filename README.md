@@ -915,6 +915,11 @@ inventory, client/protocol and server-version matrices, destructive fault
 coverage, execution cadence, and known gaps to their source and workflow
 evidence.
 
+The [engineering-hygiene guide](docs/ENGINEERING-HYGIENE.md) documents the
+public-API compatibility gate, cross-platform matrix, scheduled mutation score,
+CI wall-clock/rerun budgets, release metadata audit, and retained resource and
+build-footprint evidence.
+
 `redis-tower-test` ships two test utilities that let you write Redis tests without a running server.
 
 ### MockConnection

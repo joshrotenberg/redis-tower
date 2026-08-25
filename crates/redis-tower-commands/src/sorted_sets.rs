@@ -19,6 +19,7 @@ pub struct ZAdd {
 }
 
 impl ZAdd {
+    /// Create a new [`ZAdd`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -174,6 +175,7 @@ pub struct ZRem {
 }
 
 impl ZRem {
+    /// Create a new [`ZRem`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -181,6 +183,7 @@ impl ZRem {
         }
     }
 
+    /// Create the [`ZRem`] command for the supplied members.
     pub fn members(
         key: impl Into<String>,
         members: impl IntoIterator<Item = impl Into<String>>,
@@ -231,6 +234,7 @@ pub struct ZRange {
 }
 
 impl ZRange {
+    /// Create a new [`ZRange`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -291,6 +295,7 @@ pub struct ZScore {
 }
 
 impl ZScore {
+    /// Create a new [`ZScore`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -349,6 +354,7 @@ pub struct ZCard {
 }
 
 impl ZCard {
+    /// Create a new [`ZCard`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -392,6 +398,7 @@ pub struct ZIncrBy {
 }
 
 impl ZIncrBy {
+    /// Create a new [`ZIncrBy`] command.
     pub fn new(key: impl Into<String>, increment: f64, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -447,6 +454,7 @@ pub struct ZRank {
 }
 
 impl ZRank {
+    /// Create a new [`ZRank`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -499,6 +507,7 @@ pub struct ZRangeByScore {
 }
 
 impl ZRangeByScore {
+    /// Create a new [`ZRangeByScore`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -559,6 +568,7 @@ pub struct ZPopMin {
 }
 
 impl ZPopMin {
+    /// Create a new [`ZPopMin`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -650,6 +660,7 @@ pub struct ZPopMax {
 }
 
 impl ZPopMax {
+    /// Create a new [`ZPopMax`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -744,6 +755,7 @@ pub struct ZCount {
 }
 
 impl ZCount {
+    /// Create a new [`ZCount`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -798,6 +810,7 @@ pub struct ZLexCount {
 }
 
 impl ZLexCount {
+    /// Create a new [`ZLexCount`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -850,6 +863,7 @@ pub struct ZRandMember {
 }
 
 impl ZRandMember {
+    /// Create a new [`ZRandMember`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -917,6 +931,7 @@ pub struct ZMScore {
 }
 
 impl ZMScore {
+    /// Create a new [`ZMScore`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -924,6 +939,7 @@ impl ZMScore {
         }
     }
 
+    /// Create the [`ZMScore`] command for the supplied members.
     pub fn members(
         key: impl Into<String>,
         members: impl IntoIterator<Item = impl Into<String>>,
@@ -988,8 +1004,11 @@ impl Command for ZMScore {
 /// Aggregation function used by ZINTERSTORE, ZUNIONSTORE, and similar commands.
 #[derive(Debug, Clone, Copy)]
 pub enum Aggregate {
+    /// Select the `Sum` mode.
     Sum,
+    /// Select the `Min` mode.
     Min,
+    /// Select the `Max` mode.
     Max,
 }
 
@@ -1017,6 +1036,7 @@ pub struct ZInterStore {
 }
 
 impl ZInterStore {
+    /// Create a new [`ZInterStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -1096,6 +1116,7 @@ pub struct ZUnionStore {
 }
 
 impl ZUnionStore {
+    /// Create a new [`ZUnionStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -1173,6 +1194,7 @@ pub struct ZDiffStore {
 }
 
 impl ZDiffStore {
+    /// Create a new [`ZDiffStore`] command.
     pub fn new(
         destination: impl Into<String>,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -1226,6 +1248,7 @@ pub struct ZInterCard {
 }
 
 impl ZInterCard {
+    /// Create a new [`ZInterCard`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -1291,6 +1314,7 @@ pub struct ZRangeStore {
 }
 
 impl ZRangeStore {
+    /// Create a new [`ZRangeStore`] command.
     pub fn new(
         dst: impl Into<String>,
         src: impl Into<String>,
@@ -1381,7 +1405,9 @@ impl Command for ZRangeStore {
 /// The direction argument for ZMPOP.
 #[derive(Debug, Clone, Copy)]
 pub enum ZMPopDirection {
+    /// Select the `Min` mode.
     Min,
+    /// Select the `Max` mode.
     Max,
 }
 
@@ -1409,6 +1435,7 @@ pub struct ZMPop {
 }
 
 impl ZMPop {
+    /// Create a new [`ZMPop`] command.
     pub fn new(
         keys: impl IntoIterator<Item = impl Into<String>>,
         direction: ZMPopDirection,
@@ -1530,6 +1557,7 @@ pub struct ZRemRangeByRank {
 }
 
 impl ZRemRangeByRank {
+    /// Create a new [`ZRemRangeByRank`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -1580,6 +1608,7 @@ pub struct ZRemRangeByScore {
 }
 
 impl ZRemRangeByScore {
+    /// Create a new [`ZRemRangeByScore`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1630,6 +1659,7 @@ pub struct ZRemRangeByLex {
 }
 
 impl ZRemRangeByLex {
+    /// Create a new [`ZRemRangeByLex`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1678,6 +1708,7 @@ pub struct ZRevRank {
 }
 
 impl ZRevRank {
+    /// Create a new [`ZRevRank`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1820,6 +1851,7 @@ pub struct ZAddIncr {
 }
 
 impl ZAddIncr {
+    /// Create a new [`ZAddIncr`] command.
     pub fn new(key: impl Into<String>, score: f64, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1878,6 +1910,7 @@ pub struct ZDiff {
 }
 
 impl ZDiff {
+    /// Create a new [`ZDiff`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -1919,6 +1952,7 @@ pub struct ZDiffWithScores {
 }
 
 impl ZDiffWithScores {
+    /// Create a new [`ZDiffWithScores`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -1963,6 +1997,7 @@ pub struct ZUnion {
 }
 
 impl ZUnion {
+    /// Create a new [`ZUnion`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -2030,6 +2065,7 @@ pub struct ZUnionWithScores {
 }
 
 impl ZUnionWithScores {
+    /// Create a new [`ZUnionWithScores`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -2098,6 +2134,7 @@ pub struct ZInter {
 }
 
 impl ZInter {
+    /// Create a new [`ZInter`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -2165,6 +2202,7 @@ pub struct ZInterWithScores {
 }
 
 impl ZInterWithScores {
+    /// Create a new [`ZInterWithScores`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -2237,6 +2275,7 @@ pub struct BZMPop {
 }
 
 impl BZMPop {
+    /// Create a new [`BZMPop`] command.
     pub fn new(
         timeout: f64,
         keys: impl IntoIterator<Item = impl Into<String>>,
@@ -2367,6 +2406,7 @@ pub struct ZRevRange {
 }
 
 impl ZRevRange {
+    /// Create a new [`ZRevRange`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -2415,6 +2455,7 @@ pub struct ZRevRangeWithScores {
 }
 
 impl ZRevRangeWithScores {
+    /// Create a new [`ZRevRangeWithScores`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -2467,6 +2508,7 @@ pub struct ZRangeByLex {
 }
 
 impl ZRangeByLex {
+    /// Create a new [`ZRangeByLex`] command.
     pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -2532,6 +2574,7 @@ pub struct ZRevRangeByLex {
 }
 
 impl ZRevRangeByLex {
+    /// Create a new [`ZRevRangeByLex`] command.
     pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -2598,6 +2641,7 @@ pub struct ZRevRangeByScore {
 }
 
 impl ZRevRangeByScore {
+    /// Create a new [`ZRevRangeByScore`] command.
     pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -2661,6 +2705,7 @@ pub struct ZRevRangeByScoreWithScores {
 }
 
 impl ZRevRangeByScoreWithScores {
+    /// Create a new [`ZRevRangeByScoreWithScores`] command.
     pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
         Self {
             key: key.into(),

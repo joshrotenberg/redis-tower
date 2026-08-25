@@ -24,6 +24,7 @@ pub struct JsonSet {
 }
 
 impl JsonSet {
+    /// Create a new [`JsonSet`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -91,6 +92,7 @@ pub struct JsonGet {
 }
 
 impl JsonGet {
+    /// Create a new [`JsonGet`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -153,6 +155,7 @@ pub struct JsonDel {
 }
 
 impl JsonDel {
+    /// Create a new [`JsonDel`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -204,6 +207,7 @@ pub struct JsonMGet {
 }
 
 impl JsonMGet {
+    /// Create a new [`JsonMGet`] command.
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>, path: impl Into<String>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -267,6 +271,7 @@ pub struct JsonType {
 }
 
 impl JsonType {
+    /// Create a new [`JsonType`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -334,6 +339,7 @@ pub struct JsonNumIncrBy {
 }
 
 impl JsonNumIncrBy {
+    /// Create a new [`JsonNumIncrBy`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
@@ -381,6 +387,7 @@ pub struct JsonStrLen {
 }
 
 impl JsonStrLen {
+    /// Create a new [`JsonStrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -430,6 +437,7 @@ pub struct JsonStrAppend {
 }
 
 impl JsonStrAppend {
+    /// Create a new [`JsonStrAppend`] command.
     pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -478,6 +486,7 @@ pub struct JsonArrAppend {
 }
 
 impl JsonArrAppend {
+    /// Create a new [`JsonArrAppend`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -533,6 +542,7 @@ pub struct JsonArrLen {
 }
 
 impl JsonArrLen {
+    /// Create a new [`JsonArrLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -585,6 +595,7 @@ pub struct JsonArrIndex {
 }
 
 impl JsonArrIndex {
+    /// Create a new [`JsonArrIndex`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -652,6 +663,7 @@ pub struct JsonArrPop {
 }
 
 impl JsonArrPop {
+    /// Create a new [`JsonArrPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -713,6 +725,7 @@ pub struct JsonObjKeys {
 }
 
 impl JsonObjKeys {
+    /// Create a new [`JsonObjKeys`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -761,6 +774,7 @@ pub struct JsonObjLen {
 }
 
 impl JsonObjLen {
+    /// Create a new [`JsonObjLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -955,6 +969,7 @@ pub struct JsonToggle {
 }
 
 impl JsonToggle {
+    /// Create a new [`JsonToggle`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1009,6 +1024,7 @@ pub struct JsonClear {
 }
 
 impl JsonClear {
+    /// Create a new [`JsonClear`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1081,6 +1097,7 @@ pub struct JsonArrInsert {
 }
 
 impl JsonArrInsert {
+    /// Create a new [`JsonArrInsert`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, index: i64) -> Self {
         Self {
             key: key.into(),
@@ -1159,6 +1176,7 @@ pub struct JsonArrTrim {
 }
 
 impl JsonArrTrim {
+    /// Create a new [`JsonArrTrim`] command.
     pub fn new(key: impl Into<String>, path: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -1202,6 +1220,7 @@ pub struct JsonForget {
 }
 
 impl JsonForget {
+    /// Create a new [`JsonForget`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1253,6 +1272,7 @@ pub struct JsonDebugMemory {
 }
 
 impl JsonDebugMemory {
+    /// Create a new [`JsonDebugMemory`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),

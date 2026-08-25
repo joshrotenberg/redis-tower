@@ -66,6 +66,7 @@ pub struct FtCreate {
 }
 
 impl FtCreate {
+    /// Create a new [`FtCreate`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -184,6 +185,7 @@ pub struct FtDropIndex {
 }
 
 impl FtDropIndex {
+    /// Create a new [`FtDropIndex`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -234,6 +236,7 @@ pub struct FtAlter {
 }
 
 impl FtAlter {
+    /// Create a new [`FtAlter`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -307,6 +310,7 @@ pub struct FtInfo {
 }
 
 impl FtInfo {
+    /// Create a new [`FtInfo`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -341,6 +345,7 @@ impl Command for FtInfo {
 pub struct FtList;
 
 impl FtList {
+    /// Create a new [`FtList`] command.
     pub fn new() -> Self {
         Self
     }
@@ -403,6 +408,7 @@ pub struct FtSearch {
 }
 
 impl FtSearch {
+    /// Create a new [`FtSearch`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -537,6 +543,7 @@ pub struct FtAggregate {
 }
 
 impl FtAggregate {
+    /// Create a new [`FtAggregate`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -731,6 +738,7 @@ pub struct FtCursorRead {
 }
 
 impl FtCursorRead {
+    /// Create a new [`FtCursorRead`] command.
     pub fn new(index: impl Into<String>, cursor_id: u64) -> Self {
         Self {
             index: index.into(),
@@ -797,6 +805,7 @@ pub struct FtCursorDel {
 }
 
 impl FtCursorDel {
+    /// Create a new [`FtCursorDel`] command.
     pub fn new(index: impl Into<String>, cursor_id: u64) -> Self {
         Self {
             index: index.into(),
@@ -842,6 +851,7 @@ pub struct FtAliasAdd {
 }
 
 impl FtAliasAdd {
+    /// Create a new [`FtAliasAdd`] command.
     pub fn new(alias: impl Into<String>, index: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),
@@ -885,6 +895,7 @@ pub struct FtAliasDel {
 }
 
 impl FtAliasDel {
+    /// Create a new [`FtAliasDel`] command.
     pub fn new(alias: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),
@@ -924,6 +935,7 @@ pub struct FtAliasUpdate {
 }
 
 impl FtAliasUpdate {
+    /// Create a new [`FtAliasUpdate`] command.
     pub fn new(alias: impl Into<String>, index: impl Into<String>) -> Self {
         Self {
             alias: alias.into(),
@@ -1826,6 +1838,7 @@ pub struct FtTagVals {
 }
 
 impl FtTagVals {
+    /// Create a new [`FtTagVals`] command.
     pub fn new(index: impl Into<String>, field: impl Into<String>) -> Self {
         Self {
             index: index.into(),

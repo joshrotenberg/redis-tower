@@ -12,6 +12,10 @@ readme = "../../README.md"
 keywords = ["redis", "testing", "mock", "tower"]
 categories = ["database", "development-tools::testing"]
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [dependencies]
 redis-tower-protocol = { workspace = true }
 redis-tower-core = { workspace = true }

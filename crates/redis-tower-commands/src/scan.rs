@@ -114,6 +114,7 @@ pub struct SScan {
 }
 
 impl SScan {
+    /// Create a new [`SScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -123,16 +124,19 @@ impl SScan {
         }
     }
 
+    /// Configure the `cursor` option.
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Configure the `match_pattern` option.
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -180,6 +184,7 @@ pub struct HScan {
 }
 
 impl HScan {
+    /// Create a new [`HScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -189,16 +194,19 @@ impl HScan {
         }
     }
 
+    /// Configure the `cursor` option.
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Configure the `match_pattern` option.
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self
@@ -246,6 +254,7 @@ pub struct ZScan {
 }
 
 impl ZScan {
+    /// Create a new [`ZScan`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -255,16 +264,19 @@ impl ZScan {
         }
     }
 
+    /// Configure the `cursor` option.
     pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
         self.cursor = cursor.into();
         self
     }
 
+    /// Configure the `match_pattern` option.
     pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
 
+    /// Configure the `count` option.
     pub fn count(mut self, n: u64) -> Self {
         self.count = Some(n);
         self

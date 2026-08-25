@@ -13,6 +13,7 @@ pub struct Publish {
 }
 
 impl Publish {
+    /// Create a new [`Publish`] command.
     pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             channel: channel.into(),
@@ -58,6 +59,7 @@ pub struct SPublish {
 }
 
 impl SPublish {
+    /// Create a new [`SPublish`] command.
     pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             channel: channel.into(),
@@ -104,10 +106,12 @@ pub struct PubSubChannels {
 }
 
 impl PubSubChannels {
+    /// Create a new [`PubSubChannels`] command.
     pub fn new() -> Self {
         Self { pattern: None }
     }
 
+    /// Create the [`PubSubChannels`] command using the `with_pattern` form.
     pub fn with_pattern(pattern: impl Into<String>) -> Self {
         Self {
             pattern: Some(pattern.into()),
@@ -173,12 +177,14 @@ pub struct PubSubNumSub {
 }
 
 impl PubSubNumSub {
+    /// Create a new [`PubSubNumSub`] command.
     pub fn new() -> Self {
         Self {
             channels: Vec::new(),
         }
     }
 
+    /// Create the [`PubSubNumSub`] command for the supplied channels.
     pub fn with_channels(channels: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             channels: channels.into_iter().map(|c| c.into()).collect(),
@@ -285,6 +291,7 @@ impl Command for PubSubNumSub {
 pub struct PubSubNumPat;
 
 impl PubSubNumPat {
+    /// Create a new [`PubSubNumPat`] command.
     pub fn new() -> Self {
         Self
     }
@@ -330,10 +337,12 @@ pub struct PubSubShardChannels {
 }
 
 impl PubSubShardChannels {
+    /// Create a new [`PubSubShardChannels`] command.
     pub fn new() -> Self {
         Self { pattern: None }
     }
 
+    /// Create the [`PubSubShardChannels`] command using the `with_pattern` form.
     pub fn with_pattern(pattern: impl Into<String>) -> Self {
         Self {
             pattern: Some(pattern.into()),
@@ -399,12 +408,14 @@ pub struct PubSubShardNumSub {
 }
 
 impl PubSubShardNumSub {
+    /// Create a new [`PubSubShardNumSub`] command.
     pub fn new() -> Self {
         Self {
             channels: Vec::new(),
         }
     }
 
+    /// Create the [`PubSubShardNumSub`] command for the supplied channels.
     pub fn with_channels(channels: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             channels: channels.into_iter().map(|c| c.into()).collect(),
@@ -510,6 +521,7 @@ impl Command for PubSubShardNumSub {
 pub struct PubSubHelp;
 
 impl PubSubHelp {
+    /// Create a new [`PubSubHelp`] command.
     pub fn new() -> Self {
         Self
     }

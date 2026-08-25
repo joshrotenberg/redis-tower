@@ -39,6 +39,7 @@
 //! surface intentionally tracks `RedisClient`, not `ResilientRedisClient`.
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use redis_tower::RedisClient;
 use redis_tower_core::{Command, RedisError};

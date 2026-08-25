@@ -80,6 +80,7 @@ pub struct CmsInitByDim {
 }
 
 impl CmsInitByDim {
+    /// Create a new [`CmsInitByDim`] command.
     pub fn new(key: impl Into<String>, width: i64, depth: i64) -> Self {
         Self {
             key: key.into(),
@@ -127,6 +128,7 @@ pub struct CmsInitByProb {
 }
 
 impl CmsInitByProb {
+    /// Create a new [`CmsInitByProb`] command.
     pub fn new(key: impl Into<String>, error: f64, probability: f64) -> Self {
         Self {
             key: key.into(),
@@ -174,6 +176,7 @@ pub struct CmsIncrBy {
 }
 
 impl CmsIncrBy {
+    /// Create a new [`CmsIncrBy`] command.
     pub fn new(
         key: impl Into<String>,
         items: impl IntoIterator<Item = (impl Into<String>, i64)>,
@@ -216,6 +219,7 @@ pub struct CmsQuery {
 }
 
 impl CmsQuery {
+    /// Create a new [`CmsQuery`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -259,6 +263,7 @@ pub struct CmsMerge {
 }
 
 impl CmsMerge {
+    /// Create a new [`CmsMerge`] command.
     pub fn new(
         destination: impl Into<String>,
         sources: impl IntoIterator<Item = impl Into<String>>,
@@ -322,6 +327,7 @@ pub struct CmsInfo {
 }
 
 impl CmsInfo {
+    /// Create a new [`CmsInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -364,6 +370,7 @@ pub struct TopkReserve {
 }
 
 impl TopkReserve {
+    /// Create a new [`TopkReserve`] command.
     pub fn new(key: impl Into<String>, topk: i64) -> Self {
         Self {
             key: key.into(),
@@ -426,6 +433,7 @@ pub struct TopkAdd {
 }
 
 impl TopkAdd {
+    /// Create a new [`TopkAdd`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -465,6 +473,7 @@ pub struct TopkIncrBy {
 }
 
 impl TopkIncrBy {
+    /// Create a new [`TopkIncrBy`] command.
     pub fn new(
         key: impl Into<String>,
         items: impl IntoIterator<Item = (impl Into<String>, i64)>,
@@ -507,6 +516,7 @@ pub struct TopkQuery {
 }
 
 impl TopkQuery {
+    /// Create a new [`TopkQuery`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -549,6 +559,7 @@ pub struct TopkCount {
 }
 
 impl TopkCount {
+    /// Create a new [`TopkCount`] command.
     pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             key: key.into(),
@@ -592,6 +603,7 @@ pub struct TopkList {
 }
 
 impl TopkList {
+    /// Create a new [`TopkList`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -639,6 +651,7 @@ pub struct TopkInfo {
 }
 
 impl TopkInfo {
+    /// Create a new [`TopkInfo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }

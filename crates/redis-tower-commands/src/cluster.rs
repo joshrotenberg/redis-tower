@@ -10,6 +10,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 pub struct ClusterInfo;
 
 impl ClusterInfo {
+    /// Create a new [`ClusterInfo`] command.
     pub fn new() -> Self {
         Self
     }
@@ -51,6 +52,7 @@ impl Command for ClusterInfo {
 pub struct ClusterNodes;
 
 impl ClusterNodes {
+    /// Create a new [`ClusterNodes`] command.
     pub fn new() -> Self {
         Self
     }
@@ -95,6 +97,7 @@ impl Command for ClusterNodes {
 pub struct ClusterSlots;
 
 impl ClusterSlots {
+    /// Create a new [`ClusterSlots`] command.
     pub fn new() -> Self {
         Self
     }
@@ -136,6 +139,7 @@ impl Command for ClusterSlots {
 pub struct ClusterShards;
 
 impl ClusterShards {
+    /// Create a new [`ClusterShards`] command.
     pub fn new() -> Self {
         Self
     }
@@ -176,6 +180,7 @@ impl Command for ClusterShards {
 pub struct ClusterMyId;
 
 impl ClusterMyId {
+    /// Create a new [`ClusterMyId`] command.
     pub fn new() -> Self {
         Self
     }
@@ -221,6 +226,7 @@ pub struct ClusterMeet {
 }
 
 impl ClusterMeet {
+    /// Create a new [`ClusterMeet`] command.
     pub fn new(ip: impl Into<String>, port: u16) -> Self {
         Self {
             ip: ip.into(),
@@ -265,6 +271,7 @@ pub struct ClusterForget {
 }
 
 impl ClusterForget {
+    /// Create a new [`ClusterForget`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -307,6 +314,7 @@ pub struct ClusterReplicate {
 }
 
 impl ClusterReplicate {
+    /// Create a new [`ClusterReplicate`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -359,16 +367,19 @@ pub enum FailoverOption {
 }
 
 impl ClusterFailover {
+    /// Create a new [`ClusterFailover`] command.
     pub fn new() -> Self {
         Self { option: None }
     }
 
+    /// Create the [`ClusterFailover`] command using the `force` form.
     pub fn force() -> Self {
         Self {
             option: Some(FailoverOption::Force),
         }
     }
 
+    /// Create the [`ClusterFailover`] command using the `takeover` form.
     pub fn takeover() -> Self {
         Self {
             option: Some(FailoverOption::Takeover),
@@ -420,10 +431,12 @@ pub struct ClusterReset {
 }
 
 impl ClusterReset {
+    /// Create the [`ClusterReset`] command using the `soft` form.
     pub fn soft() -> Self {
         Self { hard: false }
     }
 
+    /// Create the [`ClusterReset`] command using the `hard` form.
     pub fn hard() -> Self {
         Self { hard: true }
     }
@@ -472,6 +485,7 @@ pub struct ClusterCountKeysInSlot {
 }
 
 impl ClusterCountKeysInSlot {
+    /// Create a new [`ClusterCountKeysInSlot`] command.
     pub fn new(slot: u16) -> Self {
         Self { slot }
     }
@@ -513,6 +527,7 @@ pub struct ClusterGetKeysInSlot {
 }
 
 impl ClusterGetKeysInSlot {
+    /// Create a new [`ClusterGetKeysInSlot`] command.
     pub fn new(slot: u16, count: u32) -> Self {
         Self { slot, count }
     }
@@ -569,6 +584,7 @@ pub struct ClusterKeySlot {
 }
 
 impl ClusterKeySlot {
+    /// Create a new [`ClusterKeySlot`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -607,6 +623,7 @@ impl Command for ClusterKeySlot {
 pub struct ClusterHelp;
 
 impl ClusterHelp {
+    /// Create a new [`ClusterHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -662,6 +679,7 @@ pub struct ClusterSetSlot {
 }
 
 impl ClusterSetSlot {
+    /// Create a new [`ClusterSetSlot`] command.
     pub fn new(slot: u16, state: SetSlotState) -> Self {
         Self { slot, state }
     }
@@ -712,6 +730,7 @@ pub struct ClusterAddSlots {
 }
 
 impl ClusterAddSlots {
+    /// Create a new [`ClusterAddSlots`] command.
     pub fn new(slots: impl IntoIterator<Item = u16>) -> Self {
         Self {
             slots: slots.into_iter().collect(),
@@ -746,6 +765,7 @@ pub struct ClusterDelSlots {
 }
 
 impl ClusterDelSlots {
+    /// Create a new [`ClusterDelSlots`] command.
     pub fn new(slots: impl IntoIterator<Item = u16>) -> Self {
         Self {
             slots: slots.into_iter().collect(),
@@ -780,6 +800,7 @@ pub struct ClusterAddSlotsRange {
 }
 
 impl ClusterAddSlotsRange {
+    /// Create a new [`ClusterAddSlotsRange`] command.
     pub fn new(ranges: impl IntoIterator<Item = (u16, u16)>) -> Self {
         Self {
             ranges: ranges.into_iter().collect(),
@@ -817,6 +838,7 @@ pub struct ClusterDelSlotsRange {
 }
 
 impl ClusterDelSlotsRange {
+    /// Create a new [`ClusterDelSlotsRange`] command.
     pub fn new(ranges: impl IntoIterator<Item = (u16, u16)>) -> Self {
         Self {
             ranges: ranges.into_iter().collect(),
@@ -855,6 +877,7 @@ pub struct ClusterReplicas {
 }
 
 impl ClusterReplicas {
+    /// Create a new [`ClusterReplicas`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -896,6 +919,7 @@ pub struct ClusterSlaves {
 }
 
 impl ClusterSlaves {
+    /// Create a new [`ClusterSlaves`] command.
     pub fn new(node_id: impl Into<String>) -> Self {
         Self {
             node_id: node_id.into(),
@@ -936,6 +960,7 @@ impl Command for ClusterSlaves {
 pub struct ClusterLinks;
 
 impl ClusterLinks {
+    /// Create a new [`ClusterLinks`] command.
     pub fn new() -> Self {
         Self
     }
@@ -983,6 +1008,7 @@ pub struct ClusterSetConfigEpoch {
 }
 
 impl ClusterSetConfigEpoch {
+    /// Create a new [`ClusterSetConfigEpoch`] command.
     pub fn new(epoch: u64) -> Self {
         Self { epoch }
     }
@@ -1016,6 +1042,7 @@ impl Command for ClusterSetConfigEpoch {
 pub struct ClusterBumpEpoch;
 
 impl ClusterBumpEpoch {
+    /// Create a new [`ClusterBumpEpoch`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1058,6 +1085,7 @@ impl Command for ClusterBumpEpoch {
 pub struct ClusterFlushSlots;
 
 impl ClusterFlushSlots {
+    /// Create a new [`ClusterFlushSlots`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1092,6 +1120,7 @@ impl Command for ClusterFlushSlots {
 pub struct ClusterSaveConfig;
 
 impl ClusterSaveConfig {
+    /// Create a new [`ClusterSaveConfig`] command.
     pub fn new() -> Self {
         Self
     }

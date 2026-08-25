@@ -9,6 +9,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 pub struct AclList;
 
 impl AclList {
+    /// Create a new [`AclList`] command.
     pub fn new() -> Self {
         Self
     }
@@ -115,6 +116,7 @@ pub struct AclGetUser {
 }
 
 impl AclGetUser {
+    /// Create a new [`AclGetUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -152,6 +154,7 @@ pub struct AclSetUser {
 }
 
 impl AclSetUser {
+    /// Create a new [`AclSetUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -207,12 +210,14 @@ pub struct AclDelUser {
 }
 
 impl AclDelUser {
+    /// Create a new [`AclDelUser`] command.
     pub fn new(username: impl Into<String>) -> Self {
         Self {
             usernames: vec![username.into()],
         }
     }
 
+    /// Create the [`AclDelUser`] command for the supplied usernames.
     pub fn usernames(usernames: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             usernames: usernames.into_iter().map(Into::into).collect(),
@@ -362,6 +367,7 @@ impl Command for AclLog {
 pub struct AclLogReset;
 
 impl AclLogReset {
+    /// Create a new [`AclLogReset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -402,6 +408,7 @@ impl Command for AclLogReset {
 pub struct AclSave;
 
 impl AclSave {
+    /// Create a new [`AclSave`] command.
     pub fn new() -> Self {
         Self
     }
@@ -442,6 +449,7 @@ impl Command for AclSave {
 pub struct AclLoad;
 
 impl AclLoad {
+    /// Create a new [`AclLoad`] command.
     pub fn new() -> Self {
         Self
     }
@@ -482,6 +490,7 @@ impl Command for AclLoad {
 pub struct AclWhoAmI;
 
 impl AclWhoAmI {
+    /// Create a new [`AclWhoAmI`] command.
     pub fn new() -> Self {
         Self
     }
@@ -581,6 +590,7 @@ pub struct AclDryRun {
 }
 
 impl AclDryRun {
+    /// Create a new [`AclDryRun`] command.
     pub fn new(username: impl Into<String>, command: impl Into<String>) -> Self {
         Self {
             username: username.into(),
@@ -641,6 +651,7 @@ impl Command for AclDryRun {
 pub struct AclHelp;
 
 impl AclHelp {
+    /// Create a new [`AclHelp`] command.
     pub fn new() -> Self {
         Self
     }

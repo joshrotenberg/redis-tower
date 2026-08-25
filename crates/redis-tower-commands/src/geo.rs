@@ -41,6 +41,7 @@ pub struct GeoAdd {
 }
 
 impl GeoAdd {
+    /// Create a new [`GeoAdd`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -129,6 +130,7 @@ pub struct GeoDist {
 }
 
 impl GeoDist {
+    /// Create a new [`GeoDist`] command.
     pub fn new(
         key: impl Into<String>,
         member1: impl Into<String>,
@@ -203,6 +205,7 @@ pub struct GeoHash {
 }
 
 impl GeoHash {
+    /// Create a new [`GeoHash`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -272,6 +275,7 @@ pub struct GeoPos {
 }
 
 impl GeoPos {
+    /// Create a new [`GeoPos`] command.
     pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
         Self {
             key: key.into(),

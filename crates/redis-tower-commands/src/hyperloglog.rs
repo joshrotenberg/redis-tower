@@ -13,6 +13,7 @@ pub struct PfAdd {
 }
 
 impl PfAdd {
+    /// Create a new [`PfAdd`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -20,6 +21,7 @@ impl PfAdd {
         }
     }
 
+    /// Create the [`PfAdd`] command for the supplied elements.
     pub fn elements(
         key: impl Into<String>,
         elements: impl IntoIterator<Item = impl Into<String>>,
@@ -69,12 +71,14 @@ pub struct PfCount {
 }
 
 impl PfCount {
+    /// Create a new [`PfCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`PfCount`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -119,6 +123,7 @@ pub struct PfMerge {
 }
 
 impl PfMerge {
+    /// Create a new [`PfMerge`] command.
     pub fn new(
         destkey: impl Into<String>,
         sourcekeys: impl IntoIterator<Item = impl Into<String>>,

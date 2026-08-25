@@ -16,6 +16,7 @@ pub struct FtSugAdd {
 }
 
 impl FtSugAdd {
+    /// Create a new [`FtSugAdd`] command.
     pub fn new(key: impl Into<String>, string: impl Into<String>, score: f64) -> Self {
         Self {
             key: key.into(),
@@ -89,6 +90,7 @@ pub struct FtSugGet {
 }
 
 impl FtSugGet {
+    /// Create a new [`FtSugGet`] command.
     pub fn new(key: impl Into<String>, prefix: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -170,6 +172,7 @@ pub struct FtSugDel {
 }
 
 impl FtSugDel {
+    /// Create a new [`FtSugDel`] command.
     pub fn new(key: impl Into<String>, string: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -214,6 +217,7 @@ pub struct FtSugLen {
 }
 
 impl FtSugLen {
+    /// Create a new [`FtSugLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -252,6 +256,7 @@ pub struct FtSynUpdate {
 }
 
 impl FtSynUpdate {
+    /// Create a new [`FtSynUpdate`] command.
     pub fn new(
         index: impl Into<String>,
         group_id: impl Into<String>,
@@ -305,6 +310,7 @@ pub struct FtSynDump {
 }
 
 impl FtSynDump {
+    /// Create a new [`FtSynDump`] command.
     pub fn new(index: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -338,6 +344,7 @@ pub struct FtDictAdd {
 }
 
 impl FtDictAdd {
+    /// Create a new [`FtDictAdd`] command.
     pub fn new(
         dict: impl Into<String>,
         terms: impl IntoIterator<Item = impl Into<String>>,
@@ -385,6 +392,7 @@ pub struct FtDictDel {
 }
 
 impl FtDictDel {
+    /// Create a new [`FtDictDel`] command.
     pub fn new(
         dict: impl Into<String>,
         terms: impl IntoIterator<Item = impl Into<String>>,
@@ -431,6 +439,7 @@ pub struct FtDictDump {
 }
 
 impl FtDictDump {
+    /// Create a new [`FtDictDump`] command.
     pub fn new(dict: impl Into<String>) -> Self {
         Self { dict: dict.into() }
     }
@@ -489,6 +498,7 @@ pub struct FtSpellCheck {
 }
 
 impl FtSpellCheck {
+    /// Create a new [`FtSpellCheck`] command.
     pub fn new(index: impl Into<String>, query: impl Into<String>) -> Self {
         Self {
             index: index.into(),
@@ -565,6 +575,7 @@ pub struct FtConfigSet {
 }
 
 impl FtConfigSet {
+    /// Create a new [`FtConfigSet`] command.
     pub fn new(option: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
             option: option.into(),
@@ -609,6 +620,7 @@ pub struct FtConfigGet {
 }
 
 impl FtConfigGet {
+    /// Create a new [`FtConfigGet`] command.
     pub fn new(option: impl Into<String>) -> Self {
         Self {
             option: option.into(),

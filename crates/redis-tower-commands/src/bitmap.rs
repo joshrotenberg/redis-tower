@@ -13,6 +13,7 @@ pub struct SetBit {
 }
 
 impl SetBit {
+    /// Create a new [`SetBit`] command.
     pub fn new(key: impl Into<String>, offset: u64, value: u8) -> Self {
         Self {
             key: key.into(),
@@ -59,6 +60,7 @@ pub struct GetBit {
 }
 
 impl GetBit {
+    /// Create a new [`GetBit`] command.
     pub fn new(key: impl Into<String>, offset: u64) -> Self {
         Self {
             key: key.into(),
@@ -106,6 +108,7 @@ pub struct BitCount {
 }
 
 impl BitCount {
+    /// Create a new [`BitCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -171,6 +174,7 @@ pub struct BitPos {
 }
 
 impl BitPos {
+    /// Create a new [`BitPos`] command.
     pub fn new(key: impl Into<String>, bit: u8) -> Self {
         Self {
             key: key.into(),
@@ -264,6 +268,7 @@ pub struct BitOp {
 }
 
 impl BitOp {
+    /// Create a new [`BitOp`] command.
     pub fn new(
         operation: BitOperation,
         destkey: impl Into<String>,

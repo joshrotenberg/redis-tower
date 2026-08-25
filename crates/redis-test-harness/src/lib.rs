@@ -9,9 +9,12 @@
 //!   that already exists
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 #[macro_use]
+/// Reusable command-contract test macros for standalone and clustered clients.
 pub mod command_tests;
 pub mod cluster;
 pub mod mock;
+/// Fixed port ranges reserved by live-server tests and benchmarks.
 pub mod port_ranges;

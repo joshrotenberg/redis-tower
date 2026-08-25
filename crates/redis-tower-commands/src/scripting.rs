@@ -21,6 +21,7 @@ pub struct Eval {
 }
 
 impl Eval {
+    /// Create a new [`Eval`] command.
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),
@@ -84,6 +85,7 @@ pub struct EvalSha {
 }
 
 impl EvalSha {
+    /// Create a new [`EvalSha`] command.
     pub fn new(sha1: impl Into<String>) -> Self {
         Self {
             sha1: sha1.into(),
@@ -148,6 +150,7 @@ pub struct EvalRo {
 }
 
 impl EvalRo {
+    /// Create a new [`EvalRo`] command.
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),
@@ -212,6 +215,7 @@ pub struct EvalShaRo {
 }
 
 impl EvalShaRo {
+    /// Create a new [`EvalShaRo`] command.
     pub fn new(sha1: impl Into<String>) -> Self {
         Self {
             sha1: sha1.into(),
@@ -392,6 +396,7 @@ pub struct ScriptLoad {
 }
 
 impl ScriptLoad {
+    /// Create a new [`ScriptLoad`] command.
     pub fn new(script: impl Into<String>) -> Self {
         Self {
             script: script.into(),
@@ -439,6 +444,7 @@ pub struct ScriptExists {
 }
 
 impl ScriptExists {
+    /// Create a new [`ScriptExists`] command.
     pub fn new(sha1: impl Into<String>) -> Self {
         Self {
             sha1s: vec![sha1.into()],
@@ -501,6 +507,7 @@ pub struct ScriptFlush {
 }
 
 impl ScriptFlush {
+    /// Create a new [`ScriptFlush`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
@@ -557,6 +564,7 @@ impl Command for ScriptFlush {
 pub struct ScriptKill;
 
 impl ScriptKill {
+    /// Create a new [`ScriptKill`] command.
     pub fn new() -> Self {
         Self
     }
@@ -606,6 +614,7 @@ pub struct FCall {
 }
 
 impl FCall {
+    /// Create a new [`FCall`] command.
     pub fn new(function: impl Into<String>) -> Self {
         Self {
             function: function.into(),
@@ -670,6 +679,7 @@ pub struct FCallRo {
 }
 
 impl FCallRo {
+    /// Create a new [`FCallRo`] command.
     pub fn new(function: impl Into<String>) -> Self {
         Self {
             function: function.into(),
@@ -732,6 +742,7 @@ pub struct FunctionLoad {
 }
 
 impl FunctionLoad {
+    /// Create a new [`FunctionLoad`] command.
     pub fn new(code: impl Into<String>) -> Self {
         Self {
             code: code.into(),
@@ -786,6 +797,7 @@ pub struct FunctionDelete {
 }
 
 impl FunctionDelete {
+    /// Create a new [`FunctionDelete`] command.
     pub fn new(library: impl Into<String>) -> Self {
         Self {
             library: library.into(),
@@ -834,6 +846,7 @@ pub struct FunctionList {
 }
 
 impl FunctionList {
+    /// Create a new [`FunctionList`] command.
     pub fn new() -> Self {
         Self {
             library_pattern: None,
@@ -902,6 +915,7 @@ impl Command for FunctionList {
 pub struct FunctionDump;
 
 impl FunctionDump {
+    /// Create a new [`FunctionDump`] command.
     pub fn new() -> Self {
         Self
     }
@@ -960,6 +974,7 @@ pub enum RestorePolicy {
 }
 
 impl FunctionRestore {
+    /// Create a new [`FunctionRestore`] command.
     pub fn new(payload: Bytes) -> Self {
         Self {
             payload,
@@ -1020,6 +1035,7 @@ pub struct FunctionFlush {
 }
 
 impl FunctionFlush {
+    /// Create a new [`FunctionFlush`] command.
     pub fn new() -> Self {
         Self { mode: None }
     }
@@ -1124,6 +1140,7 @@ impl Command for FunctionKill {
 pub struct FunctionStats;
 
 impl FunctionStats {
+    /// Create a new [`FunctionStats`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1174,6 +1191,7 @@ impl Command for FunctionStats {
 pub struct FunctionHelp;
 
 impl FunctionHelp {
+    /// Create a new [`FunctionHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1212,6 +1230,7 @@ impl Command for FunctionHelp {
 pub struct ScriptHelp;
 
 impl ScriptHelp {
+    /// Create a new [`ScriptHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1273,6 +1292,7 @@ pub struct ScriptDebug {
 }
 
 impl ScriptDebug {
+    /// Create a new [`ScriptDebug`] command.
     pub fn new(mode: ScriptDebugMode) -> Self {
         Self { mode }
     }

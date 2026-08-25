@@ -17,6 +17,7 @@ pub struct MemoryUsage {
 }
 
 impl MemoryUsage {
+    /// Create a new [`MemoryUsage`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -67,6 +68,7 @@ impl Command for MemoryUsage {
 pub struct MemoryDoctor;
 
 impl MemoryDoctor {
+    /// Create a new [`MemoryDoctor`] command.
     pub fn new() -> Self {
         Self
     }
@@ -111,6 +113,7 @@ impl Command for MemoryDoctor {
 pub struct MemoryStats;
 
 impl MemoryStats {
+    /// Create a new [`MemoryStats`] command.
     pub fn new() -> Self {
         Self
     }
@@ -289,6 +292,7 @@ impl Command for SlowlogGet {
 pub struct SlowlogLen;
 
 impl SlowlogLen {
+    /// Create a new [`SlowlogLen`] command.
     pub fn new() -> Self {
         Self
     }
@@ -329,6 +333,7 @@ impl Command for SlowlogLen {
 pub struct SlowlogReset;
 
 impl SlowlogReset {
+    /// Create a new [`SlowlogReset`] command.
     pub fn new() -> Self {
         Self
     }
@@ -374,6 +379,7 @@ impl Command for SlowlogReset {
 pub struct LatencyLatest;
 
 impl LatencyLatest {
+    /// Create a new [`LatencyLatest`] command.
     pub fn new() -> Self {
         Self
     }
@@ -411,6 +417,7 @@ pub struct LatencyHistory {
 }
 
 impl LatencyHistory {
+    /// Create a new [`LatencyHistory`] command.
     pub fn new(event: impl Into<String>) -> Self {
         Self {
             event: event.into(),
@@ -507,6 +514,7 @@ pub struct LatencyGraph {
 }
 
 impl LatencyGraph {
+    /// Create a new [`LatencyGraph`] command.
     pub fn new(event: impl Into<String>) -> Self {
         Self {
             event: event.into(),
@@ -677,6 +685,7 @@ impl Command for LatencyDoctor {
 pub struct MemoryHelp;
 
 impl MemoryHelp {
+    /// Create a new [`MemoryHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -715,6 +724,7 @@ impl Command for MemoryHelp {
 pub struct SlowlogHelp;
 
 impl SlowlogHelp {
+    /// Create a new [`SlowlogHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -753,6 +763,7 @@ impl Command for SlowlogHelp {
 pub struct LatencyHelp;
 
 impl LatencyHelp {
+    /// Create a new [`LatencyHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -791,6 +802,7 @@ impl Command for LatencyHelp {
 pub struct DebugHelp;
 
 impl DebugHelp {
+    /// Create a new [`DebugHelp`] command.
     pub fn new() -> Self {
         Self
     }

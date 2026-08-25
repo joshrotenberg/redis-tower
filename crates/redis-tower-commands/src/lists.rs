@@ -13,6 +13,7 @@ pub struct LPush {
 }
 
 impl LPush {
+    /// Create a new [`LPush`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -20,6 +21,7 @@ impl LPush {
         }
     }
 
+    /// Create the [`LPush`] command for the supplied elements.
     pub fn elements(
         key: impl Into<String>,
         elements: impl IntoIterator<Item = impl Into<String>>,
@@ -74,6 +76,7 @@ pub struct RPush {
 }
 
 impl RPush {
+    /// Create a new [`RPush`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -81,6 +84,7 @@ impl RPush {
         }
     }
 
+    /// Create the [`RPush`] command for the supplied elements.
     pub fn elements(
         key: impl Into<String>,
         elements: impl IntoIterator<Item = impl Into<String>>,
@@ -134,6 +138,7 @@ pub struct LPop {
 }
 
 impl LPop {
+    /// Create a new [`LPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -172,6 +177,7 @@ pub struct RPop {
 }
 
 impl RPop {
+    /// Create a new [`RPop`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -213,6 +219,7 @@ pub struct LRange {
 }
 
 impl LRange {
+    /// Create a new [`LRange`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -273,6 +280,7 @@ pub struct LLen {
 }
 
 impl LLen {
+    /// Create a new [`LLen`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -316,6 +324,7 @@ pub struct LIndex {
 }
 
 impl LIndex {
+    /// Create a new [`LIndex`] command.
     pub fn new(key: impl Into<String>, index: i64) -> Self {
         Self {
             key: key.into(),
@@ -367,6 +376,7 @@ pub struct LSet {
 }
 
 impl LSet {
+    /// Create a new [`LSet`] command.
     pub fn new(key: impl Into<String>, index: i64, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -406,7 +416,9 @@ impl Command for LSet {
 /// Direction for LMOVE source/destination.
 #[derive(Clone)]
 pub enum ListDirection {
+    /// Select the `Left` mode.
     Left,
+    /// Select the `Right` mode.
     Right,
 }
 
@@ -432,6 +444,7 @@ pub struct LMove {
 }
 
 impl LMove {
+    /// Create a new [`LMove`] command.
     pub fn new(
         source: impl Into<String>,
         destination: impl Into<String>,
@@ -488,6 +501,7 @@ pub struct LPushX {
 }
 
 impl LPushX {
+    /// Create a new [`LPushX`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -534,6 +548,7 @@ pub struct RPushX {
 }
 
 impl RPushX {
+    /// Create a new [`RPushX`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -571,7 +586,9 @@ impl Command for RPushX {
 /// Position relative to a pivot element for `LINSERT`.
 #[derive(Clone)]
 pub enum ListPosition {
+    /// Select the `Before` mode.
     Before,
+    /// Select the `After` mode.
     After,
 }
 
@@ -598,6 +615,7 @@ pub struct LInsert {
 }
 
 impl LInsert {
+    /// Create a new [`LInsert`] command.
     pub fn new(
         key: impl Into<String>,
         position: ListPosition,
@@ -655,6 +673,7 @@ pub struct LRem {
 }
 
 impl LRem {
+    /// Create a new [`LRem`] command.
     pub fn new(key: impl Into<String>, count: i64, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -704,6 +723,7 @@ pub struct LTrim {
 }
 
 impl LTrim {
+    /// Create a new [`LTrim`] command.
     pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
@@ -755,6 +775,7 @@ pub struct LPos {
 }
 
 impl LPos {
+    /// Create a new [`LPos`] command.
     pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -843,6 +864,7 @@ pub struct LMPop {
 }
 
 impl LMPop {
+    /// Create a new [`LMPop`] command.
     pub fn new(
         keys: impl IntoIterator<Item = impl Into<String>>,
         direction: ListDirection,
@@ -935,6 +957,7 @@ pub struct LPopCount {
 }
 
 impl LPopCount {
+    /// Create a new [`LPopCount`] command.
     pub fn new(key: impl Into<String>, count: u64) -> Self {
         Self {
             key: key.into(),
@@ -990,6 +1013,7 @@ pub struct RPopCount {
 }
 
 impl RPopCount {
+    /// Create a new [`RPopCount`] command.
     pub fn new(key: impl Into<String>, count: u64) -> Self {
         Self {
             key: key.into(),
@@ -1049,6 +1073,7 @@ pub struct BlMPop {
 }
 
 impl BlMPop {
+    /// Create a new [`BlMPop`] command.
     pub fn new(
         timeout: f64,
         keys: impl IntoIterator<Item = impl Into<String>>,

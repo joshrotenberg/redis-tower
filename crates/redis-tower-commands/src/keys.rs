@@ -11,12 +11,14 @@ pub struct Del {
 }
 
 impl Del {
+    /// Create a new [`Del`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`Del`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -59,12 +61,14 @@ pub struct Exists {
 }
 
 impl Exists {
+    /// Create a new [`Exists`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`Exists`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -137,6 +141,7 @@ pub struct Expire {
 }
 
 impl Expire {
+    /// Create a new [`Expire`] command.
     pub fn new(key: impl Into<String>, seconds: u64) -> Self {
         Self {
             key: key.into(),
@@ -193,6 +198,7 @@ pub struct Ttl {
 }
 
 impl Ttl {
+    /// Create a new [`Ttl`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -234,6 +240,7 @@ pub struct Rename {
 }
 
 impl Rename {
+    /// Create a new [`Rename`] command.
     pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -278,6 +285,7 @@ pub struct Type {
 }
 
 impl Type {
+    /// Create a new [`Type`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -319,12 +327,14 @@ pub struct Unlink {
 }
 
 impl Unlink {
+    /// Create a new [`Unlink`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`Unlink`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -367,6 +377,7 @@ pub struct Persist {
 }
 
 impl Persist {
+    /// Create a new [`Persist`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -410,6 +421,7 @@ pub struct PExpire {
 }
 
 impl PExpire {
+    /// Create a new [`PExpire`] command.
     pub fn new(key: impl Into<String>, milliseconds: u64) -> Self {
         Self {
             key: key.into(),
@@ -468,6 +480,7 @@ pub struct PExpireAt {
 }
 
 impl PExpireAt {
+    /// Create a new [`PExpireAt`] command.
     pub fn new(key: impl Into<String>, ms_timestamp: i64) -> Self {
         Self {
             key: key.into(),
@@ -526,6 +539,7 @@ pub struct Copy {
 }
 
 impl Copy {
+    /// Create a new [`struct@Copy`] command.
     pub fn new(source: impl Into<String>, destination: impl Into<String>) -> Self {
         Self {
             source: source.into(),
@@ -534,6 +548,7 @@ impl Copy {
         }
     }
 
+    /// Configure the `replace` option.
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
@@ -580,6 +595,7 @@ pub struct Keys {
 }
 
 impl Keys {
+    /// Create a new [`Keys`] command.
     pub fn new(pattern: impl Into<String>) -> Self {
         Self {
             pattern: pattern.into(),
@@ -629,6 +645,7 @@ impl Command for Keys {
 pub struct RandomKey;
 
 impl RandomKey {
+    /// Create a new [`RandomKey`] command.
     pub fn new() -> Self {
         Self
     }
@@ -677,12 +694,14 @@ pub struct Touch {
 }
 
 impl Touch {
+    /// Create a new [`Touch`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
+    /// Create the [`Touch`] command for the supplied keys.
     pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
@@ -726,6 +745,7 @@ pub struct ExpireTime {
 }
 
 impl ExpireTime {
+    /// Create a new [`ExpireTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -767,6 +787,7 @@ pub struct PExpireTime {
 }
 
 impl PExpireTime {
+    /// Create a new [`PExpireTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -808,6 +829,7 @@ pub struct Dump {
 }
 
 impl Dump {
+    /// Create a new [`Dump`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -856,6 +878,7 @@ pub struct Restore {
 }
 
 impl Restore {
+    /// Create a new [`Restore`] command.
     pub fn new(key: impl Into<String>, ttl_ms: u64, serialized_value: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),
@@ -868,21 +891,25 @@ impl Restore {
         }
     }
 
+    /// Configure the `replace` option.
     pub fn replace(mut self) -> Self {
         self.replace = true;
         self
     }
 
+    /// Configure the `absttl` option.
     pub fn absttl(mut self) -> Self {
         self.absttl = true;
         self
     }
 
+    /// Configure the `idletime` option.
     pub fn idletime(mut self, seconds: u64) -> Self {
         self.idletime = Some(seconds);
         self
     }
 
+    /// Configure the `freq` option.
     pub fn freq(mut self, frequency: u64) -> Self {
         self.freq = Some(frequency);
         self
@@ -1136,7 +1163,9 @@ impl Command for Migrate {
 /// Sort order for SORT and SORT_RO commands.
 #[derive(Clone)]
 pub enum SortOrder {
+    /// Select the `Asc` mode.
     Asc,
+    /// Select the `Desc` mode.
     Desc,
 }
 
@@ -1157,6 +1186,7 @@ pub struct Sort {
 }
 
 impl Sort {
+    /// Create a new [`Sort`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1169,31 +1199,37 @@ impl Sort {
         }
     }
 
+    /// Configure the `by` option.
     pub fn by(mut self, pattern: impl Into<String>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
+    /// Configure the `get` option.
     pub fn get(mut self, pattern: impl Into<String>) -> Self {
         self.get.push(pattern.into());
         self
     }
 
+    /// Configure the `limit` option.
     pub fn limit(mut self, offset: i64, count: i64) -> Self {
         self.limit = Some((offset, count));
         self
     }
 
+    /// Configure the `order` option.
     pub fn order(mut self, order: SortOrder) -> Self {
         self.order = Some(order);
         self
     }
 
+    /// Configure the `alpha` option.
     pub fn alpha(mut self) -> Self {
         self.alpha = true;
         self
     }
 
+    /// Configure the `store` option.
     pub fn store(mut self, destination: impl Into<String>) -> Self {
         self.store = Some(destination.into());
         self
@@ -1259,6 +1295,7 @@ pub struct SortRo {
 }
 
 impl SortRo {
+    /// Create a new [`SortRo`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1270,26 +1307,31 @@ impl SortRo {
         }
     }
 
+    /// Configure the `by` option.
     pub fn by(mut self, pattern: impl Into<String>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
+    /// Configure the `get` option.
     pub fn get(mut self, pattern: impl Into<String>) -> Self {
         self.get.push(pattern.into());
         self
     }
 
+    /// Configure the `limit` option.
     pub fn limit(mut self, offset: i64, count: i64) -> Self {
         self.limit = Some((offset, count));
         self
     }
 
+    /// Configure the `order` option.
     pub fn order(mut self, order: SortOrder) -> Self {
         self.order = Some(order);
         self
     }
 
+    /// Configure the `alpha` option.
     pub fn alpha(mut self) -> Self {
         self.alpha = true;
         self
@@ -1364,6 +1406,7 @@ pub struct ObjectEncoding {
 }
 
 impl ObjectEncoding {
+    /// Create a new [`ObjectEncoding`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1409,6 +1452,7 @@ pub struct ObjectFreq {
 }
 
 impl ObjectFreq {
+    /// Create a new [`ObjectFreq`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1447,6 +1491,7 @@ impl Command for ObjectFreq {
 pub struct ObjectHelp;
 
 impl ObjectHelp {
+    /// Create a new [`ObjectHelp`] command.
     pub fn new() -> Self {
         Self
     }
@@ -1488,6 +1533,7 @@ pub struct ObjectIdleTime {
 }
 
 impl ObjectIdleTime {
+    /// Create a new [`ObjectIdleTime`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1532,6 +1578,7 @@ pub struct ObjectRefCount {
 }
 
 impl ObjectRefCount {
+    /// Create a new [`ObjectRefCount`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1579,6 +1626,7 @@ pub struct ExpireAt {
 }
 
 impl ExpireAt {
+    /// Create a new [`ExpireAt`] command.
     pub fn new(key: impl Into<String>, timestamp: i64) -> Self {
         Self {
             key: key.into(),
@@ -1635,6 +1683,7 @@ pub struct Pttl {
 }
 
 impl Pttl {
+    /// Create a new [`Pttl`] command.
     pub fn new(key: impl Into<String>) -> Self {
         Self { key: key.into() }
     }
@@ -1677,6 +1726,7 @@ pub struct RenameNx {
 }
 
 impl RenameNx {
+    /// Create a new [`RenameNx`] command.
     pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
         Self {
             key: key.into(),
@@ -1723,6 +1773,7 @@ pub struct Move {
 }
 
 impl Move {
+    /// Create a new [`Move`] command.
     pub fn new(key: impl Into<String>, db: u16) -> Self {
         Self {
             key: key.into(),
