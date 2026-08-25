@@ -149,6 +149,7 @@ jobs:
         env:
           MUTATION_PACKAGE: ${{ matrix.package }}
         run: |
+          mkdir -p mutation-results
           set +e
           cargo mutants --package "$MUTATION_PACKAGE" --jobs 2 \
             --timeout-multiplier 5 --output "mutation-results/$MUTATION_PACKAGE"

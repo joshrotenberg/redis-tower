@@ -26,6 +26,12 @@ class HygieneWorkflowTests(unittest.TestCase):
         self.assertIn("--jobs 2", command)
         self.assertNotIn("--in-place", command)
 
+    def test_mutation_output_parent_is_created(self) -> None:
+        self.assertIn(
+            "mkdir -p mutation-results\n          set +e",
+            self.workflow,
+        )
+
     def test_mutation_evidence_has_an_explicit_output_directory(self) -> None:
         command = self.mutation_command()
         self.assertIn(
