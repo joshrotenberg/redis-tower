@@ -69,6 +69,14 @@ class HygieneWorkflowTests(unittest.TestCase):
             len([row for row in rows if row["package"] == "redis-tower"]),
             12,
         )
+        self.assertEqual(
+            [
+                row["shard"]
+                for row in rows
+                if row["package"] == "redis-tower-commands"
+            ],
+            [0, 1, 2, 3],
+        )
 
 
 if __name__ == "__main__":

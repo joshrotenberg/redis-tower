@@ -44,7 +44,7 @@ def build_plan(packages: list[str]) -> dict[str, object]:
         package_rows.append({"package": package, "shards": count})
         shards.extend(
             {"package": package, "shard": shard, "shards": count}
-            for shard in range(1, count + 1)
+            for shard in range(count)
         )
     return {
         "matrix": {"include": shards},
