@@ -111,6 +111,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       packages: ${{ steps.plan.outputs.packages }}
+      package_count: ${{ steps.plan.outputs.package_count }}
     steps:
       - uses: actions/checkout@v4
 
@@ -174,7 +175,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mutation-shard-${{ matrix.package }}-${{ matrix.shard }}
+          name: mutation-shard-${{ matrix.package }}--${{ matrix.shard }}
           path: mutation-results/${{ matrix.package }}/shard-${{ matrix.shard }}
           retention-days: 90
           if-no-files-found: error
@@ -195,7 +196,7 @@ jobs:
       - name: Download package mutation shards
         uses: actions/download-artifact@v4
         with:
-          pattern: mutation-shard-${{ matrix.package }}-*
+          pattern: mutation-shard-${{ matrix.package }}--*
           path: mutation-shards/${{ matrix.package }}
 
       - name: Render package mutation score
@@ -221,7 +222,9 @@ jobs:
   mutation-summary:
     name: Mutation headline score
     if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
-    needs: mutation-package
+    needs:
+      - mutation-plan
+      - mutation-package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -235,6 +238,7 @@ jobs:
       - name: Render headline score
         run: |
           python3 scripts/mutation_score.py mutation-results \
+            --expected-reports "${{ needs.mutation-plan.outputs.package_count }}" \
             --minimum-score 0.70 \
             --json-output mutation-results/score.json \
             --markdown-output mutation-results/score.md

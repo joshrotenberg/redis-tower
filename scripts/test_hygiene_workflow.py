@@ -50,17 +50,23 @@ class HygieneWorkflowTests(unittest.TestCase):
 
     def test_package_aggregation_requires_every_shard(self) -> None:
         self.assertIn('--expected-reports "${{ matrix.shards }}"', self.workflow)
-        self.assertIn('pattern: mutation-shard-${{ matrix.package }}-*', self.workflow)
+        self.assertIn('pattern: mutation-shard-${{ matrix.package }}--*', self.workflow)
+        self.assertIn(
+            '--expected-reports "${{ needs.mutation-plan.outputs.package_count }}"',
+            self.workflow,
+        )
 
     def test_plan_covers_publishable_packages_and_shards_large_crates(self) -> None:
         packages = [
             "redis-tower",
             "redis-tower-auth-aws",
             "redis-tower-commands",
+            "redis-tower-primitives",
         ]
         plan = mutation_plan.build_plan(packages)
         rows = plan["matrix"]["include"]
-        self.assertEqual(len(rows), 17)
+        self.assertEqual(len(rows), 21)
+        self.assertEqual(plan["package_count"], 4)
         self.assertEqual(
             {row["package"] for row in rows},
             set(packages),
@@ -74,6 +80,14 @@ class HygieneWorkflowTests(unittest.TestCase):
                 row["shard"]
                 for row in rows
                 if row["package"] == "redis-tower-commands"
+            ],
+            [0, 1, 2, 3],
+        )
+        self.assertEqual(
+            [
+                row["shard"]
+                for row in rows
+                if row["package"] == "redis-tower-primitives"
             ],
             [0, 1, 2, 3],
         )

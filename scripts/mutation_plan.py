@@ -14,10 +14,12 @@ ROOT = Path(__file__).resolve().parents[1]
 # Large packages are split using round-robin cargo-mutants shards so every job
 # stays comfortably within the workflow's three-hour limit. The counts are
 # based on the complete 2026-08-25 evidence run: redis-tower discovered 1,781
-# mutants and redis-tower-commands discovered 3,562.
+# mutants and redis-tower-commands discovered 3,562. Primitives is split to
+# limit evidence loss after two unrelated hosted runners shut down mid-job.
 SHARD_COUNTS = {
     "redis-tower": 12,
     "redis-tower-commands": 4,
+    "redis-tower-primitives": 4,
 }
 
 
@@ -49,6 +51,7 @@ def build_plan(packages: list[str]) -> dict[str, object]:
     return {
         "matrix": {"include": shards},
         "packages": {"include": package_rows},
+        "package_count": len(package_rows),
     }
 
 
@@ -71,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     plan = build_plan(publishable_packages(load_metadata()))
     if args.github_output:
         with args.github_output.open("a") as output:
-            for name in ("matrix", "packages"):
+            for name in ("matrix", "packages", "package_count"):
                 value = json.dumps(plan[name], separators=(",", ":"))
                 output.write(f"{name}={value}\n")
     else:
