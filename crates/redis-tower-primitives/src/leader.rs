@@ -6,6 +6,30 @@
 //! lets another task observe demotion even when the leadership handle is
 //! dropped.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::{LeaderElection, LeadershipEvent};
+//!
+//! let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let election = LeaderElection::new(
+//!     "scheduler:leader",
+//!     Duration::from_secs(15),
+//!     Duration::from_secs(5),
+//! )?;
+//!
+//! if let Some(campaign) = election.campaign(client).await? {
+//!     let (leadership, mut events) = campaign.into_parts();
+//!     assert_eq!(events.recv().await, Some(LeadershipEvent::Elected));
+//!     leadership.abdicate().await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cluster keys
 //!
 //! Every operation touches one Redis key and is cluster-safe without a hash

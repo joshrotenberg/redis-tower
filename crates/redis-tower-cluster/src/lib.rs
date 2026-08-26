@@ -5,6 +5,21 @@
 //! high-concurrency client, and a cached high-concurrency wrapper; pick one
 //! based on your workload.
 //!
+//! # Quick start
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::commands::{Get, Set};
+//! use redis_tower_cluster::MultiplexedClusterClient;
+//!
+//! let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
+//! client.execute(Set::new("{user:42}:name", "Ada")).await?;
+//! let name = client.execute(Get::new("{user:42}:name")).await?;
+//! # let _ = name;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Which client to use
 //!
 //! | You need... | Use |
@@ -195,6 +210,13 @@
 //! from the host portion of each node's address; combine with
 //! `.host_override(host)` if your nodes report IPs that don't match your
 //! certificate.
+//!
+//! # Module guide
+//!
+//! - [`pipeline`] documents cross-node execution and split multi-key helpers.
+//! - [`scan_stream`] provides cluster-wide SCAN, HSCAN, SSCAN, and ZSCAN.
+//! - [`slot`] and [`key_extractor`] explain routing and hash tags.
+//! - [`topology`] exposes the discovered slot-to-node map.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

@@ -6,6 +6,24 @@
 //! convenience constructor for [`ManagedIdentityCredential`].
 //! It caches each access token, refreshes at 75% of its observed lifetime, and
 //! exposes that replacement through redis-tower's push credential stream.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use redis_tower_auth_azure::EntraIdProvider;
+//!
+//! # fn provider() -> Result<EntraIdProvider, azure_core::Error> {
+//! EntraIdProvider::managed_identity(
+//!     "00000000-0000-0000-0000-000000000000",
+//!     None,
+//! )
+//! # }
+//! ```
+//!
+//! The object ID becomes the Redis ACL username. Pass the provider to a
+//! credential-aware connection factory and configure TLS separately. See the
+//! [cloud authentication guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md)
+//! for complete topology examples.
 
 use std::fmt;
 use std::future::Future;

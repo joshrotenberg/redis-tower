@@ -3,6 +3,19 @@
 //! [`ClusterFixture`] always starts three masters and one replica per master.
 //! It adds bounded readiness, topology inspection, deterministic hash-slot
 //! keys, resharding, and failover helpers on top of `redis-server-wrapper`.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_test::cluster::{ClusterFixture, NODE_COUNT};
+//!
+//! let fixture = ClusterFixture::start().await?;
+//! assert_eq!(fixture.node_addrs().len(), NODE_COUNT);
+//! println!("cluster seed: {}", fixture.seed_addr());
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashSet;
 use std::fs;

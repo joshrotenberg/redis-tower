@@ -4,6 +4,33 @@
 //! and observed through an explicit polling wait. The caller supplies both the
 //! poll interval and timeout; no hidden task or default timing policy exists.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::{CountDownLatch, LatchWaitOutcome};
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let latch = CountDownLatch::new("deploy:ready", 3, Duration::from_secs(60))?;
+//! latch.initialize(&mut client).await?;
+//! latch.count_down(&mut client).await?;
+//!
+//! let outcome = latch
+//!     .wait(
+//!         &mut client,
+//!         Duration::from_millis(100),
+//!         Duration::from_secs(10),
+//!     )
+//!     .await?;
+//! if let LatchWaitOutcome::TimedOut { remaining } = outcome {
+//!     eprintln!("still waiting for {remaining} participants");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cluster keys
 //!
 //! Every operation touches one Redis key and is cluster-safe without a hash

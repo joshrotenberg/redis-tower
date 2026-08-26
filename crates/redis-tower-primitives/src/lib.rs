@@ -6,6 +6,43 @@
 //! [`redis_tower::Script`], so calls use EVALSHA first and fall back to EVAL
 //! only when Redis reports `NOSCRIPT`.
 //!
+//! # Choose a primitive
+//!
+//! | Need | Module |
+//! |---|---|
+//! | Exclusive ownership with fencing | [`lock`] |
+//! | One renewable active leader | [`leader`] |
+//! | A bounded number of expiring holders | [`semaphore`] |
+//! | Wait for a distributed count to reach zero | [`latch`] |
+//! | Claim due payloads in deadline order | [`delayed_queue`] |
+//! | Allocate IDs in local blocks | [`id_generator`] |
+//! | Enforce a shared Redis-time quota | [`rate_limiter`] |
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::DistributedLock;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let lock = DistributedLock::new(
+//!     "{job:17}:lock",
+//!     "{job:17}:fence",
+//!     Duration::from_secs(15),
+//! )?;
+//!
+//! if let Some(lease) = lock.acquire(&mut client).await? {
+//!     let fencing_token = lease.fencing_token();
+//!     // The guarded resource must reject fencing tokens older than this one.
+//!     # let _ = fencing_token;
+//!     lease.release(&mut client).await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Failure model
 //!
 //! Redis is not a consensus system. A process pause or network partition can
@@ -17,6 +54,10 @@
 //! and ID uniqueness depends on a persistent counter that failover cannot roll
 //! back. Rate-limit calls return Redis failures to the caller; applications
 //! must choose recovery and fail-open or fail-closed behavior explicitly.
+//!
+//! The [distributed primitives guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md)
+//! documents lifecycle, Cluster key placement, and failure semantics for every
+//! primitive.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

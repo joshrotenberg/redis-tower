@@ -10,6 +10,29 @@
 //! when each process also needs local admission pressure; local backpressure
 //! and shared quota solve different problems.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::GcraRateLimiter;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let limiter = GcraRateLimiter::new(
+//!     "tenant:42:rate",
+//!     100,
+//!     Duration::from_secs(1),
+//! )?;
+//!
+//! let decision = limiter.check(&mut client).await?;
+//! if !decision.is_allowed() {
+//!     tokio::time::sleep(decision.retry_after()).await;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cluster keys
 //!
 //! Each decision touches one Redis key and is cluster-safe without a hash tag.

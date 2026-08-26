@@ -5,6 +5,28 @@
 //! a bounded batch whose deadlines have arrived. There is no transfer thread,
 //! hidden poll loop, acknowledgement phase, or automatic retry.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::DelayedQueue;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let queue = DelayedQueue::new("emails:delayed", Duration::from_secs(3600))?;
+//! queue
+//!     .enqueue(&mut client, b"welcome:user:42", Duration::from_secs(30))
+//!     .await?;
+//!
+//! let batch = queue.claim_due(&mut client, 100).await?;
+//! for payload in batch.payloads() {
+//!     println!("claimed {} bytes", payload.len());
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Delivery and retention
 //!
 //! Claims are at-most-once: the claim script removes messages before returning

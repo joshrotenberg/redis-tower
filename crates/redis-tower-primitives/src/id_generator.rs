@@ -4,6 +4,23 @@
 //! reserved range as an [`IdBlock`]. Iterating IDs inside the block performs no
 //! Redis I/O and starts no task.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::IdGenerator;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let generator = IdGenerator::new("orders:next-id", 1_000)?;
+//! let mut block = generator.allocate(&mut client).await?;
+//!
+//! let first_id = block.next().expect("a non-empty block");
+//! # let _ = first_id;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Persistence and failure mode
 //!
 //! The counter intentionally has no TTL: deleting, expiring, or restoring an

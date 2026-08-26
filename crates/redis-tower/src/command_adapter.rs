@@ -4,6 +4,22 @@
 //! `Service<Cmd>` for any `Cmd: Command`. Because lowering to a raw frame
 //! removes typed command metadata, the adapter enforces [`Command::deadline`]
 //! around the inner call before crossing that boundary.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{CommandAdapter, FrameService};
+//! use redis_tower::commands::Get;
+//! use tower::Service;
+//!
+//! let frames = FrameService::connect("127.0.0.1:6379").await?;
+//! let mut commands = CommandAdapter::new(frames);
+//! let value: Option<bytes::Bytes> = commands.call(Get::new("key")).await?;
+//! # let _ = value;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;

@@ -1,4 +1,27 @@
 //! TLS configuration for Redis connections.
+//!
+//! Enable `tls-rustls` for a pure-Rust backend or `tls-native-tls` for the
+//! platform TLS stack. [`TlsConfig`] can use system roots, custom root CAs,
+//! mutual TLS certificates, or a caller-built backend configuration.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_core::RedisConnection;
+//! use redis_tower_core::tls::TlsConfig;
+//!
+//! let tls = TlsConfig::default_rustls();
+//! let connection = RedisConnection::connect_tls(
+//!     "redis.example.com:6380",
+//!     "redis.example.com",
+//!     &tls,
+//! )
+//! .await?;
+//! # let _ = connection;
+//! # Ok(())
+//! # }
+//! ```
 
 use crate::error::RedisError;
 use crate::stream::RedisStream;

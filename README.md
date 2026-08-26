@@ -3,1029 +3,458 @@
 [![Crates.io](https://img.shields.io/crates/v/redis-tower.svg)](https://crates.io/crates/redis-tower)
 [![Documentation](https://docs.rs/redis-tower/badge.svg)](https://docs.rs/redis-tower)
 [![CI](https://github.com/joshrotenberg/redis-tower/actions/workflows/ci.yml/badge.svg)](https://github.com/joshrotenberg/redis-tower/actions/workflows/ci.yml)
-=======
-[![codecov](https://codecov.io/gh/joshrotenberg/redis-tower/branch/main/graph/badge.svg)](https://codecov.io/gh/joshrotenberg/redis-tower)
 [![License: MIT OR Apache-2.0](https://img.shields.io/crates/l/redis-tower.svg)](https://github.com/joshrotenberg/redis-tower#license)
 
-A Redis client for Rust where every connection is a `tower::Service`.
+A typed, async Redis client built around Tower services.
 
-Commands are typed structs with compile-time response types. Middleware
-(timeouts, retries, circuit breaking, caching, metrics) composes via
-standard Tower layers. 450+ commands, including Redis Stack modules
-behind feature flags.
+- Typed commands and responses for Redis 7.x, Redis 8.x, and Redis Stack.
+- A cloneable, auto-pipelined client for normal application traffic.
+- Standalone, Cluster, Sentinel, blocking, and topology-neutral clients.
+- Tower middleware, reconnection, pooling, client-side caching, metrics, TLS,
+  and rotating credentials.
 
-**Documentation:** Read the
-[redis-tower guide](https://joshrotenberg.com/redis-tower/) for migration
-and production guidance, or browse its [Markdown source](https://github.com/joshrotenberg/redis-tower/blob/main/docs/README.md).
+## Install
 
-**Coming from another Rust client?** See the migration guides for
-[redis-rs](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-REDIS-RS.md) and
-[Fred](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-FRED.md).
-
-**Comparing clients?** The [feature matrix](https://github.com/joshrotenberg/redis-tower/blob/main/docs/FEATURE-MATRIX.md) weighs
-redis-tower against redis-rs, fred, Lettuce, go-redis, StackExchange.Redis, and
-ioredis, with every redis-tower cell linked to the code that backs it.
-
-## Quick start
-
-```rust,ignore
-use redis_tower::{MultiplexedClient, RedisValueExt, commands::*};
-
-// MultiplexedClient is the recommended default: one auto-pipelined
-// connection, cheap to clone and share across tasks.
-let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
-client.execute(Set::new("key", "hello")).await?;
-
-let val: String = client.execute(Get::new("key")).await?.parse_into()?;
+```bash
+cargo add redis-tower
 ```
 
-## Choosing a client
-
-| Client | When to use |
-|--------|-------------|
-| `MultiplexedClient` | **The default.** One connection, concurrent commands auto-pipelined; cheap to clone and share across tasks. |
-| `CachedMultiplexedClient` | The cloneable standalone client when repeated reads benefit from RESP3 server-assisted caching; hits stay local and misses remain auto-pipelined. |
-| `RedisConnection` | A single exclusive connection (`&mut self`), or a building block for the others. |
-| `RedisClient` | `Arc<Mutex<RedisConnection>>` -- a simple shared handle, but serializes commands through one lock (lower throughput than `MultiplexedClient`; a naive benchmark will under-report it). |
-| `ResilientRedisClient` | A shared handle with automatic reconnection + backoff, for long-running services. |
-| `ConnectionPool<S>` | N connections -- for blocking commands (`BLPOP`) or CPU-bound reply parsing, where one multiplexed connection would head-of-line block. |
-| `MultiplexedClusterClient` | Redis Cluster, high concurrency (`redis-tower-cluster`). |
-| `CachedMultiplexedClusterClient` | Redis Cluster with one shared RESP3 server-assisted cache and fail-closed invalidation coverage across every master (`redis-tower-cluster`; master reads only). |
-| `MultiplexedSentinelClient` | Sentinel-managed failover, high concurrency (`redis-tower-sentinel`). |
-| `SyncClient` | Blocking (non-`async`) contexts (`redis-tower-sync`). |
-
-## Connection configuration and decode limits
-
-Normal connection constructors use Redis-compatible defaults. For an
-untrusted/shared server or a memory-constrained process, tighten the maximum
-buffered frame size and nesting depth with `ConnectionConfig`; the codec is
-configured before SETINFO, AUTH, SELECT, or HELLO responses are decoded.
-
-```rust,ignore
-use redis_tower::{ConnectionConfig, MultiplexedClient, RespLimits};
-
-let connection = ConnectionConfig::new().with_resp_limits(RespLimits {
-    max_frame_size: 8 * 1024 * 1024,
-    max_depth: 32,
-});
-let client = MultiplexedClient::connect_with_connection_config(
-    "127.0.0.1:6379",
-    &connection,
-).await?;
-```
-
-`RedisConnection`, `RedisClient`, and `MultiplexedClient` expose configured
-connectors directly. The built-in address and URL reconnect factories retain
-the config for resilient clients and pool replacements. Both Redis Cluster
-builders accept `.connection_config(...)` and `.protocol(...)`; they apply the
-complete config to discovery, every data node, redirects, topology changes,
-and reconnects, authenticating protected nodes before final RESP negotiation.
-Cluster and Sentinel builders retain `.resp_limits(...)` as a convenience.
-`PubSubConnection` inherits the codec from the connection or factory supplied
-to it.
-
-## Smart Client Handoff maintenance
-
-A factory-backed `MultiplexedClient` can opt into Redis
-[Smart Client Handoff](https://redis.io/docs/latest/develop/clients/sch/)
-maintenance notifications:
-
-```rust,ignore
-use redis_tower::MultiplexedClient;
-use redis_tower::auto_pipeline::{
-    AutoPipelineConfig, AutoPipelineReconnectConfig,
-};
-use redis_tower::reconnect::Resp3AddrConnectionFactory;
-
-let (client, maintenance) =
-    MultiplexedClient::from_factory_with_maintenance(
-        Resp3AddrConnectionFactory::new("127.0.0.1:6379"),
-        AutoPipelineConfig::default(),
-        AutoPipelineReconnectConfig::default(),
-    )
-    .await?;
-
-// Keep `maintenance` alive for as long as handoff handling is required.
-# let _ = client;
-maintenance.shutdown().await;
-```
-
-This constructor requires RESP3 and a successful
-`CLIENT MAINT_NOTIFICATIONS ON moving-endpoint-type none` registration before
-it returns. A valid `MOVING` notification holds newly queued work, lets an
-already active batch finish once, and replaces the connection at half the
-server-supplied TTL through the original factory. No server-supplied endpoint
-is used. `MIGRATING` is observational only; use
-`from_factory_with_maintenance_and_events` when it needs to be observed.
-
-Dropping the returned handle disables future maintenance handling and cancels
-a handoff that has not crossed its half-TTL boundary; the client remains
-usable. `MaintenanceListenerHandle::shutdown().await` additionally waits for
-worker acknowledgement and, if a handoff is already committed, for its
-replacement attempt to connect or terminate. This opt-in covers only the
-factory-backed multiplexed path. It does not add handoff handling to pools,
-Cluster, blocking connections, or Pub/Sub, and it does not implement relaxed
-timeouts or server-directed endpoint switching.
-
-## Connection pool
-
-```rust,ignore
-use redis_tower::pool::{ConnectionPool, PoolConfig, DispatchStrategy};
-
-use redis_tower::{ConnectionConfig, RespLimits};
-use redis_tower::reconnect::AddrConnectionFactory;
-
-let connection = ConnectionConfig::new().with_resp_limits(RespLimits {
-    max_frame_size: 8 * 1024 * 1024,
-    max_depth: 32,
-});
-let factory = AddrConnectionFactory::new("127.0.0.1:6379")
-    .with_connection_config(connection);
-let pool = ConnectionPool::connect_with_factory(
-    PoolConfig::default().size(4),
-    factory,
-).await?;
-
-// Clone and share across tasks.
-let p = pool.clone();
-tokio::spawn(async move { p.execute(Ping::new()).await });
-```
-
-Dispatch strategies: `RoundRobin` (default), `Random`, `LeastConnections`.
-
-Factory-backed pools can opt into dynamic sizing with
-`PoolConfig::bounds(min, max)`. They grow on acquisition contention; configure
-`idle_timeout` and retain the handle returned by `spawn_idle_reaper` to shrink
-back to the minimum. Active health probing is likewise explicit:
-`spawn_health_prober` defaults to PING, while ROLE, replication-lag, and custom
-probes are available through the pool module. Dropping either owned handle
-stops its task. `ConnectionPool::connect_lazy` starts at zero for serverless
-scale-to-zero workloads.
-
-Works with any connection type -- standalone, cluster, or sentinel.
-
-## Tower middleware
-
-```rust,ignore
-use tower::ServiceBuilder;
-use redis_tower::{FrameService, CommandAdapter, TracingLayer, MetricsLayer};
-
-let svc = CommandAdapter::new(
-    ServiceBuilder::new()
-        .layer(TracingLayer::new())
-        .layer(MetricsLayer::new(my_recorder))
-        .service(FrameService::connect("127.0.0.1:6379").await?)
-);
-```
-
-Built-in middleware: `TracingLayer`, `MetricsLayer`, `CacheLayer`, and
-`ReconnectService`.
-
-Composes with [tower-resilience](https://crates.io/crates/tower-resilience) for
-circuit breaking, retry with backoff, rate limiting, and bulkhead isolation.
-
-## Observability
-
-Enable the `metrics` feature to send redis-tower measurements through the
-lightweight [`metrics`](https://docs.rs/metrics) facade. The application installs
-one global exporter; redis-tower stays independent of the chosen backend.
+The default feature set includes the Redis Stack command builders. A smaller
+core-only dependency looks like this:
 
 ```toml
 [dependencies]
-redis-tower = { version = "0.1", features = ["metrics"] }
+redis-tower = { version = "0.1", default-features = false }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-```rust,ignore
-use std::{sync::Arc, time::Duration};
-use redis_tower::{AutoPipelineConfig, MetricsFacadeRecorder,
-    MultiplexedClient, RedisConnection, spawn_pool_stats_exporter,
-    spawn_queue_depth_exporter};
-use redis_tower::pool::{ConnectionPool, PoolConfig};
-use redis_tower_cluster::MultiplexedClusterClient;
+Add the topology or higher-level crates only when you need them:
 
-// Install a metrics-facade exporter before constructing this recorder.
-let recorder = Arc::new(MetricsFacadeRecorder::new());
+```bash
+cargo add redis-tower-cluster redis-tower-sentinel redis-tower-client
+cargo add redis-tower-modules redis-tower-primitives redis-tower-sync
+```
 
-let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-let client = MultiplexedClient::from_connection_with_config(conn, AutoPipelineConfig {
-    metrics_recorder: Some(recorder.clone()),
-    ..AutoPipelineConfig::default()
-});
+The minimum supported Rust version is 1.88.
 
-let cluster_client = MultiplexedClusterClient::builder("127.0.0.1:7000")
-    .metrics_recorder(recorder.clone())
-    .include_node_in_metrics(true)
-    .connect().await?;
+## Quick start
 
-let pool = ConnectionPool::connect_with_config(
-    PoolConfig::default()
-        .name("primary")
-        .metrics_recorder(recorder),
-    || async { RedisConnection::connect("127.0.0.1:6379").await },
+[`MultiplexedClient`](https://docs.rs/redis-tower/latest/redis_tower/struct.MultiplexedClient.html)
+is the recommended default. It is cheap to clone, accepts concurrent commands,
+and automatically pipelines work over one connection.
+
+```rust
+use redis_tower::{MultiplexedClient, RedisValueExt};
+use redis_tower::commands::{Get, Set};
+
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+
+client.execute(Set::new("greeting", "hello")).await?;
+let greeting: String = client
+    .execute(Get::new("greeting"))
+    .await?
+    .parse_into()?;
+
+assert_eq!(greeting, "hello");
+# Ok(())
+# }
+```
+
+Redis URLs support authentication, database selection, Unix sockets, and TLS:
+
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use redis_tower::MultiplexedClient;
+let client = MultiplexedClient::connect_url(
+    "rediss://default:secret@redis.example.com:6380/0",
 ).await?;
-let pool_stats = spawn_pool_stats_exporter(pool.clone(), Duration::from_secs(5));
-let queue_stats = spawn_queue_depth_exporter(
-    client.clone(), "commands", Duration::from_secs(5));
-
-println!("pending pipeline requests: {}", client.queue_depth());
-# let _ = (cluster_client, pool_stats, queue_stats);
+# let _ = client;
+# Ok(())
+# }
 ```
 
-Use a stable, distinct `PoolConfig::name` for every pool; it becomes the
-`db.client.connection.pool.name` label. `AutoPipelineConfig` reports worker
-batch sizes. Wrap the frame service in `MetricsLayer` as well when command
-duration, count, outcome, and error metrics are needed. `queue_depth()` is an
-instantaneous in-process snapshot for an `AutoPipelineService`-backed
-`MultiplexedClient`; `spawn_queue_depth_exporter` publishes that snapshot as a
-named gauge. Keep each returned `MetricsExporterHandle` alive while gauges
-should be published; dropping it cancels the background task, and
-`shutdown().await` emits a final snapshot, cancels, and joins it explicitly.
-The queue exporter retains a client clone, so stop it before gracefully
-shutting down the client.
+## Choose a client
 
-The built-in recorder emits:
+| Client | Use it for |
+|---|---|
+| `MultiplexedClient` | Most async applications; cloneable and auto-pipelined |
+| `CachedMultiplexedClient` | Read-heavy standalone workloads using RESP3 client-side caching |
+| `RedisConnection` | Exclusive access to one connection or custom Tower stacks |
+| `RedisClient` | Simple serialized sharing behind a mutex |
+| `ResilientRedisClient` | Automatic reconnect with optional bounded offline queuing |
+| `ConnectionPool` | Blocking commands, multiple sockets, or CPU-heavy response parsing |
+| `MultiplexedClusterClient` | High-concurrency Redis Cluster workloads |
+| `MultiplexedSentinelClient` | Sentinel discovery, failover, and replica reads |
+| `UniversalClient` | One application type selected by standalone, Cluster, or Sentinel URL |
+| `SyncClient` | CLI tools and other blocking code |
 
-- commands: `db.client.operation.duration` and `redis_tower.commands`;
-- auto-pipelines: `redis_tower.pipeline.batch_size` and
-  `redis_tower.pipeline.queue_depth`;
-- client-side caching: `redis_tower.cache.events`, with bounded hit, miss,
-  invalidation, and eviction event labels;
-- pool waits and lifecycle: `db.client.connection.wait_time`,
-  `db.client.connection.timeouts`, `redis_tower.pool.health_check_failures`,
-  `redis_tower.pool.connection_replacements`,
-  `redis_tower.pool.health_probes`, and
-  `redis_tower.pool.connections_reaped`;
-- pool snapshots: `db.client.connection.count`,
-  `db.client.connection.max`, `db.client.connection.pending_requests`,
-  `redis_tower.pool.inflight_commands`, and
-  `redis_tower.pool.max_inflight_per_connection`; replication-lag gauges are
-  paired with an `*_observed` freshness gauge so an unknown observation cannot
-  leave a stale lag reading;
-- cluster routing: `redis_tower.cluster.redirects`,
-  `redis_tower.cluster.topology_refreshes`, and
-  `redis_tower.cluster.topology_refresh.duration`.
+The [production tuning guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRODUCTION-TUNING.md)
+goes deeper on client selection, backpressure, timeouts, pooling, reconnects,
+and shutdown.
 
-Cluster redirect counters distinguish only `MOVED` and `ASK`, while topology
-refresh counters and histograms use bounded success/partial/error outcomes. Per-node
-command latency labels are disabled by default. Enabling
-`include_node_in_metrics(true)` adds `redis_tower.cluster.node` to command
-measurements, with up to 64 concrete node-address labels per client plus
-`_OTHER`; later addresses are folded into `_OTHER` so topology churn cannot
-grow cardinality without bound.
+## Common operations
 
-The pool measurements use OpenTelemetry database client semantic-convention
-metric and attribute names. The `metrics` facade represents the connection and
-request snapshots as gauges with a generic count unit; exporters therefore do
-not preserve OpenTelemetry's specialized instrument kinds and `{connection}` /
-`{request}` units. These conventions are currently development status and may
-evolve before stabilization. The
-[`prometheus`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/prometheus.rs) and [`otel`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/otel.rs) examples
-show complete exporter setup against a local Redis server:
+Commands are ordinary typed values. Optional arguments use builder methods.
 
-```shell
-cargo run -p redis-tower-examples --example prometheus --features prometheus
-cargo run -p redis-tower-examples --example otel --features otel
+```rust
+use redis_tower::commands::{Set, XAdd, ZAdd};
+
+let set = Set::new("session:42", "active").ex(60).nx();
+let score = ZAdd::new("leaders").member(100.0, "alice");
+let event = XAdd::new("events").field("kind", "created");
+# let _ = (set, score, event);
 ```
 
-Prometheus replaces dots in metric and label names with underscores. Useful
-Grafana PromQL starting points (the Prometheus example enables recommended
-counter naming) include:
+Pipelines batch a known group of commands. Transactions use Redis
+`WATCH`/`MULTI`/`EXEC` semantics.
 
-```promql
-# Commands per second by operation
-sum by (db_operation_name) (rate(redis_tower_commands_total[5m]))
-
-# Command errors per second by category
-sum by (error_type) (rate(redis_tower_commands_total{outcome="error"}[5m]))
-
-# Mean pool acquisition wait in seconds by pool
-sum by (db_client_connection_pool_name) (rate(db_client_connection_wait_time_seconds_sum[5m]))
-/
-sum by (db_client_connection_pool_name) (rate(db_client_connection_wait_time_seconds_count[5m]))
-
-# Pool utilization ratio
-sum by (db_client_connection_pool_name) (db_client_connection_count{db_client_connection_state="used"})
-/
-sum by (db_client_connection_pool_name) (db_client_connection_max)
-
-# Auto-pipeline queue depth
-max by (redis_tower_pipeline_name) (redis_tower_pipeline_queue_depth)
-```
-
-## Auto-pipelining
-
-```rust,ignore
-use redis_tower::{AutoPipelineService, AutoPipelineConfig, CommandAdapter};
-
-let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-let mut svc = CommandAdapter::new(
-    AutoPipelineService::new(conn, AutoPipelineConfig::default()),
-);
-// Concurrent calls from multiple tasks are batched into pipelines.
-```
-
-## Pipeline and transactions
-
-```rust,ignore
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use redis_tower::{Pipeline, RedisConnection, Transaction};
+# use redis_tower::commands::{Get, Incr, Set};
+# let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 let results = Pipeline::new()
     .push(Set::new("a", "1"))
-    .push(Set::new("b", "2"))
+    .push(Incr::new("counter"))
     .push(Get::new("a"))
-    .execute(&mut conn).await?;
+    .execute(&mut conn)
+    .await?;
 
-let result = Transaction::new()
-    .watch(["key"])
-    .push(Incr::new("key"))
-    .execute(&mut conn).await?;
+let transaction = Transaction::new()
+    .watch(["counter"])
+    .push(Incr::new("counter"))
+    .execute(&mut conn)
+    .await?;
+# let _ = (results, transaction);
+# Ok(())
+# }
 ```
 
-## Pub/sub
+## Deployment topologies
 
-```rust,ignore
-let mut pubsub = PubSubConnection::from_connection(conn)?;
-pubsub.subscribe(&["events"]).await?;
+### Cluster
 
-while let Some(msg) = pubsub.next().await {
-    let msg = msg?;
-    println!("{}: {:?}", msg.channel, msg.payload);
-}
-```
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::commands::{Get, Set};
+use redis_tower_cluster::{MultiplexedClusterClient, ReadPreference};
 
-## Streams
-
-```rust,ignore
-use redis_tower::consumer::{StreamConsumer, ConsumerConfig};
-
-let consumer = StreamConsumer::new("my-group", "worker-1", ["events"])
-    .config(ConsumerConfig { batch_size: 20, auto_ack: true, ..Default::default() });
-
-let mut stream = consumer.into_stream(conn);
-while let Some(msg) = stream.next().await {
-    let msg = msg?;
-    println!("{}: {} fields", msg.id, msg.fields.len());
-}
-```
-
-## Lua scripting
-
-```rust,ignore
-let script = Script::new("return redis.call('GET', KEYS[1])");
-let result = script.execute(&mut conn, &["mykey"], &[]).await?;
-```
-
-`Script` pre-computes the SHA1 and tries EVALSHA first, falling back to
-EVAL on NOSCRIPT.
-
-## Client-side caching
-
-```rust,ignore
-use std::time::Duration;
-use redis_tower::{
-    CacheTrackingMode, CachedClientConfig, CachedMultiplexedClient,
-    commands::Get,
-};
-
-let config = CachedClientConfig::new()
-    .max_entries(50_000)
-    .client_ttl(Some(Duration::from_secs(15)))
-    .tracking_mode(CacheTrackingMode::broadcast_with_prefixes(["user:"]));
-let client =
-    CachedMultiplexedClient::connect_with_config("127.0.0.1:6379", config).await?;
-
-let val = client.execute(Get::new("user:42")).await?; // Redis miss
-let val = client.clone().execute(Get::new("user:42")).await?; // local hit
-let stats = client.cache_statistics().await;
-# let _ = (val, stats);
-```
-
-Redis Cluster uses the same cache configuration through
-`redis-tower-cluster`:
-
-```rust,ignore
-use redis_tower::{CacheTrackingMode, CachedClientConfig, commands::Get};
-use redis_tower_cluster::CachedMultiplexedClusterClient;
-use std::time::Duration;
-
-let config = CachedClientConfig::new()
-    .client_ttl(Some(Duration::from_secs(30)))
-    .tracking_mode(CacheTrackingMode::OptIn);
-let cluster = CachedMultiplexedClusterClient::builder("127.0.0.1:7000")
-    .cache_config(config)
+let client = MultiplexedClusterClient::builder("127.0.0.1:7000")
+    .read_preference(ReadPreference::PreferReplica)
     .connect()
     .await?;
 
-let value = cluster.execute(Get::new("user:42")).await?;
-# let _ = value;
+client.execute(Set::new("{user:42}:name", "Ada")).await?;
+let name = client.execute(Get::new("{user:42}:name")).await?;
+# let _ = name;
+# Ok(())
+# }
 ```
 
-`CachedMultiplexedClient` owns two RESP3 connections, reconnects its invalidation
-receiver, disables and clears caching while either connection is unhealthy,
-evicts locally around writes, and rejects stale inserts from reads that race an
-invalidation. A fixed data worker fails closed when its socket is lost, while a
-replacement receiver can safely reinstall tracking. Broadcast (optionally
-prefix-filtered), Redis server-default, and opt-in tracking modes are available.
-Address, URL, connection-config, factory, and existing-connection constructors
-keep authentication, database, TLS/Unix transport, and RESP limits consistent
-across both cache connections. `CachedClient` remains as the serialized
-compatibility form, and `CacheLayer` / `CacheService` support custom Tower
-composition. Place the cache directly above a backend implementing
-`ReleaseReadiness`, with other middleware outside it, so local hits return any
-capacity reserved by `poll_ready`.
+The Cluster crate also provides explicit cross-node pipelines, split multi-key
+helpers, cluster-wide scans, regular and sharded Pub/Sub, replica routing, and
+automatic MOVED/ASK handling.
 
-`CachedMultiplexedClusterClient` keeps one shared cache above cluster routing,
-forces RESP3, and owns a separate invalidation receiver for every current
-master. Cache use is enabled only after all masters have `CLIENT TRACKING`
-redirected to healthy receivers. A data/receiver loss clears and disables the
-cache globally until complete coverage is rebuilt. MOVED patches invalidate
-the affected slot immediately so an in-flight response from the previous owner
-cannot populate the cache; any receiver handover or topology-wide coverage
-reconfiguration then clears globally before cache use resumes. Opt-in requests
-keep `CLIENT CACHING YES` adjacent to the command. Redis's one-shot `ASKING`
-and `CLIENT CACHING YES` flags cannot prefix the same command, so an ASK closes
-the cache gate and retries as `[ASKING, command]` without caching that response.
-The initial cluster cache is intentionally master-only: configuring `Replica`
-or `PreferReplica` read preference is rejected rather than promising
-invalidations the client cannot prove complete. It also requires a finite
-`client_ttl`: a slot can change owners without this client seeing the handoff,
-so Redis invalidations alone cannot bound the lifetime of every old-owner
-entry. Standalone cached clients may still explicitly choose `None`.
+### Sentinel
 
-See the [client-side caching guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md) for failure
-semantics, bounds, and metrics.
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::commands::Ping;
+use redis_tower_sentinel::{MultiplexedSentinelClient, ReadPreference};
 
-## JSON API
-
-Requires the `serde` feature.
-
-```rust,ignore
-use redis_tower::Json;
-
-let mut json = Json::new(&mut conn);
-json.set("user:1", "$", &User { name: "Alice".into(), age: 30 }).await?;
-let user: User = json.get("user:1", "$").await?;
-```
-
-## Search API
-
-Requires the `serde` feature.
-
-```rust,ignore
-use redis_tower::search_api::{Search, SortDir};
-
-let results = Search::new("idx", "shoes")
-    .filter("@price:[0 100]")
-    .sort_by("price", SortDir::Asc)
-    .limit(0, 10)
-    .search::<Product>(&mut conn).await?;
-```
-
-## Cluster
-
-Two cluster clients for different workloads:
-
-- **`ClusterConnection`** / **`ClusterClient`** -- simple, mutex-based sharing.
-  Good for single-task workloads or when you need connection-level features
-  like `MULTI`/`EXEC`.
-- **`MultiplexedClusterClient`** -- per-node connections with automatic
-  pipelining. Designed for high-concurrency sharing across many tokio tasks
-  (~35x higher throughput than `ClusterClient` under load).
-
-```rust,ignore
-use redis_tower_cluster::{ClusterConnection, ReadPreference};
-
-// Simple single-connection usage
-let mut cluster = ClusterConnection::builder("127.0.0.1:7000")
-    .read_preference(ReadPreference::PreferReplica)
-    .connect().await?;
-
-cluster.execute(Set::new("{user:1}:name", "Alice")).await?;
-```
-
-```rust,ignore
-use std::sync::Arc;
-use redis_tower::MetricsFacadeRecorder;
-use redis_tower_cluster::{MultiplexedClusterClient, ReadPreference};
-
-// High-concurrency shared client
-let recorder = Arc::new(MetricsFacadeRecorder::new());
-let client = MultiplexedClusterClient::builder("127.0.0.1:7000")
-    .read_preference(ReadPreference::PreferReplica)
-    .metrics_recorder(recorder)
-    .include_node_in_metrics(true)
-    .connect().await?;
-
-// Clone and share across tasks
-let c = client.clone();
-tokio::spawn(async move {
-    c.execute(Set::new("{user:1}:name", "Alice")).await.unwrap();
-});
-```
-
-Replica selection can combine availability-zone affinity, observed response
-latency, and health ejection. Zone data is explicit because Redis topology
-responses do not report it; use the final address after any cluster address
-mapping:
-
-```rust,ignore
-use std::time::Duration;
-use redis_tower_cluster::{
-    AdaptiveReplicaRouting, MultiplexedClusterClient, NodeAddr, ReadPreference,
-};
-
-let routing = AdaptiveReplicaRouting::builder()
-    .local_zone("us-east-1a")
-    .replica_zone(NodeAddr::new("10.0.1.10", 6379), "us-east-1a")
-    .replica_zone(NodeAddr::new("10.0.2.10", 6379), "us-east-1b")
-    .failure_threshold(3)
-    .ejection_duration(Duration::from_secs(30))
-    .minimum_healthy_replicas(1)
-    .build()?;
-
-let client = MultiplexedClusterClient::builder("10.0.0.10:6379")
-    .read_preference(ReadPreference::PreferReplica)
-    .read_routing(routing)
-    .connect().await?;
-```
-
-Healthy same-AZ replicas are preferred. New or recovered candidates are
-sampled round-robin; measured candidates use inverse-EWMA weighting, so faster
-replicas receive more reads without permanently starving slower ones. Only
-transport, protocol, reconnect, and deadline failures count toward ejection;
-Redis command errors prove the node answered and reset the consecutive-failure
-count. Recovery is lazy and creates no task. The minimum-candidate floor can
-re-admit the soonest-recovering ejected replica rather than leave a strict
-replica read with no target. Writes and master reads are unaffected.
-
-Explicit cluster pipelines pin commands to their owning masters, preserve
-submission order within each master batch, dispatch different master batches
-concurrently, and restore the original result order. There is no total
-execution order across hash slots, and cancellation after dispatch can leave
-some node batches applied:
-
-```rust,ignore
-use redis_tower_cluster::ClusterPipeline;
-
-let results = ClusterPipeline::new()
-    .push(Set::new("{user:1}:name", "Alice"))
-    .push(Set::new("{user:2}:name", "Bob"))
-    .push(Get::new("{user:1}:name"))
-    .execute(&client)
-    .await?;
-```
-
-Use `mget_split`, `mset_split`, and `del_split` when one logical multi-key
-operation intentionally spans hash slots. `MGET` restores caller order;
-cross-slot `MSET` and `DEL` are atomic only within each slot group and can
-partially apply if another group fails. `ClusterConnection` and `ClusterClient`
-also accept `Transaction`; every WATCH and command key must share one hash slot
-(use a common `{hash-tag}`), and mixed-slot transactions are rejected before
-anything is written. `Transaction::watch` can protect a transaction body that
-is already known. The closure-based `transaction` helpers are rejected because
-their separate WATCH/read/build calls cannot reserve one cluster-node
-connection, so read/compute/build optimistic locking is not available on the
-cluster clients.
-
-Ordinary commands and cluster pipelines handle MOVED/ASK redirects
-automatically. Transactions surface redirects without replay because Redis may
-already have observed WATCH or MULTI; MOVED still updates topology for the next
-freshly built transaction. The multiplexed client traces redirects and
-topology-refresh lifecycle events; a configured recorder also emits redirect
-counters and refresh count/duration metrics. Per-node command latency labels
-are opt-in: they are disabled by default and, when enabled, are limited to 64
-concrete addresses per client plus `_OTHER`; additional addresses use the
-`_OTHER` label.
-
-Cluster Pub/Sub uses dedicated connections rather than the command workers.
-Regular subscriptions stay pinned to the topology node you select and replay
-there after a transport failure. Sharded subscriptions require one hash slot
-per handle, follow that slot's committed primary owner, and replay after an
-ownership change. `SPUBLISH` uses the ordinary slot-routed command path:
-
-```rust,ignore
-use redis_tower_cluster::MultiplexedClusterClient;
-use redis_tower_commands::SPublish;
-
-let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
-let mut shard = client
-    .sharded_pubsub(&["{orders}:created", "{orders}:updated"])
-    .await?;
-
-client
-    .execute(SPublish::new("{orders}:created", "order-42"))
-    .await?;
-let message = shard.next_message().await?;
-```
-
-Channels passed to one sharded handle must hash to the same slot. During
-reconnect or resubscription there is an at-most-once delivery gap: Redis does
-not retain Pub/Sub messages for disconnected consumers. Keep at least one clone
-of the originating `MultiplexedClusterClient` alive while using a sharded
-handle; after the client shuts down, topology observation and reconnects return
-`ConnectionClosed`.
-
-## Sentinel
-
-```rust,ignore
-use redis_tower_sentinel::{ReadPreference, SentinelConnection};
-
-let mut conn = SentinelConnection::builder(
-    &["127.0.0.1:26379", "127.0.0.1:26380", "127.0.0.1:26381"],
+let client = MultiplexedSentinelClient::builder(
+    &["127.0.0.1:26379", "127.0.0.1:26380"],
     "mymaster",
 )
 .read_preference(ReadPreference::PreferReplica)
 .connect()
 .await?;
+
+client.execute(Ping::new()).await?;
+# Ok(())
+# }
 ```
 
-The default read preference is `Master`. `Replica` requires a reachable
-replica for read-only commands, while `PreferReplica` falls back to the master
-when none is reachable. Writes always use the Sentinel-discovered master.
-`SentinelClient` and `MultiplexedSentinelClient` expose the same builder
-options. The multiplexed client keeps an automatically pipelined connection to
-each reachable replica and applies its routing strategy per read.
+### One client for every topology
 
-## Resilience
+`redis-tower-client` chooses a variant from the URL scheme:
 
-`ResilientRedisClient` handles auto-reconnection with exponential backoff:
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::commands::Ping;
+use redis_tower_client::UniversalClient;
 
-```rust,ignore
-let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
+let standalone = UniversalClient::connect_url("redis://127.0.0.1:6379").await?;
+let cluster = UniversalClient::connect_url("redis+cluster://127.0.0.1:7000").await?;
+let sentinel = UniversalClient::connect_url(
+    "redis+sentinel://127.0.0.1:26379/mymaster",
+).await?;
+
+standalone.execute(Ping::new()).await?;
+# let _ = (cluster, sentinel);
+# Ok(())
+# }
 ```
 
-The built-in Redis-aware circuit breaker is backed by
-[tower-resilience](https://crates.io/crates/tower-resilience). It counts
-connection and timeout failures, but ignores Redis command errors such as
-`WRONGTYPE`:
+Use the `rediss`, `rediss+cluster`, and `rediss+sentinel` variants for TLS.
 
-```rust,ignore
-use redis_tower::{MultiplexedClient, RedisCircuitBreakerConfig};
+## Data access modules
 
-let client = MultiplexedClient::connect("127.0.0.1:6379")
-    .await?
-    .with_circuit_breaker(RedisCircuitBreakerConfig::default());
+The `redis-tower-modules` crate provides higher-level clients over the lower-
+level typed command builders.
 
-let handle = client.circuit_breaker_handle();
-println!("circuit health: {}", handle.health_status());
+| Module | Client | Typical use |
+|---|---|---|
+| RedisJSON | `json::JsonClient` | Serialize application types with Serde |
+| RediSearch | `search::SearchClient` | Define indexes and deserialize query results |
+| RedisTimeSeries | `timeseries::TimeSeriesClient` | Store and query timestamped samples |
+| Probabilistic | `probabilistic::*` | Bloom, Cuckoo, CMS, TopK, and T-Digest |
+| Vector Sets | `vector::VectorSetClient` | Add vectors and run similarity search |
+
+### JSON
+
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::MultiplexedClient;
+use redis_tower_modules::json::JsonClient;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+struct User { name: String }
+
+let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+let mut json = JsonClient::new(client);
+json.set("user:42", "$", &User { name: "Ada".into() }).await?;
+let user: Option<User> = json.get("user:42", "$").await?;
+# let _ = user;
+# Ok(())
+# }
 ```
 
-The same `with_circuit_breaker` option is available on
-`ResilientRedisClient`. The returned client retains typed execution, health
-checks, and idempotent-aware retry composition. `CircuitBreakerLayer` and its
-config/service names remain as deprecated aliases for one compatibility
-release.
+### Search, time series, probabilistic structures, and vectors
 
-`RedisError::is_retryable()` classifies which errors are worth retrying.
-Process-local rate limiting and bulkhead isolation remain available from the
-tower-resilience crate family. The companion `redis-tower-primitives` crate
-adds fenced distributed locks, leader election, expirable semaphores,
-countdown latches, delayed queues, block-allocated IDs, and Redis-time GCRA
-admission for shared quota; see the [distributed primitives
-guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md).
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::RedisConnection;
+use redis_tower_modules::probabilistic::BloomFilter;
+use redis_tower_modules::search::{IndexBuilder, SearchClient};
+use redis_tower_modules::timeseries::{TimeSeriesClient, TsKeyConfig, TsTimestamp};
+use redis_tower_modules::vector::VectorSetClient;
 
-Other resilience building blocks:
+let mut conn = RedisConnection::connect("127.0.0.1:6379").await?;
 
-- **Health checks** -- `ResilientRedisClient::health_check()` for `/health`
-  endpoints and Kubernetes readiness probes.
-- **Per-command timeouts** -- `CommandTimeoutLayer` applies a generic static
-  timeout; call `.with_request_deadlines()` to let a `WithDeadline<Cmd>` carry
-  one earlier absolute budget through typed middleware.
-- **Pool health** -- `ConnectionPool` replaces dead connections after a lazy
-  health check, exposes active PING/ROLE/replication-lag probing through an
-  explicit owned task, and reports health and dynamic-sizing state in
-  `PoolStats`.
-- **Error taxonomy** -- `RedisError::is_retryable()`, `is_connection_error()`,
-  `is_moved()` / `is_ask()`, and `is_wrongtype()` classify failures so callers
-  can respond appropriately.
+SearchClient::new(&mut conn)
+    .create_index(IndexBuilder::new("users").on_hash().text_field("name"))
+    .await?;
 
-See [`examples/resilience.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/examples/resilience.rs) for a runnable tour.
+TimeSeriesClient::new(&mut conn)
+    .create("temperature", TsKeyConfig::new().label("room", "lab"))
+    .await?;
+TimeSeriesClient::new(&mut conn)
+    .add("temperature", TsTimestamp::Auto, 21.5)
+    .await?;
 
-## Credential provider
+{
+    let mut bloom = BloomFilter::new(&mut conn, "seen-users");
+    bloom.add("user:42").await?;
+}
 
-```rust,ignore
-use redis_tower::{
-    AutoPipelineConfig, ConnectionConfig, CredentialConnectionFactory,
-    MultiplexedClient, ProtocolVersion, StaticCredentials,
-};
-use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
-use redis_tower::reconnect::{ReconnectConfig, ResilientConnection};
+let mut vectors = VectorSetClient::new(&mut conn, "embeddings");
+vectors.add(vec![1.0, 0.0, 0.0], "user:42").await?;
+# Ok(())
+# }
+```
 
-let factory = CredentialConnectionFactory::new(
+## Pub/Sub, streams, and caching
+
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use redis_tower::RedisConnection;
+let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+let mut pubsub = redis_tower::PubSubConnection::from_connection(conn)?;
+pubsub.subscribe(&["events"]).await?;
+
+while let Some(message) = pubsub.next().await {
+    println!("{:?}", message?);
+}
+# Ok(())
+# }
+```
+
+For durable processing, use Redis Streams through the typed `X*` commands or
+[`StreamConsumer`](https://docs.rs/redis-tower/latest/redis_tower/struct.StreamConsumer.html).
+
+RESP3 client-side caching is available as a managed client:
+
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use std::time::Duration;
+use redis_tower::{CachedClientConfig, CachedMultiplexedClient};
+use redis_tower::commands::Get;
+
+let config = CachedClientConfig::new()
+    .max_entries(10_000)
+    .client_ttl(Some(Duration::from_secs(30)));
+let client = CachedMultiplexedClient::connect_with_config(
     "127.0.0.1:6379",
-    StaticCredentials::password("secret"),
-)
-.with_connection_config(
-    ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
-);
-
-let resilient = ResilientConnection::new(
-    factory.clone(),
-    ReconnectConfig::default(),
+    config,
 ).await?;
 
-let multiplexed = MultiplexedClient::from_factory(
-    factory,
-    AutoPipelineConfig::default(),
-    AutoPipelineReconnectConfig::default(),
-).await?;
+let value = client.execute(Get::new("user:42")).await?;
+# let _ = value;
+# Ok(())
+# }
 ```
 
-Implement `CredentialProvider` for dynamic auth, or use the companion
-`redis-tower-auth-aws` and `redis-tower-auth-azure` crates for ElastiCache IAM
-and Microsoft Entra ID. Each factory call starts in RESP2, fetches credentials,
-runs `AUTH`, and only then negotiates the protocol requested by
-`ConnectionConfig`. Initial connections and every reconnect therefore fetch
-credentials again.
+Read the [client-side caching guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md)
+for invalidation, failure, and consistency semantics.
 
-If connection-establishment `AUTH` returns `NOAUTH` or `WRONGPASS`, the
-factory calls `force_refresh()` and retries `AUTH` once. A
-`StreamingCredentialProvider` can also proactively reauthenticate established
-standalone, multiplexed, pooled, Cluster, and Sentinel data connections. Its
-owned handle stops the subscription when dropped. Neither path replays a user
-command after a live `NOAUTH` or `WRONGPASS`.
+## Tower middleware
 
-Credential values redact their secret from `Debug` and zeroize their owned
-buffers on drop. See [Cloud and rotating credentials](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) for
-provider and topology examples, expiry behavior, and security boundaries.
+`FrameService` is a `tower::Service<Frame>`. `CommandAdapter` converts a frame
+stack back into a typed command service.
 
-## TLS
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use redis_tower::{CommandAdapter, FrameService, TracingLayer};
+use tower::ServiceBuilder;
 
-```rust,ignore
-let conn = RedisConnection::connect_url("rediss://my-redis:6380").await?;
+let service = ServiceBuilder::new()
+    .layer(TracingLayer::new())
+    .service(FrameService::connect("127.0.0.1:6379").await?);
+let typed = CommandAdapter::new(service);
+# let _ = typed;
+# Ok(())
+# }
 ```
 
-A `rediss://` URL uses rustls by default (system roots with a webpki-roots
-fallback). For a private CA or mutual TLS (mTLS) -- the standard enterprise
-posture -- build a `TlsConfig` from PEM and pass it explicitly:
+The facade also includes request deadlines, Redis-aware retries and circuit
+breaking, reconnection, cache middleware, and metrics-facade integration.
 
-```rust,ignore
-use redis_tower_core::tls::TlsConfig;
+## Distributed primitives
 
-let tls = TlsConfig::default_rustls()
-    .with_root_ca_pem(std::fs::read("ca.pem")?)                                  // trust a private CA
-    .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?); // present a client cert (mTLS)
+`redis-tower-primitives` builds coordination tools on the same typed executor:
 
-// URL provides host/port/AUTH; the TlsConfig drives the handshake:
-let conn = RedisConnection::connect_url_with_tls("rediss://default:secret@redis.internal:6379", &tls).await?;
+- Fenced distributed locks and leader election.
+- Expirable semaphores and countdown latches.
+- Delayed queues and block-allocated IDs.
+- Redis-time GCRA rate limiting.
 
-// To keep custom TLS across reconnects, wire it into the factory:
-use redis_tower::reconnect::UrlConnectionFactory;
-let factory = UrlConnectionFactory::new("rediss://default:secret@redis.internal:6379").with_tls(tls);
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use std::time::Duration;
+use redis_tower::MultiplexedClient;
+use redis_tower_primitives::DistributedLock;
+
+let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+let lock = DistributedLock::new(
+    "{invoice:42}:lock",
+    "{invoice:42}:fence",
+    Duration::from_secs(10),
+)?;
+
+if let Some(lease) = lock.acquire(&mut client).await? {
+    let fencing_token = lease.fencing_token();
+    // Pass fencing_token to the guarded resource and reject stale writers.
+    lease.release(&mut client).await?;
+}
+# Ok(())
+# }
 ```
 
-`with_root_ca_pem` / `with_client_auth_pem` work with both the `native-tls`
-and `rustls` backends (selected via feature flags).
+These are Redis-backed leases, not consensus primitives. Read the
+[distributed primitives guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md)
+before using them for correctness-sensitive work.
 
-## Sync client
+## Authentication, TLS, and blocking code
 
-`redis-tower-sync` provides a blocking wrapper for scripts and CLI tools:
+Static credentials can be supplied through URLs or builders. Dynamic
+credentials implement `CredentialProvider`; companion crates provide AWS
+ElastiCache IAM and Microsoft Entra ID integrations:
 
-```rust,ignore
+- `redis-tower-auth-aws`
+- `redis-tower-auth-azure`
+
+The [cloud authentication guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md)
+covers reconnect-time refresh, proactive reauthentication, TLS, and topology-
+specific configuration.
+
+Blocking applications can use `redis-tower-sync`:
+
+```rust
 use redis_tower_sync::SyncClient;
-use redis_tower_sync::commands::*;
+use redis_tower_sync::commands::{Get, Set};
 
+# fn example() -> Result<(), Box<dyn std::error::Error>> {
 let client = SyncClient::connect("127.0.0.1:6379")?;
-client.execute(Set::new("key", "hello"))?;
+client.execute(Set::new("key", "value"))?;
+let value = client.execute(Get::new("key"))?;
+# let _ = value;
+# Ok(())
+# }
 ```
 
-## Feature flags
+## Workspace crates
 
-| Feature | Description |
-|---------|-------------|
-| `commands-stack` (default) | All Redis Stack module commands |
-| `commands-json` | RedisJSON commands |
-| `commands-search` | RediSearch commands |
-| `commands-bloom` | Bloom and Cuckoo filter commands |
-| `commands-sketch` | Count-Min Sketch and Top-K commands |
-| `commands-tdigest` | t-digest commands |
-| `commands-timeseries` | TimeSeries commands |
-| `commands-vector-sets` | Vector Set commands |
-| `serde` | JSON and Search high-level APIs |
-| `tls-native-tls` | TLS via native-tls |
-| `tls-rustls` | TLS via rustls |
+| Crate | Purpose |
+|---|---|
+| `redis-tower` | Main client facade, middleware, pooling, caching, and resilience |
+| `redis-tower-core` | Connection, command trait, Tower frame service, URL/TLS, conversions |
+| `redis-tower-protocol` | RESP3 frames and bounded Tokio codec |
+| `redis-tower-commands` | Typed Redis and Redis Stack command builders |
+| `redis-tower-cluster` | Cluster topology, routing, redirects, scans, pipelines, and Pub/Sub |
+| `redis-tower-sentinel` | Sentinel discovery, failover, and replica reads |
+| `redis-tower-client` | Topology-neutral `UniversalClient` |
+| `redis-tower-modules` | High-level JSON, Search, TimeSeries, probabilistic, and vector clients |
+| `redis-tower-primitives` | Distributed coordination primitives |
+| `redis-tower-sync` | Blocking wrapper |
+| `redis-tower-auth-aws` | ElastiCache IAM credentials |
+| `redis-tower-auth-azure` | Microsoft Entra ID credentials |
+| `redis-tower-test` | Mocks and managed Redis test fixtures |
 
-## Benchmarks
+## Learn more
 
-The comparison runners cover redis-tower, redis-rs, and fred across 64 B,
-1 KiB, and 16 KiB values, configurable concurrency, repeated HDR latency
-samples, and machine-readable output. See
-[`crates/cluster-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/cluster-bench) and
-[`crates/standalone-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/standalone-bench) for the exact matrix and
-reproduction controls.
+- [Documentation home](https://joshrotenberg.com/redis-tower/)
+- [Production tuning](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRODUCTION-TUNING.md)
+- [Serverless and scale-to-zero](https://github.com/joshrotenberg/redis-tower/blob/main/docs/SERVERLESS.md)
+- [Client-side caching](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md)
+- [Cloud and rotating credentials](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md)
+- [Distributed primitives](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md)
+- [Migrating from redis-rs](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-REDIS-RS.md)
+- [Migrating from Fred](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-FRED.md)
+- [Feature matrix](https://github.com/joshrotenberg/redis-tower/blob/main/docs/FEATURE-MATRIX.md)
+- [Test conformance](https://github.com/joshrotenberg/redis-tower/blob/main/docs/TEST-CONFORMANCE.md)
 
-The cluster benchmark also has opt-in live topology-churn modes. They compare
-`MultiplexedClusterClient` with redis-rs under the same held reshard or master
-failure, reporting stable-versus-churn p99/p999, dropped operations, recovery
-timing, topology convergence, and redis-tower redirect/refresh counters:
+Runnable programs live in the
+[`examples`](https://github.com/joshrotenberg/redis-tower/tree/main/examples)
+directory.
 
-```bash
-BENCH_SCENARIO=reshard cargo run -p cluster-bench --release -- --json
-BENCH_SCENARIO=failover cargo run -p cluster-bench --release -- --json
-```
+## Compatibility
 
-The cluster runner also has a six-node replica-read scenario. It proves each
-seed write was acknowledged and verifies the keyspace through a strict replica
-client before measuring master versus replica routing:
+Redis 7.x and 8.x are the supported server lines. CI exercises Redis 7.4 and
+8.0 on every change, with a broader nightly Redis and Valkey matrix. Redis
+Stack command groups are feature-gated and return normal server errors when a
+module is unavailable.
 
-```bash
-BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json
-```
-
-The single-node command benches start their own `redis-server` on port 6482
-and stop it when the run ends, so they need no server set up in advance:
-
-```bash
-cargo bench -p redis-tower --bench commands
-```
-
-Set `REDIS_URL` to benchmark against an existing server instead.
-
-Pull requests compare the RESP codec Criterion benchmarks against the target
-branch. A check fails when mean time regresses by more than 10% and the two
-confidence intervals do not overlap; the full `critcmp` report is attached to
-the workflow run.
-
-The `Weekly Benchmarks` workflow runs both comparison binaries, the replica
-scenario, and the process-isolated resource probes, retaining their JSON output
-for 90 days. These GitHub-hosted results are useful for trends. Run headline
-measurements on dedicated, otherwise-idle hardware:
-
-```bash
-BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
-  cargo run -p standalone-bench --release -- --json
-BENCH_SECS=5 BENCH_PAYLOAD_SIZES=64,1K,16K \
-  cargo run -p cluster-bench --release -- --json
-```
-
-Release evidence uses the resumable
-[`scripts/benchmarks/run_publication.sh`](https://github.com/joshrotenberg/redis-tower/blob/main/scripts/benchmarks/run_publication.sh)
-runner and its [publication protocol](https://github.com/joshrotenberg/redis-tower/blob/main/scripts/benchmarks/README.md). It records
-three explicit non-Cartesian sweeps: GET/SET payload-by-concurrency, pipeline
-depth-by-payload at concurrency 1, and pipeline concurrency at a fixed 1 KiB /
-100-command batch. Publication mode requires the validated four-hour soak;
-`--matrix-only` is visibly incomplete development output.
-
-For hours-long stability and recovery evidence, [`crates/soak-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/soak-bench)
-keeps per-worker HDR histograms at constant memory, emits per-minute human or
-JSONL statistics, and can SIGKILL/restart standalone Redis or kill the current
-owner of a key's slot in a managed six-node cluster. Its README documents the
-reconnect and recovery accounting and reproducible four-hour commands.
-
-Resource-cost comparisons against redis-rs and Fred use separate subject
-processes for RSS per connection and CPU at a fixed offered rate, plus isolated
-cold builds for compile time and stripped binary size. See
-[`crates/resource-bench`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/resource-bench) for the methodology and
-machine-readable commands. Treat hosted-runner results as probe smoke tests;
-publish comparisons only from an otherwise-idle dedicated host.
-
-## Workspace
-
-```
-redis-tower              Facade crate
-redis-tower-core         Command trait, RedisConnection, FrameService
-redis-tower-protocol     RESP3 codec
-redis-tower-commands     488+ typed command structs
-redis-tower-cluster      Cluster routing and topology
-redis-tower-sentinel     Sentinel discovery and failover
-redis-tower-modules      High-level Redis Stack clients (JSON, Search, TimeSeries, probabilistic, Vector)
-redis-tower-sync         Blocking wrapper
-redis-tower-client       UniversalClient over standalone/cluster/sentinel
-redis-tower-primitives   Locks, elections, semaphores, latches, delayed queues, IDs, and GCRA
-redis-tower-auth-aws     AWS ElastiCache IAM SigV4 credential provider
-redis-tower-auth-azure   Microsoft Entra ID credential provider
-redis-tower-test         Test utilities: mocks, command tests, and managed live cluster fixtures
-redis-chaos-tests        Docker-backed compatibility and fault-injection tests
-soak-bench               Hours-long constant-memory stability and chaos harness
-resource-bench           Process-isolated RSS, CPU, compile-time, and binary-size comparisons
-```
-
-Typed command conformance against the pinned Redis 8.8 documentation metadata
-is tracked in [`COMMAND_COVERAGE.md`](https://github.com/joshrotenberg/redis-tower/blob/main/COMMAND_COVERAGE.md). The report is
-generated from the command implementations and checked in CI. Search, Vector
-Set, and the Redis 8.8 Array data type have typed builders for every scoped
-command name. The server and operations sweep includes MIGRATE, module and
-memory administration, latency diagnostics, command introspection, and a
-dedicated `MonitorStream`. `FtHybrid` builds text/vector fusion queries,
-`FtExplain` and `FtExplainCli` expose search plans, and the `Ar*` builders cover
-sparse-array reads, writes, scans, textual predicates, aggregates, and
-ring-buffer workflows.
-
-## Testing
-
-The [test conformance report](https://github.com/joshrotenberg/redis-tower/blob/main/docs/TEST-CONFORMANCE.md) maps the generated test
-inventory, client/protocol and server-version matrices, destructive fault
-coverage, execution cadence, and known gaps to their source and workflow
-evidence.
-
-The [engineering-hygiene guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/ENGINEERING-HYGIENE.md) documents the
-public-API compatibility gate, cross-platform matrix, scheduled mutation score,
-CI wall-clock/rerun budgets, release metadata audit, and retained resource and
-build-footprint evidence.
-
-`redis-tower-test` ships two test utilities that let you write Redis tests without a running server.
-
-### MockConnection
-
-`MockConnection` is an in-memory frame queue. Enqueue responses before calling
-`execute`, and the mock returns them in FIFO order through the standard
-`Command::parse_response` path. This is the recommended way to test
-`parse_response` error branches that a real Redis server cannot trigger.
-
-```toml
-[dev-dependencies]
-redis-tower-test = "0.1"
-```
-
-```rust
-use redis_tower_test::mock::MockConnection;
-use redis_tower_commands::strings::Get;
-use redis_tower_protocol::Frame;
-use bytes::Bytes;
-
-let mut mock = MockConnection::new();
-mock.enqueue(Frame::BulkString(Some(Bytes::from("hello"))));
-let val: Option<Bytes> = mock.execute(Get::new("key")).unwrap();
-assert_eq!(val, Some(Bytes::from("hello")));
-```
-
-### command_tests! macro
-
-`command_tests!` generates a cross-backend suite of async integration tests
-(strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams)
-against any connection factory that exposes an `execute` method. The standalone,
-cluster, and sentinel integration suites all use it to verify consistent
-behavior across every client type.
-
-```rust
-// In a test file, after defining a `my_conn()` async factory:
-redis_tower_test::command_tests!(my_conn, "prefix");
-// or for #[ignore]-gated cluster/sentinel tests:
-redis_tower_test::command_tests!(my_conn, "prefix", ignored);
-```
-
-## Server compatibility
-
-redis-tower speaks RESP2 and RESP3 over the standard Redis protocol, so it works
-with any RESP-compatible server.
-
-- **Redis.** Every PR runs the full integration suite against **Redis 7.4 and
-  8.0**. A nightly Docker matrix reruns the standalone suite against Redis 7.2,
-  7.4, 8.0, 8.2, 8.4, 8.6, and 8.8. Redis 7.x and 8.x are the supported
-  targets; the version-gated Redis 8.x command suite runs on every Redis 8 minor
-  in that matrix. Redis 6.x works for the core commands but is not tested.
-  Commands introduced in a specific server version return a clear error on
-  older servers rather than misbehaving.
-- **Valkey.** The nightly matrix also runs against Valkey 8.1. Valkey speaks the
-  same protocol, and the `valkey://` / `valkeys://` URL schemes are accepted as
-  aliases for `redis://` / `rediss://`.
-- **Redis Stack modules.** The JSON, Search, TimeSeries, probabilistic, and
-  Vector-set command groups target the Redis Stack modules, which ship built in
-  with Redis 8.x. They are feature-gated (on by default) and degrade to a clear
-  error when the module is absent.
-- **Managed services.** Because it uses only the standard protocol plus optional
-  TLS and `AUTH`/`HELLO`, redis-tower is compatible with managed offerings.
-  **AWS ElastiCache**, **AWS MemoryDB**, **Redis Enterprise**, **Redis Cloud**,
-  **Azure Cache for Redis**, and **Google Cloud Memorystore** all speak the
-  standard protocol; cluster mode, TLS, and `AUTH`/ACL credentials are
-  supported -- see the [Cluster](#cluster), [TLS](#tls), and
-  [Credential provider](#credential-provider) sections.
-
-## Stability and versioning
-
-redis-tower is pre-1.0. While on the `0.x` series it follows Cargo's `0.x`
-semver convention: a bump of the **minor** version (`0.1 -> 0.2`) may contain
-breaking changes, and a **patch** bump (`0.1.0 -> 0.1.1`) is additive or a fix.
-Breaking changes are called out in the changelog.
-
-- **Deprecations.** Where practical an API is marked `#[deprecated]` (with a
-  migration note) for at least one minor release before it is removed.
-- **MSRV.** The minimum supported Rust version is **1.88**. Raising the MSRV is
-  treated as a minor-version change, never a patch.
-- **Toward 1.0.** The path to 1.0 is a settled command-trait and client API
-  surface, the cluster/sentinel/caching layers stabilized, and the public API
-  fully documented and exercised by integration tests. Until then, expect the
-  occasional breaking minor release as the design is refined.
+redis-tower is pre-1.0. A `0.x` minor release may contain breaking changes;
+those changes are called out in crate changelogs.
 
 ## Security
 
-See [SECURITY.md](https://github.com/joshrotenberg/redis-tower/blob/main/SECURITY.md) for the vulnerability disclosure policy. Every
-pull request runs `cargo deny` and `cargo audit` against the RustSec advisory
-database, and the workspace contains no `unsafe` code -- every crate sets
-`#![forbid(unsafe_code)]`.
+See [SECURITY.md](https://github.com/joshrotenberg/redis-tower/blob/main/SECURITY.md)
+for the vulnerability disclosure policy. The workspace forbids unsafe code and
+runs dependency policy and advisory checks in CI.
 
 ## Contributing
 
-Contributions are welcome -- see [CONTRIBUTING.md](https://github.com/joshrotenberg/redis-tower/blob/main/CONTRIBUTING.md) for the
-development setup, the pre-PR checklist, and conventions.
+See [CONTRIBUTING.md](https://github.com/joshrotenberg/redis-tower/blob/main/CONTRIBUTING.md)
+for development setup and validation commands.
 
 ## License
 
-Licensed under either of
-
-- MIT license ([LICENSE-MIT](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
-- Apache License, Version 2.0 ([LICENSE-APACHE](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
-
+Licensed under either the
+[MIT License](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-MIT)
+or the
+[Apache License, Version 2.0](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-APACHE),
 at your option.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
-dual-licensed as above, without any additional terms or conditions.

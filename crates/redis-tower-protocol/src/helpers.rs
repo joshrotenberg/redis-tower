@@ -7,6 +7,15 @@
 //!   a `redis-cli`-style, human-readable layout.
 //! - [`frame_to_json`] (behind the `serde` feature): converts a frame into a
 //!   [`serde_json::Value`] for logging, inspection, or serialization.
+//!
+//! # Example
+//!
+//! ```
+//! use redis_tower_protocol::helpers::{array, bulk, display};
+//!
+//! let command = array(vec![bulk("SET"), bulk("key"), bulk("value")]);
+//! assert_eq!(display(&command).to_string(), "1) \"SET\"\n2) \"key\"\n3) \"value\"");
+//! ```
 
 use core::fmt;
 

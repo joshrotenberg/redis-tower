@@ -6,6 +6,31 @@
 //! [`LockLease::spawn_renewal`], which consumes the lease and returns an owned
 //! handle whose drop cancels and aborts the task.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::DistributedLock;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let lock = DistributedLock::new(
+//!     "{invoice:42}:lock",
+//!     "{invoice:42}:fence",
+//!     Duration::from_secs(15),
+//! )?;
+//!
+//! if let Some(lease) = lock.acquire(&mut client).await? {
+//!     let fencing_token = lease.fencing_token();
+//!     // Pass `fencing_token` to the resource protected by the lock.
+//!     # let _ = fencing_token;
+//!     lease.release(&mut client).await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cluster keys
 //!
 //! Acquisition touches the lock and fencing keys in one script. Redis Cluster

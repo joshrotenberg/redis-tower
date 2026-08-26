@@ -1,4 +1,26 @@
-//! Cluster topology discovery via CLUSTER SLOTS.
+//! Cluster topology discovery via `CLUSTER SLOTS`.
+//!
+//! [`ClusterTopology`] stores the slot ranges Redis reports and maintains an
+//! O(1) slot-to-owner table. Clients patch that topology after `MOVED`
+//! redirects and replace it after full discovery.
+//!
+//! # Example
+//!
+//! ```
+//! use redis_tower_cluster::slot::slot_for_key;
+//! use redis_tower_cluster::topology::{ClusterTopology, NodeAddr, SlotRange};
+//!
+//! let master = NodeAddr::new("redis-1.internal", 6379);
+//! let topology = ClusterTopology::new(vec![SlotRange {
+//!     start: 0,
+//!     end: 16_383,
+//!     master: master.clone(),
+//!     replicas: vec![NodeAddr::new("redis-2.internal", 6379)],
+//! }]);
+//!
+//! let slot = slot_for_key(b"user:42");
+//! assert_eq!(topology.master_for_slot(slot), Some(&master));
+//! ```
 
 use redis_tower_core::{Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

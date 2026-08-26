@@ -6,6 +6,28 @@
 //! enabled again only after a new receiver ID has been installed on the data
 //! connection. Losing the fixed data connection clears and permanently closes
 //! caching for that client, which must then be rebuilt.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{CacheTrackingMode, CachedClient, CachedClientConfig};
+//! use redis_tower::commands::Get;
+//!
+//! let config = CachedClientConfig::new()
+//!     .max_entries(10_000)
+//!     .tracking_mode(CacheTrackingMode::broadcast_with_prefixes(["user:"]));
+//! let client = CachedClient::connect_with_config("127.0.0.1:6379", config).await?;
+//!
+//! let value = client.execute(Get::new("user:42")).await?;
+//! # let _ = value;
+//! client.shutdown().await;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See the [client-side caching guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md)
+//! for tracking modes, failure behavior, and metrics.
 
 use std::fmt;
 use std::future::Future;

@@ -10,6 +10,32 @@
 //! ElastiCache IAM requires in-transit encryption. This crate produces
 //! credentials only; callers must configure TLS on their standalone, Cluster,
 //! or Sentinel client.
+//!
+//! # Example
+//!
+//! Build one provider and clone it into connection factories and proactive
+//! reauthentication handles. The provider caches signed tokens across a
+//! reconnect fan-out.
+//!
+//! ```no_run
+//! use aws_credential_types::provider::ProvideCredentials;
+//! use redis_tower_auth_aws::{ElastiCacheIamProvider, ElastiCacheResourceType};
+//!
+//! # fn provider(
+//! #     aws_credentials: impl ProvideCredentials + 'static,
+//! # ) -> Result<ElastiCacheIamProvider, redis_tower::RedisError> {
+//! ElastiCacheIamProvider::new(
+//!     "redis-app",
+//!     "production-cache",
+//!     "us-west-2",
+//!     ElastiCacheResourceType::ReplicationGroup,
+//!     aws_credentials,
+//! )
+//! # }
+//! ```
+//!
+//! See the [cloud authentication guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md)
+//! for standalone, Cluster, Sentinel, pool, and TLS wiring.
 
 use std::fmt;
 use std::future::Future;

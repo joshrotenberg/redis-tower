@@ -3,6 +3,33 @@
 //! [`CacheLayer`] builds cloneable [`CacheService`] values. Production users
 //! should attach an invalidation stream or use a tracked cached client; a
 //! cache without invalidations can serve stale data until its client TTL.
+//!
+//! Use [`crate::CachedClient`] when redis-tower should own RESP3 tracking and
+//! invalidation recovery. Use this module when a cache must sit inside a custom
+//! Tower stack.
+//!
+//! # Example
+//!
+//! This explicit invalidation-free setup is appropriate only when bounded
+//! staleness is acceptable. Production coherent caching should supply an
+//! invalidation stream through [`CacheLayer::with_invalidation_stream`].
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::{CacheConfig, CacheLayer, FrameService};
+//! use tower::Layer;
+//!
+//! let backend = FrameService::connect("127.0.0.1:6379").await?;
+//! let cache = CacheLayer::without_invalidation(CacheConfig {
+//!     max_size: 1_000,
+//!     ttl: Some(Duration::from_secs(5)),
+//! });
+//! let service = cache.layer(backend);
+//! # let _ = service;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::future::Future;
 use std::pin::Pin;

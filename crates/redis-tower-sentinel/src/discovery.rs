@@ -1,4 +1,26 @@
-//! Sentinel discovery: find the current master and replicas.
+//! Sentinel discovery for the current master and its replicas.
+//!
+//! The free functions in this module are useful when an application needs to
+//! inspect Sentinel directly. Most applications should use
+//! [`crate::SentinelConnection`], [`crate::SentinelClient`], or
+//! [`crate::MultiplexedSentinelClient`], which combine discovery with command
+//! execution and failover recovery.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_sentinel::discovery::discover_master;
+//!
+//! let sentinels = vec![
+//!     "127.0.0.1:26379".to_owned(),
+//!     "127.0.0.1:26380".to_owned(),
+//! ];
+//! let master = discover_master(&sentinels, "mymaster").await?;
+//! println!("current master: {master}");
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
