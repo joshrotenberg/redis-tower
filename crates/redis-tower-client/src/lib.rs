@@ -16,6 +16,8 @@
 //! //   redis://host:port            -> standalone
 //! //   redis+cluster://host:port    -> cluster (seed node)
 //! //   redis+sentinel://h1,h2/name  -> sentinel (sentinels + master name)
+//! // Each scheme accepts `user:pass@` credentials, and the `rediss` variants
+//! // (rediss://, rediss+cluster://, rediss+sentinel://) enable TLS.
 //! let client = UniversalClient::connect_url("redis://127.0.0.1:6379").await?;
 //!
 //! client.execute(Set::new("key", "value")).await?;
@@ -88,50 +90,66 @@ impl UniversalClient {
     /// Connect, selecting the topology from the URL scheme:
     ///
     /// - `redis://`, `rediss://`, `unix://` -> [`Standalone`](Self::Standalone)
-    /// - `redis+cluster://host:port` / `rediss+cluster://...` ->
+    /// - `redis+cluster://[user:pass@]host:port` / `rediss+cluster://...` ->
     ///   [`Cluster`](Self::Cluster) (the host is the seed node)
-    /// - `redis+sentinel://h1:p1,h2:p2/master-name` ->
-    ///   [`Sentinel`](Self::Sentinel) (comma-separated sentinels, master name
-    ///   after the `/`)
+    /// - `redis+sentinel://[user:pass@]h1:p1,h2:p2/master-name` /
+    ///   `rediss+sentinel://...` -> [`Sentinel`](Self::Sentinel)
+    ///   (comma-separated sentinels, master name after the `/`)
+    ///
+    /// Every scheme carries authentication and TLS:
+    ///
+    /// - `user:pass@` userinfo authenticates the Redis data nodes on all
+    ///   three topologies (`user:pass` is an ACL login, `:pass` a legacy
+    ///   `requirepass` password); components are percent-decoded.
+    /// - The `rediss` variants enable TLS -- for cluster, on every node
+    ///   connection; for sentinel, on both the sentinel and node hops. A
+    ///   `rediss` URL **errors** unless a TLS backend feature (`tls-rustls`
+    ///   or `tls-native-tls`) is enabled; it never silently connects in
+    ///   plaintext.
+    /// - Sentinel URLs additionally accept `?sentinel_username=U&`
+    ///   `sentinel_password=P` for sentinels that require their own
+    ///   credentials, and default sentinel hosts without a port to 26379.
+    ///   See [`MultiplexedSentinelClient::connect_url`].
+    ///
+    /// The cluster and sentinel variants connect with automatic
+    /// reconnection, re-applying the URL's credentials and TLS after node
+    /// failures or failover.
     ///
     /// # Errors
     ///
     /// Returns [`RedisError::InvalidUrl`] if a `+cluster` / `+sentinel` URL is
-    /// missing its seed, sentinels, or master name; otherwise propagates the
-    /// underlying connection error.
+    /// missing its seed, sentinels, or master name, or if a `rediss` URL is
+    /// used without a TLS feature; otherwise propagates the underlying
+    /// connection error.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
-        if let Some(rest) = url
-            .strip_prefix("redis+cluster://")
-            .or_else(|| url.strip_prefix("rediss+cluster://"))
-        {
-            let seed = rest.split('/').next().unwrap_or(rest);
-            if seed.is_empty() {
+        // The cluster client's connect_url speaks plain redis:// / rediss://,
+        // so translate the +cluster schemes onto it -- it wires the URL's
+        // credentials and TLS (or rejects rediss:// without a TLS feature).
+        if let Some(rest) = url.strip_prefix("redis+cluster://") {
+            if rest.is_empty() {
                 return Err(RedisError::InvalidUrl(
                     "redis+cluster URL requires a seed host:port".into(),
                 ));
             }
-            return Self::cluster(seed).await;
+            return Ok(Self::Cluster(
+                MultiplexedClusterClient::connect_url(&format!("redis://{rest}")).await?,
+            ));
+        }
+        if let Some(rest) = url.strip_prefix("rediss+cluster://") {
+            if rest.is_empty() {
+                return Err(RedisError::InvalidUrl(
+                    "rediss+cluster URL requires a seed host:port".into(),
+                ));
+            }
+            return Ok(Self::Cluster(
+                MultiplexedClusterClient::connect_url(&format!("rediss://{rest}")).await?,
+            ));
         }
 
-        if let Some(rest) = url.strip_prefix("redis+sentinel://") {
-            let (hosts, master) = rest.split_once('/').ok_or_else(|| {
-                RedisError::InvalidUrl(
-                    "redis+sentinel URL requires a master name: redis+sentinel://h1,h2/master"
-                        .into(),
-                )
-            })?;
-            let addrs: Vec<&str> = hosts.split(',').filter(|s| !s.is_empty()).collect();
-            if addrs.is_empty() {
-                return Err(RedisError::InvalidUrl(
-                    "redis+sentinel URL requires at least one sentinel host".into(),
-                ));
-            }
-            if master.is_empty() {
-                return Err(RedisError::InvalidUrl(
-                    "redis+sentinel URL requires a master name after the '/'".into(),
-                ));
-            }
-            return Self::sentinel(&addrs, master).await;
+        if url.starts_with("redis+sentinel://") || url.starts_with("rediss+sentinel://") {
+            return Ok(Self::Sentinel(
+                MultiplexedSentinelClient::connect_url(url).await?,
+            ));
         }
 
         // Default: standalone (redis://, rediss://, unix://).
@@ -204,6 +222,31 @@ mod tests {
     #[tokio::test]
     async fn connect_url_rejects_empty_cluster_seed() {
         let err = UniversalClient::connect_url("redis+cluster://")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RedisError::InvalidUrl(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn connect_url_rejects_empty_tls_cluster_seed() {
+        let err = UniversalClient::connect_url("rediss+cluster://")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RedisError::InvalidUrl(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn connect_url_rejects_tls_sentinel_without_master() {
+        let err = UniversalClient::connect_url("rediss+sentinel://127.0.0.1:26379")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, RedisError::InvalidUrl(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn connect_url_rejects_unknown_sentinel_query_param() {
+        // A typo'd credential key must error, not silently drop auth.
+        let err = UniversalClient::connect_url("redis+sentinel://127.0.0.1:26379/mymaster?bogus=1")
             .await
             .unwrap_err();
         assert!(matches!(err, RedisError::InvalidUrl(_)), "got {err:?}");

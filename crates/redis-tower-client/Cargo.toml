@@ -12,6 +12,22 @@ readme = "../../README.md"
 keywords = ["redis", "cluster", "sentinel", "tower"]
 categories = ["database", "asynchronous", "network-programming"]
 
+[features]
+default = []
+# Forward TLS backends so `rediss://`, `rediss+cluster://`, and
+# `rediss+sentinel://` URLs can establish TLS connections. Without one of
+# these, a `rediss` URL returns an error rather than connecting in plaintext.
+tls-rustls = [
+    "redis-tower/tls-rustls",
+    "redis-tower-cluster/tls-rustls",
+    "redis-tower-sentinel/tls-rustls",
+]
+tls-native-tls = [
+    "redis-tower/tls-native-tls",
+    "redis-tower-cluster/tls-native-tls",
+    "redis-tower-sentinel/tls-native-tls",
+]
+
 [dependencies]
 redis-tower = { workspace = true, default-features = false }
 redis-tower-core = { workspace = true }
