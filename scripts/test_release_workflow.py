@@ -24,7 +24,12 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("- release", self.workflow)
 
     def test_action_runs_only_the_selected_operation(self) -> None:
+        self.assertIn(
+            "uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9",
+            self.workflow,
+        )
         self.assertIn("command: ${{ inputs.command }}", self.workflow)
+        self.assertIn('version: "0.3.160"', self.workflow)
 
     def test_runs_are_serialized_and_forks_are_excluded(self) -> None:
         self.assertIn("group: release", self.workflow)

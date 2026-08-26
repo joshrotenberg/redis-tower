@@ -54,8 +54,10 @@ before changing this recovery plan.
    workspace dependency until that dependency has reached crates.io. Before a
    staged workspace release, dry-run the first dependency tier
    (`redis-tower-protocol`) and use the full workspace gates above for the
-   downstream crates. During publication, validate each completed tier before
-   proceeding to the next one.
+   downstream crates. A whole-workspace release-plz dry-run has the same
+   limitation because it does not upload the first tier. A real release-plz
+   run waits for each published dependency to appear in the registry before
+   continuing.
 
 3. For an ordinary future release, ask release-plz to prepare version and
    changelog changes:
@@ -81,11 +83,10 @@ The workspace dependency graph requires this publication order:
 
 1. `redis-tower-protocol`
 2. `redis-tower-core`
-3. `redis-tower-test`
-4. `redis-tower-commands`
-5. `redis-tower`
-6. Cluster, Sentinel, modules, primitives, sync, and cloud-auth crates
-7. `redis-tower-client`
+3. `redis-tower-commands` and `redis-tower-test`
+4. `redis-tower`
+5. Cluster, Sentinel, modules, primitives, sync, and cloud-auth crates
+6. `redis-tower-client`
 
 Do not retry a partially successful workflow blindly. First inspect crates.io
 and the workflow output to determine which immutable versions already exist;
