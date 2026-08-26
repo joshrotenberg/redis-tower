@@ -62,7 +62,7 @@ pub use error::RedisError;
 pub use frame_service::FrameService;
 pub use from_frame::FromFrame;
 pub use stream::RedisStream;
-pub use url::{RedisUrl, parse_redis_url};
+pub use url::{RedisUrl, parse_redis_url, percent_decode};
 
 pub use value::{FromRedisBytes, RedisConvert, RedisValueExt};
 

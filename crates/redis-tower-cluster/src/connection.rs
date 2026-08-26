@@ -2722,6 +2722,18 @@ mod tests {
         assert!(!tls);
     }
 
+    #[tokio::test]
+    async fn parse_cluster_url_percent_decodes_credentials() {
+        // Managed-service passwords routinely contain URL-special characters;
+        // they arrive percent-encoded and must be decoded before AUTH.
+        let (seed, creds, _tls) =
+            parse_cluster_url("redis://alice:p%40ss%3Aw0rd@127.0.0.1:7000").unwrap();
+        assert_eq!(seed, "127.0.0.1:7000");
+        let creds = creds.unwrap().get_credentials().await.unwrap();
+        assert_eq!(creds.username.as_deref(), Some("alice"));
+        assert_eq!(creds.password, "p@ss:w0rd");
+    }
+
     #[test]
     fn parse_cluster_url_rejects_unix_socket() {
         assert!(parse_cluster_url("unix:///tmp/redis.sock").is_err());
