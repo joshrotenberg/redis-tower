@@ -7,11 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- make `JsonClient::path_exists` work with RedisJSON JSONPath responses
-
-## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-modules-v0.1.0) - 2026-06-05
+## [0.1.0](https://github.com/joshrotenberg/redis-tower/releases/tag/redis-tower-modules-v0.1.0) - 2026-08-26
 
 ### Added
 
@@ -35,3 +31,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - add README with full API overview
 - polish phase for v0.1.0 release
 - initialize redis-tower experimental project skeleton
+- make `JsonClient::path_exists` work with RedisJSON JSONPath responses

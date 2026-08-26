@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-commands"
-version = "0.1.0"
+version = "0.1.1"
 description = "Typed Redis command implementations for redis-tower"
 edition.workspace = true
 authors.workspace = true

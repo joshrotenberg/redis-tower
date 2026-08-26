@@ -36,6 +36,7 @@ jobs:
       - name: Test hygiene reporters
         run: |
           python3 scripts/test_check_release_hygiene.py -v
+          python3 scripts/test_release_workflow.py -v
           python3 scripts/test_hygiene_workflow.py -v
           python3 scripts/test_mutation_score.py -v
           python3 scripts/test_ci_health.py -v
