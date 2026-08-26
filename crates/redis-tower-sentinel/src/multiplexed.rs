@@ -588,6 +588,62 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
         })
     }
 
+    /// Connect from a sentinel URL, with automatic reconnection via sentinel
+    /// discovery.
+    ///
+    /// ```text
+    /// redis+sentinel://[user:pass@]host1[:port1],host2[:port2]/master-name
+    ///     [?sentinel_username=U&sentinel_password=P]
+    /// rediss+sentinel://...    (TLS for both sentinel and node connections)
+    /// ```
+    ///
+    /// The userinfo (`user:pass@`) authenticates the **data nodes** --
+    /// sentinels commonly run without auth or with separate credentials,
+    /// which go in the `sentinel_username` / `sentinel_password` query
+    /// parameters. Credential components and the master name are
+    /// percent-decoded; hosts without an explicit port default to 26379.
+    /// `user:pass` is an ACL login, `:pass` (or a bare token) is a legacy
+    /// `requirepass` password.
+    ///
+    /// `rediss+sentinel://` enables TLS for both hops using rustls when
+    /// available (system roots with a webpki-roots fallback), otherwise
+    /// native-tls. For a custom TLS config, split sentinel/node credentials
+    /// beyond what the URL expresses, or replica read routing, use
+    /// [`Self::builder`].
+    ///
+    /// Unlike [`Self::connect`], this connects with automatic reconnection
+    /// ([`Self::connect_with_reconnect`] semantics): on connection failure or
+    /// failover the factory re-queries sentinel for the current master,
+    /// re-applying the URL's credentials and TLS.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::InvalidUrl`] for a malformed URL, an unknown
+    /// query parameter, or a `rediss+sentinel://` URL when neither the
+    /// `tls-rustls` nor `tls-native-tls` feature is enabled; otherwise
+    /// propagates the underlying connection error.
+    pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
+        let parsed = crate::url::parse_sentinel_url(url)?;
+        let mut builder = Self::builder(&parsed.sentinel_addrs, &parsed.master_name);
+        if let Some(creds) = parsed.node_credentials {
+            builder = builder.node_credentials(creds);
+        }
+        if let Some(creds) = parsed.sentinel_credentials {
+            builder = builder.sentinel_credentials(creds);
+        }
+        if parsed.tls {
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            {
+                builder = builder.tls(crate::url::default_url_tls());
+            }
+            #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
+            {
+                return Err(crate::url::tls_feature_required());
+            }
+        }
+        builder.connect_with_reconnect().await
+    }
+
     /// Connect with automatic reconnection via sentinel discovery.
     ///
     /// On connection failure, the factory re-queries sentinel to find

@@ -85,6 +85,7 @@ mod client;
 mod connection;
 pub mod discovery;
 mod multiplexed;
+mod url;
 
 pub use client::{SentinelClient, SentinelClientBuilder};
 pub use connection::{SentinelConnection, SentinelConnectionBuilder};
