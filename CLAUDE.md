@@ -1,31 +1,42 @@
 # redis-tower
 
-A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. The GitHub repo is public, but no current release is available: all published crates were yanked on 2026-06-11 and the Release workflow is manual-dispatch only. See Release State below.
+A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. The GitHub repo is public, but no current release is available: all published crates were yanked on 2026-06-11 and the Release workflow is manual-dispatch only. PR #690 is the pending re-launch. See Release State below.
 
 ## Architecture
 
-Workspace of 12 crates with a clear dependency direction:
+Workspace of 19 members: 13 publishable crates and 6 internal ones.
 
 ```
-redis-tower-protocol   (RESP2/3 codec, frame types)
-redis-tower-core       (RedisConnection, RedisError, Command trait, TLS)
-redis-tower-commands   (typed command builders -- one file per command group)
-redis-tower            (clients, middleware layers, pool, pipeline, pub/sub)
-  redis-tower-cluster  (cluster topology, routing, MOVED/ASK handling)
-  redis-tower-sentinel (sentinel discovery, failover)
-  redis-tower-sync     (blocking wrapper around MultiplexedClient)
-  redis-tower-modules  (high-level module clients: JSON, Search, TimeSeries, Probabilistic, Vector)
-  redis-tower-client   (UniversalClient: one type over standalone/cluster/sentinel)
-redis-test-harness     (test utilities: MockConnection, command_tests! macro)
-cluster-bench          (criterion benchmarks for cluster clients)
-standalone-bench       (redis-rs comparison benchmarks)
+redis-tower-protocol     (RESP2/3 codec, frame types)
+redis-tower-core         (RedisConnection, RedisError, Command trait, TLS)
+redis-tower-commands     (typed command builders -- one file per command group)
+redis-tower              (clients, middleware layers, pool, pipeline, pub/sub)
+  redis-tower-cluster    (cluster topology, routing, MOVED/ASK handling)
+  redis-tower-sentinel   (sentinel discovery, failover)
+  redis-tower-sync       (blocking wrapper around MultiplexedClient)
+  redis-tower-modules    (high-level module clients: JSON, Search, TimeSeries, Probabilistic, Vector)
+  redis-tower-primitives (distributed lock, rate limiter, leader election, semaphore, latch, queue, IDs)
+  redis-tower-auth-aws   (ElastiCache IAM CredentialProvider)
+  redis-tower-auth-azure (Entra ID CredentialProvider)
+  redis-tower-client     (UniversalClient: one type over standalone/cluster/sentinel)
+redis-tower-test         (test utilities: MockConnection, command_tests! macro, cluster fixtures)
 ```
+
+Internal, `publish = false`: `redis-chaos-tests` (Docker-tier chaos matrix),
+`cluster-bench`, `standalone-bench`, `sentinel-bench`, `soak-bench`,
+`resource-bench`.
 
 `redis-tower-cluster` and `redis-tower-sentinel` both depend on `redis-tower`.
 `redis-tower-modules` depends on `redis-tower` and `redis-tower-commands`.
+`redis-tower-primitives` and the two cloud-auth crates depend on `redis-tower`.
 `redis-tower-client` is the top of the graph -- it depends on `redis-tower`,
 `redis-tower-cluster`, and `redis-tower-sentinel` so it can unify all three
 multiplexed clients (the only crate that sees all of them).
+
+**Directory vs package name.** `redis-tower-test` lives in
+`crates/redis-test-harness/`; the directory kept its original name when the
+package was renamed and made publishable (#578). Every other crate's directory
+matches its package name.
 
 ## Key Client Types
 
@@ -56,6 +67,33 @@ multiplexed clients (the only crate that sees all of them).
 The node set is **not** snapshotted once. The scan works in rounds: each round scans the masters the client holds that it has not scanned yet, then re-checks. A settled cluster spends one round on every master and a second that finds nothing, so the traversal matches what a snapshot would give. A master published mid-scan gets its own later round; a master the client drops mid-scan is skipped (`scan_node` breaks cleanly when `execute_on_node` fails and `client.holds_master(&node)` is false, so a *present* node that fails still ends the stream). Rounds are capped at `MAX_MEMBERSHIP_ROUNDS` (8) and exceeding it errors, because stopping quietly would report a scan that knowingly left masters unscanned.
 
 Re-checking alone only sees membership the client already learned, and `SCAN` never teaches it any -- keyless, so never MOVED. `ClusterScan::refresh_membership(true)` (off by default) runs `refresh_topology()` between rounds so the check sees the live slot map, at the cost of one `CLUSTER SLOTS` per round, the refresh's usual service reconciliation, and a failed refresh ending the scan. Refreshes only happen at round boundaries, when no `SCAN` is in flight. The irreducible gap either way: a slot migrating from an unscanned master to an already-scanned one is missed (and the reverse is double-counted), because a per-node cursor tracks no slots. Closing that needs slot-level scan state.
+
+### Cluster read routing (`redis-tower/read_routing.rs`)
+
+`ReadPreference` (defined in `redis-tower`, honored by `ClusterClient` and
+`MultiplexedClusterClient`) has three variants: `Master` (default), `Replica`
+(strict -- errors when no usable replica serves the key's slot), and
+`PreferReplica` (falls back to the master). Writes always go to the master. The
+cached cluster client requires `Master` and rejects the replica variants.
+
+When reads go to replicas, `ReadRoutingStrategy` picks which one.
+Implementations: `RoundRobinRouting` (default), `RandomRouting`,
+`FirstReplicaRouting`, and `AdaptiveReplicaRouting` (built via
+`AdaptiveReplicaRoutingBuilder`). The adaptive strategy composes caller-owned
+availability-zone metadata, inverse-EWMA latency weighting, consecutive
+transport-failure ejection, lazy timed recovery, and a configurable
+minimum-candidate floor. Both ordinary clients feed replica attempt outcomes back
+to the strategy; writes and master reads never enter that path.
+
+`CLUSTER SLOTS` carries no AZ metadata, so AZ mappings are explicit application
+configuration and must map the final node addresses seen after `host_override`
+or `address_map` rewriting. Unmapped replicas stay eligible as cross-AZ
+fallbacks.
+
+### Cluster pub/sub (`redis-tower-cluster/pubsub.rs`)
+
+`ClusterPubSubConnection` and `ShardedClusterPubSubConnection` (SSUBSCRIBE /
+SPUBLISH). Both reconnect on connection loss and resubscribe.
 
 ## Middleware Layers (Tower)
 
@@ -97,6 +135,39 @@ High-level ergonomic clients for Redis Stack modules. Feature-gated; all enabled
 
 The old `Json<>` and `Search` prototypes in `redis-tower` are deprecated aliases — use `redis-tower-modules` instead.
 
+## Distributed Primitives (`redis-tower-primitives`)
+
+Redisson-style coordination primitives, minus the magic. Each is generic over a
+`RedisExecutor` and owns no background threads unless you ask for one.
+
+| Type | File | Notes |
+|------|------|-------|
+| `DistributedLock` | `lock.rs` | Lease-based mutex; `LockLease`, `LockRenewalHandle`, `RenewalOutcome` |
+| `GcraRateLimiter` | `rate_limiter.rs` | GCRA (leaky-bucket) limiter returning `RateLimitDecision` |
+| `LeaderElection` | `leader.rs` | `Campaign`, `Leadership`, `LeadershipEvents` stream, `LeadershipOutcome` |
+| `ExpirableSemaphore` | `semaphore.rs` | Counted permits with TTL; `SemaphorePermit` |
+| `CountDownLatch` | `latch.rs` | `LatchCountDown`, `LatchWaitOutcome`, `LatchWaitError` |
+| `DelayedQueue` | `delayed_queue.rs` | Scheduled delivery; `ClaimBatch`, `DelayedQueueError` |
+| `IdGenerator` | `id_generator.rs` | Block-allocating unique IDs; `IdBlock` |
+
+Live integration tests are in `crates/redis-tower-primitives/tests/live.rs`.
+See `docs/PRIMITIVES.md` for the usage guide.
+
+## Cloud Auth
+
+`redis-tower/src/credentials.rs` defines `CredentialProvider` (and
+`StreamingCredentialProvider` for providers that push rotations). Managed-service
+providers live in their own crates so the core does not carry cloud SDKs:
+
+| Crate | Type | Notes |
+|-------|------|-------|
+| `redis-tower-auth-aws` | `ElastiCacheIamProvider` | IAM token auth; `ElastiCacheResourceType` selects cluster vs serverless |
+| `redis-tower-auth-azure` | `EntraIdProvider` | Azure Entra ID token auth |
+
+Tokens expire, so these pair with the provider-backed connection factory (#670)
+that re-authenticates on reconnect. See `docs/CLOUD-AUTH.md` and
+`docs/SERVERLESS.md`.
+
 ## Test Infrastructure
 
 ### Standalone tests (`crates/redis-tower/tests/`)
@@ -108,7 +179,7 @@ cargo test --test test_strings --all-features
 cargo test --test '*' --all-features   # all standalone integration tests
 ```
 
-Test files: `integration.rs`, `test_acl.rs`, `test_bitmap.rs`, `test_errors.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_lists.rs`, `test_object.rs`, `test_pool.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
+Test files: `integration.rs`, `client_side_caching_v2.rs`, `redis_8x_commands.rs`, `test_acl.rs`, `test_auth.rs`, `test_bitmap.rs`, `test_bloom.rs`, `test_errors.rs`, `test_exotic.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_large_values.rs`, `test_lists.rs`, `test_maintenance.rs`, `test_monitor.rs`, `test_object.rs`, `test_pool.rs`, `test_resilience_integration.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
 
 The admin-command fixtures stay in this tier rather than requiring Docker.
 `test_acl.rs` provisions an `aclfile`-backed Redis process and verifies the
@@ -145,9 +216,26 @@ cargo bench -p redis-tower --bench commands
 cargo test -p redis-tower --benches --all-features   # criterion test mode: one iteration each, also runs in CI
 ```
 
-### `command_tests!` macro (`redis-test-harness`)
+### `command_tests!` macro (`redis-tower-test`)
 
 Generates a suite of cross-backend tests (strings, hashes, lists, sets, sorted sets, bitmap, geo, HyperLogLog, streams). Used in standalone, cluster, and sentinel test files. **SCAN is intentionally excluded** from the macro -- SCAN is not cluster-compatible (only scans one node). For a cluster-wide scan use `ScanClusterStream` (see below); the macro still excludes SCAN because it asserts identical behavior across backends and a per-node SCAN does not have any.
+
+### Benchmark and chaos crates
+
+Five internal bench crates plus a Docker-tier chaos suite, none published:
+
+| Crate | Purpose |
+|-------|---------|
+| `standalone-bench` | redis-rs and fred comparison benchmarks |
+| `cluster-bench` | criterion benchmarks for cluster clients |
+| `sentinel-bench` | sentinel client benchmarks |
+| `soak-bench` | long-running soak and chaos harness; backs the Soak Harness Smoke workflow |
+| `resource-bench` | memory and connection footprint comparisons |
+| `redis-chaos-tests` | Docker-tier only: image-based version/Stack/Valkey matrices and true network partitions |
+
+Benchmark evidence is generated and contract-checked in CI. Regression gates run
+via `scripts/check_criterion_regressions.py`; the reporting scripts under
+`scripts/` each have a paired `test_*.py` unit test that also runs in CI.
 
 ## Definition of Done
 
@@ -174,7 +262,32 @@ cargo test --test '*' --all-features
 
 ## CI
 
-10 checks on every PR: Format, Clippy, Documentation, Unit Tests (stable), Unit Tests (beta), MSRV (1.88), Feature Checks, Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6), Coverage. All must be green before merge. Coverage uses cargo-llvm-cov with --no-report accumulation across the unit/doc/standalone/cluster/sentinel runs, then uploads an lcov report to Codecov (informational, not a hard gate).
+Nine workflows. Four fire on every PR and contribute **22 required checks**:
+
+| Workflow | Checks |
+|----------|--------|
+| `ci.yml` | Format, Clippy, Documentation, MSRV (1.88), Feature Checks, Unit Tests (stable), Unit Tests (beta), Integration Tests (Redis 7.4.3), Integration Tests (Redis 8.0.6), Coverage, Command Coverage, Fuzz Targets, Codec Benchmark Regression, Benchmark Evidence Contract |
+| `hygiene.yml` | Release hygiene, Public API compatibility, macOS arm64, Windows x64, Linux arm64 |
+| `supply-chain.yml` | cargo-audit, cargo-deny |
+| `soak-smoke.yml` | Standalone and cluster chaos (path-filtered) |
+
+Five more jobs appear on the PR as `SKIPPED` by design -- the four mutation jobs
+and CI wall-clock and flake budget are gated on
+`github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'`.
+They are not gaps.
+
+The remaining workflows do not run on PRs: `docs.yml` (mdBook build plus GitHub
+Pages deploy, `push: main` only), `nightly.yml`, `nightly-modules.yml`, and
+`release-plz.yml` (manual dispatch).
+
+`docs.yml` only *deploys*. The documentation content is verified on every PR by
+CI's Documentation job, which runs `cargo doc` with `RUSTDOCFLAGS: -D warnings`,
+`mdbook build`, `mdbook test`, and both link checkers. Its absence from a PR's
+check list is expected.
+
+Coverage uses cargo-llvm-cov with `--no-report` accumulation across the
+unit/doc/standalone/cluster/sentinel runs, then uploads an lcov report to Codecov
+(informational, not a hard gate).
 
 The version-gated Redis 8.x live-command suite runs nightly against every Redis
 minor in the 8.0, 8.2, 8.4, 8.6, and 8.8 matrix.
@@ -194,6 +307,15 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 - **`handle.master_addr()` is static** -- `RedisSentinelHandle::master_addr()` returns the original master address from the struct, not the dynamically elected master after a failover. Use `handle.poke()` to query the sentinel for the current elected master post-failover.
 - **`OBJECT ENCODING` response** -- returns `SimpleString`, not `BulkString`. Both must be handled in `parse_response`.
 - **`BLMove` timeout response** -- Redis 7.4+ returns `Frame::Array(None)` on a blocking timeout for BLMOVE (not `Frame::Null`). Fixed in `blocking.rs`.
+- **`Cargo.lock` is gitignored** -- this is a library workspace, so the lock is
+  not committed and CI always resolves fresh. A long-lived working copy can hold
+  a stale lock that CI never sees. The known symptom is `cargo clippy` failing in
+  `redis-tower-test` with `no method named cluster_base` on
+  `redis_server_wrapper::RedisClusterHandle`: the workspace requires
+  `redis-server-wrapper = "0.4.1"`, `cluster_base()` landed in 0.4.3, and a lock
+  pinned at 0.4.1 satisfies the requirement without providing the method. Fix
+  with `cargo update -p redis-server-wrapper`. Reach for `cargo update` before
+  assuming a local-only build failure is a real regression.
 - **Let-chains** -- MSRV is 1.88; clippy will suggest let-chains and they are valid.
 - **`FunctionFlush` ordering** -- global operation; tests using it should run with `--test-threads=1` to avoid interfering with function-load tests.
 - **Sentinel failover sim is destructive** -- the failover phases kill processes in their topology (a sentinel, then the master). As of #509 they live in their own binary (`sentinel_failover.rs`) on a separate port block, wrapped in a single `sentinel_failover_sequence` test that fixes their order, so they no longer degrade the healthy `sentinel_integration` suite and the sentinel tests are robust to parallel and reordered execution.
@@ -202,13 +324,30 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 
 ## Current Status
 
-The architecture and bug queues are largely closed. As of 2026-06-18 the `kind: bug` queue is empty (0 open, 15 closed) and the `kind: architecture` queue has 4 open (#399 #442 #444 #505) against 9 closed. The `kind: feature` queue has 30 open. Repo-wide: 64 open issues, 302 closed. This supersedes the earlier "lone open item" framing in the Go-Hard Backlog section below; treat that section as the original filing plan, not the live state.
+**The issue queue is empty: 0 open, 376 closed.** Every audit pass, the
+architecture/bug/feature queues, and the Go-Hard Backlog below have been worked
+to completion. There is no standing backlog to pull from; new work starts by
+filing an issue.
 
-All three audit passes are complete and merged: the initial audit, the second (#289–#353), and a third test-coverage/completeness pass (#390–#396). TimeSeriesClient (#344) and the high-level module clients (JSON/Search/TimeSeries/probabilistic/Vector) all shipped.
+The last major tranche (roughly #654-#689) added distributed primitives, cloud
+auth, adaptive replica routing, topology-aware client-side caching, reconnecting
+cluster pub/sub, maintenance push-notification handling, explicit pool lifecycle
+controls, and an evidence-generation layer under `scripts/` (command coverage,
+test conformance, mutation score, CI health, benchmark contracts) with unit tests
+for each reporter.
 
-**Every per-file test suite now runs in CI.** As of #400 the standalone integration job runs `cargo test -p redis-tower --test '*' -- --test-threads=1` (all `tests/*.rs` suites, not just `integration.rs`; single-threaded for the `FunctionFlush` quirk above). The #390–#396 pass added: live-server circuit-breaker/command-timeout failure injection (`test_resilience_integration.rs`), `#[ignore]` module-client integration tests (need Redis Stack), server/CLIENT command coverage, EVAL_RO/EVALSHA_RO + XSETID, ACL DRYRUN, an `#[ignore]` ObjectFreq LFU fixture, and `command_tests!` applied to `MultiplexedSentinelClient`. Dead `todo!()` infra stubs were removed.
+Guides live in `docs/`: `MIGRATING-FROM-REDIS-RS.md`, `MIGRATING-FROM-FRED.md`,
+`PRODUCTION-TUNING.md`, `PRIMITIVES.md`, `CLOUD-AUTH.md`, `SERVERLESS.md`,
+`CLIENT-SIDE-CACHING.md`, `POOL-HEALTH-PROBING.md`, `FEATURE-MATRIX.md`,
+`TEST-CONFORMANCE.md`, `ENGINEERING-HYGIENE.md`. `COMMAND_COVERAGE.md` at the
+repo root is generated.
 
-**What's been hardened (since the second audit):**
+**Every per-file test suite runs in CI.** The standalone integration job runs
+`cargo test -p redis-tower --test '*' -- --test-threads=1` (all `tests/*.rs`
+suites, single-threaded for the `FunctionFlush` quirk above). Module-client
+integration tests remain `#[ignore]` and need Redis Stack (`-- --ignored`).
+
+**What's been hardened:**
 - Circuit breaker, command/connect timeouts, pool acquisition timeout
 - TCP keepalive, reconnect backoff jitter, graceful shutdown across `MultiplexedClient`, `MultiplexedClusterClient::shutdown()`, and `ConnectionPool::close()` (the SIGTERM drain path)
 - Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
@@ -217,40 +356,61 @@ All three audit passes are complete and merged: the initial audit, the second (#
 
 ## Release State
 
-- **0.1.x published then yanked (2026-06-11).** The publishable crates were released to crates.io and yanked the same day. All 0.1.x versions of `redis-tower-protocol`, `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, and `redis-tower-sentinel` are yanked. The GitHub repo is now public, but there is still no current crate release. `redis-tower-protocol` reached 0.1.1; `redis-tower-sync` and `redis-tower-modules` hit the crates.io new-crate rate limit and never published. Yank is reversible (`cargo yank --undo` or a fresh publish when ready).
-- **Substantial work is unreleased** since the v0.1.0 tags. A re-launch publishes from current `main`, not from the yanked 0.1.0 tree.
-- **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger was removed so merges no longer auto-publish. The workflow (`.github/workflows/release-plz.yml`) runs `release-plz` and is triggered with `gh workflow run Release --ref main`.
+**Nothing is currently published.** crates.io holds only `redis-tower` 0.1.0 and
+siblings, all yanked on 2026-06-11. A yanked version can never be reused, so the
+re-launch must bump.
 
-### Re-launch runbook
+**PR #690 is the release vehicle.** It is open, ready for review, and green
+(22/22 checks). It covers 73 files and:
 
-Coordinated republish. Run in order; each step is a gate for the next.
+| Package group | Version |
+|---|---:|
+| `redis-tower-protocol` | 0.1.2 |
+| `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.1 |
+| `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives`, `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.0, first publication |
 
-1. **Decide the version line.** The yanked 0.1.0 is burned for the affected crates (a yanked version cannot be re-published at the same number). Bump to 0.1.1+ (or 0.2.0) as `release-plz` proposes from the unreleased changes. `redis-tower-protocol` is already at 0.1.1, so it bumps from there.
-2. **Confirm public metadata.** The repo is public; verify each crate's repository/homepage links and package include set before publishing.
-3. **Confirm secrets.** `CARGO_REGISTRY_TOKEN` must be set in repo secrets for the Release workflow; `GITHUB_TOKEN` is provided by Actions.
-4. **Dry-run locally.** `cargo publish -p <crate> --dry-run` in dependency order (protocol, core, commands, redis-tower, then cluster/sentinel/sync/modules/client) to catch packaging or metadata errors before dispatch.
-5. **Publish.** Re-enable releases by dispatching the workflow: `gh workflow run Release --ref main`. `release-plz` opens or pushes the version-bump PR, tags, and publishes. Do not restore the `push: main` trigger unless the team decides to resume auto-publish.
-6. **Un-yank only if republishing the same tree.** If the decision is to expose the existing 0.1.0 rather than ship the 51 unreleased commits, `cargo yank --undo --version 0.1.0 <crate>` per crate instead of step 5. The default re-launch path is a fresh publish from `main`.
-7. **Verify badges and docs.** After publish, confirm crates.io pages resolve, docs.rs builds (see docs.rs metadata work, #436), and README/badge links are live now that the repo is public.
+It also adds changelogs for all 13 publishable crates and enforces them in
+release hygiene, rewrites the README, removes `roba.toml`, and makes release-plz
+manual, operation-specific, serialized, and unavailable in forks.
 
-## Go-Hard Backlog (filed 2026-06-11)
+**Publication order** (each tier must be on crates.io before the next resolves):
 
-This section is the original filing plan, not live state. For current open/closed counts see Current Status above; as of 2026-06-18 the architecture and bug queues are largely closed. The plan below filed 107 issues from three competitive-analysis passes: customer axes vs redis-rs/fred; verifiable dimensions (testing, perf, command + feature coverage); and "what makes a great Redis client in 2026" (incl. a Redisson-minus-magic primitives study). Browse by label rather than by number:
+1. `redis-tower-protocol`
+2. `redis-tower-core`
+3. `redis-tower-commands` and `redis-tower-test`
+4. `redis-tower`
+5. cluster, sentinel, modules, primitives, sync, cloud-auth
+6. `redis-tower-client`
 
-- **Kind** (the execution axis -- work in this order): `kind: architecture` (13, structural / awkward-by-design), then `kind: bug` (13), then `kind: feature` (42). Test/docs/chore/perf issues carry no kind label.
-- **Priority**: `priority: high` (P0), `priority: medium` (P1), `priority: low` (P2).
-- **Area**: `area: cluster`, `area: resilience`, `area: observability`, `area: client-caching`, `area: commands`, `area: performance`, `area: testing`, `area: tower`, `area: pubsub`, `area: transactions`, `documentation`.
+**Known limit on #690's evidence.** release-plz cannot dry-run the downstream
+crates until each upstream tier is actually published, so the whole-workspace
+dry-run stops at `redis-tower-core` by design. The remaining tiers are covered by
+the staged-publication procedure and the partial-release recovery steps in the
+release guide, not by a full rehearsal. Treat that as a documented constraint,
+not a missing check.
 
-The agreed working sequence is **architecture first, then bugs, then features**. The `kind: architecture` queue opens with the composition foundation -- the ExecutorService bridge (#480) and middleware injection point (#482) that unblock wiring Tower layers into the real clients (#429); the rest of that queue is #417 #420 #421 #433 #442 #444 #448 #478 #505 plus the #399 circuit-breaker adapter.
+**Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger
+was removed so merges never auto-publish. Dispatch with
+`gh workflow run Release --ref main`. Do not restore the `push: main` trigger
+without an explicit decision to resume auto-publish.
 
-**P0 tracks, roughly in dependency order:**
+`CARGO_REGISTRY_TOKEN` must be set in repo secrets; `GITHUB_TOKEN` comes from
+Actions.
 
-1. **`auto_pipeline.rs` chokepoint** -- response timeout (#420), real backpressure (#421, replaces the current `try_send`/`QueueFull` load-shedding), observability wiring (#429). Land as one series; the cluster work builds on it.
-2. **Cluster failover self-healing** (#417, the kill-a-master test) -- plus single-slot MOVED patching (#418), TRYAGAIN/CLUSTERDOWN/LOADING handling (#419), per-command key extraction (#422).
-3. **Sentinel auth/TLS** (#424) and demoted-master detection (#425).
-4. **CSC correctness blockers** -- cache-key collisions (#426), tracking-loss stale data (#427), TTL/bounding (#428).
-5. **Packaging / procurement** -- redis-rs migration guide (#434), publish reconciliation (#435), docs.rs metadata (#436), client-selection docs (#437), stability + SECURITY + supply-chain pack (#438).
+## History: the Go-Hard Backlog
 
-**Cross-repo dogfooding** (filed on the user's own supporting crates, worked in parallel): `docker-wrapper` #243-#250 (chaos-test backbone; being remediated now), `redis-server-wrapper` #79-#80 (byte-level fault proxy, reshard orchestration), `tower-resilience` #346-#347 (Clone bound + `failure_classifier` for the #399 adapter).
+Closed out. On 2026-06-11 three competitive-analysis passes filed 107 issues
+(customer axes vs redis-rs/fred; verifiable dimensions across testing, perf, and
+command coverage; and a "great Redis client in 2026" study including a
+Redisson-minus-magic primitives review). Those issues, and the audit passes
+before them, are all closed. The label taxonomy they introduced is still in use
+for new work: `kind:` (architecture/bug/feature), `priority:` (high/medium/low),
+and `area:` (cluster, resilience, observability, client-caching, commands,
+performance, testing, tower, pubsub, transactions, documentation).
 
-**Test architecture decision**: per-PR tests stay on `redis-server-wrapper` processes (it already has chaos kill/freeze/failover, ACL files, `replicaof`, full TLS). A nightly Docker tier (`redis-chaos-tests`, #411) covers only what processes cannot: image-based version/Stack/Valkey matrices and true network partitions. The tier-1 process suite covers `ACL SAVE`/`ACL LOAD` with an `aclfile`-backed restart fixture (#414), and `REPLICAOF`/`FAILOVER` with dedicated primary and replica processes (#415). Module-client integration tests are still `#[ignore]` (run with `-- --ignored`).
+**Test architecture decision (still current).** Per-PR tests run on
+`redis-server-wrapper` processes, which provide chaos kill/freeze/failover, ACL
+files, `replicaof`, and full TLS. The Docker tier (`redis-chaos-tests`) covers
+only what processes cannot: image-based version/Stack/Valkey matrices and true
+network partitions. `ACL SAVE`/`ACL LOAD` and `REPLICAOF`/`FAILOVER` live in the
+process tier.
