@@ -4,6 +4,25 @@
 //! TopK, and T-Digest. Each client binds to a single Redis key and holds a
 //! mutable borrow of an executor, so it can be created cheaply from any
 //! `&mut impl RedisExecutor` without transferring ownership.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::RedisConnection;
+//! use redis_tower_modules::probabilistic::BloomFilter;
+//!
+//! let mut connection = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut filter = BloomFilter::new(&mut connection, "seen-users");
+//! filter.add("user:42").await?;
+//!
+//! assert!(filter.exists("user:42").await?);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The module also provides [`CuckooFilter`], [`CountMinSketch`], [`TopK`],
+//! and [`TDigest`] clients with the same executor-borrowing pattern.
 
 use std::collections::HashMap;
 

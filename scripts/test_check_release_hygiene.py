@@ -50,6 +50,7 @@ class ReleaseHygieneTests(unittest.TestCase):
             (package / "Cargo.toml").write_text(manifest)
             (package / "src" / "lib.rs").write_text("#![deny(missing_docs)]\n//! docs\n")
             (package / "README.md").write_text("[Guide](https://example.com/guide)\n")
+            (package / "CHANGELOG.md").write_text("# Changelog\n\n## [Unreleased]\n")
         (root / "LICENSE-MIT").write_text("MIT\n")
         (root / "LICENSE-APACHE").write_text("Apache-2.0\n")
         return temporary, root
@@ -81,6 +82,19 @@ class ReleaseHygieneTests(unittest.TestCase):
         _, errors = check_release_hygiene.audit(root, package_contents=False)
 
         self.assertTrue(any("repository-relative" in error for error in errors))
+
+    def test_audit_requires_a_changelog_with_an_unreleased_section(self) -> None:
+        temporary, root = self.fixture()
+        self.addCleanup(temporary.cleanup)
+        changelog = root / "crates" / "good" / "CHANGELOG.md"
+        changelog.write_text("# Changelog\n")
+
+        _, errors = check_release_hygiene.audit(root, package_contents=False)
+
+        self.assertIn(
+            "redis-tower-good: CHANGELOG.md must contain an Unreleased section",
+            errors,
+        )
 
     def test_audit_requires_dual_license_expression_and_files(self) -> None:
         temporary, root = self.fixture()

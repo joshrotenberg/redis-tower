@@ -54,7 +54,7 @@ matches its package name.
 | `SentinelClient` | `redis-tower-sentinel/client.rs` | Arc<Mutex<SentinelConnection>>, cloneable |
 | `MultiplexedSentinelClient` | `redis-tower-sentinel/multiplexed.rs` | Auto-pipeline + sentinel discovery, both static and factory-reconnect ctors |
 | `SyncClient` | `redis-tower-sync/lib.rs` | Blocking wrapper, uses tokio Runtime internally |
-| `UniversalClient` | `redis-tower-client/lib.rs` | Enum over Standalone/Cluster/Sentinel multiplexed clients; `connect_url` picks the variant by scheme (`redis://`, `redis+cluster://`, `redis+sentinel://h1,h2/master`) |
+| `UniversalClient` | `redis-tower-client/lib.rs` | Enum over Standalone/Cluster/Sentinel multiplexed clients; `connect_url` picks the variant by scheme (`redis://`, `redis+cluster://`, `redis+sentinel://h1,h2/master`). All schemes carry percent-decoded `user:pass@` credentials; `rediss`/`rediss+cluster`/`rediss+sentinel` enable TLS (error without a TLS feature, never silent plaintext); sentinel URLs take `?sentinel_username/sentinel_password` and reconnect on failover |
 
 `ConnectionPool<S>` requires `S: RedisExecutor`. Impls exist for `RedisConnection`, `RedisClient`, `ResilientRedisClient`, `CachedClient`, `MultiplexedClient`, `CachedMultiplexedClient`, `ClusterConnection`, `SentinelConnection`, `MultiplexedClusterClient`, `CachedMultiplexedClusterClient`, and `UniversalClient`.
 

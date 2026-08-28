@@ -31,12 +31,14 @@ If you are evaluating or adopting the project, start here:
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test
   inventory, topology and server matrices, and destructive fault coverage to
   their source and CI evidence.
+- The [release process](RELEASING.md) records the manual prepare/publish split,
+  workspace publish order, validation gates, and post-publish verification.
 
-For the short installation example, complete API tour, workspace layout, and
-compatibility policy, see the
-[repository README](https://github.com/joshrotenberg/redis-tower).
-Typed API reference documentation will be published on
-[docs.rs](https://docs.rs/redis-tower) with the first crate release.
+For installation, a quick API overview, and examples across the main modules,
+see the [repository README](https://github.com/joshrotenberg/redis-tower).
+The typed API reference on [docs.rs](https://docs.rs/redis-tower) provides
+crate-level tours, module guides, and compiled examples alongside every public
+type and method.
 
 ## Local preview
 

@@ -21,6 +21,26 @@
 //!
 //! When `numkeys` is `0` (a keyless script, e.g. `EVAL "..." 0`) there is no
 //! key, so routing falls back to the default node.
+//!
+//! # Example
+//!
+//! ```
+//! use redis_tower_cluster::key_extractor::{CommandKeys, extract_keys};
+//! use redis_tower_protocol::helpers::{array, bulk};
+//!
+//! let command = array(vec![
+//!     bulk("EVAL"),
+//!     bulk("return redis.call('GET', KEYS[1])"),
+//!     bulk("1"),
+//!     bulk("{user:42}:profile"),
+//! ]);
+//!
+//! let CommandKeys::Known(keys) = extract_keys(&command)? else {
+//!     panic!("EVAL has a known key specification");
+//! };
+//! assert_eq!(keys, vec![b"{user:42}:profile".as_slice()]);
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use redis_tower_core::Frame;
 

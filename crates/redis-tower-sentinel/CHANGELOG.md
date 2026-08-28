@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sentinel-v0.1.0...redis-tower-sentinel-v0.1.1) - 2026-08-26
+
 ### Added
 
+- URL-driven multiplexed Sentinel connections with independent sentinel and
+  data-node credentials, percent decoding, TLS on both hops, and reconnect-time
+  reuse through `redis+sentinel` and `rediss+sentinel` schemes
 - provider-backed Sentinel and data-node setup now force-refreshes once after
   an authentication rejection, negotiates RESP only after authentication, and
   direct/multiplexed clients can apply streamed credentials to established

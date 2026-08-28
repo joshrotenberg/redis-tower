@@ -1,3 +1,9 @@
+//! Reusable command-contract tests for Redis-compatible client backends.
+//!
+//! The exported [`command_tests!`] macro generates the shared standalone and
+//! Cluster command suite. The caller supplies an async connection factory and
+//! imports the command types used by the generated tests.
+
 /// Generate command tests for any connection type that has an `execute` method.
 ///
 /// Usage:

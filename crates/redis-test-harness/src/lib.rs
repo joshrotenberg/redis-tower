@@ -7,6 +7,24 @@
 //! - [`port_ranges`] -- registry of the fixed ports live-server fixtures reserve,
 //!   with a regression test guarding against a new fixture colliding with one
 //!   that already exists
+//!
+//! # Quick start
+//!
+//! [`mock::MockConnection`] runs typed response parsing without a Redis server:
+//!
+//! ```
+//! use redis_tower_test::mock::MockConnection;
+//! use redis_tower_protocol::Frame;
+//!
+//! let mut mock = MockConnection::new();
+//! mock.enqueue(Frame::Integer(42));
+//! assert!(matches!(mock.next_response()?, Frame::Integer(42)));
+//! # Ok::<(), std::io::Error>(())
+//! ```
+//!
+//! On Unix, [`cluster::ClusterFixture`] provides an owned six-node Cluster for
+//! topology, resharding, failover, and benchmark tests. Use [`command_tests!`]
+//! when the same typed command contract should run against several backends.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

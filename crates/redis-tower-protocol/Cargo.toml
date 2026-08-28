@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-protocol"
-version = "0.1.1"
+version = "0.1.2"
 description = "RESP protocol types and codec for redis-tower, backed by resp-rs"
 edition.workspace = true
 authors.workspace = true

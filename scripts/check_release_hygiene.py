@@ -83,6 +83,12 @@ def audit_package(package: Package) -> list[str]:
         errors.append(f"{package.name}: src/lib.rs is missing")
     elif "#![deny(missing_docs)]" not in lib.read_text():
         errors.append(f"{package.name}: src/lib.rs must deny missing_docs")
+
+    changelog = package.root / "CHANGELOG.md"
+    if not changelog.is_file():
+        errors.append(f"{package.name}: CHANGELOG.md is missing")
+    elif "## [Unreleased]" not in changelog.read_text():
+        errors.append(f"{package.name}: CHANGELOG.md must contain an Unreleased section")
     errors.extend(audit_release_readme(package))
     return errors
 
@@ -147,7 +153,7 @@ def check_package_contents(root: Path, package: Package) -> list[str]:
         suffix = detail[-1] if detail else f"exit {process.returncode}"
         return [f"{package.name}: cargo package --list failed: {suffix}"]
     contents = set(process.stdout.splitlines())
-    required = {"Cargo.toml", "README.md", "src/lib.rs"}
+    required = {"Cargo.toml", "CHANGELOG.md", "README.md", "src/lib.rs"}
     missing = sorted(required - contents)
     return [f"{package.name}: package is missing {path}" for path in missing]
 

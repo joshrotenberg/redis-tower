@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.0...redis-tower-core-v0.1.1) - 2026-08-26
+
 ### Added
 
 - cancellation-safe idle RESP3 push reads on `RedisConnection`, allowing an
@@ -25,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- percent-decode usernames, passwords, and bearer-style URL credentials before
+  authentication, including reserved characters used by managed Redis tokens
 - discard a connection after canceled or incomplete command I/O so a late
   response cannot be consumed by a later request, while retaining connections
   after complete Redis and response-conversion errors

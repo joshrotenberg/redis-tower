@@ -5,6 +5,28 @@
 //! frames by cluster node. The split helpers deliberately use explicit names:
 //! splitting a Redis command across slots changes its atomicity contract and
 //! must never happen invisibly inside ordinary command execution.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use bytes::Bytes;
+//! use redis_tower::commands::{Get, Set};
+//! use redis_tower_cluster::{ClusterPipeline, MultiplexedClusterClient};
+//!
+//! let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
+//! let results = ClusterPipeline::new()
+//!     .push(Set::new("{user:42}:name", "Ada"))
+//!     .push(Get::new("{user:42}:name"))
+//!     .execute(&client)
+//!     .await?;
+//!
+//! let _: &() = results.get(0)?;
+//! let name: &Option<Bytes> = results.get(1)?;
+//! # let _ = name;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::BTreeMap;
 

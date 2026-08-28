@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.0...redis-tower-v0.1.1) - 2026-08-26
+
 ### Added
 
 - shared adaptive replica routing with explicit AZ affinity, inverse-EWMA
@@ -52,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded TTL/capacity, aggregate statistics, and cache metric events
 
 ### Changed
+
+- replace the exhaustive repository README with a concise installation,
+  client-selection, and module tour, while expanding crate and module rustdoc
+  entry pages with compiled examples and deeper-topic navigation
 
 - Pub/Sub confirmation handling now preserves interleaved messages, validates
   confirmation kind and channel, rejects empty subscribe calls before I/O, and

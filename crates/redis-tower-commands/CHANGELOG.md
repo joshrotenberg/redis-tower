@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.0...redis-tower-commands-v0.1.1) - 2026-08-26
+
 ### Added
 
 - `CLIENT TRACKING` redirect and `NOLOOP` options, binary-safe prefixes, and

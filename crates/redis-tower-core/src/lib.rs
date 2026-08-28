@@ -4,6 +4,26 @@
 //! client. Most users should depend on the `redis-tower` facade crate instead
 //! of using this directly.
 //!
+//! # Quick start
+//!
+//! Use [`FrameService`] when building a Tower stack at the RESP frame level.
+//! Application code normally uses the typed clients from `redis-tower`.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower_core::FrameService;
+//! use redis_tower_protocol::helpers::{array, bulk};
+//! use tower_service::Service;
+//!
+//! let mut service = FrameService::connect("127.0.0.1:6379").await?;
+//! let response = service
+//!     .call(array(vec![bulk("PING")]))
+//!     .await?;
+//! # let _ = response;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Command Trait
 //!
 //! The [`Command`] trait defines the interface every typed Redis command must
@@ -38,6 +58,16 @@
 //! [`FromRedisBytes`] traits for ergonomic conversion between RESP frames and
 //! Rust types. For dynamic commands that return a raw [`Frame`], the
 //! [`FromFrame`] trait decodes a frame straight into a Rust type.
+//!
+//! # Deeper topics
+//!
+//! - [`ConnectionConfig`] controls protocol negotiation, timeouts, keepalive,
+//!   and RESP decode limits.
+//! - [`RedisUrl`] describes parsed TCP, TLS, authentication, database, and Unix
+//!   socket settings.
+//! - [`tls`] configures native-tls or rustls when the corresponding feature is
+//!   enabled.
+//! - [`value`] covers byte-oriented conversion helpers for typed clients.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -62,7 +92,7 @@ pub use error::RedisError;
 pub use frame_service::FrameService;
 pub use from_frame::FromFrame;
 pub use stream::RedisStream;
-pub use url::{RedisUrl, parse_redis_url};
+pub use url::{RedisUrl, parse_redis_url, percent_decode};
 
 pub use value::{FromRedisBytes, RedisConvert, RedisValueExt};
 

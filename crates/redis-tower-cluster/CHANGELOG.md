@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.0...redis-tower-cluster-v0.1.1) - 2026-08-26
+
 ### Added
 
 - adaptive replica-read routing across direct and multiplexed clients, with
@@ -48,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- preserve percent-decoded credentials and TLS settings from cluster URLs
+  across discovery, node setup, redirects, and reconnects
 - require a finite client-side cache TTL for Cluster before connecting, so an
   unobserved empty-slot ownership change cannot leave an old-owner cached miss
   stale indefinitely; standalone cached clients still permit disabling TTL

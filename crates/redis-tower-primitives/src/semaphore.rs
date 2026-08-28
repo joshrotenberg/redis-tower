@@ -5,6 +5,29 @@
 //! checking capacity. A permit can be renewed or explicitly released; dropping
 //! it performs no I/O and leaves recovery to its required TTL.
 //!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use std::time::Duration;
+//! use redis_tower::MultiplexedClient;
+//! use redis_tower_primitives::ExpirableSemaphore;
+//!
+//! let mut client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+//! let semaphore = ExpirableSemaphore::new(
+//!     "workers:permits",
+//!     16,
+//!     Duration::from_secs(30),
+//! )?;
+//!
+//! if let Some(permit) = semaphore.try_acquire(&mut client).await? {
+//!     # let _remaining = permit.remaining_at_acquire();
+//!     permit.release(&mut client).await?;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Cluster keys
 //!
 //! All operations touch one key and are Redis Cluster safe without a hash tag.

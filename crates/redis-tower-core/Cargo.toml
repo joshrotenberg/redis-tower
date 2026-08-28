@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Core connection and Service implementation for redis-tower"
 edition.workspace = true
 authors.workspace = true

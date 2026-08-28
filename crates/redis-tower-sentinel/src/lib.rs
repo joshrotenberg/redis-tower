@@ -3,6 +3,24 @@
 //! Provides automatic master discovery and failover handling via Redis
 //! Sentinel.
 //!
+//! # Quick start
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::commands::{Get, Set};
+//! use redis_tower_sentinel::MultiplexedSentinelClient;
+//!
+//! let client = MultiplexedSentinelClient::connect(
+//!     &["127.0.0.1:26379", "127.0.0.1:26380"],
+//!     "mymaster",
+//! ).await?;
+//! client.execute(Set::new("key", "value")).await?;
+//! let value = client.execute(Get::new("key")).await?;
+//! # let _ = value;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! # Master Discovery
 //!
 //! [`SentinelConnection`] accepts a list of Sentinel addresses and a
@@ -85,6 +103,7 @@ mod client;
 mod connection;
 pub mod discovery;
 mod multiplexed;
+mod url;
 
 pub use client::{SentinelClient, SentinelClientBuilder};
 pub use connection::{SentinelConnection, SentinelConnectionBuilder};

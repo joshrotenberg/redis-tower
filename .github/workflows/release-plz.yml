@@ -1,19 +1,31 @@
 name: Release
 
-# Manual-only: releases are frozen during the current development push.
-# Trigger with: gh workflow run Release --ref main
-# Note: redis-tower-sync and redis-tower-modules 0.1.0 are tagged in
-# Cargo.toml but not yet on crates.io; the next dispatch publishes them.
+# Manual-only. Prepare a release PR first; publish only from main after that PR
+# has merged and all required checks have passed.
 on:
   workflow_dispatch:
+    inputs:
+      command:
+        description: Release operation
+        type: choice
+        required: true
+        default: release-pr
+        options:
+          - release-pr
+          - release
 
 permissions:
   pull-requests: write
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release-plz:
     name: Release-plz
+    if: github.repository_owner == 'joshrotenberg'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -26,7 +38,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz
-        uses: MarcoIeni/release-plz-action@v0.5
+        uses: MarcoIeni/release-plz-action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5
+        with:
+          command: ${{ inputs.command }}
+          version: "0.3.160"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

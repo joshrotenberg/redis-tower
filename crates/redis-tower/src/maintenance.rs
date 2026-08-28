@@ -6,6 +6,29 @@
 //! the client with
 //! [`MultiplexedClient::from_factory_with_maintenance`](crate::MultiplexedClient::from_factory_with_maintenance)
 //! and retain the returned [`MaintenanceListenerHandle`] to keep it enabled.
+//!
+//! # Example
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! use redis_tower::{AutoPipelineConfig, MultiplexedClient};
+//! use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
+//! use redis_tower::reconnect::Resp3AddrConnectionFactory;
+//!
+//! let factory = Resp3AddrConnectionFactory::new("127.0.0.1:6379");
+//! let (client, maintenance) = MultiplexedClient::from_factory_with_maintenance(
+//!     factory,
+//!     AutoPipelineConfig::default(),
+//!     AutoPipelineReconnectConfig::default(),
+//! )
+//! .await?;
+//!
+//! // Keep the handle alive for as long as maintenance handoff is desired.
+//! # let _ = client;
+//! maintenance.shutdown().await;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};

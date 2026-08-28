@@ -359,14 +359,24 @@
 //!
 //! This is the facade crate. It re-exports types from the workspace:
 //!
-//! - `redis-tower-protocol` -- RESP3 frame types and codec
-//! - `redis-tower-core` -- [`Command`] trait, [`RedisConnection`],
-//!   [`FrameService`], transport, URL parsing, and value conversion
-//! - `redis-tower-commands` -- 450+ typed command implementations
-//!   (re-exported via [`commands`])
-//! - `redis-tower-cluster` -- cluster routing, MOVED/ASK, read preference
-//! - `redis-tower-sentinel` -- Sentinel discovery and failover
-//! - `redis-tower-sync` -- blocking wrapper with internal tokio runtime
+//! | Crate | Role |
+//! |---|---|
+//! | `redis-tower` | This facade: standalone clients, Tower middleware, pools, caching, scripting, streams, and transactions |
+//! | `redis-tower-protocol` | RESP2/RESP3 frame types, codec, limits, and frame helpers |
+//! | `redis-tower-core` | [`Command`], [`RedisConnection`], [`FrameService`], transport, URL parsing, and value conversion |
+//! | `redis-tower-commands` | 450+ typed commands, re-exported here through [`commands`] |
+//! | `redis-tower-client` | One URL-driven client enum for standalone, Cluster, and Sentinel |
+//! | `redis-tower-cluster` | Cluster topology, slot routing, MOVED/ASK handling, replica reads, scans, and pipelines |
+//! | `redis-tower-sentinel` | Sentinel discovery, replica reads, and failover-aware clients |
+//! | `redis-tower-modules` | High-level JSON, Search, TimeSeries, probabilistic, and vector APIs |
+//! | `redis-tower-primitives` | Fenced locks, leader election, semaphores, latches, delayed queues, IDs, and rate limits |
+//! | `redis-tower-auth-aws` / `redis-tower-auth-azure` | Cloud credential providers for rotating authentication |
+//! | `redis-tower-sync` | Blocking wrapper with an internal Tokio runtime |
+//! | `redis-tower-test` | Mocks, reusable command tests, and a managed Cluster fixture |
+//!
+//! The [guide](https://github.com/joshrotenberg/redis-tower/tree/main/docs)
+//! goes deeper on production tuning, caching, cloud authentication,
+//! distributed-primitives failure semantics, migrations, and compatibility.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

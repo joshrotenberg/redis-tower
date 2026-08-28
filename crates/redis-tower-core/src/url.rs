@@ -26,10 +26,10 @@ pub struct RedisUrl {
     /// Port number (default: 6379).
     pub port: u16,
 
-    /// Username for AUTH (Redis 6+ ACL).
+    /// Username for AUTH (Redis 6+ ACL). Percent-decoded.
     pub username: Option<String>,
 
-    /// Password for AUTH.
+    /// Password for AUTH. Percent-decoded.
     pub password: Option<String>,
 
     /// Database number for SELECT.
@@ -67,6 +67,11 @@ impl Default for RedisUrl {
 /// - `rediss://[user:pass@]host[:port][/db]` (TLS)
 /// - `valkey://` / `valkeys://` -- aliases for `redis://` / `rediss://`
 /// - `unix:///path/to/socket[?db=N]`
+///
+/// The username and password are percent-decoded (managed-service passwords
+/// routinely contain URL-special characters such as `@`, `:`, and `/`, which
+/// must be percent-encoded to appear in a URL). See [`percent_decode`] for
+/// the exact decoding rules.
 pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
     if url.starts_with("unix://") {
         let path = url.strip_prefix("unix://").unwrap();
@@ -114,11 +119,11 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
             let user = if user.is_empty() {
                 None
             } else {
-                Some(user.to_string())
+                Some(percent_decode(user)?)
             };
-            (user, Some(pass.to_string()))
+            (user, Some(percent_decode(pass)?))
         } else {
-            (None, Some(auth.to_string()))
+            (None, Some(percent_decode(auth)?))
         }
     } else {
         (None, None)
@@ -157,6 +162,51 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         unix: false,
         path: None,
     })
+}
+
+/// Decode percent-encoded (`%XX`) sequences in a URL component.
+///
+/// A `%` followed by two hex digits is decoded to the corresponding byte. A
+/// `%` **not** followed by two hex digits is preserved as-is (lenient
+/// decoding, matching the behavior of the `percent-encoding` crate used by
+/// most URL libraries), so a legacy password containing a literal `%` keeps
+/// working.
+///
+/// # Errors
+///
+/// Returns [`RedisError::InvalidUrl`] if the decoded bytes are not valid
+/// UTF-8.
+pub fn percent_decode(input: &str) -> Result<String, RedisError> {
+    if !input.contains('%') {
+        return Ok(input.to_string());
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).map_err(|_| {
+        RedisError::InvalidUrl("percent-decoded URL component is not valid UTF-8".to_string())
+    })
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -247,10 +297,54 @@ mod tests {
 
     #[test]
     fn parse_password_with_special_characters() {
-        let url = parse_redis_url("redis://:p%40ss:w0rd@localhost").unwrap();
-        // The parser does not percent-decode, so it preserves the raw value.
-        assert_eq!(url.password.as_deref(), Some("p%40ss:w0rd"));
+        let url = parse_redis_url("redis://:p%40ss%3Aw0rd@localhost").unwrap();
+        assert_eq!(url.password.as_deref(), Some("p@ss:w0rd"));
         assert!(url.username.is_none());
+    }
+
+    #[test]
+    fn parse_percent_encoded_username_and_password() {
+        let url = parse_redis_url("redis://us%2Fer:pa%25ss@localhost").unwrap();
+        assert_eq!(url.username.as_deref(), Some("us/er"));
+        assert_eq!(url.password.as_deref(), Some("pa%ss"));
+    }
+
+    #[test]
+    fn parse_bare_token_is_percent_decoded() {
+        let url = parse_redis_url("redis://tok%2Ben@localhost").unwrap();
+        assert!(url.username.is_none());
+        assert_eq!(url.password.as_deref(), Some("tok+en"));
+    }
+
+    #[test]
+    fn parse_literal_percent_without_hex_is_preserved() {
+        // Lenient decoding: `%` not followed by two hex digits passes through
+        // raw, so an unencoded legacy password containing `%` keeps working.
+        let url = parse_redis_url("redis://:100%pass@localhost").unwrap();
+        assert_eq!(url.password.as_deref(), Some("100%pass"));
+    }
+
+    #[test]
+    fn parse_percent_decoded_invalid_utf8_is_rejected() {
+        // %FF alone is not valid UTF-8 after decoding.
+        assert!(parse_redis_url("redis://:%FF@localhost").is_err());
+    }
+
+    #[test]
+    fn percent_decode_plain_string_unchanged() {
+        assert_eq!(percent_decode("plain").unwrap(), "plain");
+    }
+
+    #[test]
+    fn percent_decode_truncated_escape_preserved() {
+        assert_eq!(percent_decode("abc%2").unwrap(), "abc%2");
+        assert_eq!(percent_decode("abc%").unwrap(), "abc%");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // "café" with the é percent-encoded as UTF-8 (0xC3 0xA9).
+        assert_eq!(percent_decode("caf%C3%A9").unwrap(), "café");
     }
 
     #[test]

@@ -3,6 +3,18 @@
 //! This crate re-exports `resp_rs::resp3::Frame` and provides a Tokio codec
 //! adapter for use with `tokio_util::codec::Framed`.
 //!
+//! # Quick start
+//!
+//! ```
+//! use redis_tower_protocol::{Frame, frame_to_bytes};
+//! use redis_tower_protocol::helpers::{array, bulk};
+//!
+//! let command = array(vec![bulk("SET"), bulk("key"), bulk("value")]);
+//! let encoded = frame_to_bytes(&command);
+//! assert!(!encoded.is_empty());
+//! assert!(matches!(command, Frame::Array(Some(_))));
+//! ```
+//!
 //! # Frame Types
 //!
 //! The [`Frame`] enum (re-exported from `resp_rs`) covers all RESP3 wire types

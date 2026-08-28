@@ -24,6 +24,23 @@
 //! the master. The strict guarantee covers the full command attempt: retries
 //! and cluster redirects must not replay an eligible `Replica` read against a
 //! master.
+//!
+//! # Example
+//!
+//! ```
+//! use std::time::Duration;
+//! use redis_tower::{AdaptiveReplicaRouting, NodeAddr};
+//!
+//! let replica = NodeAddr::new("redis-b.internal", 6379);
+//! let routing = AdaptiveReplicaRouting::builder()
+//!     .local_zone("us-west-2b")
+//!     .replica_zone(replica, "us-west-2b")
+//!     .failure_threshold(3)
+//!     .ejection_duration(Duration::from_secs(10))
+//!     .build()?;
+//! # let _ = routing;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use redis_tower_core::Frame;
 use std::collections::HashMap;

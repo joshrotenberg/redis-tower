@@ -1,4 +1,19 @@
 //! CRC16 slot calculation for Redis Cluster.
+//!
+//! Redis Cluster maps keys to 16,384 slots. Text between the first non-empty
+//! pair of braces is the hash tag, so related keys can be forced into one slot.
+//!
+//! # Example
+//!
+//! ```
+//! use redis_tower_cluster::slot::{extract_hash_tag, slot_for_key};
+//!
+//! assert_eq!(extract_hash_tag(b"{user:42}:name"), b"user:42");
+//! assert_eq!(
+//!     slot_for_key(b"{user:42}:name"),
+//!     slot_for_key(b"{user:42}:email"),
+//! );
+//! ```
 
 /// Total number of hash slots in a Redis Cluster.
 pub const SLOT_COUNT: u16 = 16384;
@@ -40,6 +55,7 @@ fn crc16(data: &[u8]) -> u16 {
 /// as the hash tag. If no valid tag is found, the entire key is used.
 ///
 /// Examples:
+///
 /// - `{user:1}:name` -> `user:1`
 /// - `foo{bar}baz` -> `bar`
 /// - `foo{}bar` -> entire key (empty tag ignored)
@@ -54,7 +70,7 @@ pub fn extract_hash_tag(key: &[u8]) -> &[u8] {
     key
 }
 
-/// Calculate the slot number for a given key.
+/// Calculate the slot number for a key, honoring Redis hash-tag syntax.
 pub fn slot_for_key(key: &[u8]) -> u16 {
     let hash_input = extract_hash_tag(key);
     crc16(hash_input) % SLOT_COUNT

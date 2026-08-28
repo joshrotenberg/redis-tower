@@ -376,7 +376,15 @@ let sentinel = MultiplexedSentinelClient::builder(
 For application code that must select a topology from configuration at
 runtime, use `redis_tower_client::UniversalClient`. Its URL schemes are
 `redis://`, `redis+cluster://`, and `redis+sentinel://`; all variants expose the
-same typed `execute` method.
+same typed `execute` method. As with Fred's URLs, credentials ride in the
+userinfo (`redis+cluster://user:pass@host:7000`, percent-decoded), the
+`rediss` variants enable TLS, and sentinel URLs take separate sentinel
+credentials as query parameters -- Fred's `?sentinelUsername=U&sentinelPassword=P`
+becomes `?sentinel_username=U&sentinel_password=P`:
+
+```text
+redis+sentinel://app:node-pass@s1:26379,s2:26379/mymaster?sentinel_password=sent-pass
+```
 
 Read the [feature matrix](FEATURE-MATRIX.md) before assuming exact parity.
 RESP3 negotiation is available on standalone and cluster clients, while
