@@ -36,7 +36,7 @@ use tokio_stream::{Stream, StreamExt};
 use tokio_util::codec::Framed;
 
 use redis_tower_core::RedisStream;
-use redis_tower_protocol::RespCodec;
+use redis_tower_protocol::{ProtocolError, RespCodec};
 
 use crate::reconnect::{ConnectionFactory, ReconnectConfig, connect_with_timeout};
 
@@ -69,15 +69,183 @@ impl PubSubName for Bytes {
 }
 
 /// Pub/Sub message with text channel and pattern names.
-pub type PubSubMessage = NamedPubSubMessage<String>;
+#[derive(Debug, Clone)]
+pub struct PubSubMessage {
+    /// Message family.
+    pub kind: MessageKind,
+    /// Received channel name.
+    pub channel: String,
+    /// Matching pattern, for pattern subscriptions.
+    pub pattern: Option<String>,
+    /// Message payload.
+    pub payload: Bytes,
+}
+
+impl From<NamedPubSubMessage<String>> for PubSubMessage {
+    fn from(message: NamedPubSubMessage<String>) -> Self {
+        Self {
+            kind: message.kind,
+            channel: message.channel,
+            pattern: message.pattern,
+            payload: message.payload,
+        }
+    }
+}
 /// Pub/Sub message preserving binary channel and pattern names.
 pub type BinaryPubSubMessage = NamedPubSubMessage<Bytes>;
 /// Confirmed text subscriptions.
-pub type Subscriptions = NamedSubscriptions<String>;
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subscriptions {
+    /// Channels from `SUBSCRIBE`.
+    pub channels: BTreeSet<String>,
+    /// Patterns from `PSUBSCRIBE`.
+    pub patterns: BTreeSet<String>,
+    /// Shard channels from `SSUBSCRIBE`.
+    pub shard_channels: BTreeSet<String>,
+}
+
+impl From<&NamedSubscriptions<String>> for Subscriptions {
+    fn from(names: &NamedSubscriptions<String>) -> Self {
+        Self {
+            channels: names.channels.clone(),
+            patterns: names.patterns.clone(),
+            shard_channels: names.shard_channels.clone(),
+        }
+    }
+}
+impl Subscriptions {
+    /// True when nothing is subscribed.
+    pub fn is_empty(&self) -> bool {
+        self.channels.is_empty() && self.patterns.is_empty() && self.shard_channels.is_empty()
+    }
+    /// Frames replaying every confirmed subscription.
+    pub fn replay_frames(&self) -> Vec<Frame> {
+        NamedSubscriptions {
+            channels: self.channels.clone(),
+            patterns: self.patterns.clone(),
+            shard_channels: self.shard_channels.clone(),
+        }
+        .replay_frames()
+    }
+}
 /// Confirmed binary subscriptions.
 pub type BinarySubscriptions = NamedSubscriptions<Bytes>;
 /// Pub/Sub connection with text channel and pattern names.
-pub type PubSubConnection = NamedPubSubConnection<String>;
+pub struct PubSubConnection {
+    inner: NamedPubSubConnection<String>,
+    // Preserve the concrete public text subscription type and borrowed getter.
+    subscriptions: Subscriptions,
+}
+
+impl From<NamedPubSubConnection<String>> for PubSubConnection {
+    fn from(inner: NamedPubSubConnection<String>) -> Self {
+        let subscriptions = inner.subscriptions().into();
+        Self {
+            inner,
+            subscriptions,
+        }
+    }
+}
+impl PubSubConnection {
+    /// Consume a dedicated connection, retaining its decode limits.
+    pub fn from_connection(connection: RedisConnection) -> Result<Self, RedisError> {
+        NamedPubSubConnection::from_connection(connection).map(Self::from)
+    }
+    /// Confirmed subscriptions replayed after a reconnect.
+    pub fn subscriptions(&self) -> &Subscriptions {
+        &self.subscriptions
+    }
+    /// Consume the connection as a typed keyspace event stream.
+    pub fn into_keyspace_events(self) -> KeyspaceEventStream {
+        KeyspaceEventStream { inner: self }
+    }
+    /// See [`NamedPubSubConnection::subscribe`].
+    pub async fn subscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.subscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::psubscribe`].
+    pub async fn psubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.psubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::ssubscribe`].
+    pub async fn ssubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.ssubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::unsubscribe`].
+    pub async fn unsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.unsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::punsubscribe`].
+    pub async fn punsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.punsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::sunsubscribe`].
+    pub async fn sunsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.sunsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::psubscribe_keyspace`].
+    pub async fn psubscribe_keyspace(&mut self, db: u32, pattern: &str) -> Result<(), RedisError> {
+        let result = self.inner.psubscribe_keyspace(db, pattern).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedPubSubConnection::psubscribe_keyevent`].
+    pub async fn psubscribe_keyevent(&mut self, db: u32, pattern: &str) -> Result<(), RedisError> {
+        let result = self.inner.psubscribe_keyevent(db, pattern).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// Replay confirmed subscriptions on the current socket.
+    pub async fn resubscribe(&mut self) -> Result<(), RedisError> {
+        let result = self.inner.resubscribe().await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// Reconnect using the supplied factory and replay confirmed subscriptions.
+    pub async fn reconnect_with(
+        &mut self,
+        factory: &dyn ConnectionFactory,
+    ) -> Result<(), RedisError> {
+        let result = self.inner.reconnect_with(factory).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// Reconnect and replay under the supplied retry and backoff policy.
+    pub async fn reconnect_with_backoff(
+        &mut self,
+        factory: &dyn ConnectionFactory,
+        config: &ReconnectConfig,
+    ) -> Result<(), RedisError> {
+        let result = self.inner.reconnect_with_backoff(factory, config).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    #[cfg(test)]
+    fn parse_message(frame: Frame) -> Result<Option<PubSubMessage>, RedisError> {
+        NamedPubSubConnection::<String>::parse_message(frame).map(|message| message.map(Into::into))
+    }
+}
+impl Stream for PubSubConnection {
+    type Item = Result<PubSubMessage, RedisError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner)
+            .poll_next(cx)
+            .map(|message| message.map(|message| message.map(Into::into)))
+    }
+}
+
 /// Pub/Sub connection preserving binary channel and pattern names.
 ///
 /// Use the `*_bytes` subscription methods and consume its ordinary `Stream`.
@@ -875,6 +1043,13 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
     }
 }
 
+fn pubsub_stream_error(error: ProtocolError) -> RedisError {
+    match error {
+        ProtocolError::Io(error) if error.kind() != std::io::ErrorKind::Unsupported => error.into(),
+        error => error.into(),
+    }
+}
+
 impl<N: PubSubName> Stream for NamedPubSubConnection<N> {
     type Item = Result<NamedPubSubMessage<N>, RedisError>;
 
@@ -887,7 +1062,7 @@ impl<N: PubSubName> Stream for NamedPubSubConnection<N> {
                 match Pin::new(&mut self.framed).poll_next(cx) {
                     Poll::Ready(Some(Ok(frame))) => frame,
                     Poll::Ready(Some(Err(e))) => {
-                        return Poll::Ready(Some(Err(RedisError::from(e))));
+                        return Poll::Ready(Some(Err(pubsub_stream_error(e))));
                     }
                     Poll::Ready(None) => return Poll::Ready(None),
                     Poll::Pending => return Poll::Pending,
@@ -913,7 +1088,7 @@ impl NamedPubSubConnection<String> {
     /// [`psubscribe_keyspace`](Self::psubscribe_keyspace) or
     /// [`psubscribe_keyevent`](Self::psubscribe_keyevent).
     pub fn into_keyspace_events(self) -> KeyspaceEventStream {
-        KeyspaceEventStream { inner: self }
+        KeyspaceEventStream { inner: self.into() }
     }
 }
 
@@ -967,6 +1142,21 @@ impl Stream for KeyspaceEventStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_errors_distinguish_transport_loss_from_unsupported_protocol() {
+        let reset = ProtocolError::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        assert!(pubsub_stream_error(reset).is_connection_error());
+        let unsupported = ProtocolError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "RESP3 attributed replies are not supported",
+        ));
+        assert!(matches!(
+            pubsub_stream_error(unsupported),
+            RedisError::Protocol(_)
+        ));
+    }
+
     use redis_tower_protocol::helpers::{array, bulk};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1140,7 +1330,8 @@ mod tests {
     #[test]
     fn extract_confirmation_channel_matches_expected_kind() {
         let frame = sub_confirmation("subscribe", "events", 1);
-        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        let result =
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_some());
         assert_eq!(result.unwrap().unwrap(), "events");
     }
@@ -1153,7 +1344,7 @@ mod tests {
             Frame::Integer(1),
         ]);
         assert_eq!(
-            PubSubConnection::extract_confirmation_channel(&frame, "subscribe")
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe")
                 .unwrap()
                 .unwrap(),
             "events"
@@ -1163,14 +1354,16 @@ mod tests {
     #[test]
     fn extract_confirmation_channel_returns_none_for_wrong_kind() {
         let frame = sub_confirmation("psubscribe", "events.*", 1);
-        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        let result =
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_confirmation_channel_returns_err_for_error_frame() {
         let frame = Frame::Error(b"ERR something"[..].into());
-        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        let result =
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
     }
@@ -1178,14 +1371,16 @@ mod tests {
     #[test]
     fn extract_confirmation_channel_returns_none_for_message_frame() {
         let frame = array(vec![bulk("message"), bulk("events"), bulk("hello")]);
-        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        let result =
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_none());
     }
 
     #[test]
     fn extract_confirmation_channel_returns_none_for_short_array() {
         let frame = array(vec![bulk("subscribe")]);
-        let result = PubSubConnection::extract_confirmation_channel(&frame, "subscribe");
+        let result =
+            NamedPubSubConnection::<String>::extract_confirmation_channel(&frame, "subscribe");
         assert!(result.is_none());
     }
 
@@ -1223,7 +1418,7 @@ mod tests {
     fn is_confirmation_accepts_zero_count() {
         let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(0)]);
         assert!(matches!(
-            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            NamedPubSubConnection::<String>::is_confirmation(&frame, "unsubscribe"),
             Some(Ok(()))
         ));
     }
@@ -1232,7 +1427,7 @@ mod tests {
     fn is_confirmation_accepts_nonzero_count() {
         let frame = array(vec![bulk("unsubscribe"), bulk("ch1"), Frame::Integer(2)]);
         assert!(matches!(
-            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            NamedPubSubConnection::<String>::is_confirmation(&frame, "unsubscribe"),
             Some(Ok(()))
         ));
     }
@@ -1245,7 +1440,7 @@ mod tests {
             Frame::Integer(0),
         ]);
         assert!(matches!(
-            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            NamedPubSubConnection::<String>::is_confirmation(&frame, "unsubscribe"),
             Some(Ok(()))
         ));
     }
@@ -1254,7 +1449,7 @@ mod tests {
     fn is_confirmation_accepts_resp3_null_unsubscribe_name() {
         let frame = Frame::Push(vec![bulk("unsubscribe"), Frame::Null, Frame::Integer(0)]);
         assert!(matches!(
-            PubSubConnection::is_confirmation(&frame, "unsubscribe"),
+            NamedPubSubConnection::<String>::is_confirmation(&frame, "unsubscribe"),
             Some(Ok(()))
         ));
     }
@@ -1263,6 +1458,7 @@ mod tests {
     async fn subscribe_bypasses_existing_buffer_and_preserves_wire_messages() {
         let (mut pubsub, mut server) = pubsub_pair().await;
         pubsub
+            .inner
             .buffered_frames
             .push_back(message("events", "already-buffered"));
 
@@ -1345,10 +1541,13 @@ mod tests {
     async fn unsubscribe_all_matches_family_names_and_preserves_interleaved_message() {
         let (mut pubsub, mut server) = pubsub_pair().await;
         NamedSubscriptions::add(
-            &mut pubsub.subs.channels,
+            &mut pubsub.inner.subs.channels,
             &[b"a".as_slice(), b"b".as_slice()],
         );
-        NamedSubscriptions::add(&mut pubsub.subs.patterns, &[b"still-active.*".as_slice()]);
+        NamedSubscriptions::add(
+            &mut pubsub.inner.subs.patterns,
+            &[b"still-active.*".as_slice()],
+        );
 
         let server_task = tokio::spawn(async move {
             assert_eq!(
@@ -1424,7 +1623,7 @@ mod tests {
     async fn unsubscribe_deduplicates_names_before_wire_and_confirmation_wait() {
         let (mut pubsub, mut server) = pubsub_pair().await;
         NamedSubscriptions::add(
-            &mut pubsub.subs.channels,
+            &mut pubsub.inner.subs.channels,
             &[b"a".as_slice(), b"b".as_slice()],
         );
         let server_task = tokio::spawn(async move {
@@ -1452,7 +1651,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_replacement_replay_does_not_install_partial_session() {
-        let (mut pubsub, mut original_server) = pubsub_pair().await;
+        let (pubsub, mut original_server) = pubsub_pair().await;
+        let mut pubsub = pubsub.inner;
         NamedSubscriptions::add(
             &mut pubsub.subs.channels,
             &[b"a".as_slice(), b"b".as_slice()],

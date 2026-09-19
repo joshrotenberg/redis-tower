@@ -62,7 +62,7 @@ impl Default for RespLimits {
 ///
 /// Decoding enforces the [`RespLimits`] the codec was built with; encoding is
 /// unaffected, since outbound frames are ones this client built itself.
-/// RESP3 attribute prefixes fail closed with [`ProtocolError::UnsupportedAttributes`]
+/// RESP3 attribute prefixes fail closed with an unsupported-operation protocol error
 /// until attributes can be attached to their following response value.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RespCodec {
@@ -140,7 +140,11 @@ impl Decoder for RespCodec {
                 // pipelined response to the wrong request. Until the public
                 // response model can attach attributes, reject the transport.
                 if contains_attributes(&frame) {
-                    return Err(ProtocolError::UnsupportedAttributes);
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "RESP3 attributed replies are not supported",
+                    )
+                    .into());
                 }
                 let consumed = src.len() - remaining.len();
                 src.advance(consumed);
@@ -346,7 +350,7 @@ mod tests {
             let mut bytes = BytesMut::from(wire);
             assert!(matches!(
                 codec.decode(&mut bytes),
-                Err(ProtocolError::UnsupportedAttributes)
+                Err(ProtocolError::Io(error)) if error.kind() == std::io::ErrorKind::Unsupported
             ));
             assert_eq!(
                 bytes.as_ref(),
