@@ -1,6 +1,11 @@
 /// Protocol-level errors for RESP parsing and serialization.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtocolError {
+    /// RESP3 attribute prefixes cannot yet be attached to a reply by this API.
+    /// The connection fails closed to avoid shifting pipelined reply ownership.
+    #[error("RESP3 attributed replies are not supported")]
+    UnsupportedAttributes,
+
     /// RESP parse error from resp-rs.
     #[error("parse error: {0}")]
     Parse(#[from] resp_rs::ParseError),

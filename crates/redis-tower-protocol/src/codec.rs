@@ -62,6 +62,8 @@ impl Default for RespLimits {
 ///
 /// Decoding enforces the [`RespLimits`] the codec was built with; encoding is
 /// unaffected, since outbound frames are ones this client built itself.
+/// RESP3 attribute prefixes fail closed with [`ProtocolError::UnsupportedAttributes`]
+/// until attributes can be attached to their following response value.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RespCodec {
     limits: RespLimits,
@@ -81,6 +83,22 @@ impl RespCodec {
     /// The limits this codec enforces while decoding.
     pub fn limits(&self) -> RespLimits {
         self.limits
+    }
+}
+
+fn contains_attributes(frame: &Frame) -> bool {
+    match frame {
+        Frame::Attribute(_) | Frame::StreamedAttribute(_) => true,
+        Frame::Array(Some(values))
+        | Frame::StreamedArray(values)
+        | Frame::Set(values)
+        | Frame::StreamedSet(values)
+        | Frame::Push(values)
+        | Frame::StreamedPush(values) => values.iter().any(contains_attributes),
+        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
+            .iter()
+            .any(|(key, value)| contains_attributes(key) || contains_attributes(value)),
+        _ => false,
     }
 }
 
@@ -117,6 +135,13 @@ impl Decoder for RespCodec {
         let input = src.clone().freeze();
         match resp3::parse_frame(input) {
             Ok((frame, remaining)) => {
+                // resp-rs represents an attribute prefix as an independent
+                // frame. Returning it as a reply would shift every subsequent
+                // pipelined response to the wrong request. Until the public
+                // response model can attach attributes, reject the transport.
+                if contains_attributes(&frame) {
+                    return Err(ProtocolError::UnsupportedAttributes);
+                }
                 let consumed = src.len() - remaining.len();
                 src.advance(consumed);
                 Ok(Some(frame))
@@ -310,6 +335,26 @@ fn parse_len(bytes: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[test]
+    fn attributed_replies_fail_closed_before_consuming_pipeline_bytes() {
+        for wire in [
+            b"|1\r\n+ttl\r\n:1\r\n+first\r\n+second\r\n".as_slice(),
+            b"*1\r\n|1\r\n+ttl\r\n:1\r\n+first\r\n+second\r\n".as_slice(),
+        ] {
+            let mut codec = RespCodec::new();
+            let mut bytes = BytesMut::from(wire);
+            assert!(matches!(
+                codec.decode(&mut bytes),
+                Err(ProtocolError::UnsupportedAttributes)
+            ));
+            assert_eq!(
+                bytes.as_ref(),
+                wire,
+                "no reply may be mistaken for the next request's result"
+            );
+        }
+    }
 
     #[test]
     fn decode_simple_string() {

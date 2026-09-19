@@ -2319,6 +2319,90 @@ mod cluster_pubsub {
     /// replay its tracked channels. Waiting for the second SUBSCRIBE command
     /// before publishing makes the at-most-once reconnect gap deterministic.
     #[tokio::test]
+    #[ignore = "live: starts an isolated Redis Cluster"]
+    async fn binary_pubsub_names_round_trip_in_regular_and_sharded_sessions() {
+        use redis_tower::commands::RawCommand;
+        let fixture = start_fixture().await;
+        let client = bounded(
+            "binary client",
+            OPERATION_TIMEOUT,
+            MultiplexedClusterClient::connect(&fixture.seed_addr()),
+        )
+        .await
+        .unwrap();
+        let topology = client.topology().await;
+        let node = topology.master_addrs()[0].clone();
+        let mut regular = bounded(
+            "binary regular connection",
+            OPERATION_TIMEOUT,
+            client.pubsub_on_bytes(node),
+        )
+        .await
+        .unwrap();
+        let channel = b"{binary-pubsub}:channel\xff".as_slice();
+        let pattern = b"{binary-pubsub}:*\xff".as_slice();
+        bounded(
+            "binary pattern subscribe",
+            OPERATION_TIMEOUT,
+            regular.psubscribe_bytes(&[pattern]),
+        )
+        .await
+        .unwrap();
+        bounded(
+            "binary publish",
+            OPERATION_TIMEOUT,
+            client.execute(RawCommand::new("PUBLISH").arg(channel).arg(vec![0, 255])),
+        )
+        .await
+        .unwrap();
+        let message = bounded(
+            "binary regular delivery",
+            OPERATION_TIMEOUT,
+            regular.next_message(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.channel.as_ref(), channel);
+        assert_eq!(message.pattern.as_ref().unwrap().as_ref(), pattern);
+        assert_eq!(message.payload.as_ref(), &[0, 255]);
+        let mut sharded = bounded(
+            "binary shard connection",
+            OPERATION_TIMEOUT,
+            client.sharded_pubsub_bytes(&[channel]),
+        )
+        .await
+        .unwrap();
+        bounded(
+            "binary shard publish",
+            OPERATION_TIMEOUT,
+            client.execute(RawCommand::new("SPUBLISH").arg(channel).arg(vec![255, 0])),
+        )
+        .await
+        .unwrap();
+        let message = bounded(
+            "binary shard delivery",
+            OPERATION_TIMEOUT,
+            sharded.next_message(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(message.channel.as_ref(), channel);
+        assert_eq!(message.payload.as_ref(), &[255, 0]);
+        assert!(sharded.subscriptions().shard_channels.contains(channel));
+        bounded(
+            "binary unsubscribe",
+            OPERATION_TIMEOUT,
+            sharded.unsubscribe_bytes(&[channel]),
+        )
+        .await
+        .unwrap();
+        assert!(sharded.subscriptions().is_empty());
+        drop(sharded);
+        drop(regular);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
     #[ignore = "live: kills a designated-node Pub/Sub connection"]
     async fn regular_pubsub_reconnects_to_designated_node_and_resubscribes() {
         let fixture = start_fixture().await;

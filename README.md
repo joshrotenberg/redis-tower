@@ -133,6 +133,17 @@ let transaction = Transaction::new()
 
 ## Deployment topologies
 
+For binary channel or pattern names, use `BinaryPubSubConnection` and the
+`subscribe_bytes` / `psubscribe_bytes` / `ssubscribe_bytes` methods. Messages
+and tracked subscriptions retain `Bytes`, including across reconnects. Cluster
+clients expose `pubsub_on_bytes` and `sharded_pubsub_bytes` with the same
+routing and recovery behavior as the text API.
+
+RESP3 attribute-prefixed replies currently fail with a protocol error. The
+transport closes rather than assign an attribute or its payload to the wrong
+pipelined request. Complete attribute metadata support needs a response model
+that pairs the prefix with its following value.
+
 ### Cluster
 
 ```rust
@@ -151,6 +162,15 @@ let name = client.execute(Get::new("{user:42}:name")).await?;
 # Ok(())
 # }
 ```
+
+Raw `FT.CURSOR` and counted set/cardinality commands route by the index or
+first declared key, including binary keys and hash tags.
+
+For node-local or connection-stateful work, `client.connect_to_node(node)`
+opens an exclusively owned connection to a current topology member using the
+client's authentication, TLS, protocol, and connection timeout settings. The
+caller bounds command duration and owns the socket; shared workers remain
+available. This connection does not route commands or replay failures.
 
 The Cluster crate also provides explicit cross-node pipelines, split multi-key
 helpers, cluster-wide scans, regular and sharded Pub/Sub, replica routing, and

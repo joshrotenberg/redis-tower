@@ -241,7 +241,11 @@ pub use connection::{
 };
 pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
 pub use pipeline::ClusterPipeline;
-pub use pubsub::{ClusterPubSubConnection, ShardedClusterPubSubConnection};
+pub use pubsub::{
+    BinaryClusterPubSubConnection, BinaryShardedClusterPubSubConnection, ClusterPubSubConnection,
+    NamedClusterPubSubConnection, NamedShardedClusterPubSubConnection,
+    ShardedClusterPubSubConnection,
+};
 pub use scan_stream::{
     ClusterScan, ClusterScanItem, MAX_MEMBERSHIP_ROUNDS, MAX_SCAN_CONCURRENCY, ScanClusterStream,
 };
