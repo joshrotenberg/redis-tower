@@ -84,6 +84,9 @@ jobs:
       - name: Test CI workflow contract
         run: python3 scripts/test_ci_workflow.py
 
+      - name: Test benchmark regression gate
+        run: python3 scripts/test_check_criterion_regressions.py
+
       - name: Test coverage generator
         run: python3 scripts/test_generate_command_coverage.py
 
@@ -162,6 +165,8 @@ jobs:
     name: Codec Benchmark Regression
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      needs_confirmation: ${{ steps.compare.outputs.needs_confirmation }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -204,20 +209,79 @@ jobs:
           critcmp main candidate --list | tee benchmark-comparison.txt
           set +e
           python3 scripts/check_criterion_regressions.py \
-            --baseline main --candidate candidate --threshold 10
+            --baseline main --candidate candidate --threshold 10 \
+            --benchmark-threshold codec_decode/bulk_string_1kb=25
           status=$?
           set -e
           if [[ "$status" -eq 1 ]]; then
             echo "needs_confirmation=true" >> "$GITHUB_OUTPUT"
-            echo "Initial regression requires a reversed-order confirmation run."
+            echo "::notice::Unconfirmed regression. The Codec Benchmark Confirmation job re-measures it on a different runner and decides the check."
           elif [[ "$status" -eq 0 ]]; then
             echo "needs_confirmation=false" >> "$GITHUB_OUTPUT"
           else
             exit "$status"
           fi
 
-      - name: Confirm benchmark pull request first
+      - name: Package baselines for the confirmation job
         if: steps.compare.outputs.needs_confirmation == 'true'
+        run: tar -czf criterion-baselines.tar.gz -C target --exclude=report criterion
+
+      - name: Upload baselines for the confirmation job
+        if: steps.compare.outputs.needs_confirmation == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-baselines-${{ github.event.pull_request.number }}
+          path: criterion-baselines.tar.gz
+          if-no-files-found: error
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-${{ github.event.pull_request.number }}
+          path: benchmark-comparison.txt
+          if-no-files-found: ignore
+
+  # A regression measured in one job is re-measured here, on a runner that has
+  # not already run the first pass. Reversing the order within a single job
+  # controls for drift across that job but not for a skew that lasts as long as
+  # the runner does: issue #692 recorded a confirmed +19% on a pull request
+  # whose diff contained no code, which did not reproduce on another runner.
+  bench-regression-confirm:
+    name: Codec Benchmark Confirmation
+    needs: bench-regression
+    if: needs.bench-regression.outputs.needs_confirmation == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codec-benchmark
+          save-if: false
+
+      - name: Download first-pass baselines
+        uses: actions/download-artifact@v4
+        with:
+          name: codec-benchmark-baselines-${{ github.event.pull_request.number }}
+
+      - name: Restore first-pass baselines
+        run: |
+          mkdir -p target
+          tar -xzf criterion-baselines.tar.gz -C target
+
+      - name: Confirm benchmark pull request first
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -227,7 +291,6 @@ jobs:
             --save-baseline candidate-confirm
 
       - name: Confirm benchmark main second
-        if: steps.compare.outputs.needs_confirmation == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -237,15 +300,16 @@ jobs:
             --save-baseline main-confirm
 
       - name: Compare confirmation results
-        if: steps.compare.outputs.needs_confirmation == 'true'
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git checkout --detach "$CANDIDATE_SHA"
-          printf '\nReversed-order confirmation:\n' | tee -a benchmark-comparison.txt
+          critcmp main candidate --list | tee benchmark-comparison.txt
+          printf '\nReversed-order confirmation (separate runner):\n' | tee -a benchmark-comparison.txt
           critcmp main-confirm candidate-confirm --list | tee -a benchmark-comparison.txt
           python3 scripts/check_criterion_regressions.py \
             --baseline main --candidate candidate --threshold 10 \
+            --benchmark-threshold codec_decode/bulk_string_1kb=25 \
             --confirmation-baseline main-confirm \
             --confirmation-candidate candidate-confirm
 
@@ -253,7 +317,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: codec-benchmark-${{ github.event.pull_request.number }}
+          name: codec-benchmark-confirmation-${{ github.event.pull_request.number }}
           path: benchmark-comparison.txt
           if-no-files-found: ignore
 

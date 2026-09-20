@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -32,6 +32,61 @@ class Comparison:
             self.change_percent > threshold_percent
             and not self.confidence_intervals_overlap
         )
+
+
+@dataclass(frozen=True)
+class ThresholdTable:
+    """The allowed mean-time increase, per benchmark, with a default for the rest.
+
+    Benchmarks in one suite do not share a noise profile. A uniform limit is
+    therefore either too loose for the quiet cases or too tight for the noisy
+    ones; an override lets a known-noisy benchmark carry its own limit without
+    relaxing the gate everywhere else.
+    """
+
+    default: float
+    overrides: dict[str, float] = field(default_factory=dict)
+
+    def for_benchmark(self, name: str) -> float:
+        return self.overrides.get(name, self.default)
+
+    def is_overridden(self, name: str) -> bool:
+        return name in self.overrides
+
+
+def parse_threshold_override(value: str) -> tuple[str, float]:
+    """Parse one ``NAME=PERCENT`` per-benchmark threshold override."""
+
+    name, separator, raw_percent = value.partition("=")
+    name = name.strip()
+    if not separator or not name:
+        raise argparse.ArgumentTypeError(
+            f"expected NAME=PERCENT, got {value!r}"
+        )
+    try:
+        percent = float(raw_percent)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"{raw_percent!r} in {value!r} is not a number"
+        ) from None
+    if percent < 0:
+        raise argparse.ArgumentTypeError(
+            f"threshold for {name!r} must be non-negative"
+        )
+    return name, percent
+
+
+def build_threshold_table(
+    default: float, overrides: list[tuple[str, float]]
+) -> ThresholdTable:
+    """Build a threshold table, rejecting a benchmark named more than once."""
+
+    resolved: dict[str, float] = {}
+    for name, percent in overrides:
+        if name in resolved and resolved[name] != percent:
+            raise ValueError(f"benchmark {name!r} has conflicting thresholds")
+        resolved[name] = percent
+    return ThresholdTable(default=default, overrides=resolved)
 
 
 def load_estimates(criterion_dir: Path, baseline: str) -> dict[str, Estimate]:
@@ -85,7 +140,7 @@ def print_comparisons(
     comparisons: list[Comparison],
     added: list[str],
     removed: list[str],
-    threshold_percent: float,
+    thresholds: ThresholdTable,
 ) -> None:
     """Print one human-readable comparison set."""
 
@@ -95,14 +150,16 @@ def print_comparisons(
             if comparison.confidence_intervals_overlap
             else "non-overlapping"
         )
-        marker = (
-            "REGRESSION"
-            if comparison.is_regression(threshold_percent)
-            else "ok"
+        limit = thresholds.for_benchmark(comparison.name)
+        marker = "REGRESSION" if comparison.is_regression(limit) else "ok"
+        suffix = (
+            f"  (limit: +{limit:g}%)"
+            if thresholds.is_overridden(comparison.name)
+            else ""
         )
         print(
             f"{marker:10} {comparison.change_percent:+8.2f}%  "
-            f"{confidence:15}  {comparison.name}"
+            f"{confidence:15}  {comparison.name}{suffix}"
         )
 
     for name in added:
@@ -126,6 +183,17 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=10.0,
         help="Allowed mean-time increase as a percentage (default: 10)",
+    )
+    parser.add_argument(
+        "--benchmark-threshold",
+        action="append",
+        default=[],
+        metavar="NAME=PERCENT",
+        type=parse_threshold_override,
+        help=(
+            "Per-benchmark override of --threshold, e.g. "
+            "codec_decode/bulk_string_1kb=25. Repeatable."
+        ),
     )
     parser.add_argument(
         "--confirmation-baseline",
@@ -156,6 +224,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    try:
+        thresholds = build_threshold_table(args.threshold, args.benchmark_threshold)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    unknown = sorted(set(thresholds.overrides) - (baseline.keys() | candidate.keys()))
+    if unknown:
+        print(
+            "error: --benchmark-threshold names no such benchmark: "
+            + ", ".join(unknown),
+            file=sys.stderr,
+        )
+        return 2
+
     comparisons, added, removed = compare_estimates(baseline, candidate)
     if not comparisons:
         print("error: the baselines have no benchmarks in common", file=sys.stderr)
@@ -164,14 +247,16 @@ def main(argv: list[str] | None = None) -> int:
     regressions = [
         comparison
         for comparison in comparisons
-        if comparison.is_regression(args.threshold)
+        if comparison.is_regression(thresholds.for_benchmark(comparison.name))
     ]
 
     print(
         f"Criterion regression gate: {args.baseline} -> {args.candidate} "
         f"(limit: +{args.threshold:g}%)"
     )
-    print_comparisons(comparisons, added, removed, args.threshold)
+    for name in sorted(thresholds.overrides):
+        print(f"per-benchmark limit: {name} +{thresholds.overrides[name]:g}%")
+    print_comparisons(comparisons, added, removed, thresholds)
 
     if args.confirmation_baseline and args.confirmation_candidate:
         confirmation_baseline = load_estimates(
@@ -215,12 +300,12 @@ def main(argv: list[str] | None = None) -> int:
             confirmation_comparisons,
             confirmation_added,
             confirmation_removed,
-            args.threshold,
+            thresholds,
         )
         confirmation_regression_names = {
             comparison.name
             for comparison in confirmation_comparisons
-            if comparison.is_regression(args.threshold)
+            if comparison.is_regression(thresholds.for_benchmark(comparison.name))
         }
         regressions = [
             comparison
@@ -235,8 +320,8 @@ def main(argv: list[str] | None = None) -> int:
             else ""
         )
         print(
-            f"\n{len(regressions)} benchmark(s) {qualifier}exceeded "
-            f"+{args.threshold:g}% with non-overlapping confidence intervals.",
+            f"\n{len(regressions)} benchmark(s) {qualifier}exceeded their "
+            "allowed increase with non-overlapping confidence intervals.",
             file=sys.stderr,
         )
         return 1

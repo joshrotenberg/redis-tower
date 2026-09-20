@@ -271,10 +271,33 @@ Nine workflows. Four fire on every PR and contribute **22 required checks**:
 | `supply-chain.yml` | cargo-audit, cargo-deny |
 | `soak-smoke.yml` | Standalone and cluster chaos (path-filtered) |
 
-Five more jobs appear on the PR as `SKIPPED` by design -- the four mutation jobs
+Six more jobs appear on the PR as `SKIPPED` by design. The four mutation jobs
 and CI wall-clock and flake budget are gated on
 `github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'`.
-They are not gaps.
+Codec Benchmark Confirmation runs only when Codec Benchmark Regression measures
+a regression. They are not gaps.
+
+### The codec benchmark gate
+
+Codec Benchmark Regression benchmarks the base commit and the head commit on one
+runner and compares them with `scripts/check_criterion_regressions.py`. A clean
+comparison passes the check outright. A regression does **not** fail that job:
+it sets a `needs_confirmation` output, uploads its saved Criterion baselines, and
+hands the decision to Codec Benchmark Confirmation, which runs on a different
+runner, re-benchmarks both commits in the reverse order, and fails only when the
+same benchmark regresses in both passes.
+
+The split exists because reversing the order within a single job controls for
+drift across that job but not for a skew that lasts as long as the runner does.
+Issue #692 recorded a `+19.43%` regression, endorsed at `+19.59%` by the
+same-runner reversal, on a pull request whose diff contained no code; it did not
+reproduce on another runner.
+
+The limit is `+10%` with a non-overlapping confidence interval, overridable per
+benchmark via `--benchmark-threshold NAME=PERCENT`. Benchmarks in one suite do
+not share a noise profile: `codec_decode/bulk_string_1kb` allocates a 1 KiB
+buffer per iteration and is gated at `+25%`. An override naming a benchmark that
+no longer exists is an error, so a rename cannot leave a dead entry behind.
 
 The remaining workflows do not run on PRs: `docs.yml` (mdBook build plus GitHub
 Pages deploy, `push: main` only), `nightly.yml`, `nightly-modules.yml`, and
