@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-sentinel"
-version = "0.1.2"
+version = "0.1.3"
 description = "Redis Sentinel support for redis-tower"
 edition.workspace = true
 authors.workspace = true
