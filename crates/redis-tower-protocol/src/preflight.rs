@@ -12,6 +12,63 @@ const MAX_COLLECTION_SIZE: usize = 10_000_000;
 const MAX_BLOB_SIZE: usize = 512 * 1024 * 1024;
 // Both an empty simple string and a RESP3 null occupy three wire bytes.
 const MIN_ELEMENT_SIZE: usize = 3;
+// Ordinary Redis replies nest only a few levels. Keep those counts inline so
+// scanning an array or map does not allocate; adversarial/deep input spills.
+const INLINE_NESTING: usize = 8;
+
+struct PendingStack {
+    inline: [usize; INLINE_NESTING],
+    inline_len: usize,
+    spill: Vec<usize>,
+}
+
+impl PendingStack {
+    fn new() -> Self {
+        Self {
+            inline: [0; INLINE_NESTING],
+            inline_len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.inline_len + self.spill.len()
+    }
+
+    fn push(&mut self, value: usize) {
+        if self.inline_len < INLINE_NESTING {
+            self.inline[self.inline_len] = value;
+            self.inline_len += 1;
+        } else {
+            self.spill.push(value);
+        }
+    }
+
+    fn last(&self) -> Option<&usize> {
+        self.spill
+            .last()
+            .or_else(|| self.inline[..self.inline_len].last())
+    }
+
+    fn last_mut(&mut self) -> Option<&mut usize> {
+        if let Some(last) = self.spill.last_mut() {
+            Some(last)
+        } else {
+            self.inline[..self.inline_len].last_mut()
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        if let Some(value) = self.spill.pop() {
+            Some(value)
+        } else if self.inline_len > 0 {
+            self.inline_len -= 1;
+            Some(self.inline[self.inline_len])
+        } else {
+            None
+        }
+    }
+}
 
 /// Determine the complete first frame's extent without materializing frames.
 ///
@@ -27,7 +84,7 @@ pub(crate) fn frame_len(buf: &[u8], limits: RespLimits) -> Result<Option<usize>,
     let mut cursor = 0;
     // Outstanding children for each open aggregate. A zero ancestor remains
     // open while its last child is itself an unfinished aggregate.
-    let mut open: Vec<usize> = Vec::new();
+    let mut open = PendingStack::new();
     // Initially the root is owed. Thereafter this is the sum of open counts.
     let mut pending = 1usize;
 
