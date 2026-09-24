@@ -279,6 +279,11 @@ jobs:
       - name: Run unit tests
         run: cargo test --lib --all-features
 
+      - name: Run protocol boundary regressions
+        run: |
+          cargo test -p redis-tower-protocol --all-features --test frame_boundaries
+          cargo test -p redis-tower-core --all-features --test protocol_boundaries
+
       - name: Run doc tests
         run: cargo test --doc --all-features
 

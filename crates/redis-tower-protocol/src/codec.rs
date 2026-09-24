@@ -1,15 +1,15 @@
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use resp_rs::resp3;
 use tokio_util::codec::{Decoder, Encoder};
 
 use crate::Frame;
 use crate::error::ProtocolError;
 
-/// Default maximum size, in bytes, of a single frame the decoder will buffer.
+/// Default maximum wire size, in bytes, of a single decoded frame.
 ///
-/// Set to 512 MiB, which is Redis's own `proto-max-bulk-len` ceiling, so the
-/// default cannot reject a reply a Redis server could legitimately send.
-/// Lower it when talking to a server that is not fully trusted.
+/// The 512 MiB limit includes headers, payloads, and aggregate children. It is
+/// not a bulk-payload limit: a reply containing a 512 MiB value, or a larger
+/// aggregate, requires a higher limit. Lower it for untrusted servers.
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 512 * 1024 * 1024;
 
 /// Default maximum nesting depth of a decoded frame.
@@ -19,13 +19,13 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 512 * 1024 * 1024;
 /// over real traffic while still bounding a hostile server's reply.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
-/// Minimum wire bytes one nesting level can occupy (`*1\r\n`).
-const MIN_BYTES_PER_LEVEL: usize = 4;
-
 /// Resource limits [`RespCodec`] applies while decoding.
 ///
-/// Both limits exist to bound what a malicious or compromised server can make
-/// the client allocate. Set either field to [`usize::MAX`] to disable it.
+/// Frames are structurally scanned before the allocating parser runs. The
+/// size limit bounds wire bytes, not exact heap usage: decoded aggregate
+/// elements have their own representation overhead. Incomplete frames never
+/// reserve storage for their declared element counts. Set either field to
+/// [`usize::MAX`] to disable that codec limit; dependency parsing limits remain.
 ///
 /// ```
 /// use redis_tower_protocol::{RespCodec, RespLimits};
@@ -38,14 +38,17 @@ const MIN_BYTES_PER_LEVEL: usize = 4;
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RespLimits {
-    /// Largest single frame, in bytes, the decoder will buffer before failing.
+    /// Largest single frame's wire encoding, including headers and terminators.
     ///
-    /// This bounds the incomplete frame currently being assembled, not the
-    /// total bytes in the read buffer: a pipelined burst of many small frames
-    /// is never rejected, because each is parsed and drained as it completes.
+    /// Enforced for complete and incomplete input before materialization. A
+    /// declared length or element count that cannot fit is rejected early.
+    /// This is not a total receive-buffer or exact decoded-heap limit: a burst
+    /// of individually small pipelined replies is accepted.
     pub max_frame_size: usize,
-    /// Deepest nesting the decoder will accept, counting aggregate frames
-    /// (arrays, sets, pushes, maps, attributes) from the outermost inward.
+    /// Deepest nesting of arrays, sets, pushes, and maps, outermost first.
+    ///
+    /// Empty aggregates count as a level; RESP2 null arrays are nil leaves.
+    /// Attributes and streamed encodings are unsupported independently of depth.
     pub max_depth: usize,
 }
 
@@ -62,8 +65,9 @@ impl Default for RespLimits {
 ///
 /// Decoding enforces the [`RespLimits`] the codec was built with; encoding is
 /// unaffected, since outbound frames are ones this client built itself.
-/// RESP3 attribute prefixes fail closed with an unsupported-operation protocol error
-/// until attributes can be attached to their following response value.
+/// Attributes and streamed RESP3 encodings fail closed with an unsupported-
+/// operation error until their metadata/sequence can be attached to one reply.
+/// Errors and incomplete input leave the receive buffer unchanged.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RespCodec {
     limits: RespLimits,
@@ -86,85 +90,26 @@ impl RespCodec {
     }
 }
 
-fn contains_attributes(frame: &Frame) -> bool {
-    match frame {
-        Frame::Attribute(_) | Frame::StreamedAttribute(_) => true,
-        Frame::Array(Some(values))
-        | Frame::StreamedArray(values)
-        | Frame::Set(values)
-        | Frame::StreamedSet(values)
-        | Frame::Push(values)
-        | Frame::StreamedPush(values) => values.iter().any(contains_attributes),
-        Frame::Map(entries) | Frame::StreamedMap(entries) => entries
-            .iter()
-            .any(|(key, value)| contains_attributes(key) || contains_attributes(value)),
-        _ => false,
-    }
-}
-
 impl Decoder for RespCodec {
     type Item = Frame;
     type Error = ProtocolError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, ProtocolError> {
-        if src.is_empty() {
+        let Some(frame_len) = crate::preflight::frame_len(src, self.limits)? else {
             return Ok(None);
-        }
+        };
 
-        // Depth is checked before the buffer reaches the parser, not after:
-        // resp-rs recurses once per nesting level and tracks no depth of its
-        // own, so a hostile `*1\r\n` chain would overflow the stack inside
-        // `parse_frame` before any post-hoc inspection could run.
-        //
-        // A frame nested `d` levels deep needs at least `4 * d` bytes, so a
-        // buffer too short to reach the cap skips the scan entirely and the
-        // common case of a small reply pays nothing.
-        if src.len() >= self.limits.max_depth.saturating_mul(MIN_BYTES_PER_LEVEL)
-            && exceeds_depth(src, self.limits.max_depth)
-        {
-            return Err(ProtocolError::NestingTooDeep {
-                max: self.limits.max_depth,
-            });
+        // Materialize only a complete, bounded first frame. BytesMut::clone()
+        // copies, so cloning the entire unread pipeline here would repeatedly
+        // copy its shrinking remainder. Copying just this frame also preserves
+        // the original buffer if the parser rejects scalar semantics.
+        let input = Bytes::copy_from_slice(&src[..frame_len]);
+        let (frame, remaining) = resp3::parse_frame(input)?;
+        if !remaining.is_empty() {
+            return Err(resp_rs::ParseError::InvalidFormat.into());
         }
-
-        // Use clone().freeze() for a zero-copy Bytes view instead of copy_from_slice.
-        // BytesMut::clone() is copy-on-write; freeze() converts to immutable Bytes
-        // without allocating a new buffer. This avoids copying the entire receive
-        // buffer on every decode call (particularly expensive under pipelining where
-        // decode is called once per response frame from the same buffer).
-        let input = src.clone().freeze();
-        match resp3::parse_frame(input) {
-            Ok((frame, remaining)) => {
-                // resp-rs represents an attribute prefix as an independent
-                // frame. Returning it as a reply would shift every subsequent
-                // pipelined response to the wrong request. Until the public
-                // response model can attach attributes, reject the transport.
-                if contains_attributes(&frame) {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Unsupported,
-                        "RESP3 attributed replies are not supported",
-                    )
-                    .into());
-                }
-                let consumed = src.len() - remaining.len();
-                src.advance(consumed);
-                Ok(Some(frame))
-            }
-            Err(resp_rs::ParseError::Incomplete) => {
-                // Everything buffered here belongs to one unfinished frame:
-                // any frame ahead of it already parsed and drained. Refusing
-                // to keep buffering is what bounds the allocation a server can
-                // drive by declaring a length it never sends.
-                if src.len() > self.limits.max_frame_size {
-                    return Err(ProtocolError::FrameTooLarge {
-                        size: src.len(),
-                        max: self.limits.max_frame_size,
-                    });
-                }
-                Ok(None)
-            }
-            Err(e) => Err(ProtocolError::Parse(e)),
-        }
+        src.advance(frame_len);
+        Ok(Some(frame))
     }
 }
 
@@ -176,163 +121,6 @@ impl Encoder<Frame> for RespCodec {
         dst.extend_from_slice(&serialized);
         Ok(())
     }
-}
-
-/// One step of the depth scan: the index just past the element, and whether it
-/// opened a new nesting level.
-enum Step {
-    /// A complete element that owns no children.
-    Leaf(usize),
-    /// An aggregate that opened a level owing this many children.
-    Open(usize, usize),
-}
-
-/// Returns `true` if the first frame in `buf` nests deeper than `max_depth`.
-///
-/// This is a structural pre-pass, not a parser. It walks element headers,
-/// skips blob payloads whole, and tracks how many children each open aggregate
-/// still owes. It allocates no frame and never recurses, so it is safe to run
-/// on input that would overflow the stack inside `parse_frame`.
-///
-/// It is deliberately permissive. Anything it cannot interpret -- a truncated
-/// buffer, an unknown type byte, a malformed length -- ends the scan with
-/// `false`, leaving `resp_rs::resp3::parse_frame` the single authority on what
-/// is a valid frame. The one judgement made here is "deeper than `max_depth`".
-fn exceeds_depth(buf: &[u8], max_depth: usize) -> bool {
-    // Children still owed by each currently-open aggregate, innermost last.
-    let mut open: Vec<usize> = Vec::new();
-    let mut pos = 0usize;
-
-    loop {
-        let Some(&tag) = buf.get(pos) else {
-            return false;
-        };
-
-        let step = match tag {
-            // Line-delimited leaves: simple string, error, integer, boolean,
-            // big number, double, null, stream terminator.
-            b'+' | b'-' | b':' | b'#' | b'(' | b',' | b'_' | b'.' => {
-                match crlf_after(buf, pos + 1) {
-                    Some(after) => Step::Leaf(after),
-                    None => return false,
-                }
-            }
-            // Length-prefixed blobs: bulk string, blob error, verbatim string,
-            // streamed chunk. Skipping the payload whole is what keeps a `*`
-            // byte inside a value from being counted as nesting.
-            b'$' | b'!' | b'=' | b';' => match blob_end(buf, pos) {
-                Some(after) => Step::Leaf(after),
-                None => return false,
-            },
-            // Aggregates of single elements.
-            b'*' | b'~' | b'>' => match header_count(buf, pos) {
-                Some((Some(n), after)) if n > 0 => Step::Open(n, after),
-                // An empty, null, or streamed header owns no children.
-                Some((_, after)) => Step::Leaf(after),
-                None => return false,
-            },
-            // Aggregates of key/value pairs.
-            b'%' | b'|' => match header_count(buf, pos) {
-                Some((Some(n), after)) if n > 0 => match n.checked_mul(2) {
-                    Some(children) => Step::Open(children, after),
-                    None => return false,
-                },
-                Some((_, after)) => Step::Leaf(after),
-                None => return false,
-            },
-            _ => return false,
-        };
-
-        match step {
-            Step::Open(children, after) => {
-                open.push(children);
-                if open.len() > max_depth {
-                    return true;
-                }
-                pos = after;
-            }
-            Step::Leaf(after) => {
-                pos = after;
-                // Settle the finished element against its parents, closing
-                // every aggregate whose last child it was. A closed aggregate
-                // is itself an element of its own parent, so this walks out.
-                loop {
-                    match open.last_mut() {
-                        // Nothing left open: the outermost frame is complete.
-                        None => return false,
-                        Some(remaining) => {
-                            *remaining -= 1;
-                            if *remaining > 0 {
-                                break;
-                            }
-                            open.pop();
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Index just past the CRLF ending the line that starts at `from`.
-fn crlf_after(buf: &[u8], from: usize) -> Option<usize> {
-    line_end(buf, from).map(|end| end + 2)
-}
-
-/// Index of the `\r` ending the line that starts at `from`.
-fn line_end(buf: &[u8], from: usize) -> Option<usize> {
-    let mut i = from;
-    while i + 1 < buf.len() {
-        if buf[i] == b'\r' && buf[i + 1] == b'\n' {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Index just past a length-prefixed blob, payload and trailing CRLF included.
-///
-/// The returned index may sit past the end of `buf` when the payload has not
-/// arrived yet; the caller's `buf.get` then ends the scan.
-fn blob_end(buf: &[u8], pos: usize) -> Option<usize> {
-    let end = line_end(buf, pos + 1)?;
-    let header = &buf[pos + 1..end];
-    // `?` opens a streamed string and `-1` is a null bulk string; neither
-    // carries a payload of its own.
-    if header == b"?" || header == b"-1" {
-        return Some(end + 2);
-    }
-    let len = parse_len(header)?;
-    end.checked_add(2)?.checked_add(len)?.checked_add(2)
-}
-
-/// The element count on an aggregate header, plus the index just past that
-/// header line. A `None` count means the header owns no children: `?` opens a
-/// streamed aggregate and `-1` is the null array.
-fn header_count(buf: &[u8], pos: usize) -> Option<(Option<usize>, usize)> {
-    let end = line_end(buf, pos + 1)?;
-    let header = &buf[pos + 1..end];
-    if header == b"?" || header == b"-1" {
-        return Some((None, end + 2));
-    }
-    Some((Some(parse_len(header)?), end + 2))
-}
-
-/// Parse a non-negative decimal length. Returns `None` on anything else, which
-/// defers the input to the real parser.
-fn parse_len(bytes: &[u8]) -> Option<usize> {
-    if bytes.is_empty() {
-        return None;
-    }
-    let mut n: usize = 0;
-    for &b in bytes {
-        if !b.is_ascii_digit() {
-            return None;
-        }
-        n = n.checked_mul(10)?.checked_add((b - b'0') as usize)?;
-    }
-    Some(n)
 }
 
 #[cfg(test)]
@@ -747,8 +535,7 @@ mod limit_tests {
     #[test]
     fn nesting_within_the_cap_still_decodes() {
         let mut codec = RespCodec::new();
-        // Deep enough to run the scan (past the 4 * max_depth fast path) but
-        // inside the limit.
+        // The complete frame is scanned before recursive parsing.
         let mut buf = nested(DEFAULT_MAX_DEPTH);
         let frame = codec.decode(&mut buf).unwrap().unwrap();
         assert!(matches!(frame, Frame::Array(Some(_))));
@@ -809,34 +596,28 @@ mod limit_tests {
     }
 
     #[test]
-    fn an_incomplete_frame_past_the_size_cap_is_rejected() {
+    fn an_oversized_declared_frame_is_rejected_before_payload_arrives() {
         let limits = RespLimits {
             max_frame_size: 64,
             ..RespLimits::default()
         };
         let mut codec = RespCodec::with_limits(limits);
 
-        // A server declaring a large payload and then trickling it: under the
-        // cap the decoder keeps waiting, over it the connection fails instead
-        // of buffering whatever the server chooses to declare.
-        let mut buf = BytesMut::new();
-        buf.extend_from_slice(b"$1000000\r\n");
-        buf.extend_from_slice(&[b'x'; 40]);
-        assert!(codec.decode(&mut buf).unwrap().is_none());
-
-        buf.extend_from_slice(&[b'x'; 40]);
+        // The declaration already establishes an impossible-to-fit extent.
+        let mut buf = BytesMut::from(&b"$1000000\r\n"[..]);
         let err = codec.decode(&mut buf).unwrap_err();
         assert!(
-            matches!(err, ProtocolError::FrameTooLarge { size, max } if size == 90 && max == 64),
+            matches!(err, ProtocolError::FrameTooLarge { size, max } if size == 1_000_012 && max == 64),
             "unexpected error: {err:?}"
         );
+        assert_eq!(buf.as_ref(), b"$1000000\r\n");
     }
 
     #[test]
     fn the_size_cap_applies_per_frame_not_to_pipelined_bytes() {
         // Three complete replies buffered together exceed a 6-byte cap in
         // total, but each is parsed and drained on its own, so none is
-        // rejected. Only an unfinished frame is measured against the cap.
+        // rejected. The cap bounds each frame, not the total receive buffer.
         let limits = RespLimits {
             max_frame_size: 6,
             ..RespLimits::default()
@@ -903,8 +684,7 @@ mod limit_tests {
 
     #[test]
     fn a_malformed_frame_is_still_the_parsers_verdict() {
-        // The scan defers on anything it cannot interpret, so garbage keeps
-        // producing the parse error it always did rather than a limit error.
+        // Scalar semantics remain the parser's verdict after framing checks.
         let mut codec = RespCodec::with_limits(RespLimits {
             max_depth: 1,
             ..RespLimits::default()
