@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-modules"
-version = "0.1.0"
+version = "0.1.1"
 description = "High-level ergonomic client interfaces for Redis Stack modules"
 documentation = "https://docs.rs/redis-tower-modules"
 keywords = ["redis", "tower", "async", "json", "search"]

@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-test"
-version = "0.1.0"
+version = "0.1.1"
 description = "Test utilities for redis-tower: mocks, command tests, and managed Redis Cluster fixtures"
 edition.workspace = true
 authors.workspace = true
