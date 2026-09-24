@@ -250,8 +250,8 @@ fn line_end(
 ) -> Result<Option<usize>, ProtocolError> {
     let mut cursor = from;
     while cursor + 1 < buf.len() {
-        check_size(cursor + 2, pending, limits)?;
         if buf[cursor] == b'\r' && buf[cursor + 1] == b'\n' {
+            check_size(cursor + 2, pending, limits)?;
             return Ok(Some(cursor));
         }
         cursor += 1;
