@@ -12,7 +12,7 @@ pub enum ProtocolError {
     /// A single frame exceeded the codec's configured maximum size.
     #[error("frame of {size} bytes exceeds the configured maximum of {max} bytes")]
     FrameTooLarge {
-        /// Bytes buffered for the unfinished frame when the limit was hit.
+        /// Complete wire size or minimum required size established so far.
         size: usize,
         /// The configured maximum, in bytes.
         max: usize,

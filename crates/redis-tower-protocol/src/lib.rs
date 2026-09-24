@@ -30,14 +30,19 @@
 //!
 //! # Decode Limits
 //!
-//! Decoding is bounded by [`RespLimits`]: a maximum single-frame size and a
-//! maximum nesting depth, both applied before a frame is materialized. They
-//! exist so a malicious or compromised server cannot drive unbounded
-//! allocation or overflow the stack with a deeply nested reply. The defaults
-//! ([`DEFAULT_MAX_FRAME_SIZE`], [`DEFAULT_MAX_DEPTH`]) sit above anything a
-//! Redis server sends in normal operation. Normal redis-tower clients tighten
-//! them through `redis_tower_core::ConnectionConfig`; callers constructing the
-//! codec directly use [`RespCodec::with_limits`].
+//! [`RespLimits`] bounds each frame's wire size and aggregate nesting before
+//! the recursive parser materializes it. Complete and fragmented input obey
+//! the same limits; incomplete aggregate headers do not reserve storage for
+//! their declared children. Wire size is not an exact heap budget: decoded
+//! aggregate elements have representation overhead. A receive buffer may hold
+//! many individually bounded replies. Clients configure these limits through
+//! `redis_tower_core::ConnectionConfig`; direct codec users call
+//! [`RespCodec::with_limits`].
+//!
+//! Attributes and streamed RESP3 encodings are rejected rather than emitted
+//! as independent replies. Representing these variants in [`Frame`] does not
+//! mean the codec supports their metadata or sequence semantics. Errors and
+//! incomplete input leave the receive buffer unchanged.
 //!
 //! # Helpers
 //!
@@ -54,6 +59,7 @@
 mod codec;
 mod error;
 pub mod helpers;
+mod preflight;
 
 pub use codec::{DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, RespCodec, RespLimits};
 pub use error::ProtocolError;
