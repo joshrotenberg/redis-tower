@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sentinel-v0.1.1...redis-tower-sentinel-v0.1.2) - 2026-09-24
+
+### Added
+
+- support dedicated Cluster connections and binary Pub/Sub ([#693](https://github.com/joshrotenberg/redis-tower/pull/693))
+
 ## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sentinel-v0.1.0...redis-tower-sentinel-v0.1.1) - 2026-08-26
 
 ### Added
