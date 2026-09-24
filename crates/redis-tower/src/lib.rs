@@ -476,8 +476,8 @@ pub use pool::{
     PoolHealthState, PoolStats, RedisRole, ReplicationLagHealthProbe, RoleHealthProbe,
 };
 pub use pubsub::{
-    KeyspaceEvent, KeyspaceEventStream, MessageKind, NotificationKind, PubSubConnection,
-    PubSubMessage,
+    BinaryPubSubConnection, BinaryPubSubMessage, KeyspaceEvent, KeyspaceEventStream, MessageKind,
+    NotificationKind, PubSubConnection, PubSubMessage,
 };
 pub use read_routing::{
     AdaptiveReplicaRouting, AdaptiveReplicaRoutingBuilder, AdaptiveReplicaRoutingConfigError,

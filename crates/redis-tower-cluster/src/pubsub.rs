@@ -9,9 +9,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::Stream;
-use redis_tower::pubsub::Subscriptions;
-use redis_tower::{PubSubConnection, PubSubMessage};
+use redis_tower::pubsub::{
+    NamedPubSubConnection, NamedPubSubMessage, NamedSubscriptions, PubSubMessage, PubSubName,
+    Subscriptions,
+};
 use redis_tower_core::{Frame, RedisError};
 use redis_tower_protocol::ProtocolError;
 use tokio::sync::watch;
@@ -23,6 +26,145 @@ use crate::slot::slot_for_key;
 use crate::topology::NodeAddr;
 use crate::topology::changes::TopologyChange;
 
+/// Regular/pattern Cluster Pub/Sub with text channel names.
+pub struct ClusterPubSubConnection {
+    inner: NamedClusterPubSubConnection<String>,
+    subscriptions: Subscriptions,
+}
+impl ClusterPubSubConnection {
+    pub(crate) async fn connect(
+        backend: ClusterPubSubBackend,
+        node: NodeAddr,
+    ) -> Result<Self, RedisError> {
+        let inner = NamedClusterPubSubConnection::connect(backend, node).await?;
+        let subscriptions = inner.subscriptions().into();
+        Ok(Self {
+            inner,
+            subscriptions,
+        })
+    }
+    /// Node currently hosting the dedicated socket.
+    pub fn current_node(&self) -> &NodeAddr {
+        self.inner.current_node()
+    }
+    /// Confirmed subscriptions replayed after a reconnect.
+    pub fn subscriptions(&self) -> &Subscriptions {
+        &self.subscriptions
+    }
+    /// See [`NamedClusterPubSubConnection::subscribe`].
+    pub async fn subscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.subscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedClusterPubSubConnection::psubscribe`].
+    pub async fn psubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.psubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedClusterPubSubConnection::unsubscribe`].
+    pub async fn unsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.unsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedClusterPubSubConnection::punsubscribe`].
+    pub async fn punsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.punsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// Receive a message, reconnecting and replaying subscriptions as needed.
+    pub async fn next_message(&mut self) -> Result<PubSubMessage, RedisError> {
+        self.inner.next_message().await.map(Into::into)
+    }
+    /// Consume this connection as a reconnect-aware message stream.
+    pub fn into_stream(
+        self,
+    ) -> Pin<Box<dyn Stream<Item = Result<PubSubMessage, RedisError>> + Send>> {
+        Box::pin(
+            self.inner
+                .into_stream()
+                .map(|message| message.map(Into::into)),
+        )
+    }
+}
+
+/// Regular/pattern Cluster Pub/Sub preserving exact channel and pattern bytes.
+pub type BinaryClusterPubSubConnection = NamedClusterPubSubConnection<Bytes>;
+/// Sharded Cluster Pub/Sub with text channel names.
+pub struct ShardedClusterPubSubConnection {
+    inner: NamedShardedClusterPubSubConnection<String>,
+    subscriptions: Subscriptions,
+}
+impl ShardedClusterPubSubConnection {
+    pub(crate) async fn connect(
+        backend: ClusterPubSubBackend,
+        channels: &[&[u8]],
+    ) -> Result<Self, RedisError> {
+        let inner = NamedShardedClusterPubSubConnection::connect(backend, channels).await?;
+        let subscriptions = inner.subscriptions().into();
+        Ok(Self {
+            inner,
+            subscriptions,
+        })
+    }
+    /// Node currently hosting the dedicated socket.
+    pub fn current_node(&self) -> &NodeAddr {
+        self.inner.current_node()
+    }
+    /// Confirmed subscriptions replayed after a reconnect.
+    pub fn subscriptions(&self) -> &Subscriptions {
+        &self.subscriptions
+    }
+    /// Hash slot shared by all subscribed channels.
+    pub fn slot(&self) -> u16 {
+        self.inner.slot()
+    }
+    /// See [`NamedShardedClusterPubSubConnection::subscribe`].
+    pub async fn subscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.subscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedShardedClusterPubSubConnection::unsubscribe`].
+    pub async fn unsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.unsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedShardedClusterPubSubConnection::ssubscribe`].
+    pub async fn ssubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.ssubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// See [`NamedShardedClusterPubSubConnection::sunsubscribe`].
+    pub async fn sunsubscribe(&mut self, names: &[&str]) -> Result<(), RedisError> {
+        let result = self.inner.sunsubscribe(names).await;
+        self.subscriptions = self.inner.subscriptions().into();
+        result
+    }
+    /// Receive a message, reconnecting and replaying subscriptions as needed.
+    pub async fn next_message(&mut self) -> Result<PubSubMessage, RedisError> {
+        self.inner.next_message().await.map(Into::into)
+    }
+    /// Consume this connection as a reconnect-aware message stream.
+    pub fn into_stream(
+        self,
+    ) -> Pin<Box<dyn Stream<Item = Result<PubSubMessage, RedisError>> + Send>> {
+        Box::pin(
+            self.inner
+                .into_stream()
+                .map(|message| message.map(Into::into)),
+        )
+    }
+}
+
+/// Sharded Cluster Pub/Sub preserving exact channel bytes across reconnects.
+pub type BinaryShardedClusterPubSubConnection = NamedShardedClusterPubSubConnection<Bytes>;
+
 /// A regular or pattern Pub/Sub connection pinned to one exact cluster node.
 ///
 /// The socket is independent of the multiplexed command workers. On a
@@ -30,20 +172,21 @@ use crate::topology::changes::TopologyChange;
 /// same designated endpoint and replays every tracked regular/pattern
 /// subscription. Redis Pub/Sub remains at-most-once: messages published while
 /// the socket is disconnected can be lost.
-pub struct ClusterPubSubConnection {
-    connection: PubSubConnection,
+pub struct NamedClusterPubSubConnection<N> {
+    connection: NamedPubSubConnection<N>,
     node: NodeAddr,
     factory: NodeConnectionFactory,
     backend: ClusterPubSubBackend,
 }
 
-impl ClusterPubSubConnection {
+impl<N: PubSubName> NamedClusterPubSubConnection<N> {
     pub(crate) async fn connect(
         backend: ClusterPubSubBackend,
         node: NodeAddr,
     ) -> Result<Self, RedisError> {
         backend.validate_member(&node).await?;
-        let connection = PubSubConnection::from_connection(backend.connect_node(&node).await?)?;
+        let connection =
+            NamedPubSubConnection::from_connection(backend.connect_node(&node).await?)?;
         let factory = backend.fixed_factory(node.clone());
         Ok(Self {
             connection,
@@ -59,33 +202,57 @@ impl ClusterPubSubConnection {
     }
 
     /// The confirmed subscriptions replayed after a reconnect.
-    pub fn subscriptions(&self) -> &Subscriptions {
+    pub fn subscriptions(&self) -> &NamedSubscriptions<N> {
         self.connection.subscriptions()
     }
 
     /// Subscribe to regular channels on the designated node.
     pub async fn subscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        self.connection.subscribe(channels).await
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.subscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `SUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn subscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        self.connection.subscribe_bytes(channels).await
     }
 
     /// Subscribe to regular channel patterns on the designated node.
     pub async fn psubscribe(&mut self, patterns: &[&str]) -> Result<(), RedisError> {
-        self.connection.psubscribe(patterns).await
+        let names: Vec<&[u8]> = patterns.iter().map(|name| name.as_bytes()).collect();
+        self.psubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `PSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn psubscribe_bytes(&mut self, patterns: &[&[u8]]) -> Result<(), RedisError> {
+        self.connection.psubscribe_bytes(patterns).await
     }
 
     /// Unsubscribe regular channels, or all regular channels when empty.
     pub async fn unsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        self.connection.unsubscribe(channels).await
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.unsubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `UNSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn unsubscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        self.connection.unsubscribe_bytes(channels).await
     }
 
     /// Unsubscribe patterns, or all patterns when empty.
     pub async fn punsubscribe(&mut self, patterns: &[&str]) -> Result<(), RedisError> {
-        self.connection.punsubscribe(patterns).await
+        let names: Vec<&[u8]> = patterns.iter().map(|name| name.as_bytes()).collect();
+        self.punsubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `PUNSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn punsubscribe_bytes(&mut self, patterns: &[&[u8]]) -> Result<(), RedisError> {
+        self.connection.punsubscribe_bytes(patterns).await
     }
 
     /// Receive the next message, reconnecting and replaying subscriptions when
     /// the pinned node closes the socket.
-    pub async fn next_message(&mut self) -> Result<PubSubMessage, RedisError> {
+    pub async fn next_message(&mut self) -> Result<NamedPubSubMessage<N>, RedisError> {
         loop {
             match self.connection.next().await {
                 Some(Err(error)) if reconnectable_stream_error(&error) => {
@@ -106,7 +273,7 @@ impl ClusterPubSubConnection {
     /// Consume this connection as a reconnect-aware message stream.
     pub fn into_stream(
         mut self,
-    ) -> Pin<Box<dyn Stream<Item = Result<PubSubMessage, RedisError>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<NamedPubSubMessage<N>, RedisError>> + Send>> {
         Box::pin(async_stream::stream! {
             loop {
                 let message = self.next_message().await;
@@ -133,20 +300,20 @@ impl ClusterPubSubConnection {
 /// this handle. The handle intentionally keeps only a weak topology reference
 /// so it cannot prevent cluster shutdown; once the client is gone, topology
 /// observation and reconnects return [`RedisError::ConnectionClosed`].
-pub struct ShardedClusterPubSubConnection {
-    connection: PubSubConnection,
+pub struct NamedShardedClusterPubSubConnection<N> {
+    connection: NamedPubSubConnection<N>,
     slot: u16,
     node: NodeAddr,
     backend: ClusterPubSubBackend,
     changes: watch::Receiver<Option<std::sync::Arc<TopologyChange>>>,
 }
 
-impl ShardedClusterPubSubConnection {
+impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
     pub(crate) async fn connect(
         backend: ClusterPubSubBackend,
-        channels: &[&str],
+        channels: &[&[u8]],
     ) -> Result<Self, RedisError> {
-        let slot = preflight_shard_channels(channels)?;
+        let slot = preflight_shard_channels_bytes(channels)?;
         let (snapshot, changes) = backend.topology_state().await?;
         let node = snapshot
             .topology()
@@ -157,7 +324,8 @@ impl ShardedClusterPubSubConnection {
                     "cluster Pub/Sub has no master for hash slot {slot}"
                 ))
             })?;
-        let connection = PubSubConnection::from_connection(backend.connect_node(&node).await?)?;
+        let connection =
+            NamedPubSubConnection::from_connection(backend.connect_node(&node).await?)?;
         let mut session = Self {
             connection,
             slot,
@@ -180,13 +348,19 @@ impl ShardedClusterPubSubConnection {
     }
 
     /// The confirmed sharded subscriptions replayed after owner changes.
-    pub fn subscriptions(&self) -> &Subscriptions {
+    pub fn subscriptions(&self) -> &NamedSubscriptions<N> {
         self.connection.subscriptions()
     }
 
     /// Add shard channels. Every channel must match this session's slot.
     pub async fn subscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        let requested_slot = preflight_shard_channels(channels)?;
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.subscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `SUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn subscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        let requested_slot = preflight_shard_channels_bytes(channels)?;
         if requested_slot != self.slot {
             return Err(cross_slot_error());
         }
@@ -195,28 +369,46 @@ impl ShardedClusterPubSubConnection {
 
     /// Remove shard channels, or all shard channels when empty.
     pub async fn unsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.unsubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `UNSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn unsubscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
         if !channels.is_empty() {
-            let requested_slot = preflight_shard_channels(channels)?;
+            let requested_slot = preflight_shard_channels_bytes(channels)?;
             if requested_slot != self.slot {
                 return Err(cross_slot_error());
             }
         }
-        self.connection.sunsubscribe(channels).await
+        self.connection.sunsubscribe_bytes(channels).await
     }
 
     /// Alias using Redis's `SSUBSCRIBE` command name.
     pub async fn ssubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        self.subscribe(channels).await
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.ssubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `SSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn ssubscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        self.subscribe_bytes(channels).await
     }
 
     /// Alias using Redis's `SUNSUBSCRIBE` command name.
     pub async fn sunsubscribe(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        self.unsubscribe(channels).await
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        self.sunsubscribe_bytes(&names).await
+    }
+
+    /// Byte-oriented `SUNSUBSCRIBE` preserving exact channel or pattern names.
+    pub async fn sunsubscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        self.unsubscribe_bytes(channels).await
     }
 
     /// Receive the next shard message while following committed ownership
     /// changes for this session's slot.
-    pub async fn next_message(&mut self) -> Result<PubSubMessage, RedisError> {
+    pub async fn next_message(&mut self) -> Result<NamedPubSubMessage<N>, RedisError> {
         loop {
             tokio::select! {
                 biased;
@@ -246,7 +438,7 @@ impl ShardedClusterPubSubConnection {
     /// Consume this connection as a topology-aware message stream.
     pub fn into_stream(
         mut self,
-    ) -> Pin<Box<dyn Stream<Item = Result<PubSubMessage, RedisError>> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<NamedPubSubMessage<N>, RedisError>> + Send>> {
         Box::pin(async_stream::stream! {
             loop {
                 let message = self.next_message().await;
@@ -259,10 +451,10 @@ impl ShardedClusterPubSubConnection {
         })
     }
 
-    async fn subscribe_initial(&mut self, channels: &[&str]) -> Result<(), RedisError> {
+    async fn subscribe_initial(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
         let mut redirects = 0;
         loop {
-            match self.connection.ssubscribe(channels).await {
+            match self.connection.ssubscribe_bytes(channels).await {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     let Some((slot, address)) = moved_error(&error) else {
@@ -288,8 +480,8 @@ impl ShardedClusterPubSubConnection {
         }
     }
 
-    async fn subscribe_on_current(&mut self, channels: &[&str]) -> Result<(), RedisError> {
-        match self.connection.ssubscribe(channels).await {
+    async fn subscribe_on_current(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        match self.connection.ssubscribe_bytes(channels).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let Some((slot, address)) = moved_error(&error) else {
@@ -391,11 +583,11 @@ impl ShardedClusterPubSubConnection {
     async fn replace_at(
         &mut self,
         target: NodeAddr,
-        additional_channels: Option<&[&str]>,
+        additional_channels: Option<&[&[u8]]>,
     ) -> Result<(), RedisError> {
         let mut replacement =
-            PubSubConnection::from_connection(self.backend.connect_node(&target).await?)?;
-        let tracked: Vec<String> = self
+            NamedPubSubConnection::from_connection(self.backend.connect_node(&target).await?)?;
+        let tracked: Vec<N> = self
             .connection
             .subscriptions()
             .shard_channels
@@ -403,11 +595,11 @@ impl ShardedClusterPubSubConnection {
             .cloned()
             .collect();
         if !tracked.is_empty() {
-            let tracked_refs: Vec<&str> = tracked.iter().map(String::as_str).collect();
-            replacement.ssubscribe(&tracked_refs).await?;
+            let tracked_refs: Vec<&[u8]> = tracked.iter().map(PubSubName::name_bytes).collect();
+            replacement.ssubscribe_bytes(&tracked_refs).await?;
         }
         if let Some(channels) = additional_channels {
-            replacement.ssubscribe(channels).await?;
+            replacement.ssubscribe_bytes(channels).await?;
         }
         self.connection = replacement;
         self.node = target;
@@ -416,6 +608,23 @@ impl ShardedClusterPubSubConnection {
 }
 
 impl MultiplexedClusterClient {
+    /// Open regular/pattern Pub/Sub preserving binary channel and pattern names.
+    pub async fn pubsub_on_bytes(
+        &self,
+        node: NodeAddr,
+    ) -> Result<BinaryClusterPubSubConnection, RedisError> {
+        BinaryClusterPubSubConnection::connect(self.pubsub_backend().await, node).await
+    }
+
+    /// Subscribe same-slot shard channels preserving exact bytes across redirects
+    /// and reconnects. Retain this client while using the returned session.
+    pub async fn sharded_pubsub_bytes(
+        &self,
+        channels: &[&[u8]],
+    ) -> Result<BinaryShardedClusterPubSubConnection, RedisError> {
+        BinaryShardedClusterPubSubConnection::connect(self.pubsub_backend().await, channels).await
+    }
+
     /// Open a regular/pattern Pub/Sub connection pinned to an explicit current
     /// cluster node.
     pub async fn pubsub_on(&self, node: NodeAddr) -> Result<ClusterPubSubConnection, RedisError> {
@@ -427,21 +636,28 @@ impl MultiplexedClusterClient {
         &self,
         channels: &[&str],
     ) -> Result<ShardedClusterPubSubConnection, RedisError> {
-        ShardedClusterPubSubConnection::connect(self.pubsub_backend().await, channels).await
+        let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+        ShardedClusterPubSubConnection::connect(self.pubsub_backend().await, &names).await
     }
 }
 
+#[cfg(test)]
 fn preflight_shard_channels(channels: &[&str]) -> Result<u16, RedisError> {
+    let names: Vec<&[u8]> = channels.iter().map(|name| name.as_bytes()).collect();
+    preflight_shard_channels_bytes(&names)
+}
+
+fn preflight_shard_channels_bytes(channels: &[&[u8]]) -> Result<u16, RedisError> {
     let Some(first) = channels.first() else {
         return Err(RedisError::Redis(
             "cluster sharded Pub/Sub requires at least one channel".to_string(),
         ));
     };
-    let slot = slot_for_key(first.as_bytes());
+    let slot = slot_for_key(first);
     if channels
         .iter()
         .skip(1)
-        .any(|channel| slot_for_key(channel.as_bytes()) != slot)
+        .any(|channel| slot_for_key(channel) != slot)
     {
         return Err(cross_slot_error());
     }
@@ -466,7 +682,8 @@ fn moved_error(error: &RedisError) -> Option<(u16, String)> {
 }
 
 fn reconnectable_stream_error(error: &RedisError) -> bool {
-    error.is_connection_error() || matches!(error, RedisError::Protocol(ProtocolError::Io(_)))
+    error.is_connection_error()
+        || matches!(error, RedisError::Protocol(ProtocolError::Io(error)) if error.kind() != std::io::ErrorKind::Unsupported)
 }
 
 fn reconnect_delay_cap(
@@ -497,6 +714,16 @@ fn single_attempt_error(error: RedisError) -> RedisError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsupported_protocol_errors_are_not_reconnected() {
+        let error = RedisError::Protocol(ProtocolError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "RESP3 attributed replies are not supported",
+        )));
+        assert!(!reconnectable_stream_error(&error));
+        assert!(reconnectable_stream_error(&RedisError::ConnectionClosed));
+    }
 
     #[test]
     fn sharded_channels_require_a_nonempty_same_slot_set() {

@@ -410,7 +410,7 @@ impl ClusterPubSubBackend {
             Ok(())
         } else {
             Err(RedisError::Redis(format!(
-                "cluster Pub/Sub node {node} is not a member of the current topology"
+                "cluster node {node} is not a member of the current topology"
             )))
         }
     }
@@ -1852,6 +1852,39 @@ impl MultiplexedClusterClient {
     /// Get a snapshot of the current cluster topology.
     pub async fn topology(&self) -> ClusterTopology {
         self.inner.read().await.topology.clone()
+    }
+
+    /// Open a fresh, exclusively owned connection to a current cluster member.
+    ///
+    /// Use this for node-local diagnostics, blocking operations, or a complete
+    /// stateful exchange such as WATCH/MULTI/EXEC. The connection uses the
+    /// client's credentials, TLS, protocol, RESP limits, and configured connect
+    /// timeout. The address must come from the current topology, including any
+    /// configured address mapping; unknown addresses are rejected before I/O.
+    ///
+    /// The returned connection is independent of the shared auto-pipeline
+    /// workers. It performs no cluster routing, redirects, or automatic replay,
+    /// and does not issue READONLY for replica nodes. The caller owns its
+    /// lifetime, command deadlines, and any stateful protocol. Dropping it
+    /// abandons the dedicated connection without affecting shared clients.
+    /// Membership is checked at acquisition; later topology changes do not
+    /// move or invalidate an already returned connection.
+    ///
+    /// ```no_run
+    /// # async fn example(client: &redis_tower_cluster::MultiplexedClusterClient)
+    /// # -> Result<(), redis_tower_core::RedisError> {
+    /// let topology = client.topology().await;
+    /// for node in topology.master_addrs() {
+    ///     let mut connection = client.connect_to_node(node.clone()).await?;
+    ///     let reply = connection.execute(redis_tower::commands::RawCommand::new("DBSIZE")).await?;
+    ///     println!("{node}: {reply:?}");
+    /// }
+    /// # Ok(()) }
+    /// ```
+    pub async fn connect_to_node(&self, node: NodeAddr) -> Result<RedisConnection, RedisError> {
+        let backend = self.pubsub_backend().await;
+        backend.validate_member(&node).await?;
+        backend.connect_node(&node).await
     }
 
     /// Build the weak, dedicated-connection backend used by cluster Pub/Sub.
@@ -3575,6 +3608,152 @@ mod observability_tests {
             (target_addr, target_service),
         ]);
         test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[tokio::test]
+    async fn dedicated_connection_rejects_unknown_member_before_io() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node = node_addr(&listener.local_addr().unwrap().to_string());
+        let client = test_client(
+            String::new(),
+            ClusterTopology::new(Vec::new()),
+            HashMap::new(),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let error = client
+            .connect_to_node(node)
+            .await
+            .err()
+            .expect("unknown node rejected");
+        assert!(error.to_string().contains("not a member"));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn dedicated_connection_preserves_auth_protocol_and_owns_socket() {
+        for replica in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let node = node_addr(&listener.local_addr().unwrap().to_string());
+            let member = node.clone();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut framed = tokio_util::codec::Framed::new(
+                    socket,
+                    redis_tower_protocol::RespCodec::default(),
+                );
+                for _ in 0..2 {
+                    let parts = command_parts(framed.next().await.unwrap().unwrap());
+                    assert_eq!(parts[0].as_ref(), b"CLIENT");
+                    assert_eq!(parts[1].as_ref(), b"SETINFO");
+                    framed.send(Frame::SimpleString("OK".into())).await.unwrap();
+                }
+                let parts = command_parts(framed.next().await.unwrap().unwrap());
+                assert_eq!(
+                    parts,
+                    vec![
+                        Bytes::from_static(b"AUTH"),
+                        Bytes::from_static(b"alice"),
+                        Bytes::from_static(b"secret")
+                    ]
+                );
+                framed.send(Frame::SimpleString("OK".into())).await.unwrap();
+                // Explicit RESP2 avoids HELLO and replica connections do not
+                // inject READONLY into a caller-owned stateful exchange.
+                assert_eq!(
+                    command_parts(framed.next().await.unwrap().unwrap())[0].as_ref(),
+                    b"PING"
+                );
+                framed
+                    .send(Frame::SimpleString("PONG".into()))
+                    .await
+                    .unwrap();
+                assert!(
+                    framed.next().await.is_none(),
+                    "dropping the owner closes its socket"
+                );
+            });
+            let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+                start: 0,
+                end: 16_383,
+                master: if replica {
+                    NodeAddr::new("127.0.0.1", 1)
+                } else {
+                    member.clone()
+                },
+                replicas: if replica { vec![member] } else { Vec::new() },
+            }]);
+            let client = test_client(
+                node.addr_string(),
+                topology,
+                HashMap::new(),
+                Arc::new(RecordingMetrics::default()),
+                false,
+            );
+            {
+                let mut inner = client.inner.write().await;
+                inner.credentials = Some(Arc::new(
+                    redis_tower::credentials::StaticCredentials::new("alice", "secret"),
+                ));
+                inner.connection_config =
+                    ConnectionConfig::default().with_protocol(ProtocolVersion::Resp2);
+            }
+            let mut connection = client.connect_to_node(node).await.unwrap();
+            let reply = connection
+                .execute(redis_tower::commands::RawCommand::new("PING"))
+                .await
+                .unwrap();
+            assert_eq!(reply, Frame::SimpleString("PONG".into()));
+            drop(connection);
+            tokio::time::timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn dedicated_connection_bounds_entire_setup() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let node = node_addr(&listener.local_addr().unwrap().to_string());
+        let topology = ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node.clone(),
+            replicas: Vec::new(),
+        }]);
+        let client = test_client(
+            node.addr_string(),
+            topology,
+            HashMap::new(),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        client
+            .inner
+            .write()
+            .await
+            .reconnect_config
+            .reconnect
+            .connect_timeout = Some(Duration::from_millis(40));
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            socket.read_to_end(&mut bytes).await.unwrap();
+            assert!(!bytes.is_empty(), "setup reached the silent server");
+        });
+        assert!(matches!(
+            client.connect_to_node(node).await,
+            Err(RedisError::ConnectTimeout)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]

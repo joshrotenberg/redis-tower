@@ -933,7 +933,9 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         b"PING" | b"ECHO" | b"AUTH" | b"SELECT" | b"FLUSHDB" | b"FLUSHALL" | b"DBSIZE"
         | b"INFO" | b"CONFIG" | b"CLUSTER" | b"CLIENT" | b"COMMAND" | b"TIME" | b"MULTI"
         | b"EXEC" | b"DISCARD" | b"HOTKEYS" | b"ACL" | b"FUNCTION" | b"LATENCY" | b"MODULE"
-        | b"MONITOR" => None,
+        | b"MONITOR" | b"SCRIPT" | b"SCAN" | b"KEYS" | b"RANDOMKEY" | b"SLOWLOG" | b"TS.MGET"
+        | b"TS.MRANGE" | b"TS.MREVRANGE" | b"TS.QUERYINDEX" | b"FT._LIST" | b"FT.CONFIG"
+        | b"WAIT" | b"WAITAOF" => None,
 
         // Script / function: `CMD body numkeys key...` -- key follows numkeys
         // at argv[2]. argv[1] is the script text / SHA / function name.
@@ -942,9 +944,8 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         }
 
         // numkeys-first: `CMD numkeys key...` -- key follows numkeys at argv[1].
-        b"LMPOP" | b"ZMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZUNION" | b"MSETEX" => {
-            key_after_numkeys(items, 1)
-        }
+        b"LMPOP" | b"ZMPOP" | b"SINTERCARD" | b"SDIFFCARD" | b"SUNIONCARD" | b"ZINTERCARD"
+        | b"ZDIFF" | b"ZINTER" | b"ZUNION" | b"MSETEX" => key_after_numkeys(items, 1),
 
         // Blocking numkeys: `CMD timeout numkeys key...` -- numkeys at argv[2].
         b"BLMPOP" | b"BZMPOP" => key_after_numkeys(items, 2),
@@ -954,6 +955,7 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
 
         // Subcommand then key: `CMD SUB key` -- key at argv[2]. OBJECT HELP and
         // MEMORY DOCTOR/STATS/... have no key.
+        b"FT.CURSOR" => as_key(items.get(2)?),
         b"OBJECT" => as_key(items.get(2)?),
         b"MEMORY" => {
             if matches_token(items.get(1), b"USAGE") {
@@ -1056,6 +1058,26 @@ pub use redis_tower::is_readonly_command;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn extract_key_routes_cursor_and_counted_set_commands_by_their_keys() {
+        let key = bytes::Bytes::from_static(b"{binary}index\xff");
+        for command in ["SDIFFCARD", "SUNIONCARD", "ZINTERCARD"] {
+            let frame = redis_tower_protocol::helpers::array(vec![
+                redis_tower_protocol::helpers::bulk(command),
+                redis_tower_protocol::helpers::bulk("1"),
+                redis_tower_protocol::helpers::bulk(key.clone()),
+            ]);
+            assert_eq!(super::extract_key(&frame), Some(key.as_ref()));
+        }
+        let frame = redis_tower_protocol::helpers::array(vec![
+            redis_tower_protocol::helpers::bulk("FT.CURSOR"),
+            redis_tower_protocol::helpers::bulk("READ"),
+            redis_tower_protocol::helpers::bulk(key.clone()),
+            redis_tower_protocol::helpers::bulk("42"),
+        ]);
+        assert_eq!(super::extract_key(&frame), Some(key.as_ref()));
+    }
+
     use super::*;
     use bytes::Bytes;
     use redis_tower_protocol::helpers::{array, bulk};
