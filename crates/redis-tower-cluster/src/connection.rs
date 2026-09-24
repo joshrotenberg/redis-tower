@@ -1210,7 +1210,7 @@ impl ClusterNodeConnector {
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
         let conn = match self.tls.as_deref() {
             Some(tls) => {
-                let hostname = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+                let hostname = tls_server_name(addr);
                 RedisConnection::connect_tls_with_config(addr, hostname, tls, &bootstrap_config)
                     .await?
             }
@@ -1246,6 +1246,14 @@ impl ClusterNodeConnector {
 
         Ok(conn)
     }
+}
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+fn tls_server_name(addr: &str) -> &str {
+    let host = addr.rsplit_once(':').map(|(host, _)| host).unwrap_or(addr);
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 /// Parse a Redis URL into a cluster seed address and an optional credential
@@ -2480,6 +2488,59 @@ mod tests {
         );
         assert_eq!(builder.connection_config.protocol(), ProtocolVersion::Resp3);
         assert_eq!(builder.connection_config.resp_limits(), limits);
+    }
+
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    #[test]
+    fn tls_server_names_strip_only_ipv6_brackets() {
+        assert_eq!(tls_server_name("[::1]:6379"), "::1");
+        assert_eq!(tls_server_name("2001:db8::42:6379"), "2001:db8::42");
+        assert_eq!(
+            tls_server_name("redis.example.com:6379"),
+            "redis.example.com"
+        );
+        assert_eq!(tls_server_name("127.0.0.1:6379"), "127.0.0.1");
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[tokio::test]
+    async fn tls_connector_accepts_a_bracketed_ipv6_socket_address() {
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping TLS IPv6 connector test: IPv6 loopback is unavailable");
+                return;
+            }
+            Err(error) => panic!("bind IPv6 loopback: {error}"),
+        };
+        let address = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept TLS client");
+            stream.writable().await.expect("wait for writable socket");
+            stream
+                .try_write(b"not a TLS record")
+                .expect("write invalid TLS response");
+        });
+        let connector = ClusterNodeConnector::new(
+            ConnectionConfig::default(),
+            None,
+            Some(Arc::new(redis_tower_core::tls::TlsConfig::default_rustls())),
+        );
+
+        let error = match connector.connect(&address.to_string(), false).await {
+            Ok(_) => panic!("invalid test server cannot finish TLS"),
+            Err(error) => error,
+        };
+        server.await.expect("join test TLS server");
+
+        match &error {
+            RedisError::Connection { source, .. } => assert_ne!(
+                source.kind(),
+                std::io::ErrorKind::InvalidInput,
+                "rustls rejected the bracketed IPv6 server name: {error}"
+            ),
+            other => panic!("expected TLS connection error, got {other}"),
+        }
     }
 
     #[tokio::test]

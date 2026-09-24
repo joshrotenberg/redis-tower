@@ -67,9 +67,15 @@ impl NodeAddr {
         }
     }
 
-    /// Format as `"host:port"`.
+    /// Format as `"host:port"`, adding brackets around a bare IPv6 literal.
     pub fn addr_string(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        if self.host.starts_with('[') && self.host.ends_with(']') {
+            format!("{}:{}", self.host, self.port)
+        } else if self.host.parse::<std::net::Ipv6Addr>().is_ok() {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
     }
 
     /// Parse a `"host:port"` string into a [`NodeAddr`].
@@ -92,7 +98,7 @@ impl NodeAddr {
 
 impl std::fmt::Display for NodeAddr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        f.write_str(&self.addr_string())
     }
 }
 
@@ -720,6 +726,10 @@ mod tests {
 
         let ipv6 = NodeAddr::parse("[::1]:6380").unwrap();
         assert_eq!(ipv6.addr_string(), "[::1]:6380");
+
+        let discovered_ipv6 = NodeAddr::new("2001:db8::42", 6380);
+        assert_eq!(discovered_ipv6.addr_string(), "[2001:db8::42]:6380");
+        assert_eq!(discovered_ipv6.to_string(), "[2001:db8::42]:6380");
     }
 
     #[test]
