@@ -23883,7 +23883,12 @@
           "path": ".github/workflows/ci.yml",
           "symbol": "Run cluster integration tests"
         }
-      ]
+      ],
+      "last_observed_pass": {
+        "date": "2026-09-25",
+        "commit": "5577d6820ca53f30c09efa9b6a0a48df25f12151",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36136123746/job/108076989412"
+      }
     },
     {
       "id": "session.monitor-dedicated",
