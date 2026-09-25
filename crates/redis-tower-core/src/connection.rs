@@ -642,7 +642,9 @@ impl RedisConnection {
                         .await
                         .map_err(|error| RedisError::connection(error_address, error))?
                 };
-                Self::from_stream_inner(RedisStream::Unix(stream), config)
+                let mut conn = Self::from_stream_inner(RedisStream::Unix(stream), config);
+                conn.identify_client().await?;
+                conn
             }
             #[cfg(not(unix))]
             {
@@ -1789,6 +1791,65 @@ mod tests {
         .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
         drop(connection);
         server.await.expect("join test server");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_url_runs_the_complete_connection_setup_in_order() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/redis tower setup-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind Unix setup socket");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept Unix client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            let expected = [
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-NAME"),
+                    bulk("redis-tower"),
+                ]),
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-VER"),
+                    bulk(env!("CARGO_PKG_VERSION")),
+                ]),
+                array(vec![bulk("AUTH"), bulk("agent"), bulk("secret+value")]),
+                array(vec![bulk("SELECT"), bulk("1")]),
+                array(vec![bulk("HELLO"), bulk("3")]),
+            ];
+            for expected_command in expected {
+                let actual = framed
+                    .next()
+                    .await
+                    .expect("client closed during Unix setup")
+                    .expect("decode Unix setup command");
+                assert_eq!(actual, expected_command);
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to Unix setup command");
+            }
+        });
+
+        let encoded_path = path.to_str().unwrap().replace(' ', "%20");
+        let url = format!(
+            "redis+unix://{encoded_path}?user=agent&pass=secret%2Bvalue&db=1&protocol=resp3"
+        );
+        let connection = RedisConnection::connect_url(&url)
+            .await
+            .unwrap_or_else(|error| panic!("complete Unix URL setup: {error}"));
+        assert!(connection.is_resp3());
+        drop(connection);
+        server.await.expect("join Unix setup server");
+        std::fs::remove_file(path).expect("remove Unix setup socket");
     }
 
     // Linux permits arbitrary non-NUL bytes in a Unix socket pathname. macOS

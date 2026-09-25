@@ -122,6 +122,8 @@ impl RedisUrl {
 /// and `+` are spaces, and a literal plus is `%2B`. Query parameters may
 /// appear in any order; when repeated, the final value wins. Unknown query
 /// parameters are ignored for compatibility with other Redis clients.
+/// `user` requires `pass`; `pass` without `user` uses Redis's legacy
+/// password-only `AUTH` form.
 ///
 /// `protocol` accepts `2`, `resp2`, `3`, or `resp3`. It is consumed by the
 /// connection methods and is therefore not represented in [`RedisUrl`]. An
