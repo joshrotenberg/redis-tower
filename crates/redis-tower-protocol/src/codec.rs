@@ -5,6 +5,11 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::Frame;
 use crate::error::ProtocolError;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Default maximum wire size, in bytes, of a single decoded frame.
 ///
 /// The 512 MiB limit includes headers, payloads, and aggregate children. It is
@@ -98,6 +103,9 @@ impl Decoder for RespCodec {
         let Some(frame_len) = crate::preflight::frame_len(src, self.limits)? else {
             return Ok(None);
         };
+
+        #[cfg(test)]
+        TEST_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
 
         // Materialize only a complete, bounded first frame. BytesMut::clone()
         // copies, so cloning the entire unread pipeline here would repeatedly
@@ -463,26 +471,85 @@ mod tests {
 
         fn arb_leaf_frame() -> impl Strategy<Value = Frame> {
             prop_oneof![
-                "[a-zA-Z0-9 ]{0,20}".prop_map(|s| Frame::SimpleString(Bytes::from(s))),
+                "[a-zA-Z0-9 ._:/-]{0,24}".prop_map(|s| Frame::SimpleString(Bytes::from(s))),
+                "[A-Z][A-Z0-9 ]{0,23}".prop_map(|s| Frame::Error(Bytes::from(s))),
                 any::<i64>().prop_map(Frame::Integer),
                 prop::collection::vec(any::<u8>(), 0..=64)
                     .prop_map(|v| Frame::BulkString(Some(Bytes::from(v)))),
                 Just(Frame::BulkString(None)),
+                prop::collection::vec(any::<u8>(), 0..=64)
+                    .prop_map(|v| Frame::BlobError(Bytes::from(v))),
+                any::<f64>()
+                    .prop_filter("finite doubles have a stable Frame variant", |value| {
+                        value.is_finite()
+                    })
+                    .prop_map(Frame::Double),
+                prop_oneof![
+                    Just(Frame::SpecialFloat(Bytes::from_static(b"inf"))),
+                    Just(Frame::SpecialFloat(Bytes::from_static(b"-inf"))),
+                    Just(Frame::SpecialFloat(Bytes::from_static(b"nan"))),
+                ],
                 any::<bool>().prop_map(Frame::Boolean),
+                "-?[0-9]{1,48}".prop_map(|value| Frame::BigNumber(Bytes::from(value))),
+                prop::collection::vec(any::<u8>(), 0..=64).prop_map(|content| {
+                    Frame::VerbatimString(Bytes::from_static(b"txt"), Bytes::from(content))
+                }),
                 Just(Frame::Null),
+                Just(Frame::Array(None)),
             ]
         }
 
         fn arb_frame() -> impl Strategy<Value = Frame> {
-            arb_leaf_frame().prop_recursive(3, 16, 4, |inner| {
+            arb_leaf_frame().prop_recursive(4, 32, 6, |inner| {
                 prop_oneof![
-                    inner.clone(),
-                    prop::collection::vec(inner.clone(), 0..=4).prop_map(|v| Frame::Array(Some(v))),
+                    prop::collection::vec(inner.clone(), 0..=5)
+                        .prop_map(|items| Frame::Array(Some(items))),
+                    prop::collection::vec(inner.clone(), 0..=5).prop_map(Frame::Set),
+                    prop::collection::vec(inner.clone(), 0..=5).prop_map(Frame::Push),
+                    prop::collection::vec((inner.clone(), inner), 0..=4).prop_map(Frame::Map),
                 ]
             })
         }
 
+        fn encode_frames(frames: &[Frame]) -> Vec<u8> {
+            frames
+                .iter()
+                .flat_map(|frame| resp3::frame_to_bytes(frame).to_vec())
+                .collect()
+        }
+
+        fn decode_whole(wire: &[u8]) -> (Vec<Frame>, Vec<u8>) {
+            let mut codec = RespCodec::new();
+            let mut buffer = BytesMut::from(wire);
+            let mut frames = Vec::new();
+            while let Some(frame) = codec.decode(&mut buffer).unwrap() {
+                frames.push(frame);
+            }
+            (frames, buffer.to_vec())
+        }
+
+        fn decode_fragmented(wire: &[u8], plan: &[usize]) -> (Vec<Frame>, Vec<u8>) {
+            let mut codec = RespCodec::new();
+            let mut buffer = BytesMut::new();
+            let mut frames = Vec::new();
+            let mut offset = 0;
+            let mut plan_index = 0;
+            while offset < wire.len() {
+                let chunk_size = plan[plan_index % plan.len()];
+                plan_index += 1;
+                let end = offset.saturating_add(chunk_size).min(wire.len());
+                buffer.extend_from_slice(&wire[offset..end]);
+                offset = end;
+                while let Some(frame) = codec.decode(&mut buffer).unwrap() {
+                    frames.push(frame);
+                }
+            }
+            (frames, buffer.to_vec())
+        }
+
         proptest! {
+            #![proptest_config(ProptestConfig::with_cases(192))]
+
             #[test]
             fn codec_roundtrip(frame in arb_frame()) {
                 let mut codec = RespCodec::new();
@@ -490,6 +557,31 @@ mod tests {
                 codec.encode(frame.clone(), &mut buf).unwrap();
                 let decoded = codec.decode(&mut buf).unwrap().unwrap();
                 prop_assert_eq!(frame, decoded);
+            }
+
+            #[test]
+            fn pipelines_are_partition_invariant(
+                frames in prop::collection::vec(arb_frame(), 0..=16),
+                plan in prop::collection::vec(1usize..=64, 1..=16),
+            ) {
+                let wire = encode_frames(&frames);
+                let whole = decode_whole(&wire);
+                let fragmented = decode_fragmented(&wire, &plan);
+                prop_assert_eq!(&fragmented, &whole);
+                prop_assert_eq!(whole.0, frames);
+                prop_assert!(whole.1.is_empty());
+            }
+
+            #[test]
+            fn truncated_pipelines_have_partition_invariant_prefixes(
+                frames in prop::collection::vec(arb_frame(), 1..=12),
+                plan in prop::collection::vec(1usize..=32, 1..=12),
+                cutoff_seed in any::<usize>(),
+            ) {
+                let wire = encode_frames(&frames);
+                let cutoff = cutoff_seed % (wire.len() + 1);
+                let prefix = &wire[..cutoff];
+                prop_assert_eq!(decode_fragmented(prefix, &plan), decode_whole(prefix));
             }
         }
     }
@@ -611,6 +703,22 @@ mod limit_tests {
             "unexpected error: {err:?}"
         );
         assert_eq!(buf.as_ref(), b"$1000000\r\n");
+    }
+
+    #[test]
+    fn incomplete_aggregate_cardinality_never_reaches_materialization() {
+        TEST_MATERIALIZATIONS.with(|count| count.set(0));
+        let mut codec = RespCodec::new();
+        for header in [b"*4096\r\n".as_slice(), b"%4096\r\n"] {
+            let mut input = BytesMut::from(header);
+            assert!(codec.decode(&mut input).unwrap().is_none());
+            assert_eq!(&input[..], header);
+        }
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+
+        let mut complete = BytesMut::from(&b"*1\r\n+OK\r\n"[..]);
+        assert!(codec.decode(&mut complete).unwrap().is_some());
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
     }
 
     #[test]

@@ -35,12 +35,14 @@ impl PendingStack {
         self.inline_len + self.spill.len()
     }
 
-    fn push(&mut self, value: usize) {
+    fn push(&mut self, value: usize) -> bool {
         if self.inline_len < INLINE_NESTING {
             self.inline[self.inline_len] = value;
             self.inline_len += 1;
+            false
         } else {
             self.spill.push(value);
+            true
         }
     }
 
@@ -77,6 +79,21 @@ impl PendingStack {
 /// and streaming tokens are unsupported because they are not complete replies
 /// in the client's current response model. Payload bytes remain opaque.
 pub(crate) fn frame_len(buf: &[u8], limits: RespLimits) -> Result<Option<usize>, ProtocolError> {
+    frame_len_observed(buf, limits, &mut ())
+}
+
+trait ScanObserver {
+    fn visited_element(&mut self) {}
+    fn spilled_nesting_stack(&mut self) {}
+}
+
+impl ScanObserver for () {}
+
+fn frame_len_observed(
+    buf: &[u8],
+    limits: RespLimits,
+    observer: &mut impl ScanObserver,
+) -> Result<Option<usize>, ProtocolError> {
     if buf.is_empty() {
         return Ok(None);
     }
@@ -93,6 +110,7 @@ pub(crate) fn frame_len(buf: &[u8], limits: RespLimits) -> Result<Option<usize>,
             check_size(cursor, pending, limits)?;
             return Ok(None);
         };
+        observer.visited_element();
         pending -= 1;
         if let Some(remaining) = open.last_mut() {
             *remaining -= 1;
@@ -199,8 +217,8 @@ pub(crate) fn frame_len(buf: &[u8], limits: RespLimits) -> Result<Option<usize>,
                     };
                     pending = checked_add(pending, children)?;
                     check_size(cursor, pending, limits)?;
-                    if children > 0 {
-                        open.push(children);
+                    if children > 0 && open.push(children) {
+                        observer.spilled_nesting_stack();
                     }
                 }
             }
@@ -309,6 +327,22 @@ fn validate_integer(contents: &[u8]) -> Result<(), ProtocolError> {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct ScanMetrics {
+        visited_elements: usize,
+        nesting_spills: usize,
+    }
+
+    impl ScanObserver for ScanMetrics {
+        fn visited_element(&mut self) {
+            self.visited_elements += 1;
+        }
+
+        fn spilled_nesting_stack(&mut self) {
+            self.nesting_spills += 1;
+        }
+    }
+
     fn limits(size: usize, depth: usize) -> RespLimits {
         RespLimits {
             max_frame_size: size,
@@ -350,6 +384,19 @@ mod tests {
                 frame_len(header, limits(64, 2)),
                 Err(ProtocolError::FrameTooLarge { .. })
             ));
+        }
+    }
+
+    #[test]
+    fn declared_cardinality_has_constant_pre_materialization_work() {
+        for header in [b"*10000000\r\n".as_slice(), b"%10000000\r\n"] {
+            let mut metrics = ScanMetrics::default();
+            assert_eq!(
+                frame_len_observed(header, RespLimits::default(), &mut metrics).unwrap(),
+                None
+            );
+            assert_eq!(metrics.visited_elements, 1);
+            assert_eq!(metrics.nesting_spills, 0);
         }
     }
 

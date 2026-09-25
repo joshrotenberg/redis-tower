@@ -175,6 +175,7 @@ composed by applications, but they are not part of this conformance matrix.
 | Server compatibility | Focused `integration.rs` suite across supported Redis minor lines and Valkey; Redis 8 command tests on each Redis 8 leg | Nightly and manual dispatch | [nightly compatibility workflow](../.github/workflows/nightly.yml) |
 | Redis modules | JSON, Search, TimeSeries, probabilistic structures, and Vector Sets on module-enabled Redis images | Nightly and manual dispatch | [nightly modules workflow](../.github/workflows/nightly-modules.yml), [module suites](../crates/redis-tower-modules/tests) |
 | Soak fault smoke | Short standalone SIGKILL/restart and cluster master-kill/promotion runs, including JSONL contract checks | Pull requests touching the harness/client paths, and manual dispatch | [soak workflow](../.github/workflows/soak-smoke.yml), [soak harness](../crates/soak-bench/README.md) |
+| RESP property and fuzz | Generated mixed RESP2/RESP3 frames, independent wire fixtures, whole-versus-fragmented semantic comparison, and arbitrary malformed input | Property and ten-second fuzz smoke per PR; bounded weekly/manual campaigns | [protocol contract](PROTOCOL-TESTING.md), [fuzz targets](../fuzz), [scheduled workflow](../.github/workflows/fuzz.yml) |
 
 The per-PR cluster and Sentinel commands intentionally include `--ignored`.
 In this repository, that flag marks an infrastructure boundary, not an

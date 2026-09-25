@@ -43,6 +43,9 @@
 //! as independent replies. Representing these variants in [`Frame`] does not
 //! mean the codec supports their metadata or sequence semantics. Errors and
 //! incomplete input leave the receive buffer unchanged.
+//! The repository's [protocol validation guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PROTOCOL-TESTING.md)
+//! is the disposition table for supported, rejected, generated, and fuzzed
+//! wire forms.
 //!
 //! # Helpers
 //!

@@ -55,6 +55,16 @@ deterministic round-robin shards for suites that exceed one runner's budget or
 need smaller retry units, then requires every shard before producing each
 package artifact and all 13 package reports before the workspace headline score.
 
+## Protocol fuzzing
+
+The RESP decoder has a separate weekly and manually dispatchable fuzz workflow.
+It runs both the arbitrary-input decoder and the whole-versus-fragmented
+semantic oracle for a bounded, configurable duration. Every campaign starts
+from the reviewed named seeds and retains the final corpus, crashes, source and
+dependency provenance, log, duration, and outcome for 90 days. See the
+[protocol validation contract](PROTOCOL-TESTING.md) for the disposition table,
+input envelope, local commands, and historical mutation classification.
+
 ## CI wall clock and flake signal
 
 The scheduled report reads the latest 50 completed, non-cancelled runs of the
