@@ -8,10 +8,11 @@ mod common;
 
 use std::fmt;
 
+use bytes::Bytes;
 use common::redis_addr;
 use redis_tower::commands::{
     BitOp, BitOperation, Echo, Eval, GeoAdd, HSet, PfAdd, Publish, RPush, RawCommand, Rename, SAdd,
-    Set, XAdd, ZAdd,
+    Set, SetOutcome, SetPreviousValue, SetStatus, XAdd, ZAdd,
 };
 use redis_tower::{
     Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
@@ -829,73 +830,161 @@ async fn diff_mcp_typed_set_builder_options() {
         let mut pair = Pair::connect("typed-set-options", protocol).await;
         let tower_key = pair.key("tower", "set-option");
         let redis_key = pair.key("redis-rs", "set-option");
-        let tower_typed_key =
-            String::from_utf8(tower_key.clone()).expect("generated test key is UTF-8");
         pair.reset(&tower_key, &redis_key).await;
 
+        let existing = b"\0\xffexisting".as_slice();
         pair.tower
-            .raw("SET", &[&tower_key, b"existing"])
+            .raw("SET", &[&tower_key, existing])
             .await
             .unwrap();
         pair.redis_rs
-            .raw("SET", &[&redis_key, b"existing"])
+            .raw("SET", &[&redis_key, existing])
             .await
             .unwrap();
 
         let tower_nx = pair
             .tower
             .typed(
-                "SET NX GET",
-                Set::new(tower_typed_key.clone(), "replacement").nx().get(),
+                "SET NX GET rejected",
+                Set::new(&tower_key, b"replacement".as_slice())
+                    .nx()
+                    .get()
+                    .with_outcome(),
             )
             .await
             .unwrap();
-        let redis_context = pair.diagnostic("SET NX GET", "redis-rs");
+        let redis_context = pair.diagnostic("SET NX GET rejected", "redis-rs");
         let redis_nx = redis::cmd("SET")
             .arg(&redis_key)
-            .arg("replacement")
+            .arg(b"replacement")
             .arg("NX")
             .arg("GET")
             .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
             .await
             .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
         assert_eq!(
-            tower_nx.map(|value| value.to_vec()),
-            redis_nx,
+            tower_nx,
+            SetOutcome {
+                status: SetStatus::NotApplied,
+                previous: redis_nx
+                    .map(|value| SetPreviousValue::Value(Bytes::from(value)))
+                    .unwrap_or(SetPreviousValue::Missing),
+            },
             "{}",
-            pair.diagnostic("SET NX GET result", "both")
+            pair.diagnostic("SET NX GET rejected result", "both")
         );
         let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
         let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
-        pair.same("SET NX stored value", tower, redis_rs);
+        pair.same("SET NX rejected stored value", tower, redis_rs);
+
+        pair.reset(&tower_key, &redis_key).await;
+        let tower_nx = pair
+            .tower
+            .typed(
+                "SET NX GET applied",
+                Set::new(&tower_key, b"replacement".as_slice())
+                    .nx()
+                    .get()
+                    .with_outcome(),
+            )
+            .await
+            .unwrap();
+        let redis_context = pair.diagnostic("SET NX GET applied", "redis-rs");
+        let redis_nx = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg(b"replacement")
+            .arg("NX")
+            .arg("GET")
+            .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
+            .await
+            .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
+        assert_eq!(
+            tower_nx,
+            SetOutcome {
+                status: SetStatus::Applied,
+                previous: redis_nx
+                    .map(|value| SetPreviousValue::Value(Bytes::from(value)))
+                    .unwrap_or(SetPreviousValue::Missing),
+            },
+            "{}",
+            pair.diagnostic("SET NX GET applied result", "both")
+        );
+        let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
+        pair.same("SET NX applied stored value", tower, redis_rs);
 
         pair.reset(&tower_key, &redis_key).await;
         let tower_xx = pair
             .tower
             .typed(
-                "SET XX GET",
-                Set::new(tower_typed_key.clone(), "replacement").xx().get(),
+                "SET XX GET rejected",
+                Set::new(&tower_key, b"replacement".as_slice())
+                    .xx()
+                    .get()
+                    .with_outcome(),
             )
             .await
             .unwrap();
-        let redis_context = pair.diagnostic("SET XX GET", "redis-rs");
+        let redis_context = pair.diagnostic("SET XX GET rejected", "redis-rs");
         let redis_xx = redis::cmd("SET")
             .arg(&redis_key)
-            .arg("replacement")
+            .arg(b"replacement")
             .arg("XX")
             .arg("GET")
             .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
             .await
             .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
         assert_eq!(
-            tower_xx.map(|value| value.to_vec()),
-            redis_xx,
+            tower_xx,
+            SetOutcome {
+                status: SetStatus::NotApplied,
+                previous: redis_xx
+                    .map(|value| SetPreviousValue::Value(Bytes::from(value)))
+                    .unwrap_or(SetPreviousValue::Missing),
+            },
             "{}",
-            pair.diagnostic("SET XX GET result", "both")
+            pair.diagnostic("SET XX GET rejected result", "both")
         );
         let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
         let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
-        pair.same("SET XX stored value", tower, redis_rs);
+        pair.same("SET XX rejected stored value", tower, redis_rs);
+
+        pair.tower.raw("SET", &[&tower_key, b""]).await.unwrap();
+        pair.redis_rs.raw("SET", &[&redis_key, b""]).await.unwrap();
+        let tower_xx = pair
+            .tower
+            .typed(
+                "SET XX GET applied",
+                Set::new(&tower_key, b"replacement".as_slice())
+                    .xx()
+                    .get()
+                    .with_outcome(),
+            )
+            .await
+            .unwrap();
+        let redis_context = pair.diagnostic("SET XX GET applied", "redis-rs");
+        let redis_xx = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg(b"replacement")
+            .arg("XX")
+            .arg("GET")
+            .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
+            .await
+            .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
+        assert_eq!(
+            tower_xx,
+            SetOutcome {
+                status: SetStatus::Applied,
+                previous: redis_xx
+                    .map(|value| SetPreviousValue::Value(Bytes::from(value)))
+                    .unwrap_or(SetPreviousValue::Missing),
+            },
+            "{}",
+            pair.diagnostic("SET XX GET applied result", "both")
+        );
+        let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
+        pair.same("SET XX applied stored value", tower, redis_rs);
     }
 }
 
@@ -1440,7 +1529,10 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
     pair.tower
         .typed(
             "SET NX GET negative control",
-            Set::new(tower_typed_key, "replacement").nx().get(),
+            Set::new(tower_typed_key, "replacement")
+                .nx()
+                .get()
+                .with_outcome(),
         )
         .await
         .unwrap();

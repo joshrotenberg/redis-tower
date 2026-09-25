@@ -50,7 +50,8 @@
 //!
 //! let cmd = Set::new("key", "value")
 //!     .ex(60)       // expire in 60 seconds
-//!     .nx();        // only set if key does not exist
+//!     .nx()         // only set if key does not exist
+//!     .with_outcome(); // preserve applied vs not-applied status
 //!
 //! let previous = conn.execute(cmd).await?;
 //! # let _ = previous;

@@ -39,19 +39,27 @@ server-error replies are not interchangeable:
 ```rust,ignore
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use bytes::Bytes;
-use redis_tower::{MultiplexedClient, commands::{Get, Incr, Set}};
+use redis_tower::{
+    MultiplexedClient,
+    commands::{Get, Incr, Set, SetOutcome, SetPreviousValue},
+};
 
 let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
 
 let missing_or_value: Option<Bytes> = client.execute(Get::new("profile:1")).await?;
 let next: i64 = client.execute(Incr::new("visits")).await?;
 
-// SET always returns Option<Bytes>: without GET, OK is normalized to None;
-// with GET, Some(bytes) is the previous value and None means there was none.
-let previous: Option<Bytes> = client
-    .execute(Set::new("profile:1", "ready").get())
+// Finish with `with_outcome()` when conditional code needs to know whether
+// Redis applied the write independently from the previous value.
+let outcome: SetOutcome = client
+    .execute(Set::new("profile:1", "ready").nx().get().with_outcome())
     .await?;
-# let _ = (missing_or_value, next, previous);
+match &outcome.previous {
+    SetPreviousValue::NotRequested => unreachable!("GET was requested"),
+    SetPreviousValue::Missing => println!("the key did not exist"),
+    SetPreviousValue::Value(value) => println!("previous bytes: {value:?}"),
+}
+# let _ = (missing_or_value, next, outcome);
 # Ok(())
 # }
 ```
@@ -61,17 +69,21 @@ let previous: Option<Bytes> = client
 ordering and optional entries. Redis command errors remain `RedisError::Redis`;
 they are not converted into an empty success value.
 
-`Set` needs extra care because its options alter the wire reply. The current
-typed response maps both ordinary `OK` and a null conditional reply to `None`,
-so `Set::new(...).nx()` alone cannot tell an applied write from an unmet
-condition. `SET GET` exposes the previous value, but `None` still means there
-was no previous value. If the application must distinguish every combination,
-use an atomic script with an explicit result shape until the typed API offers a
-richer outcome.
+`Set` needs extra care because its options alter the wire reply. The base
+command keeps its original `Option<Bytes>` response for compatibility: ordinary
+`OK` and a rejected conditional write both become `None`. Conditional code
+should call `with_outcome()` after all other builder methods. Its `SetOutcome`
+separates `SetStatus::{Applied, NotApplied}` from
+`SetPreviousValue::{NotRequested, Missing, Value}`; an empty value is
+`Value(Bytes::new())`, not `Missing`.
 
-That response-design work is tracked in
-[#729](https://github.com/joshrotenberg/redis-tower/issues/729); this guide
-states the current contract rather than implying the condition is observable.
+| Builder mode | `status` | `previous` |
+|---|---|---|
+| ordinary `SET` | `Applied` | `NotRequested` |
+| `NX` / `XX` without `GET` | `Applied` or `NotApplied` from `OK` / null | `NotRequested` |
+| ordinary `SET GET` | always `Applied` | `Missing` or `Value` |
+| `NX GET` | `Applied` when missing; otherwise `NotApplied` | `Missing` or `Value` |
+| `XX GET` | `NotApplied` when missing; otherwise `Applied` | `Missing` or `Value` |
 
 The [strings](https://docs.rs/redis-tower-commands/latest/redis_tower_commands/strings/),
 [hashes](https://docs.rs/redis-tower-commands/latest/redis_tower_commands/hashes/),

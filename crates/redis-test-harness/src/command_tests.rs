@@ -79,8 +79,18 @@ macro_rules! __command_tests_inner {
             let mut c = $conn_fn().await;
             let k = _cmd_key("set_nx", "k");
             c.execute(Del::new(&k)).await.unwrap();
-            c.execute(Set::new(&k, "first").nx()).await.unwrap();
-            c.execute(Set::new(&k, "second").nx()).await.unwrap();
+            let applied = c
+                .execute(Set::new(&k, "first").nx().with_outcome())
+                .await
+                .unwrap();
+            assert_eq!(applied.status, SetStatus::Applied);
+            assert_eq!(applied.previous, SetPreviousValue::NotRequested);
+            let rejected = c
+                .execute(Set::new(&k, "second").nx().with_outcome())
+                .await
+                .unwrap();
+            assert_eq!(rejected.status, SetStatus::NotApplied);
+            assert_eq!(rejected.previous, SetPreviousValue::NotRequested);
             let val = c.execute(Get::new(&k)).await.unwrap();
             assert_eq!(val, Some(Bytes::from("first")));
             c.execute(Del::new(&k)).await.unwrap();
@@ -92,11 +102,21 @@ macro_rules! __command_tests_inner {
             let mut c = $conn_fn().await;
             let k = _cmd_key("set_xx", "k");
             c.execute(Del::new(&k)).await.unwrap();
-            c.execute(Set::new(&k, "v").xx()).await.unwrap();
+            let rejected = c
+                .execute(Set::new(&k, "v").xx().with_outcome())
+                .await
+                .unwrap();
+            assert_eq!(rejected.status, SetStatus::NotApplied);
+            assert_eq!(rejected.previous, SetPreviousValue::NotRequested);
             let val = c.execute(Get::new(&k)).await.unwrap();
             assert_eq!(val, None);
             c.execute(Set::new(&k, "v")).await.unwrap();
-            c.execute(Set::new(&k, "new").xx()).await.unwrap();
+            let applied = c
+                .execute(Set::new(&k, "new").xx().with_outcome())
+                .await
+                .unwrap();
+            assert_eq!(applied.status, SetStatus::Applied);
+            assert_eq!(applied.previous, SetPreviousValue::NotRequested);
             let val = c.execute(Get::new(&k)).await.unwrap();
             assert_eq!(val, Some(Bytes::from("new")));
             c.execute(Del::new(&k)).await.unwrap();

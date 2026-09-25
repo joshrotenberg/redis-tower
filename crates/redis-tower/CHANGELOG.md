@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- an additive structured `SET` outcome mode for conditional writes, while the
+  original `Option<Bytes>` response remains available for compatibility
 - an owned, cloneable `AutoPipelineShutdownHandle` for router and trait-erased
   hosts to stop admission, drain accepted work, and join fixed or reconnecting
   workers even while service clones remain

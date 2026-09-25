@@ -11,7 +11,8 @@ use std::error::Error;
 
 use bytes::Bytes;
 use redis_tower::commands::{
-    Get, HSet, Incr, RawCommand, Scan, Set, StreamEntry, XAck, XGroupCreate, XReadGroup,
+    Get, HSet, Incr, RawCommand, Scan, Set, SetOutcome, SetPreviousValue, StreamEntry, XAck,
+    XGroupCreate, XReadGroup,
 };
 use redis_tower::{
     BinaryPubSubConnection, MultiplexedClient, Pipeline, RedisConnection, Transaction,
@@ -27,8 +28,15 @@ async fn typed_responses() -> Result<(), Box<dyn Error>> {
 
     let missing_or_value: Option<Bytes> = client.execute(Get::new("profile:1")).await?;
     let next: i64 = client.execute(Incr::new("visits")).await?;
-    let previous: Option<Bytes> = client.execute(Set::new("profile:1", "ready").get()).await?;
-    let _ = (missing_or_value, next, previous);
+    let outcome: SetOutcome = client
+        .execute(Set::new("profile:1", "ready").nx().get().with_outcome())
+        .await?;
+    match &outcome.previous {
+        SetPreviousValue::NotRequested => unreachable!("GET was requested"),
+        SetPreviousValue::Missing => println!("the key did not exist"),
+        SetPreviousValue::Value(value) => println!("previous bytes: {value:?}"),
+    }
+    let _ = (missing_or_value, next, outcome);
     Ok(())
 }
 

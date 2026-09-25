@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- additive `Set::with_outcome` response mode that preserves applied versus
+  rejected `NX`/`XX` status independently from missing, empty, binary, or
+  unrequested previous values
 - binary-safe `CommandArg` inputs across every opaque typed position in core,
   scripting, Pub/Sub, server, and feature-gated module command families,
   including exact-byte stream response names
