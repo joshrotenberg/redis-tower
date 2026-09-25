@@ -22,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selected database instead of trusting environment labels or insecure TLS
 - **Breaking (next minor, 0.2.0):** managed stream consumers now preserve
   stream keys and field names as exact `Bytes` instead of applying lossy UTF-8
-  conversion, cached scripts accept binary source/KEYS/ARGV, and `PING`
-  responses are exact `Bytes`. This change must not ship in a `0.1.x` patch
-  release; the `redis-tower-commands` requirement must move to 0.2.0 for
-  release.
+  conversion; transaction and scan helpers, cached scripts, and the deprecated
+  JSON/Search wrappers accept binary keys, patterns, source, KEYS, and ARGV;
+  and `PING` plus Search document identifiers return exact `Bytes`. This change
+  must not ship in a `0.1.x` patch release; the `redis-tower-commands`
+  requirement must move to 0.2.0 for release.
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.2...redis-tower-v0.1.3) - 2026-09-24
 

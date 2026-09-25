@@ -480,7 +480,10 @@ impl<'a, C: RedisExecutor> SearchClient<'a, C> {
 
     /// Add a suggestion string to an auto-complete dictionary.
     ///
-    /// Returns the current size of the dictionary.
+    /// Returns the current size of the dictionary. Redis Search treats an
+    /// embedded NUL in the suggestion string as a terminator even though the
+    /// client serializes it exactly; payloads and dictionary keys preserve all
+    /// bytes.
     pub async fn sug_add(
         &mut self,
         key: impl Into<CommandArg>,

@@ -482,9 +482,9 @@ impl<'a, C: RedisExecutor + Send> CountMinSketch<'a, C> {
     }
 
     /// Increment counts for one or more items (CMS.INCRBY).
-    pub async fn incrby<A: AsRef<[u8]>>(
+    pub async fn incrby(
         &mut self,
-        items: &[(A, i64)],
+        items: &[(impl AsRef<[u8]>, i64)],
     ) -> Result<Vec<i64>, RedisError> {
         self.conn
             .execute(CmsIncrBy::new(

@@ -798,9 +798,9 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Returns one `Result<i64, RedisError>` per input sample. Per-sample
     /// errors (e.g. duplicate-policy violations) are returned as `Err` items
     /// rather than propagating the whole call.
-    pub async fn madd<A: AsRef<[u8]>>(
+    pub async fn madd(
         &mut self,
-        samples: &[(A, TsTimestamp, f64)],
+        samples: &[(impl AsRef<[u8]>, TsTimestamp, f64)],
     ) -> Result<Vec<Result<i64, RedisError>>, RedisError> {
         let mut cmd = TsMAdd::new();
         for (key, ts, value) in samples {

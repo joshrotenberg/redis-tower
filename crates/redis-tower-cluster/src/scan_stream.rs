@@ -99,7 +99,7 @@ use std::pin::Pin;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
-use redis_tower_commands::Scan;
+use redis_tower_commands::{CommandArg, Scan};
 use redis_tower_core::RedisError;
 
 use crate::multiplexed::MultiplexedClusterClient;
@@ -173,7 +173,7 @@ impl ScanClusterStream {
     /// ```
     pub fn scan(
         client: &MultiplexedClusterClient,
-        pattern: impl Into<String>,
+        pattern: impl Into<CommandArg>,
     ) -> impl Stream<Item = Result<ClusterScanItem, RedisError>> + 'static {
         ClusterScan::new(pattern).run(client)
     }
@@ -187,7 +187,7 @@ impl ScanClusterStream {
     /// Equivalent to `ClusterScan::new(pattern).count(count).run(client)`.
     pub fn scan_with_count(
         client: &MultiplexedClusterClient,
-        pattern: impl Into<String>,
+        pattern: impl Into<CommandArg>,
         count: u64,
     ) -> impl Stream<Item = Result<ClusterScanItem, RedisError>> + 'static {
         ClusterScan::new(pattern).count(count).run(client)
@@ -215,7 +215,7 @@ impl ScanClusterStream {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ClusterScan {
-    pattern: String,
+    pattern: CommandArg,
     count: Option<u64>,
     concurrency: usize,
     refresh_membership: bool,
@@ -223,7 +223,7 @@ pub struct ClusterScan {
 
 impl ClusterScan {
     /// A scan of every master for keys matching `pattern`, one master at a time.
-    pub fn new(pattern: impl Into<String>) -> Self {
+    pub fn new(pattern: impl Into<CommandArg>) -> Self {
         Self {
             pattern: pattern.into(),
             count: None,
@@ -403,7 +403,7 @@ fn scan_inner(
 fn scan_node(
     client: MultiplexedClusterClient,
     node: String,
-    pattern: String,
+    pattern: CommandArg,
     count: Option<u64>,
 ) -> NodeScan {
     Box::pin(async_stream::try_stream! {
@@ -454,7 +454,7 @@ mod tests {
 
     /// Every SCAN command each fake node received, keyed by node address and
     /// recorded as the raw argument list.
-    type ScanLog = Arc<Mutex<HashMap<String, Vec<Vec<String>>>>>;
+    type ScanLog = Arc<Mutex<HashMap<String, Vec<Vec<Bytes>>>>>;
 
     /// Counts `SCAN` commands in flight across all fake nodes at once, so a test
     /// can assert how many masters were being paged at the same moment.
@@ -504,7 +504,7 @@ mod tests {
     /// handles nothing else. It is a request reader, not a RESP parser -- but
     /// it does have to be exact, because the auto-pipeline worker can deliver
     /// several commands in one read and one reply per read would desync.
-    fn take_request(buf: &mut Vec<u8>) -> Option<Vec<String>> {
+    fn take_request(buf: &mut Vec<u8>) -> Option<Vec<Bytes>> {
         fn read_line(buf: &[u8], pos: &mut usize) -> Option<String> {
             let start = *pos;
             let idx = buf
@@ -529,7 +529,7 @@ mod tests {
             if buf.len() < pos + len + 2 {
                 return None;
             }
-            args.push(String::from_utf8_lossy(&buf[pos..pos + len]).into_owned());
+            args.push(Bytes::copy_from_slice(&buf[pos..pos + len]));
             pos += len + 2;
         }
 
@@ -666,30 +666,30 @@ mod tests {
                         buf.extend_from_slice(&chunk[..n]);
                         let mut out: Vec<u8> = Vec::new();
                         while let Some(args) = take_request(&mut buf) {
-                            match args[0].to_uppercase().as_str() {
-                                "CLUSTER" => match slots.lock().unwrap().take_reply() {
+                            if args[0].as_ref().eq_ignore_ascii_case(b"CLUSTER") {
+                                match slots.lock().unwrap().take_reply() {
                                     Some(bytes) => out.extend_from_slice(&bytes),
                                     None => out.extend_from_slice(b"-ERR no topology\r\n"),
-                                },
-                                "SCAN" => {
-                                    log.lock()
-                                        .unwrap()
-                                        .entry(node_addr.clone())
-                                        .or_default()
-                                        .push(args.clone());
-                                    probe.scanning().await;
-                                    if behavior == ScanBehavior::Fail {
-                                        out.extend_from_slice(b"-ERR scan refused\r\n");
-                                    } else {
-                                        let (cursor, keys) = pages
-                                            .get(page)
-                                            .cloned()
-                                            .unwrap_or_else(|| ("0".to_string(), Vec::new()));
-                                        page += 1;
-                                        out.extend_from_slice(&scan_reply(&cursor, &keys));
-                                    }
                                 }
-                                _ => out.extend_from_slice(b"-ERR fake node\r\n"),
+                            } else if args[0].as_ref().eq_ignore_ascii_case(b"SCAN") {
+                                log.lock()
+                                    .unwrap()
+                                    .entry(node_addr.clone())
+                                    .or_default()
+                                    .push(args.clone());
+                                probe.scanning().await;
+                                if behavior == ScanBehavior::Fail {
+                                    out.extend_from_slice(b"-ERR scan refused\r\n");
+                                } else {
+                                    let (cursor, keys) = pages
+                                        .get(page)
+                                        .cloned()
+                                        .unwrap_or_else(|| ("0".to_string(), Vec::new()));
+                                    page += 1;
+                                    out.extend_from_slice(&scan_reply(&cursor, &keys));
+                                }
+                            } else {
+                                out.extend_from_slice(b"-ERR fake node\r\n");
                             }
                         }
                         if !out.is_empty() && sock.write_all(&out).await.is_err() {
@@ -862,14 +862,15 @@ mod tests {
         for addr in &fake.sorted_addrs {
             let calls = log.get(addr).unwrap_or_else(|| panic!("no SCAN on {addr}"));
             assert_eq!(calls.len(), 2, "{addr} should have been paged twice");
-            assert_eq!(calls[0][1], "0", "the first page starts at cursor 0");
+            assert_eq!(calls[0][1], b"0"[..], "the first page starts at cursor 0");
             assert_eq!(
-                calls[1][1], "1",
+                calls[1][1],
+                b"1"[..],
                 "the second page continues from the returned cursor"
             );
             for call in calls {
                 assert!(
-                    call.contains(&"user:*".to_string()),
+                    call.contains(&Bytes::from_static(b"user:*")),
                     "the pattern is forwarded to every node"
                 );
             }
@@ -906,9 +907,29 @@ mod tests {
             for call in log.get(addr).expect("node scanned") {
                 let i = call
                     .iter()
-                    .position(|a| a.eq_ignore_ascii_case("COUNT"))
+                    .position(|a| a.as_ref().eq_ignore_ascii_case(b"COUNT"))
                     .expect("COUNT is forwarded");
-                assert_eq!(call[i + 1], "32");
+                assert_eq!(call[i + 1], b"32"[..]);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cluster_scan_forwards_binary_patterns_exactly() {
+        let fake = healthy_cluster().await;
+        let pattern = b"user:\0\xff\r\n*".as_slice();
+
+        let items = collect_ok(ScanClusterStream::scan(&fake.client, pattern)).await;
+        assert_eq!(items.len(), 9);
+
+        let expected = Bytes::copy_from_slice(pattern);
+        let log = fake.log.lock().unwrap();
+        for addr in &fake.sorted_addrs {
+            for call in log.get(addr).expect("node scanned") {
+                assert!(
+                    call.contains(&expected),
+                    "binary pattern was not forwarded exactly to {addr}: {call:?}"
+                );
             }
         }
     }
@@ -1031,15 +1052,22 @@ mod tests {
         for addr in &fake.sorted_addrs {
             let calls = log.get(addr).unwrap_or_else(|| panic!("no SCAN on {addr}"));
             assert_eq!(calls.len(), 2, "{addr} should have been paged twice");
-            assert_eq!(calls[0][1], "0", "the first page starts at cursor 0");
-            assert_eq!(calls[1][1], "1", "the second page continues the cursor");
+            assert_eq!(calls[0][1], b"0"[..], "the first page starts at cursor 0");
+            assert_eq!(
+                calls[1][1],
+                b"1"[..],
+                "the second page continues the cursor"
+            );
             for call in calls {
-                assert!(call.contains(&"user:*".to_string()), "pattern forwarded");
+                assert!(
+                    call.contains(&Bytes::from_static(b"user:*")),
+                    "pattern forwarded"
+                );
                 let i = call
                     .iter()
-                    .position(|a| a.eq_ignore_ascii_case("COUNT"))
+                    .position(|a| a.as_ref().eq_ignore_ascii_case(b"COUNT"))
                     .expect("COUNT is forwarded");
-                assert_eq!(call[i + 1], "32");
+                assert_eq!(call[i + 1], b"32"[..]);
             }
         }
     }
@@ -1311,7 +1339,7 @@ mod tests {
 
     /// The addresses that received at least one SCAN, in sorted-address order.
     fn visit_order_of_scanned(
-        log: &HashMap<String, Vec<Vec<String>>>,
+        log: &HashMap<String, Vec<Vec<Bytes>>>,
         sorted_addrs: &[String],
     ) -> Vec<String> {
         sorted_addrs
