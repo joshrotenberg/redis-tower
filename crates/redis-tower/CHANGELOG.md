@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- raise the declared Tokio dependency floor from 1.42 to 1.47 for the
+  auto-pipeline shutdown notification API
 - **Breaking (next minor, 0.2.0):** managed stream consumers now preserve
   stream keys and field names as exact `Bytes` instead of applying lossy UTF-8
   conversion. This change must not ship in a `0.1.x` patch release; the
