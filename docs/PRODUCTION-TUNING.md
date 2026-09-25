@@ -305,9 +305,12 @@ This prevents newly enqueueing a side effect after its caller budget is gone.
 Cluster clients retain the same deadline through node lookup, routing,
 redirects, and pinned-node execution; multiplexed Sentinel dispatch and the
 resilient client's offline queue retain it through their own waits as well.
-If a deadline interrupts an exchange after bytes reach the wire, redis-tower
-quarantines that connection instead of allowing its late response to poison a
-later request.
+If a deadline interrupts a direct or pool-member exchange after bytes reach
+the wire, that socket is quarantined instead of allowing its late response to
+poison a later request. On `MultiplexedClient`, the caller abandons its response
+but the worker retains the in-flight batch, reads its replies for alignment,
+and can keep a still-usable connection. In both cases, server execution remains
+unknown to the timed-out caller.
 The caller-level timeout still is not a substitute for worker-level
 `response_timeout`, which detects a connection whose batch never returns. Use
 both when a multiplexed production client needs bounded caller latency and

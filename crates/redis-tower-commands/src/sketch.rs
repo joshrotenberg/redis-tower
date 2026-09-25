@@ -1,9 +1,10 @@
 //! Count-Min Sketch and Top-K probabilistic data structures.
 //!
 //! Available with the `sketch` feature (included by `stack`) and requiring the
-//! RedisBloom module on the server. Initialization and mutation commands return
-//! status/count vectors; query commands return typed estimates or membership
-//! booleans.
+//! RedisBloom module on the server. Count-Min Sketch updates and queries return
+//! count vectors. Top-K add/increment operations return optional evicted items,
+//! membership queries return booleans, and list/info commands retain raw
+//! [`Frame`] reply shapes.
 //!
 //! ```
 //! use redis_tower_commands::CmsInitByDim;

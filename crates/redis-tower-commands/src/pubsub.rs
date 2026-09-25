@@ -3,9 +3,10 @@
 //! [`Publish`] and [`SPublish`] are ordinary request/response commands.
 //! Subscription mode is stateful and is owned by
 //! [`redis_tower::PubSubConnection`](https://docs.rs/redis-tower/latest/redis_tower/struct.PubSubConnection.html),
-//! not by repeatedly executing the low-level subscribe command builders on a
-//! shared client. Introspection replies are typed channel lists,
-//! channel/count pairs, or counts as documented on each command.
+//! not exposed as typed request/response commands in this crate. Do not send
+//! raw `SUBSCRIBE` commands through a shared client. Introspection replies are
+//! typed channel lists, channel/count pairs, or counts as documented on each
+//! command.
 //!
 //! ```
 //! use redis_tower_commands::Publish;

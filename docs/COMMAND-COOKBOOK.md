@@ -387,7 +387,8 @@ graceful shutdown.
 ## Feature-gated and versioned families
 
 Cargo feature availability, Redis server availability, and command version are
-three separate checks. Building with `stack` proves that the Rust builders are
+three separate checks. Building with `commands-stack` on the `redis-tower`
+facade (or `stack` on `redis-tower-commands`) proves that the Rust builders are
 present; it does not prove a deployment has RedisJSON, Search, Bloom, or
 TimeSeries. Native Array commands require Redis 8.8+, and Vector Sets require a
 supporting Redis 8 server.

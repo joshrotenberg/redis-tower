@@ -1,8 +1,10 @@
 //! Geospatial indexes backed by Redis sorted sets.
 //!
-//! [`GeoAdd`] stores longitude/latitude members, while search and distance
-//! commands return typed counts, coordinates, hashes, or optional distances.
-//! Units are explicit through [`GeoUnit`].
+//! [`GeoAdd`] stores longitude/latitude members. [`GeoSearch`] returns matching
+//! member names, [`GeoPos`] returns optional coordinates, [`GeoHash`] returns
+//! optional geohashes, [`GeoSearchStore`] returns a stored count, and
+//! [`GeoDist`] returns an optional distance. Units are explicit through
+//! [`GeoUnit`].
 //!
 //! ```
 //! use redis_tower_commands::GeoAdd;
