@@ -9,7 +9,7 @@ mod common;
 use std::fmt;
 
 use common::redis_addr;
-use redis_tower::commands::{RawCommand, Set};
+use redis_tower::commands::{HSet, RPush, RawCommand, SAdd, Set, XAdd, ZAdd};
 use redis_tower::{
     Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
     TransactionResult,
@@ -300,6 +300,17 @@ impl TowerAdapter {
             self.protocol,
             &self.server_version,
         )
+    }
+
+    async fn typed<C>(&mut self, step: &str, command: C) -> Result<C::Response, ObservedError>
+    where
+        C: Command,
+    {
+        let diagnostic = self.diagnostic(step);
+        self.connection
+            .execute(command)
+            .await
+            .map_err(|error| tower_error(error, diagnostic))
     }
 
     async fn raw(&mut self, command: &str, args: &[&[u8]]) -> Result<SemanticValue, ObservedError> {
@@ -683,13 +694,14 @@ async fn diff_mcp_typed_set_builder_options() {
             .await
             .unwrap();
 
-        let tower_context = pair.diagnostic("SET NX GET", "redis-tower");
         let tower_nx = pair
             .tower
-            .connection
-            .execute(Set::new(tower_typed_key.clone(), "replacement").nx().get())
+            .typed(
+                "SET NX GET",
+                Set::new(tower_typed_key.clone(), "replacement").nx().get(),
+            )
             .await
-            .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
+            .unwrap();
         let redis_context = pair.diagnostic("SET NX GET", "redis-rs");
         let redis_nx = redis::cmd("SET")
             .arg(&redis_key)
@@ -710,13 +722,14 @@ async fn diff_mcp_typed_set_builder_options() {
         pair.same("SET NX stored value", tower, redis_rs);
 
         pair.reset(&tower_key, &redis_key).await;
-        let tower_context = pair.diagnostic("SET XX GET", "redis-tower");
         let tower_xx = pair
             .tower
-            .connection
-            .execute(Set::new(tower_typed_key.clone(), "replacement").xx().get())
+            .typed(
+                "SET XX GET",
+                Set::new(tower_typed_key.clone(), "replacement").xx().get(),
+            )
             .await
-            .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
+            .unwrap();
         let redis_context = pair.diagnostic("SET XX GET", "redis-rs");
         let redis_xx = redis::cmd("SET")
             .arg(&redis_key)
@@ -742,14 +755,14 @@ async fn diff_mcp_typed_set_builder_options() {
 async fn diff_mcp_hash_collection_and_stream_shapes() {
     for protocol in Protocol::ALL {
         let mut pair = Pair::connect("collections-streams", protocol).await;
-        let tower_hash = pair.key("tower", "hash");
-        let redis_hash = pair.key("redis-rs", "hash");
+        let tower_hash = pair.binary_key("tower", "hash");
+        let redis_hash = pair.binary_key("redis-rs", "hash");
         pair.reset(&tower_hash, &redis_hash).await;
         let binary = [0xff, 0, 0x80];
         pair.tower
-            .raw(
-                "HSET",
-                &[&tower_hash, b"field-b", &binary, b"field-a", b"one"],
+            .typed(
+                "typed HSET",
+                HSet::new(&tower_hash, b"field-b", binary).field(b"field-a", b"one"),
             )
             .await
             .unwrap();
@@ -764,11 +777,17 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         let redis_rs = pairs(pair.redis_rs.raw("HGETALL", &[&redis_hash]).await.unwrap());
         pair.same("hash-map", tower, redis_rs);
 
-        let tower_list = pair.key("tower", "list");
-        let redis_list = pair.key("redis-rs", "list");
+        let tower_list = pair.binary_key("tower", "list");
+        let redis_list = pair.binary_key("redis-rs", "list");
         pair.reset(&tower_list, &redis_list).await;
         pair.tower
-            .raw("RPUSH", &[&tower_list, b"first", &binary, b"third"])
+            .typed(
+                "typed RPUSH",
+                RPush::elements(
+                    &tower_list,
+                    [b"first".as_slice(), &binary, b"third".as_slice()],
+                ),
+            )
             .await
             .unwrap();
         pair.redis_rs
@@ -787,11 +806,17 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
             .unwrap();
         pair.same("ordered-list", tower, redis_rs);
 
-        let tower_set = pair.key("tower", "set");
-        let redis_set = pair.key("redis-rs", "set");
+        let tower_set = pair.binary_key("tower", "set");
+        let redis_set = pair.binary_key("redis-rs", "set");
         pair.reset(&tower_set, &redis_set).await;
         pair.tower
-            .raw("SADD", &[&tower_set, b"beta", b"alpha", &binary])
+            .typed(
+                "typed SADD",
+                SAdd::members(
+                    &tower_set,
+                    [b"beta".as_slice(), b"alpha".as_slice(), &binary],
+                ),
+            )
             .await
             .unwrap();
         pair.redis_rs
@@ -802,11 +827,16 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         let redis_rs = unordered(pair.redis_rs.raw("SMEMBERS", &[&redis_set]).await.unwrap());
         pair.same("unordered-set", tower, redis_rs);
 
-        let tower_zset = pair.key("tower", "zset");
-        let redis_zset = pair.key("redis-rs", "zset");
+        let tower_zset = pair.binary_key("tower", "zset");
+        let redis_zset = pair.binary_key("redis-rs", "zset");
         pair.reset(&tower_zset, &redis_zset).await;
         pair.tower
-            .raw("ZADD", &[&tower_zset, b"1", b"beta", b"2.5", b"alpha"])
+            .typed(
+                "typed ZADD",
+                ZAdd::new(&tower_zset)
+                    .member(1.0, b"beta")
+                    .member(2.5, b"alpha"),
+            )
             .await
             .unwrap();
         pair.redis_rs
@@ -827,11 +857,14 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         );
         pair.same("zset-pairs", tower, redis_rs);
 
-        let tower_stream = pair.key("tower", "stream");
-        let redis_stream = pair.key("redis-rs", "stream");
+        let tower_stream = pair.binary_key("tower", "stream");
+        let redis_stream = pair.binary_key("redis-rs", "stream");
         pair.reset(&tower_stream, &redis_stream).await;
         pair.tower
-            .raw("XADD", &[&tower_stream, b"1-0", b"field", &binary])
+            .typed(
+                "typed XADD",
+                XAdd::new(&tower_stream).id("1-0").field(b"field", binary),
+            )
             .await
             .unwrap();
         pair.redis_rs
@@ -878,6 +911,58 @@ async fn diff_mcp_errors_raw_and_administrative_replies() {
             .await
             .unwrap_err();
         pair.same_error("wrongtype", tower, redis_rs);
+
+        const SENSITIVE_TYPED_ARGUMENT: &[u8] = b"DIFFERENTIAL_TYPED_SECRET";
+        let typed_error = pair
+            .tower
+            .typed(
+                "typed HSET wrongtype",
+                HSet::new(
+                    &tower_wrongtype,
+                    SENSITIVE_TYPED_ARGUMENT,
+                    SENSITIVE_TYPED_ARGUMENT,
+                ),
+            )
+            .await
+            .unwrap_err();
+        let expected_diagnostic = pair.diagnostic("typed HSET wrongtype", "redis-tower");
+        assert_eq!(typed_error.diagnostic, expected_diagnostic);
+        for required in [
+            format!("case={}", pair.case),
+            "step=typed HSET wrongtype".to_owned(),
+            "side=redis-tower".to_owned(),
+            format!("protocol={}", pair.protocol),
+            format!("server={}", pair.server_version),
+            format!("redis-tower={REDIS_TOWER_VERSION}"),
+            format!("redis-rs={REDIS_RS_VERSION}"),
+            format!("seed={CORPUS_SEED:#x}"),
+        ] {
+            assert!(
+                typed_error.diagnostic.contains(&required),
+                "typed diagnostic omitted {required}"
+            );
+        }
+        assert!(
+            !typed_error
+                .diagnostic
+                .as_bytes()
+                .windows(SENSITIVE_TYPED_ARGUMENT.len())
+                .any(|window| window == SENSITIVE_TYPED_ARGUMENT),
+            "typed diagnostic exposed a sensitive command argument"
+        );
+        let redis_rs = pair
+            .redis_rs
+            .raw(
+                "HSET",
+                &[
+                    &redis_wrongtype,
+                    SENSITIVE_TYPED_ARGUMENT,
+                    SENSITIVE_TYPED_ARGUMENT,
+                ],
+            )
+            .await
+            .unwrap_err();
+        pair.same_error("typed-wrongtype", typed_error, redis_rs);
 
         let tower_counter = pair.key("tower", "overflow");
         let redis_counter = pair.key("redis-rs", "overflow");
@@ -1204,12 +1289,13 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
         .raw("SET", &[&redis_key, b"existing"])
         .await
         .unwrap();
-    let tower_context = pair.diagnostic("SET NX GET negative control", "redis-tower");
     pair.tower
-        .connection
-        .execute(Set::new(tower_typed_key, "replacement").nx().get())
+        .typed(
+            "SET NX GET negative control",
+            Set::new(tower_typed_key, "replacement").nx().get(),
+        )
         .await
-        .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
+        .unwrap();
     let redis_context = pair.diagnostic("SET GET without NX negative control", "redis-rs");
     redis::cmd("SET")
         .arg(&redis_key)

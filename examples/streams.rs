@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(streams) = entries {
         for (name, entries) in &streams {
             for entry in entries {
-                println!("[{name}] {}: {:?}", entry.id, entry.fields);
+                println!("[{name:?}] {}: {:?}", entry.id, entry.fields);
             }
         }
     }

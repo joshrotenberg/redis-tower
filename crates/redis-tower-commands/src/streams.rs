@@ -4,13 +4,15 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// A stream entry: an ID and a list of field-value pairs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamEntry {
     /// Redis stream entry ID.
     pub id: String,
     /// Ordered field-value pairs stored in the entry.
-    pub fields: Vec<(String, Bytes)>,
+    pub fields: Vec<(Bytes, Bytes)>,
 }
 
 /// XADD key \[NOMKSTREAM\] \[MAXLEN|MINID \[=|~\] threshold\] \[*|id\] field value \[field value ...\]
@@ -18,20 +20,20 @@ pub struct StreamEntry {
 /// Appends an entry to a stream. Returns the entry ID.
 #[derive(Clone)]
 pub struct XAdd {
-    key: String,
-    id: String,
-    fields: Vec<(String, String)>,
+    key: CommandArg,
+    id: CommandArg,
+    fields: Vec<(CommandArg, CommandArg)>,
     nomkstream: bool,
-    maxlen: Option<(bool, u64)>,   // (approximate, count)
-    minid: Option<(bool, String)>, // (approximate, id)
+    maxlen: Option<(bool, u64)>,       // (approximate, count)
+    minid: Option<(bool, CommandArg)>, // (approximate, id)
 }
 
 impl XAdd {
     /// Create an XADD with auto-generated ID (*).
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
-            id: "*".to_string(),
+            id: "*".into(),
             fields: Vec::new(),
             nomkstream: false,
             maxlen: None,
@@ -40,13 +42,13 @@ impl XAdd {
     }
 
     /// Set a specific entry ID instead of auto-generated.
-    pub fn id(mut self, id: impl Into<String>) -> Self {
+    pub fn id(mut self, id: impl Into<CommandArg>) -> Self {
         self.id = id.into();
         self
     }
 
     /// Add a field-value pair.
-    pub fn field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn field(mut self, name: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.fields.push((name.into(), value.into()));
         self
     }
@@ -76,7 +78,7 @@ impl Command for XAdd {
     type Response = String;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("XADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("XADD"), bulk(self.key.as_bytes())];
         if self.nomkstream {
             args.push(bulk("NOMKSTREAM"));
         }
@@ -92,12 +94,12 @@ impl Command for XAdd {
             if *approx {
                 args.push(bulk("~"));
             }
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
-        args.push(bulk(self.id.as_str()));
+        args.push(bulk(self.id.as_bytes()));
         for (name, value) in &self.fields {
-            args.push(bulk(name.as_str()));
-            args.push(bulk(value.as_str()));
+            args.push(bulk(name.as_bytes()));
+            args.push(bulk(value.as_bytes()));
         }
         array(args)
     }
@@ -134,14 +136,14 @@ pub enum XCfgSetOption {
 /// repeated execution could erase IDs recorded after the first execution.
 #[derive(Clone)]
 pub struct XCfgSet {
-    key: String,
+    key: CommandArg,
     idmp_duration: Option<u64>,
     idmp_maxsize: Option<u64>,
 }
 
 impl XCfgSet {
     /// Create an XCFGSET command with its required initial option.
-    pub fn new(key: impl Into<String>, option: XCfgSetOption) -> Self {
+    pub fn new(key: impl Into<CommandArg>, option: XCfgSetOption) -> Self {
         let (idmp_duration, idmp_maxsize) = match option {
             XCfgSetOption::IdmpDuration(seconds) => (Some(seconds), None),
             XCfgSetOption::IdmpMaxSize(entries) => (None, Some(entries)),
@@ -174,7 +176,7 @@ impl Command for XCfgSet {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("XCFGSET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("XCFGSET"), bulk(self.key.as_bytes())];
         if let Some(seconds) = self.idmp_duration {
             args.push(bulk("IDMP-DURATION"));
             args.push(bulk(seconds.to_string()));
@@ -208,19 +210,19 @@ impl Command for XCfgSet {
 /// use the IDMP options on `XADD` instead.
 #[derive(Clone)]
 pub struct XIdmpRecord {
-    key: String,
-    producer_id: String,
-    idempotency_id: String,
-    stream_id: String,
+    key: CommandArg,
+    producer_id: CommandArg,
+    idempotency_id: CommandArg,
+    stream_id: CommandArg,
 }
 
 impl XIdmpRecord {
     /// Create an XIDMPRECORD command.
     pub fn new(
-        key: impl Into<String>,
-        producer_id: impl Into<String>,
-        idempotency_id: impl Into<String>,
-        stream_id: impl Into<String>,
+        key: impl Into<CommandArg>,
+        producer_id: impl Into<CommandArg>,
+        idempotency_id: impl Into<CommandArg>,
+        stream_id: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -237,10 +239,10 @@ impl Command for XIdmpRecord {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("XIDMPRECORD"),
-            bulk(self.key.as_str()),
-            bulk(self.producer_id.as_str()),
-            bulk(self.idempotency_id.as_str()),
-            bulk(self.stream_id.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.producer_id.as_bytes()),
+            bulk(self.idempotency_id.as_bytes()),
+            bulk(self.stream_id.as_bytes()),
         ])
     }
 
@@ -268,12 +270,12 @@ impl Command for XIdmpRecord {
 /// Returns the number of entries in a stream.
 #[derive(Clone)]
 pub struct XLen {
-    key: String,
+    key: CommandArg,
 }
 
 impl XLen {
     /// Create a new [`XLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -282,7 +284,7 @@ impl Command for XLen {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("XLEN"), bulk(self.key.as_str())])
+        array(vec![bulk("XLEN"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -305,25 +307,29 @@ impl Command for XLen {
 /// Returns entries in a stream within a range of IDs.
 #[derive(Clone)]
 pub struct XRange {
-    key: String,
-    start: String,
-    end: String,
+    key: CommandArg,
+    start: CommandArg,
+    end: CommandArg,
     count: Option<u64>,
 }
 
 impl XRange {
     /// Query all entries: start="-", end="+".
-    pub fn all(key: impl Into<String>) -> Self {
+    pub fn all(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
-            start: "-".to_string(),
-            end: "+".to_string(),
+            start: "-".into(),
+            end: "+".into(),
             count: None,
         }
     }
 
     /// Query a specific range.
-    pub fn new(key: impl Into<String>, start: impl Into<String>, end: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        start: impl Into<CommandArg>,
+        end: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             start: start.into(),
@@ -345,9 +351,9 @@ impl Command for XRange {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XRANGE"),
-            bulk(self.key.as_str()),
-            bulk(self.start.as_str()),
-            bulk(self.end.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.start.as_bytes()),
+            bulk(self.end.as_bytes()),
         ];
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -370,25 +376,29 @@ impl Command for XRange {
 /// Like XRANGE but in reverse order.
 #[derive(Clone)]
 pub struct XRevRange {
-    key: String,
-    end: String,
-    start: String,
+    key: CommandArg,
+    end: CommandArg,
+    start: CommandArg,
     count: Option<u64>,
 }
 
 impl XRevRange {
     /// Create the [`XRevRange`] command using the `all` form.
-    pub fn all(key: impl Into<String>) -> Self {
+    pub fn all(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
-            end: "+".to_string(),
-            start: "-".to_string(),
+            end: "+".into(),
+            start: "-".into(),
             count: None,
         }
     }
 
     /// Create a new [`XRevRange`] command.
-    pub fn new(key: impl Into<String>, end: impl Into<String>, start: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        end: impl Into<CommandArg>,
+        start: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             end: end.into(),
@@ -410,9 +420,9 @@ impl Command for XRevRange {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XREVRANGE"),
-            bulk(self.key.as_str()),
-            bulk(self.end.as_str()),
-            bulk(self.start.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.end.as_bytes()),
+            bulk(self.start.as_bytes()),
         ];
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -435,13 +445,13 @@ impl Command for XRevRange {
 /// Removes entries from a stream. Returns the number deleted.
 #[derive(Clone)]
 pub struct XDel {
-    key: String,
-    ids: Vec<String>,
+    key: CommandArg,
+    ids: Vec<CommandArg>,
 }
 
 impl XDel {
     /// Create a new [`XDel`] command.
-    pub fn new(key: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, id: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             ids: vec![id.into()],
@@ -449,7 +459,10 @@ impl XDel {
     }
 
     /// Create the [`XDel`] command for the supplied ids.
-    pub fn ids(key: impl Into<String>, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn ids(
+        key: impl Into<CommandArg>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             ids: ids.into_iter().map(Into::into).collect(),
@@ -461,9 +474,9 @@ impl Command for XDel {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("XDEL"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("XDEL"), bulk(self.key.as_bytes())];
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -488,14 +501,14 @@ impl Command for XDel {
 /// Trims a stream. Returns the number of entries deleted.
 #[derive(Clone)]
 pub struct XTrim {
-    key: String,
+    key: CommandArg,
     maxlen: Option<(bool, u64)>,
-    minid: Option<(bool, String)>,
+    minid: Option<(bool, CommandArg)>,
 }
 
 impl XTrim {
     /// Create the [`XTrim`] command using the `maxlen` form.
-    pub fn maxlen(key: impl Into<String>, count: u64) -> Self {
+    pub fn maxlen(key: impl Into<CommandArg>, count: u64) -> Self {
         Self {
             key: key.into(),
             maxlen: Some((false, count)),
@@ -504,7 +517,7 @@ impl XTrim {
     }
 
     /// Create the [`XTrim`] command using the `maxlen_approx` form.
-    pub fn maxlen_approx(key: impl Into<String>, count: u64) -> Self {
+    pub fn maxlen_approx(key: impl Into<CommandArg>, count: u64) -> Self {
         Self {
             key: key.into(),
             maxlen: Some((true, count)),
@@ -513,7 +526,7 @@ impl XTrim {
     }
 
     /// Create the [`XTrim`] command using the `minid` form.
-    pub fn minid(key: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn minid(key: impl Into<CommandArg>, id: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             maxlen: None,
@@ -526,7 +539,7 @@ impl Command for XTrim {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("XTRIM"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("XTRIM"), bulk(self.key.as_bytes())];
         if let Some((approx, count)) = &self.maxlen {
             args.push(bulk("MAXLEN"));
             if *approx {
@@ -539,7 +552,7 @@ impl Command for XTrim {
             if *approx {
                 args.push(bulk("~"));
             }
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -564,14 +577,18 @@ impl Command for XTrim {
 /// Acknowledges stream entries in a consumer group. Returns count acknowledged.
 #[derive(Clone)]
 pub struct XAck {
-    key: String,
-    group: String,
-    ids: Vec<String>,
+    key: CommandArg,
+    group: CommandArg,
+    ids: Vec<CommandArg>,
 }
 
 impl XAck {
     /// Create a new [`XAck`] command.
-    pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        id: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -581,9 +598,9 @@ impl XAck {
 
     /// Create the [`XAck`] command for the supplied ids.
     pub fn ids(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        ids: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -599,11 +616,11 @@ impl Command for XAck {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XACK"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ];
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -651,10 +668,10 @@ impl XNackMode {
 /// acknowledging them (Redis 8.8+). Returns the number of messages released.
 #[derive(Clone)]
 pub struct XNack {
-    key: String,
-    group: String,
+    key: CommandArg,
+    group: CommandArg,
     mode: XNackMode,
-    ids: Vec<String>,
+    ids: Vec<CommandArg>,
     retrycount: Option<u64>,
     force: bool,
 }
@@ -662,10 +679,10 @@ pub struct XNack {
 impl XNack {
     /// Create an XNACK command for one or more stream entry IDs.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
         mode: XNackMode,
-        ids: impl IntoIterator<Item = impl Into<String>>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -698,14 +715,14 @@ impl Command for XNack {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XNACK"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
             bulk(self.mode.as_str()),
             bulk("IDS"),
             bulk(self.ids.len().to_string()),
         ];
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         if let Some(count) = self.retrycount {
             args.push(bulk("RETRYCOUNT"));
@@ -806,18 +823,18 @@ fn parse_stream_status_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
 /// ```
 #[derive(Clone)]
 pub struct XAckDel {
-    key: String,
-    group: String,
+    key: CommandArg,
+    group: CommandArg,
     policy: Option<StreamRefPolicy>,
-    ids: Vec<String>,
+    ids: Vec<CommandArg>,
 }
 
 impl XAckDel {
     /// Create a new [`XAckDel`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        ids: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -840,8 +857,8 @@ impl Command for XAckDel {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XACKDEL"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ];
         if let Some(policy) = &self.policy {
             args.push(bulk(policy.as_str()));
@@ -849,7 +866,7 @@ impl Command for XAckDel {
         args.push(bulk("IDS"));
         args.push(bulk(self.ids.len().to_string()));
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -888,14 +905,17 @@ impl Command for XAckDel {
 /// ```
 #[derive(Clone)]
 pub struct XDelEx {
-    key: String,
+    key: CommandArg,
     policy: Option<StreamRefPolicy>,
-    ids: Vec<String>,
+    ids: Vec<CommandArg>,
 }
 
 impl XDelEx {
     /// Create a new [`XDelEx`] command.
-    pub fn new(key: impl Into<String>, ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             policy: None,
@@ -914,14 +934,14 @@ impl Command for XDelEx {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("XDELEX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("XDELEX"), bulk(self.key.as_bytes())];
         if let Some(policy) = &self.policy {
             args.push(bulk(policy.as_str()));
         }
         args.push(bulk("IDS"));
         args.push(bulk(self.ids.len().to_string()));
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -940,16 +960,20 @@ impl Command for XDelEx {
 /// Creates a consumer group.
 #[derive(Clone)]
 pub struct XGroupCreate {
-    key: String,
-    group: String,
-    id: String,
+    key: CommandArg,
+    group: CommandArg,
+    id: CommandArg,
     mkstream: bool,
 }
 
 impl XGroupCreate {
     /// Create a group starting from the given ID.
     /// Use "$" to only receive new entries, "0" for all existing entries.
-    pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        id: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -972,9 +996,9 @@ impl Command for XGroupCreate {
         let mut args = vec![
             bulk("XGROUP"),
             bulk("CREATE"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.id.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.id.as_bytes()),
         ];
         if self.mkstream {
             args.push(bulk("MKSTREAM"));
@@ -1002,13 +1026,13 @@ impl Command for XGroupCreate {
 /// Destroys a consumer group.
 #[derive(Clone)]
 pub struct XGroupDestroy {
-    key: String,
-    group: String,
+    key: CommandArg,
+    group: CommandArg,
 }
 
 impl XGroupDestroy {
     /// Create a new [`XGroupDestroy`] command.
-    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, group: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -1023,8 +1047,8 @@ impl Command for XGroupDestroy {
         array(vec![
             bulk("XGROUP"),
             bulk("DESTROY"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ])
     }
 
@@ -1048,9 +1072,9 @@ impl Command for XGroupDestroy {
 /// Read from streams as a consumer group member.
 #[derive(Clone)]
 pub struct XReadGroup {
-    group: String,
-    consumer: String,
-    streams: Vec<(String, String)>,
+    group: CommandArg,
+    consumer: CommandArg,
+    streams: Vec<(CommandArg, CommandArg)>,
     count: Option<u64>,
     block: Option<u64>,
 }
@@ -1058,21 +1082,21 @@ pub struct XReadGroup {
 impl XReadGroup {
     /// Read new entries (id = ">") from a single stream.
     pub fn new(
-        group: impl Into<String>,
-        consumer: impl Into<String>,
-        key: impl Into<String>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
+        key: impl Into<CommandArg>,
     ) -> Self {
         Self {
             group: group.into(),
             consumer: consumer.into(),
-            streams: vec![(key.into(), ">".to_string())],
+            streams: vec![(key.into(), ">".into())],
             count: None,
             block: None,
         }
     }
 
     /// Add another stream to read from.
-    pub fn stream(mut self, key: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn stream(mut self, key: impl Into<CommandArg>, id: impl Into<CommandArg>) -> Self {
         self.streams.push((key.into(), id.into()));
         self
     }
@@ -1092,7 +1116,7 @@ impl XReadGroup {
     /// Override the ID for all streams already added.
     ///
     /// Use `"0"` to read pending entries or `">"` for new entries.
-    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+    pub fn with_id(mut self, id: impl Into<CommandArg>) -> Self {
         let id = id.into();
         for stream in &mut self.streams {
             stream.1 = id.clone();
@@ -1102,14 +1126,14 @@ impl XReadGroup {
 }
 
 impl Command for XReadGroup {
-    type Response = Vec<(String, Vec<StreamEntry>)>;
+    type Response = Vec<(Bytes, Vec<StreamEntry>)>;
 
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XREADGROUP"),
             bulk("GROUP"),
-            bulk(self.group.as_str()),
-            bulk(self.consumer.as_str()),
+            bulk(self.group.as_bytes()),
+            bulk(self.consumer.as_bytes()),
         ];
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -1121,10 +1145,10 @@ impl Command for XReadGroup {
         }
         args.push(bulk("STREAMS"));
         for (key, _) in &self.streams {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         for (_, id) in &self.streams {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -1151,14 +1175,14 @@ impl Command for XReadGroup {
 /// Read from one or more streams.
 #[derive(Clone)]
 pub struct XRead {
-    streams: Vec<(String, String)>,
+    streams: Vec<(CommandArg, CommandArg)>,
     count: Option<u64>,
     block: Option<u64>,
 }
 
 impl XRead {
     /// Read entries after `id` from a single stream. Use "$" for only new entries.
-    pub fn new(key: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, id: impl Into<CommandArg>) -> Self {
         Self {
             streams: vec![(key.into(), id.into())],
             count: None,
@@ -1167,7 +1191,7 @@ impl XRead {
     }
 
     /// Add another stream to read from.
-    pub fn stream(mut self, key: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn stream(mut self, key: impl Into<CommandArg>, id: impl Into<CommandArg>) -> Self {
         self.streams.push((key.into(), id.into()));
         self
     }
@@ -1186,7 +1210,7 @@ impl XRead {
 }
 
 impl Command for XRead {
-    type Response = Option<Vec<(String, Vec<StreamEntry>)>>;
+    type Response = Option<Vec<(Bytes, Vec<StreamEntry>)>>;
 
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("XREAD")];
@@ -1200,10 +1224,10 @@ impl Command for XRead {
         }
         args.push(bulk("STREAMS"));
         for (key, _) in &self.streams {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         for (_, id) in &self.streams {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         array(args)
     }
@@ -1229,14 +1253,18 @@ impl Command for XRead {
 /// Sets the last-delivered ID for a consumer group.
 #[derive(Clone)]
 pub struct XGroupSetId {
-    key: String,
-    group: String,
-    id: String,
+    key: CommandArg,
+    group: CommandArg,
+    id: CommandArg,
 }
 
 impl XGroupSetId {
     /// Create a new [`XGroupSetId`] command.
-    pub fn new(key: impl Into<String>, group: impl Into<String>, id: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        id: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -1252,9 +1280,9 @@ impl Command for XGroupSetId {
         array(vec![
             bulk("XGROUP"),
             bulk("SETID"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.id.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.id.as_bytes()),
         ])
     }
 
@@ -1278,17 +1306,17 @@ impl Command for XGroupSetId {
 /// Creates a consumer in a consumer group. Returns 1 if created, 0 if already existed.
 #[derive(Clone)]
 pub struct XGroupCreateConsumer {
-    key: String,
-    group: String,
-    consumer: String,
+    key: CommandArg,
+    group: CommandArg,
+    consumer: CommandArg,
 }
 
 impl XGroupCreateConsumer {
     /// Create a new [`XGroupCreateConsumer`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        consumer: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1305,9 +1333,9 @@ impl Command for XGroupCreateConsumer {
         array(vec![
             bulk("XGROUP"),
             bulk("CREATECONSUMER"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.consumer.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.consumer.as_bytes()),
         ])
     }
 
@@ -1331,17 +1359,17 @@ impl Command for XGroupCreateConsumer {
 /// Deletes a consumer from a consumer group. Returns the number of pending entries the consumer had.
 #[derive(Clone)]
 pub struct XGroupDelConsumer {
-    key: String,
-    group: String,
-    consumer: String,
+    key: CommandArg,
+    group: CommandArg,
+    consumer: CommandArg,
 }
 
 impl XGroupDelConsumer {
     /// Create a new [`XGroupDelConsumer`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        consumer: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1358,9 +1386,9 @@ impl Command for XGroupDelConsumer {
         array(vec![
             bulk("XGROUP"),
             bulk("DELCONSUMER"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.consumer.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.consumer.as_bytes()),
         ])
     }
 
@@ -1384,11 +1412,11 @@ impl Command for XGroupDelConsumer {
 /// Claims ownership of pending stream entries.
 #[derive(Clone)]
 pub struct XClaim {
-    key: String,
-    group: String,
-    consumer: String,
+    key: CommandArg,
+    group: CommandArg,
+    consumer: CommandArg,
     min_idle_time: u64,
-    ids: Vec<String>,
+    ids: Vec<CommandArg>,
     idle: Option<u64>,
     time: Option<u64>,
     retrycount: Option<u64>,
@@ -1399,11 +1427,11 @@ pub struct XClaim {
 impl XClaim {
     /// Create a new [`XClaim`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        consumer: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
         min_idle_time: u64,
-        ids: impl IntoIterator<Item = impl Into<String>>,
+        ids: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1456,13 +1484,13 @@ impl Command for XClaim {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XCLAIM"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.consumer.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.consumer.as_bytes()),
             bulk(self.min_idle_time.to_string()),
         ];
         for id in &self.ids {
-            args.push(bulk(id.as_str()));
+            args.push(bulk(id.as_bytes()));
         }
         if let Some(ms) = self.idle {
             args.push(bulk("IDLE"));
@@ -1510,22 +1538,22 @@ pub struct AutoClaimResult {
 /// Automatically claims pending entries that have been idle for at least min-idle-time.
 #[derive(Clone)]
 pub struct XAutoClaim {
-    key: String,
-    group: String,
-    consumer: String,
+    key: CommandArg,
+    group: CommandArg,
+    consumer: CommandArg,
     min_idle_time: u64,
-    start: String,
+    start: CommandArg,
     count: Option<u64>,
 }
 
 impl XAutoClaim {
     /// Create a new [`XAutoClaim`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        consumer: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
         min_idle_time: u64,
-        start: impl Into<String>,
+        start: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1550,11 +1578,11 @@ impl Command for XAutoClaim {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XAUTOCLAIM"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
-            bulk(self.consumer.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
+            bulk(self.consumer.as_bytes()),
             bulk(self.min_idle_time.to_string()),
-            bulk(self.start.as_str()),
+            bulk(self.start.as_bytes()),
         ];
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -1582,7 +1610,7 @@ pub struct PendingSummary {
     /// Largest pending entry ID, or `None` when the list is empty.
     pub max_id: Option<String>,
     /// Pending-entry count for each consumer.
-    pub consumers: Vec<(String, i64)>,
+    pub consumers: Vec<(Bytes, i64)>,
 }
 
 /// XPENDING key group (summary form)
@@ -1590,13 +1618,13 @@ pub struct PendingSummary {
 /// Returns a summary of pending entries for a consumer group.
 #[derive(Clone)]
 pub struct XPendingSummary {
-    key: String,
-    group: String,
+    key: CommandArg,
+    group: CommandArg,
 }
 
 impl XPendingSummary {
     /// Create a new [`XPendingSummary`] command.
-    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, group: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -1610,8 +1638,8 @@ impl Command for XPendingSummary {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("XPENDING"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ])
     }
 
@@ -1630,7 +1658,7 @@ pub struct PendingEntry {
     /// Pending stream entry ID.
     pub id: String,
     /// Consumer that currently owns the entry.
-    pub consumer: String,
+    pub consumer: Bytes,
     /// Milliseconds since the entry was last delivered.
     pub idle_ms: i64,
     /// Number of times the entry has been delivered.
@@ -1642,22 +1670,22 @@ pub struct PendingEntry {
 /// Returns detailed pending entries for a consumer group.
 #[derive(Clone)]
 pub struct XPendingRange {
-    key: String,
-    group: String,
-    start: String,
-    end: String,
+    key: CommandArg,
+    group: CommandArg,
+    start: CommandArg,
+    end: CommandArg,
     count: u64,
-    consumer: Option<String>,
+    consumer: Option<CommandArg>,
     idle: Option<u64>,
 }
 
 impl XPendingRange {
     /// Create a new [`XPendingRange`] command.
     pub fn new(
-        key: impl Into<String>,
-        group: impl Into<String>,
-        start: impl Into<String>,
-        end: impl Into<String>,
+        key: impl Into<CommandArg>,
+        group: impl Into<CommandArg>,
+        start: impl Into<CommandArg>,
+        end: impl Into<CommandArg>,
         count: u64,
     ) -> Self {
         Self {
@@ -1672,7 +1700,7 @@ impl XPendingRange {
     }
 
     /// Filter by consumer name.
-    pub fn consumer(mut self, consumer: impl Into<String>) -> Self {
+    pub fn consumer(mut self, consumer: impl Into<CommandArg>) -> Self {
         self.consumer = Some(consumer.into());
         self
     }
@@ -1690,18 +1718,18 @@ impl Command for XPendingRange {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XPENDING"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ];
         if let Some(ms) = self.idle {
             args.push(bulk("IDLE"));
             args.push(bulk(ms.to_string()));
         }
-        args.push(bulk(self.start.as_str()));
-        args.push(bulk(self.end.as_str()));
+        args.push(bulk(self.start.as_bytes()));
+        args.push(bulk(self.end.as_bytes()));
         args.push(bulk(self.count.to_string()));
         if let Some(c) = &self.consumer {
-            args.push(bulk(c.as_str()));
+            args.push(bulk(c.as_bytes()));
         }
         array(args)
     }
@@ -1739,12 +1767,12 @@ pub struct StreamInfo {
 /// Returns information about a stream.
 #[derive(Clone)]
 pub struct XInfoStream {
-    key: String,
+    key: CommandArg,
 }
 
 impl XInfoStream {
     /// Create a new [`XInfoStream`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1753,7 +1781,11 @@ impl Command for XInfoStream {
     type Response = StreamInfo;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("XINFO"), bulk("STREAM"), bulk(self.key.as_str())])
+        array(vec![
+            bulk("XINFO"),
+            bulk("STREAM"),
+            bulk(self.key.as_bytes()),
+        ])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1769,7 +1801,7 @@ impl Command for XInfoStream {
 #[derive(Debug, Clone, PartialEq)]
 pub struct GroupInfo {
     /// Consumer-group name.
-    pub name: String,
+    pub name: Bytes,
     /// Number of consumers registered with the group.
     pub consumers: i64,
     /// Number of entries in the group's pending-entry list.
@@ -1783,12 +1815,12 @@ pub struct GroupInfo {
 /// Returns information about the consumer groups of a stream.
 #[derive(Clone)]
 pub struct XInfoGroups {
-    key: String,
+    key: CommandArg,
 }
 
 impl XInfoGroups {
     /// Create a new [`XInfoGroups`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1797,7 +1829,11 @@ impl Command for XInfoGroups {
     type Response = Vec<GroupInfo>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("XINFO"), bulk("GROUPS"), bulk(self.key.as_str())])
+        array(vec![
+            bulk("XINFO"),
+            bulk("GROUPS"),
+            bulk(self.key.as_bytes()),
+        ])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1813,7 +1849,7 @@ impl Command for XInfoGroups {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConsumerInfo {
     /// Consumer name.
-    pub name: String,
+    pub name: Bytes,
     /// Number of entries currently pending for the consumer.
     pub pending: i64,
     /// Milliseconds since the consumer last interacted with the group.
@@ -1825,13 +1861,13 @@ pub struct ConsumerInfo {
 /// Returns information about the consumers of a consumer group.
 #[derive(Clone)]
 pub struct XInfoConsumers {
-    key: String,
-    group: String,
+    key: CommandArg,
+    group: CommandArg,
 }
 
 impl XInfoConsumers {
     /// Create a new [`XInfoConsumers`] command.
-    pub fn new(key: impl Into<String>, group: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, group: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             group: group.into(),
@@ -1846,8 +1882,8 @@ impl Command for XInfoConsumers {
         array(vec![
             bulk("XINFO"),
             bulk("CONSUMERS"),
-            bulk(self.key.as_str()),
-            bulk(self.group.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.group.as_bytes()),
         ])
     }
 
@@ -1904,7 +1940,7 @@ fn parse_stream_entry(frame: &Frame) -> Result<StreamEntry, RedisError> {
     let mut fields = Vec::with_capacity(field_values.len() / 2);
     for chunk in field_values.chunks(2) {
         let name = match &chunk[0] {
-            Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+            Frame::BulkString(Some(b)) => b.clone(),
             other => {
                 return Err(RedisError::UnexpectedResponse {
                     expected: "bulk string field name",
@@ -1944,7 +1980,7 @@ fn parse_stream_entries(frame: &Frame) -> Result<Vec<StreamEntry>, RedisError> {
 }
 
 /// Parse XREAD/XREADGROUP response: \[\[stream_key, \[entries...\]\], ...\]
-fn parse_xread_response(frame: &Frame) -> Result<Vec<(String, Vec<StreamEntry>)>, RedisError> {
+fn parse_xread_response(frame: &Frame) -> Result<Vec<(Bytes, Vec<StreamEntry>)>, RedisError> {
     let streams = match frame {
         Frame::Array(Some(items)) => items,
         Frame::Array(None) => return Ok(Vec::new()),
@@ -1953,7 +1989,7 @@ fn parse_xread_response(frame: &Frame) -> Result<Vec<(String, Vec<StreamEntry>)>
             let mut result = Vec::new();
             for (key_frame, entries_frame) in entries {
                 let key = match key_frame {
-                    Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+                    Frame::BulkString(Some(b)) => b.clone(),
                     other => {
                         return Err(RedisError::UnexpectedResponse {
                             expected: "bulk string stream key",
@@ -1987,7 +2023,7 @@ fn parse_xread_response(frame: &Frame) -> Result<Vec<(String, Vec<StreamEntry>)>
         };
 
         let key = match &items[0] {
-            Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+            Frame::BulkString(Some(b)) => b.clone(),
             other => {
                 return Err(RedisError::UnexpectedResponse {
                     expected: "bulk string stream key",
@@ -2124,7 +2160,7 @@ fn parse_pending_summary(frame: &Frame) -> Result<PendingSummary, RedisError> {
                     }
                 };
                 let name = match &pair[0] {
-                    Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+                    Frame::BulkString(Some(b)) => b.clone(),
                     other => {
                         return Err(RedisError::UnexpectedResponse {
                             expected: "bulk string consumer name",
@@ -2201,7 +2237,7 @@ fn parse_pending_range(frame: &Frame) -> Result<Vec<PendingEntry>, RedisError> {
             }
         };
         let consumer = match &entry[1] {
-            Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+            Frame::BulkString(Some(b)) => b.clone(),
             other => {
                 return Err(RedisError::UnexpectedResponse {
                     expected: "bulk string consumer",
@@ -2241,6 +2277,17 @@ fn parse_pending_range(frame: &Frame) -> Result<Vec<PendingEntry>, RedisError> {
 fn extract_bulk_str(frame: &Frame) -> Result<String, RedisError> {
     match frame {
         Frame::BulkString(Some(b)) => Ok(String::from_utf8_lossy(b).into_owned()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "bulk string",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Extract exact bulk-string bytes from a Frame.
+fn extract_bulk_bytes(frame: &Frame) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(bytes)) => Ok(bytes.clone()),
         other => Err(RedisError::UnexpectedResponse {
             expected: "bulk string",
             actual: format!("{other:?}"),
@@ -2366,7 +2413,7 @@ fn parse_xinfo_groups(frame: &Frame) -> Result<Vec<GroupInfo>, RedisError> {
             }
         };
 
-        let mut name = String::new();
+        let mut name = Bytes::new();
         let mut consumers = 0i64;
         let mut pending = 0i64;
         let mut last_delivered_id = String::new();
@@ -2380,7 +2427,7 @@ fn parse_xinfo_groups(frame: &Frame) -> Result<Vec<GroupInfo>, RedisError> {
                 _ => continue,
             };
             match key.as_str() {
-                "name" => name = extract_bulk_str(&chunk[1])?,
+                "name" => name = extract_bulk_bytes(&chunk[1])?,
                 "consumers" => consumers = extract_integer(&chunk[1])?,
                 "pending" => pending = extract_integer(&chunk[1])?,
                 "last-delivered-id" => last_delivered_id = extract_bulk_str(&chunk[1])?,
@@ -2424,7 +2471,7 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
             }
         };
 
-        let mut name = String::new();
+        let mut name = Bytes::new();
         let mut pending = 0i64;
         let mut idle = 0i64;
 
@@ -2437,7 +2484,7 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
                 _ => continue,
             };
             match key.as_str() {
-                "name" => name = extract_bulk_str(&chunk[1])?,
+                "name" => name = extract_bulk_bytes(&chunk[1])?,
                 "pending" => pending = extract_integer(&chunk[1])?,
                 "idle" => idle = extract_integer(&chunk[1])?,
                 _ => {}
@@ -2463,14 +2510,14 @@ fn parse_xinfo_consumers(frame: &Frame) -> Result<Vec<ConsumerInfo>, RedisError>
 /// entries ever added to the stream.
 #[derive(Clone)]
 pub struct XSetId {
-    key: String,
-    last_id: String,
+    key: CommandArg,
+    last_id: CommandArg,
     entries_added: Option<u64>,
 }
 
 impl XSetId {
     /// Create an XSETID command.
-    pub fn new(key: impl Into<String>, last_id: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, last_id: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             last_id: last_id.into(),
@@ -2494,8 +2541,8 @@ impl Command for XSetId {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("XSETID"),
-            bulk(self.key.as_str()),
-            bulk(self.last_id.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.last_id.as_bytes()),
         ];
         if let Some(n) = self.entries_added {
             args.push(bulk("ENTRIESADDED"));

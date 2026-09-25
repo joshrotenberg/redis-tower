@@ -2,19 +2,21 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// HGET key field
 ///
 /// Returns the value associated with `field` in the hash stored at `key`,
 /// or `None` if the field or key does not exist.
 #[derive(Clone)]
 pub struct HGet {
-    key: String,
-    field: String,
+    key: CommandArg,
+    field: CommandArg,
 }
 
 impl HGet {
     /// Create a new [`HGet`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -28,8 +30,8 @@ impl Command for HGet {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HGET"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
         ])
     }
 
@@ -59,13 +61,17 @@ impl Command for HGet {
 /// Returns the number of fields that were added (not updated).
 #[derive(Clone)]
 pub struct HSet {
-    key: String,
-    fields: Vec<(String, String)>,
+    key: CommandArg,
+    fields: Vec<(CommandArg, CommandArg)>,
 }
 
 impl HSet {
     /// Create a new [`HSet`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        field: impl Into<CommandArg>,
+        value: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             fields: vec![(field.into(), value.into())],
@@ -75,7 +81,7 @@ impl HSet {
     /// Constructs an [`HSet`] from an iterator of `(field, value)` pairs.
     ///
     /// This is the bulk-insert constructor: equivalent to calling `.field()` for every
-    /// pair in the iterator. Accepts any `IntoIterator<Item = (impl Into<String>, impl Into<String>)>`,
+    /// pair in the iterator. Accepts any `IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>`,
     /// including `HashMap`, `Vec<(&str, &str)>`, and similar collections.
     ///
     /// Produces the same wire frame as the incremental builder:
@@ -90,8 +96,8 @@ impl HSet {
     /// assert_eq!(a.to_frame(), b.to_frame());
     /// ```
     pub fn from_fields(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -103,7 +109,7 @@ impl HSet {
     }
 
     /// Add an additional field-value pair.
-    pub fn field(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn field(mut self, name: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.fields.push((name.into(), value.into()));
         self
     }
@@ -113,10 +119,10 @@ impl Command for HSet {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HSET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HSET"), bulk(self.key.as_bytes())];
         for (field, value) in &self.fields {
-            args.push(bulk(field.as_str()));
-            args.push(bulk(value.as_str()));
+            args.push(bulk(field.as_bytes()));
+            args.push(bulk(value.as_bytes()));
         }
         array(args)
     }
@@ -142,13 +148,13 @@ impl Command for HSet {
 /// Returns the number of fields that were removed.
 #[derive(Clone)]
 pub struct HDel {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HDel {
     /// Create a new [`HDel`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             fields: vec![field.into()],
@@ -157,8 +163,8 @@ impl HDel {
 
     /// Create the [`HDel`] command for the supplied fields.
     pub fn fields(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -171,9 +177,9 @@ impl Command for HDel {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HDEL"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HDEL"), bulk(self.key.as_bytes())];
         for field in &self.fields {
-            args.push(bulk(field.as_str()));
+            args.push(bulk(field.as_bytes()));
         }
         array(args)
     }
@@ -198,13 +204,13 @@ impl Command for HDel {
 /// Returns `true` if `field` exists in the hash stored at `key`.
 #[derive(Clone)]
 pub struct HExists {
-    key: String,
-    field: String,
+    key: CommandArg,
+    field: CommandArg,
 }
 
 impl HExists {
     /// Create a new [`HExists`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -218,8 +224,8 @@ impl Command for HExists {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HEXISTS"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
         ])
     }
 
@@ -249,12 +255,12 @@ impl Command for HExists {
 /// of `(field, value)` pairs.
 #[derive(Clone)]
 pub struct HGetAll {
-    key: String,
+    key: CommandArg,
 }
 
 impl HGetAll {
     /// Create a new [`HGetAll`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -263,7 +269,7 @@ impl Command for HGetAll {
     type Response = Vec<(Bytes, Bytes)>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("HGETALL"), bulk(self.key.as_str())])
+        array(vec![bulk("HGETALL"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -347,14 +353,14 @@ impl Command for HGetAll {
 /// by `increment`. Returns the new value.
 #[derive(Clone)]
 pub struct HIncrBy {
-    key: String,
-    field: String,
+    key: CommandArg,
+    field: CommandArg,
     increment: i64,
 }
 
 impl HIncrBy {
     /// Create a new [`HIncrBy`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>, increment: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>, increment: i64) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -369,8 +375,8 @@ impl Command for HIncrBy {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HINCRBY"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
             bulk(self.increment.to_string()),
         ])
     }
@@ -395,12 +401,12 @@ impl Command for HIncrBy {
 /// Returns all field names in the hash stored at `key`.
 #[derive(Clone)]
 pub struct HKeys {
-    key: String,
+    key: CommandArg,
 }
 
 impl HKeys {
     /// Create a new [`HKeys`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -409,7 +415,7 @@ impl Command for HKeys {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("HKEYS"), bulk(self.key.as_str())])
+        array(vec![bulk("HKEYS"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -445,12 +451,12 @@ impl Command for HKeys {
 /// Returns all values in the hash stored at `key`.
 #[derive(Clone)]
 pub struct HVals {
-    key: String,
+    key: CommandArg,
 }
 
 impl HVals {
     /// Create a new [`HVals`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -459,7 +465,7 @@ impl Command for HVals {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("HVALS"), bulk(self.key.as_str())])
+        array(vec![bulk("HVALS"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -495,12 +501,12 @@ impl Command for HVals {
 /// Returns the number of fields contained in the hash stored at `key`.
 #[derive(Clone)]
 pub struct HLen {
-    key: String,
+    key: CommandArg,
 }
 
 impl HLen {
     /// Create a new [`HLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -509,7 +515,7 @@ impl Command for HLen {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("HLEN"), bulk(self.key.as_str())])
+        array(vec![bulk("HLEN"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -562,17 +568,17 @@ fn parse_per_field_response(frame: Frame) -> Result<Vec<i64>, RedisError> {
 /// Returns one status code per field.
 #[derive(Clone)]
 pub struct HExpire {
-    key: String,
+    key: CommandArg,
     seconds: i64,
-    fields: Vec<String>,
+    fields: Vec<CommandArg>,
 }
 
 impl HExpire {
     /// Create a new [`HExpire`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         seconds: i64,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -588,13 +594,13 @@ impl Command for HExpire {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HEXPIRE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.seconds.to_string()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -614,17 +620,17 @@ impl Command for HExpire {
 /// Returns one status code per field.
 #[derive(Clone)]
 pub struct HExpireAt {
-    key: String,
+    key: CommandArg,
     timestamp: i64,
-    fields: Vec<String>,
+    fields: Vec<CommandArg>,
 }
 
 impl HExpireAt {
     /// Create a new [`HExpireAt`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         timestamp: i64,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -640,13 +646,13 @@ impl Command for HExpireAt {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HEXPIREAT"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.timestamp.to_string()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -666,17 +672,17 @@ impl Command for HExpireAt {
 /// Returns one status code per field.
 #[derive(Clone)]
 pub struct HPExpire {
-    key: String,
+    key: CommandArg,
     milliseconds: i64,
-    fields: Vec<String>,
+    fields: Vec<CommandArg>,
 }
 
 impl HPExpire {
     /// Create a new [`HPExpire`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         milliseconds: i64,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -692,13 +698,13 @@ impl Command for HPExpire {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HPEXPIRE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.milliseconds.to_string()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -718,17 +724,17 @@ impl Command for HPExpire {
 /// Returns one status code per field.
 #[derive(Clone)]
 pub struct HPExpireAt {
-    key: String,
+    key: CommandArg,
     timestamp: i64,
-    fields: Vec<String>,
+    fields: Vec<CommandArg>,
 }
 
 impl HPExpireAt {
     /// Create a new [`HPExpireAt`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         timestamp: i64,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -744,13 +750,13 @@ impl Command for HPExpireAt {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HPEXPIREAT"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.timestamp.to_string()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -770,15 +776,15 @@ impl Command for HPExpireAt {
 /// Returns one value per field.
 #[derive(Clone)]
 pub struct HTtl {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HTtl {
     /// Create a new [`HTtl`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -793,12 +799,12 @@ impl Command for HTtl {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HTTL"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -822,15 +828,15 @@ impl Command for HTtl {
 /// Returns one value per field.
 #[derive(Clone)]
 pub struct HPTtl {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HPTtl {
     /// Create a new [`HPTtl`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -845,12 +851,12 @@ impl Command for HPTtl {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HPTTL"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -874,15 +880,15 @@ impl Command for HPTtl {
 /// Returns one status code per field.
 #[derive(Clone)]
 pub struct HPersist {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HPersist {
     /// Create a new [`HPersist`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -897,12 +903,12 @@ impl Command for HPersist {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HPERSIST"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -923,14 +929,18 @@ impl Command for HPersist {
 /// already existed.
 #[derive(Clone)]
 pub struct HSetNx {
-    key: String,
-    field: String,
-    value: String,
+    key: CommandArg,
+    field: CommandArg,
+    value: CommandArg,
 }
 
 impl HSetNx {
     /// Create a new [`HSetNx`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        field: impl Into<CommandArg>,
+        value: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -945,9 +955,9 @@ impl Command for HSetNx {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HSETNX"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
-            bulk(self.value.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -973,14 +983,14 @@ impl Command for HSetNx {
 /// `key` by `increment`. Returns the new value as `f64`.
 #[derive(Clone)]
 pub struct HIncrByFloat {
-    key: String,
-    field: String,
+    key: CommandArg,
+    field: CommandArg,
     increment: f64,
 }
 
 impl HIncrByFloat {
     /// Create a new [`HIncrByFloat`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>, increment: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>, increment: f64) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -995,8 +1005,8 @@ impl Command for HIncrByFloat {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HINCRBYFLOAT"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
             bulk(self.increment.to_string()),
         ])
     }
@@ -1031,13 +1041,13 @@ impl Command for HIncrByFloat {
 /// up to that many fields. The result is always returned as a `Vec<Bytes>`.
 #[derive(Clone)]
 pub struct HRandField {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl HRandField {
     /// Create a new [`HRandField`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -1055,7 +1065,7 @@ impl Command for HRandField {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HRANDFIELD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HRANDFIELD"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
             args.push(bulk(count.to_string()));
         }
@@ -1100,15 +1110,15 @@ impl Command for HRandField {
 /// specified hash fields. Returns one value per field.
 #[derive(Clone)]
 pub struct HExpireTime {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HExpireTime {
     /// Create a new [`HExpireTime`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1123,12 +1133,12 @@ impl Command for HExpireTime {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HEXPIRETIME"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -1153,13 +1163,13 @@ impl Command for HExpireTime {
 /// the field is missing.
 #[derive(Clone)]
 pub struct HMGet {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HMGet {
     /// Create a new [`HMGet`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             fields: vec![field.into()],
@@ -1168,8 +1178,8 @@ impl HMGet {
 
     /// Create the [`HMGet`] command for the supplied fields.
     pub fn fields(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1178,7 +1188,7 @@ impl HMGet {
     }
 
     /// Add another field to request.
-    pub fn field(mut self, f: impl Into<String>) -> Self {
+    pub fn field(mut self, f: impl Into<CommandArg>) -> Self {
         self.fields.push(f.into());
         self
     }
@@ -1188,9 +1198,9 @@ impl Command for HMGet {
     type Response = Vec<Option<Bytes>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HMGET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HMGET"), bulk(self.key.as_bytes())];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -1230,13 +1240,13 @@ impl Command for HMGet {
 /// stored at `key`, or 0 if the field or key does not exist.
 #[derive(Clone)]
 pub struct HStrLen {
-    key: String,
-    field: String,
+    key: CommandArg,
+    field: CommandArg,
 }
 
 impl HStrLen {
     /// Create a new [`HStrLen`] command.
-    pub fn new(key: impl Into<String>, field: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, field: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             field: field.into(),
@@ -1250,8 +1260,8 @@ impl Command for HStrLen {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("HSTRLEN"),
-            bulk(self.key.as_str()),
-            bulk(self.field.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.field.as_bytes()),
         ])
     }
 
@@ -1280,15 +1290,15 @@ impl Command for HStrLen {
 /// specified hash fields. Returns one value per field.
 #[derive(Clone)]
 pub struct HPExpireTime {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HPExpireTime {
     /// Create a new [`HPExpireTime`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1303,12 +1313,12 @@ impl Command for HPExpireTime {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HPEXPIRETIME"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -1348,15 +1358,15 @@ impl Command for HPExpireTime {
 /// ```
 #[derive(Clone)]
 pub struct HGetDel {
-    key: String,
-    fields: Vec<String>,
+    key: CommandArg,
+    fields: Vec<CommandArg>,
 }
 
 impl HGetDel {
     /// Create a new [`HGetDel`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1371,12 +1381,12 @@ impl Command for HGetDel {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("HGETDEL"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("FIELDS"),
             bulk(self.fields.len().to_string()),
         ];
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -1430,20 +1440,20 @@ impl Command for HGetDel {
 /// ```
 #[derive(Clone)]
 pub struct HGetEx {
-    key: String,
+    key: CommandArg,
     ex: Option<u64>,
     px: Option<u64>,
     exat: Option<u64>,
     pxat: Option<u64>,
     persist: bool,
-    fields: Vec<String>,
+    fields: Vec<CommandArg>,
 }
 
 impl HGetEx {
     /// Create a new [`HGetEx`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1511,7 +1521,7 @@ impl Command for HGetEx {
     type Response = Vec<Option<Bytes>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HGETEX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HGETEX"), bulk(self.key.as_bytes())];
         if let Some(ex) = self.ex {
             args.push(bulk("EX"));
             args.push(bulk(ex.to_string()));
@@ -1534,7 +1544,7 @@ impl Command for HGetEx {
         args.push(bulk("FIELDS"));
         args.push(bulk(self.fields.len().to_string()));
         for f in &self.fields {
-            args.push(bulk(f.as_str()));
+            args.push(bulk(f.as_bytes()));
         }
         array(args)
     }
@@ -1598,21 +1608,21 @@ pub enum HSetExCondition {
 /// ```
 #[derive(Clone)]
 pub struct HSetEx {
-    key: String,
+    key: CommandArg,
     condition: Option<HSetExCondition>,
     ex: Option<u64>,
     px: Option<u64>,
     exat: Option<u64>,
     pxat: Option<u64>,
     keep_ttl: bool,
-    fields: Vec<(String, String)>,
+    fields: Vec<(CommandArg, CommandArg)>,
 }
 
 impl HSetEx {
     /// Create a new [`HSetEx`] command.
     pub fn new(
-        key: impl Into<String>,
-        fields: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>,
+        key: impl Into<CommandArg>,
+        fields: impl IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -1696,7 +1706,7 @@ impl Command for HSetEx {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("HSETEX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("HSETEX"), bulk(self.key.as_bytes())];
         match &self.condition {
             Some(HSetExCondition::Fnx) => args.push(bulk("FNX")),
             Some(HSetExCondition::Fxx) => args.push(bulk("FXX")),
@@ -1724,8 +1734,8 @@ impl Command for HSetEx {
         args.push(bulk("FIELDS"));
         args.push(bulk(self.fields.len().to_string()));
         for (f, v) in &self.fields {
-            args.push(bulk(f.as_str()));
-            args.push(bulk(v.as_str()));
+            args.push(bulk(f.as_bytes()));
+            args.push(bulk(v.as_bytes()));
         }
         array(args)
     }

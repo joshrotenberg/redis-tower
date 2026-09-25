@@ -2,6 +2,8 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// ZADD key score member \[score member ...\]
 ///
 /// Adds the specified members with scores to the sorted set stored at `key`.
@@ -9,8 +11,8 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// whose score was updated).
 #[derive(Clone)]
 pub struct ZAdd {
-    key: String,
-    members: Vec<(f64, String)>,
+    key: CommandArg,
+    members: Vec<(f64, CommandArg)>,
     nx: bool,
     xx: bool,
     gt: bool,
@@ -20,7 +22,7 @@ pub struct ZAdd {
 
 impl ZAdd {
     /// Create a new [`ZAdd`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: Vec::new(),
@@ -35,7 +37,7 @@ impl ZAdd {
     /// Constructs a [`ZAdd`] pre-populated from an iterator of `(score, member)` pairs.
     ///
     /// This is the bulk-insert constructor: equivalent to calling `.member()` for every
-    /// pair in the iterator. Accepts any `IntoIterator<Item = (f64, impl Into<String>)>`,
+    /// pair in the iterator. Accepts any `IntoIterator<Item = (f64, impl Into<CommandArg>)>`,
     /// including `Vec<(f64, String)>` and similar collections.
     ///
     /// Option flags (`nx`, `xx`, `gt`, `lt`, `ch`) can be chained as usual:
@@ -68,8 +70,8 @@ impl ZAdd {
     /// assert_eq!(a.to_frame(), b.to_frame());
     /// ```
     pub fn from_members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = (f64, impl Into<String>)>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = (f64, impl Into<CommandArg>)>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -86,7 +88,7 @@ impl ZAdd {
     }
 
     /// Adds a member with the given score.
-    pub fn member(mut self, score: f64, member: impl Into<String>) -> Self {
+    pub fn member(mut self, score: f64, member: impl Into<CommandArg>) -> Self {
         self.members.push((score, member.into()));
         self
     }
@@ -126,7 +128,7 @@ impl Command for ZAdd {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZADD"), bulk(self.key.as_bytes())];
         if self.nx {
             args.push(bulk("NX"));
         }
@@ -144,7 +146,7 @@ impl Command for ZAdd {
         }
         for (score, member) in &self.members {
             args.push(bulk(score.to_string()));
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -170,13 +172,13 @@ impl Command for ZAdd {
 /// the number of members that were removed.
 #[derive(Clone)]
 pub struct ZRem {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl ZRem {
     /// Create a new [`ZRem`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -185,8 +187,8 @@ impl ZRem {
 
     /// Create the [`ZRem`] command for the supplied members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -199,9 +201,9 @@ impl Command for ZRem {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZREM"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZREM"), bulk(self.key.as_bytes())];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -228,14 +230,14 @@ impl Command for ZRem {
 /// indices, where -1 is the last element.
 #[derive(Clone)]
 pub struct ZRange {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl ZRange {
     /// Create a new [`ZRange`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -250,7 +252,7 @@ impl Command for ZRange {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
         ])
@@ -290,13 +292,13 @@ impl Command for ZRange {
 /// the \[member\] or key does not exist.
 #[derive(Clone)]
 pub struct ZScore {
-    key: String,
-    member: String,
+    key: CommandArg,
+    member: CommandArg,
 }
 
 impl ZScore {
     /// Create a new [`ZScore`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             member: member.into(),
@@ -310,8 +312,8 @@ impl Command for ZScore {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZSCORE"),
-            bulk(self.key.as_str()),
-            bulk(self.member.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -350,12 +352,12 @@ impl Command for ZScore {
 /// Returns the number of members in the sorted set stored at `key`.
 #[derive(Clone)]
 pub struct ZCard {
-    key: String,
+    key: CommandArg,
 }
 
 impl ZCard {
     /// Create a new [`ZCard`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -364,7 +366,7 @@ impl Command for ZCard {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("ZCARD"), bulk(self.key.as_str())])
+        array(vec![bulk("ZCARD"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -392,14 +394,14 @@ impl Command for ZCard {
 /// `increment`. Returns the new score of the \[member\].
 #[derive(Clone)]
 pub struct ZIncrBy {
-    key: String,
+    key: CommandArg,
     increment: f64,
-    member: String,
+    member: CommandArg,
 }
 
 impl ZIncrBy {
     /// Create a new [`ZIncrBy`] command.
-    pub fn new(key: impl Into<String>, increment: f64, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, increment: f64, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             increment,
@@ -414,9 +416,9 @@ impl Command for ZIncrBy {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZINCRBY"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.increment.to_string()),
-            bulk(self.member.as_str()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -449,13 +451,13 @@ impl Command for ZIncrBy {
 /// lowest score = rank 0), or `None` if the \[member\] or key does not exist.
 #[derive(Clone)]
 pub struct ZRank {
-    key: String,
-    member: String,
+    key: CommandArg,
+    member: CommandArg,
 }
 
 impl ZRank {
     /// Create a new [`ZRank`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             member: member.into(),
@@ -469,8 +471,8 @@ impl Command for ZRank {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZRANK"),
-            bulk(self.key.as_str()),
-            bulk(self.member.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -501,14 +503,18 @@ impl Command for ZRank {
 /// `"-inf"`, `"+inf"`, or numeric strings.
 #[derive(Clone)]
 pub struct ZRangeByScore {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
 }
 
 impl ZRangeByScore {
     /// Create a new [`ZRangeByScore`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -523,9 +529,9 @@ impl Command for ZRangeByScore {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZRANGEBYSCORE"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ])
     }
 
@@ -563,13 +569,13 @@ impl Command for ZRangeByScore {
 /// stored at `key`. Returns a list of `(member, score)` pairs.
 #[derive(Clone)]
 pub struct ZPopMin {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl ZPopMin {
     /// Create a new [`ZPopMin`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -587,7 +593,7 @@ impl Command for ZPopMin {
     type Response = Vec<(Bytes, f64)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZPOPMIN"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZPOPMIN"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
             args.push(bulk(count.to_string()));
         }
@@ -655,13 +661,13 @@ impl Command for ZPopMin {
 /// stored at `key`. Returns a list of `(member, score)` pairs.
 #[derive(Clone)]
 pub struct ZPopMax {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl ZPopMax {
     /// Create a new [`ZPopMax`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -679,7 +685,7 @@ impl Command for ZPopMax {
     type Response = Vec<(Bytes, f64)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZPOPMAX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZPOPMAX"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
             args.push(bulk(count.to_string()));
         }
@@ -749,14 +755,18 @@ impl Command for ZPopMax {
 /// `"("` for exclusive bounds).
 #[derive(Clone)]
 pub struct ZCount {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
 }
 
 impl ZCount {
     /// Create a new [`ZCount`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -771,9 +781,9 @@ impl Command for ZCount {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZCOUNT"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ])
     }
 
@@ -804,14 +814,18 @@ impl Command for ZCount {
 /// (exclusive).
 #[derive(Clone)]
 pub struct ZLexCount {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
 }
 
 impl ZLexCount {
     /// Create a new [`ZLexCount`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -826,9 +840,9 @@ impl Command for ZLexCount {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZLEXCOUNT"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ])
     }
 
@@ -858,13 +872,13 @@ impl Command for ZLexCount {
 /// When called with `count`, returns up to that many distinct members.
 #[derive(Clone)]
 pub struct ZRandMember {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl ZRandMember {
     /// Create a new [`ZRandMember`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -882,7 +896,7 @@ impl Command for ZRandMember {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZRANDMEMBER"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZRANDMEMBER"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
             args.push(bulk(count.to_string()));
         }
@@ -926,13 +940,13 @@ impl Command for ZRandMember {
 /// exists, or `None` if it does not.
 #[derive(Clone)]
 pub struct ZMScore {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl ZMScore {
     /// Create a new [`ZMScore`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -941,8 +955,8 @@ impl ZMScore {
 
     /// Create the [`ZMScore`] command for the supplied members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -955,9 +969,9 @@ impl Command for ZMScore {
     type Response = Vec<Option<f64>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("ZMSCORE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("ZMSCORE"), bulk(self.key.as_bytes())];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -1029,8 +1043,8 @@ impl Aggregate {
 /// the resulting sorted set.
 #[derive(Clone)]
 pub struct ZInterStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
@@ -1038,8 +1052,8 @@ pub struct ZInterStore {
 impl ZInterStore {
     /// Create a new [`ZInterStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -1068,11 +1082,11 @@ impl Command for ZInterStore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZINTERSTORE"),
-            bulk(self.destination.as_str()),
+            bulk(self.destination.as_bytes()),
             bulk(self.keys.len().to_string()),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -1109,8 +1123,8 @@ impl Command for ZInterStore {
 /// the resulting sorted set.
 #[derive(Clone)]
 pub struct ZUnionStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
@@ -1118,8 +1132,8 @@ pub struct ZUnionStore {
 impl ZUnionStore {
     /// Create a new [`ZUnionStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -1148,11 +1162,11 @@ impl Command for ZUnionStore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZUNIONSTORE"),
-            bulk(self.destination.as_str()),
+            bulk(self.destination.as_bytes()),
             bulk(self.keys.len().to_string()),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -1189,15 +1203,15 @@ impl Command for ZUnionStore {
 /// `destination`. Returns the number of elements in the resulting sorted set.
 #[derive(Clone)]
 pub struct ZDiffStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
 }
 
 impl ZDiffStore {
     /// Create a new [`ZDiffStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -1212,11 +1226,11 @@ impl Command for ZDiffStore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZDIFFSTORE"),
-            bulk(self.destination.as_str()),
+            bulk(self.destination.as_bytes()),
             bulk(self.keys.len().to_string()),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -1243,13 +1257,13 @@ impl Command for ZDiffStore {
 /// when the intersection cardinality reaches the limit.
 #[derive(Clone)]
 pub struct ZInterCard {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     limit: Option<i64>,
 }
 
 impl ZInterCard {
     /// Create a new [`ZInterCard`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             limit: None,
@@ -1269,7 +1283,7 @@ impl Command for ZInterCard {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZINTERCARD"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(limit) = self.limit {
             args.push(bulk("LIMIT"));
@@ -1303,10 +1317,10 @@ impl Command for ZInterCard {
 /// `dst`. Returns the number of elements in the resulting sorted set.
 #[derive(Clone)]
 pub struct ZRangeStore {
-    dst: String,
-    src: String,
-    min: String,
-    max: String,
+    dst: CommandArg,
+    src: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
     by_score: bool,
     by_lex: bool,
     rev: bool,
@@ -1316,10 +1330,10 @@ pub struct ZRangeStore {
 impl ZRangeStore {
     /// Create a new [`ZRangeStore`] command.
     pub fn new(
-        dst: impl Into<String>,
-        src: impl Into<String>,
-        min: impl Into<String>,
-        max: impl Into<String>,
+        dst: impl Into<CommandArg>,
+        src: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
     ) -> Self {
         Self {
             dst: dst.into(),
@@ -1366,10 +1380,10 @@ impl Command for ZRangeStore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZRANGESTORE"),
-            bulk(self.dst.as_str()),
-            bulk(self.src.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.dst.as_bytes()),
+            bulk(self.src.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ];
         if self.by_score {
             args.push(bulk("BYSCORE"));
@@ -1429,7 +1443,7 @@ impl ZMPopDirection {
 /// `members` is a list of `(member, score)` pairs.
 #[derive(Clone)]
 pub struct ZMPop {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     direction: ZMPopDirection,
     count: Option<i64>,
 }
@@ -1437,7 +1451,7 @@ pub struct ZMPop {
 impl ZMPop {
     /// Create a new [`ZMPop`] command.
     pub fn new(
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         direction: ZMPopDirection,
     ) -> Self {
         Self {
@@ -1460,7 +1474,7 @@ impl Command for ZMPop {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZMPOP"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         args.push(bulk(self.direction.as_str()));
         if let Some(count) = self.count {
@@ -1551,14 +1565,14 @@ impl Command for ZMPop {
 /// removed.
 #[derive(Clone)]
 pub struct ZRemRangeByRank {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl ZRemRangeByRank {
     /// Create a new [`ZRemRangeByRank`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -1573,7 +1587,7 @@ impl Command for ZRemRangeByRank {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREMRANGEBYRANK"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
         ])
@@ -1602,14 +1616,18 @@ impl Command for ZRemRangeByRank {
 /// Returns the number of members removed.
 #[derive(Clone)]
 pub struct ZRemRangeByScore {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
 }
 
 impl ZRemRangeByScore {
     /// Create a new [`ZRemRangeByScore`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -1624,9 +1642,9 @@ impl Command for ZRemRangeByScore {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREMRANGEBYSCORE"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ])
     }
 
@@ -1653,14 +1671,18 @@ impl Command for ZRemRangeByScore {
 /// (exclusive). Returns the number of members removed.
 #[derive(Clone)]
 pub struct ZRemRangeByLex {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
 }
 
 impl ZRemRangeByLex {
     /// Create a new [`ZRemRangeByLex`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -1675,9 +1697,9 @@ impl Command for ZRemRangeByLex {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREMRANGEBYLEX"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ])
     }
 
@@ -1703,13 +1725,13 @@ impl Command for ZRemRangeByLex {
 /// if the member or key does not exist.
 #[derive(Clone)]
 pub struct ZRevRank {
-    key: String,
-    member: String,
+    key: CommandArg,
+    member: CommandArg,
 }
 
 impl ZRevRank {
     /// Create a new [`ZRevRank`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             member: member.into(),
@@ -1723,8 +1745,8 @@ impl Command for ZRevRank {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREVRANK"),
-            bulk(self.key.as_str()),
-            bulk(self.member.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -1845,14 +1867,14 @@ fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisErro
 /// is returned; otherwise returns the new score of the member.
 #[derive(Clone)]
 pub struct ZAddIncr {
-    key: String,
+    key: CommandArg,
     score: f64,
-    member: String,
+    member: CommandArg,
 }
 
 impl ZAddIncr {
     /// Create a new [`ZAddIncr`] command.
-    pub fn new(key: impl Into<String>, score: f64, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, score: f64, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             score,
@@ -1867,10 +1889,10 @@ impl Command for ZAddIncr {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZADD"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk("INCR"),
             bulk(self.score.to_string()),
-            bulk(self.member.as_str()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -1906,12 +1928,12 @@ impl Command for ZAddIncr {
 /// sorted sets. Returns only the members (without scores).
 #[derive(Clone)]
 pub struct ZDiff {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl ZDiff {
     /// Create a new [`ZDiff`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -1924,7 +1946,7 @@ impl Command for ZDiff {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZDIFF"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -1948,12 +1970,12 @@ impl Command for ZDiff {
 /// sorted sets, including each member's score.
 #[derive(Clone)]
 pub struct ZDiffWithScores {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl ZDiffWithScores {
     /// Create a new [`ZDiffWithScores`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -1966,7 +1988,7 @@ impl Command for ZDiffWithScores {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZDIFF"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         args.push(bulk("WITHSCORES"));
         array(args)
@@ -1991,14 +2013,14 @@ impl Command for ZDiffWithScores {
 /// only the members (without scores).
 #[derive(Clone)]
 pub struct ZUnion {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
 
 impl ZUnion {
     /// Create a new [`ZUnion`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             weights: None,
@@ -2025,7 +2047,7 @@ impl Command for ZUnion {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZUNION"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -2059,14 +2081,14 @@ impl Command for ZUnion {
 /// each member's score.
 #[derive(Clone)]
 pub struct ZUnionWithScores {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
 
 impl ZUnionWithScores {
     /// Create a new [`ZUnionWithScores`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             weights: None,
@@ -2093,7 +2115,7 @@ impl Command for ZUnionWithScores {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZUNION"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -2128,14 +2150,14 @@ impl Command for ZUnionWithScores {
 /// Returns only the members (without scores).
 #[derive(Clone)]
 pub struct ZInter {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
 
 impl ZInter {
     /// Create a new [`ZInter`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             weights: None,
@@ -2162,7 +2184,7 @@ impl Command for ZInter {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZINTER"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -2196,14 +2218,14 @@ impl Command for ZInter {
 /// including each member's score.
 #[derive(Clone)]
 pub struct ZInterWithScores {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     weights: Option<Vec<f64>>,
     aggregate: Option<Aggregate>,
 }
 
 impl ZInterWithScores {
     /// Create a new [`ZInterWithScores`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             weights: None,
@@ -2230,7 +2252,7 @@ impl Command for ZInterWithScores {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("ZINTER"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(weights) = &self.weights {
             args.push(bulk("WEIGHTS"));
@@ -2269,7 +2291,7 @@ impl Command for ZInterWithScores {
 #[derive(Clone)]
 pub struct BZMPop {
     timeout: f64,
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     direction: ZMPopDirection,
     count: Option<u64>,
 }
@@ -2278,7 +2300,7 @@ impl BZMPop {
     /// Create a new [`BZMPop`] command.
     pub fn new(
         timeout: f64,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         direction: ZMPopDirection,
     ) -> Self {
         Self {
@@ -2306,7 +2328,7 @@ impl Command for BZMPop {
             bulk(self.keys.len().to_string()),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         args.push(bulk(self.direction.as_str()));
         if let Some(count) = self.count {
@@ -2400,14 +2422,14 @@ impl Command for BZMPop {
 /// used. Use [`ZRevRangeWithScores`] to also return each member's score.
 #[derive(Clone)]
 pub struct ZRevRange {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl ZRevRange {
     /// Create a new [`ZRevRange`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -2422,7 +2444,7 @@ impl Command for ZRevRange {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREVRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
         ])
@@ -2449,14 +2471,14 @@ impl Command for ZRevRange {
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... REV WITHSCORES`.
 #[derive(Clone)]
 pub struct ZRevRangeWithScores {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl ZRevRangeWithScores {
     /// Create a new [`ZRevRangeWithScores`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -2471,7 +2493,7 @@ impl Command for ZRevRangeWithScores {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("ZREVRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
             bulk("WITHSCORES"),
@@ -2501,15 +2523,19 @@ impl Command for ZRevRangeWithScores {
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX`.
 #[derive(Clone)]
 pub struct ZRangeByLex {
-    key: String,
-    min: String,
-    max: String,
+    key: CommandArg,
+    min: CommandArg,
+    max: CommandArg,
     limit: Option<(i64, i64)>,
 }
 
 impl ZRangeByLex {
     /// Create a new [`ZRangeByLex`] command.
-    pub fn new(key: impl Into<String>, min: impl Into<String>, max: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             min: min.into(),
@@ -2531,9 +2557,9 @@ impl Command for ZRangeByLex {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZRANGEBYLEX"),
-            bulk(self.key.as_str()),
-            bulk(self.min.as_str()),
-            bulk(self.max.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.min.as_bytes()),
+            bulk(self.max.as_bytes()),
         ];
         if let Some((offset, count)) = self.limit {
             args.push(bulk("LIMIT"));
@@ -2567,15 +2593,19 @@ impl Command for ZRangeByLex {
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYLEX REV`.
 #[derive(Clone)]
 pub struct ZRevRangeByLex {
-    key: String,
-    max: String,
-    min: String,
+    key: CommandArg,
+    max: CommandArg,
+    min: CommandArg,
     limit: Option<(i64, i64)>,
 }
 
 impl ZRevRangeByLex {
     /// Create a new [`ZRevRangeByLex`] command.
-    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             max: max.into(),
@@ -2597,9 +2627,9 @@ impl Command for ZRevRangeByLex {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZREVRANGEBYLEX"),
-            bulk(self.key.as_str()),
-            bulk(self.max.as_str()),
-            bulk(self.min.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.max.as_bytes()),
+            bulk(self.min.as_bytes()),
         ];
         if let Some((offset, count)) = self.limit {
             args.push(bulk("LIMIT"));
@@ -2634,15 +2664,19 @@ impl Command for ZRevRangeByLex {
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV`.
 #[derive(Clone)]
 pub struct ZRevRangeByScore {
-    key: String,
-    max: String,
-    min: String,
+    key: CommandArg,
+    max: CommandArg,
+    min: CommandArg,
     limit: Option<(i64, i64)>,
 }
 
 impl ZRevRangeByScore {
     /// Create a new [`ZRevRangeByScore`] command.
-    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             max: max.into(),
@@ -2664,9 +2698,9 @@ impl Command for ZRevRangeByScore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZREVRANGEBYSCORE"),
-            bulk(self.key.as_str()),
-            bulk(self.max.as_str()),
-            bulk(self.min.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.max.as_bytes()),
+            bulk(self.min.as_bytes()),
         ];
         if let Some((offset, count)) = self.limit {
             args.push(bulk("LIMIT"));
@@ -2698,15 +2732,19 @@ impl Command for ZRevRangeByScore {
 /// Deprecated since Redis 6.2 in favor of `ZRANGE ... BYSCORE REV WITHSCORES`.
 #[derive(Clone)]
 pub struct ZRevRangeByScoreWithScores {
-    key: String,
-    max: String,
-    min: String,
+    key: CommandArg,
+    max: CommandArg,
+    min: CommandArg,
     limit: Option<(i64, i64)>,
 }
 
 impl ZRevRangeByScoreWithScores {
     /// Create a new [`ZRevRangeByScoreWithScores`] command.
-    pub fn new(key: impl Into<String>, max: impl Into<String>, min: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        max: impl Into<CommandArg>,
+        min: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             max: max.into(),
@@ -2728,9 +2766,9 @@ impl Command for ZRevRangeByScoreWithScores {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("ZREVRANGEBYSCORE"),
-            bulk(self.key.as_str()),
-            bulk(self.max.as_str()),
-            bulk(self.min.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.max.as_bytes()),
+            bulk(self.min.as_bytes()),
             bulk("WITHSCORES"),
         ];
         if let Some((offset, count)) = self.limit {

@@ -284,6 +284,10 @@ jobs:
           cargo test -p redis-tower-protocol --all-features --test frame_boundaries
           cargo test -p redis-tower-core --all-features --test protocol_boundaries
 
+      - name: Run command integration regressions
+        if: matrix.rust == 'stable'
+        run: cargo test -p redis-tower-commands --all-features --test '*'
+
       - name: Run doc tests
         run: cargo test --doc --all-features
 

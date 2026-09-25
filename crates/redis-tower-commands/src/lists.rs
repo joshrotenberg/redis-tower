@@ -2,19 +2,21 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// LPUSH key element \[element ...\]
 ///
 /// Prepends one or more elements to the head of the list stored at `key`.
 /// Returns the length of the list after the push operation.
 #[derive(Clone)]
 pub struct LPush {
-    key: String,
-    elements: Vec<String>,
+    key: CommandArg,
+    elements: Vec<CommandArg>,
 }
 
 impl LPush {
     /// Create a new [`LPush`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             elements: vec![element.into()],
@@ -23,8 +25,8 @@ impl LPush {
 
     /// Create the [`LPush`] command for the supplied elements.
     pub fn elements(
-        key: impl Into<String>,
-        elements: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        elements: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -33,7 +35,7 @@ impl LPush {
     }
 
     /// Add another element to push.
-    pub fn element(mut self, element: impl Into<String>) -> Self {
+    pub fn element(mut self, element: impl Into<CommandArg>) -> Self {
         self.elements.push(element.into());
         self
     }
@@ -43,9 +45,9 @@ impl Command for LPush {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("LPUSH"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("LPUSH"), bulk(self.key.as_bytes())];
         for element in &self.elements {
-            args.push(bulk(element.as_str()));
+            args.push(bulk(element.as_bytes()));
         }
         array(args)
     }
@@ -71,13 +73,13 @@ impl Command for LPush {
 /// Returns the length of the list after the push operation.
 #[derive(Clone)]
 pub struct RPush {
-    key: String,
-    elements: Vec<String>,
+    key: CommandArg,
+    elements: Vec<CommandArg>,
 }
 
 impl RPush {
     /// Create a new [`RPush`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             elements: vec![element.into()],
@@ -86,8 +88,8 @@ impl RPush {
 
     /// Create the [`RPush`] command for the supplied elements.
     pub fn elements(
-        key: impl Into<String>,
-        elements: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        elements: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -96,7 +98,7 @@ impl RPush {
     }
 
     /// Add another element to push.
-    pub fn element(mut self, element: impl Into<String>) -> Self {
+    pub fn element(mut self, element: impl Into<CommandArg>) -> Self {
         self.elements.push(element.into());
         self
     }
@@ -106,9 +108,9 @@ impl Command for RPush {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("RPUSH"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("RPUSH"), bulk(self.key.as_bytes())];
         for element in &self.elements {
-            args.push(bulk(element.as_str()));
+            args.push(bulk(element.as_bytes()));
         }
         array(args)
     }
@@ -134,12 +136,12 @@ impl Command for RPush {
 /// Returns `None` if the key does not exist.
 #[derive(Clone)]
 pub struct LPop {
-    key: String,
+    key: CommandArg,
 }
 
 impl LPop {
     /// Create a new [`LPop`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -148,7 +150,7 @@ impl Command for LPop {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("LPOP"), bulk(self.key.as_str())])
+        array(vec![bulk("LPOP"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -173,12 +175,12 @@ impl Command for LPop {
 /// Returns `None` if the key does not exist.
 #[derive(Clone)]
 pub struct RPop {
-    key: String,
+    key: CommandArg,
 }
 
 impl RPop {
     /// Create a new [`RPop`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -187,7 +189,7 @@ impl Command for RPop {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("RPOP"), bulk(self.key.as_str())])
+        array(vec![bulk("RPOP"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -213,14 +215,14 @@ impl Command for RPop {
 /// from the end of the list.
 #[derive(Clone)]
 pub struct LRange {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl LRange {
     /// Create a new [`LRange`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -235,7 +237,7 @@ impl Command for LRange {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
         ])
@@ -276,12 +278,12 @@ impl Command for LRange {
 /// exist, it is interpreted as an empty list and 0 is returned.
 #[derive(Clone)]
 pub struct LLen {
-    key: String,
+    key: CommandArg,
 }
 
 impl LLen {
     /// Create a new [`LLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -290,7 +292,7 @@ impl Command for LLen {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("LLEN"), bulk(self.key.as_str())])
+        array(vec![bulk("LLEN"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -319,13 +321,13 @@ impl Command for LLen {
 /// Returns `None` if the index is out of range.
 #[derive(Clone)]
 pub struct LIndex {
-    key: String,
+    key: CommandArg,
     index: i64,
 }
 
 impl LIndex {
     /// Create a new [`LIndex`] command.
-    pub fn new(key: impl Into<String>, index: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, index: i64) -> Self {
         Self {
             key: key.into(),
             index,
@@ -339,7 +341,7 @@ impl Command for LIndex {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LINDEX"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.index.to_string()),
         ])
     }
@@ -370,14 +372,14 @@ impl Command for LIndex {
 /// out-of-range indices.
 #[derive(Clone)]
 pub struct LSet {
-    key: String,
+    key: CommandArg,
     index: i64,
-    element: String,
+    element: CommandArg,
 }
 
 impl LSet {
     /// Create a new [`LSet`] command.
-    pub fn new(key: impl Into<String>, index: i64, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, index: i64, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             index,
@@ -392,9 +394,9 @@ impl Command for LSet {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LSET"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.index.to_string()),
-            bulk(self.element.as_str()),
+            bulk(self.element.as_bytes()),
         ])
     }
 
@@ -437,8 +439,8 @@ impl ListDirection {
 /// Returns the element moved.
 #[derive(Clone)]
 pub struct LMove {
-    source: String,
-    destination: String,
+    source: CommandArg,
+    destination: CommandArg,
     wherefrom: ListDirection,
     whereto: ListDirection,
 }
@@ -446,8 +448,8 @@ pub struct LMove {
 impl LMove {
     /// Create a new [`LMove`] command.
     pub fn new(
-        source: impl Into<String>,
-        destination: impl Into<String>,
+        source: impl Into<CommandArg>,
+        destination: impl Into<CommandArg>,
         wherefrom: ListDirection,
         whereto: ListDirection,
     ) -> Self {
@@ -466,8 +468,8 @@ impl Command for LMove {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LMOVE"),
-            bulk(self.source.as_str()),
-            bulk(self.destination.as_str()),
+            bulk(self.source.as_bytes()),
+            bulk(self.destination.as_bytes()),
             bulk(self.wherefrom.as_str()),
             bulk(self.whereto.as_str()),
         ])
@@ -496,13 +498,13 @@ impl Command for LMove {
 /// push operation, or 0 if the key does not exist.
 #[derive(Clone)]
 pub struct LPushX {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl LPushX {
     /// Create a new [`LPushX`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -516,8 +518,8 @@ impl Command for LPushX {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LPUSHX"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.element.as_bytes()),
         ])
     }
 
@@ -543,13 +545,13 @@ impl Command for LPushX {
 /// push operation, or 0 if the key does not exist.
 #[derive(Clone)]
 pub struct RPushX {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl RPushX {
     /// Create a new [`RPushX`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -563,8 +565,8 @@ impl Command for RPushX {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("RPUSHX"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.element.as_bytes()),
         ])
     }
 
@@ -608,19 +610,19 @@ impl ListPosition {
 /// operation, or -1 when the pivot value was not found.
 #[derive(Clone)]
 pub struct LInsert {
-    key: String,
+    key: CommandArg,
     position: ListPosition,
-    pivot: String,
-    element: String,
+    pivot: CommandArg,
+    element: CommandArg,
 }
 
 impl LInsert {
     /// Create a new [`LInsert`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         position: ListPosition,
-        pivot: impl Into<String>,
-        element: impl Into<String>,
+        pivot: impl Into<CommandArg>,
+        element: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -637,10 +639,10 @@ impl Command for LInsert {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LINSERT"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.position.as_str()),
-            bulk(self.pivot.as_str()),
-            bulk(self.element.as_str()),
+            bulk(self.pivot.as_bytes()),
+            bulk(self.element.as_bytes()),
         ])
     }
 
@@ -667,14 +669,14 @@ impl Command for LInsert {
 /// Returns the number of removed elements.
 #[derive(Clone)]
 pub struct LRem {
-    key: String,
+    key: CommandArg,
     count: i64,
-    element: String,
+    element: CommandArg,
 }
 
 impl LRem {
     /// Create a new [`LRem`] command.
-    pub fn new(key: impl Into<String>, count: i64, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, count: i64, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count,
@@ -689,9 +691,9 @@ impl Command for LRem {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LREM"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.count.to_string()),
-            bulk(self.element.as_str()),
+            bulk(self.element.as_bytes()),
         ])
     }
 
@@ -717,14 +719,14 @@ impl Command for LRem {
 /// values counting from the end of the list.
 #[derive(Clone)]
 pub struct LTrim {
-    key: String,
+    key: CommandArg,
     start: i64,
     stop: i64,
 }
 
 impl LTrim {
     /// Create a new [`LTrim`] command.
-    pub fn new(key: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -739,7 +741,7 @@ impl Command for LTrim {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LTRIM"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
         ])
@@ -767,8 +769,8 @@ impl Command for LTrim {
 /// `RANK`, `COUNT`, and `MAXLEN` sub-commands.
 #[derive(Clone)]
 pub struct LPos {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
     rank: Option<i64>,
     count: Option<u64>,
     maxlen: Option<u64>,
@@ -776,7 +778,7 @@ pub struct LPos {
 
 impl LPos {
     /// Create a new [`LPos`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -813,8 +815,8 @@ impl Command for LPos {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("LPOS"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.element.as_bytes()),
         ];
         if let Some(rank) = self.rank {
             args.push(bulk("RANK"));
@@ -858,7 +860,7 @@ impl Command for LPos {
 /// `Some((key, elements))`, or `None` if all lists are empty.
 #[derive(Clone)]
 pub struct LMPop {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     direction: ListDirection,
     count: Option<u64>,
 }
@@ -866,7 +868,7 @@ pub struct LMPop {
 impl LMPop {
     /// Create a new [`LMPop`] command.
     pub fn new(
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         direction: ListDirection,
     ) -> Self {
         Self {
@@ -889,7 +891,7 @@ impl Command for LMPop {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("LMPOP"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         args.push(bulk(self.direction.as_str()));
         if let Some(count) = self.count {
@@ -952,13 +954,13 @@ impl Command for LMPop {
 /// at `key`. Returns an empty vector if the key does not exist.
 #[derive(Clone)]
 pub struct LPopCount {
-    key: String,
+    key: CommandArg,
     count: u64,
 }
 
 impl LPopCount {
     /// Create a new [`LPopCount`] command.
-    pub fn new(key: impl Into<String>, count: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, count: u64) -> Self {
         Self {
             key: key.into(),
             count,
@@ -972,7 +974,7 @@ impl Command for LPopCount {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("LPOP"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.count.to_string()),
         ])
     }
@@ -1008,13 +1010,13 @@ impl Command for LPopCount {
 /// at `key`. Returns an empty vector if the key does not exist.
 #[derive(Clone)]
 pub struct RPopCount {
-    key: String,
+    key: CommandArg,
     count: u64,
 }
 
 impl RPopCount {
     /// Create a new [`RPopCount`] command.
-    pub fn new(key: impl Into<String>, count: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, count: u64) -> Self {
         Self {
             key: key.into(),
             count,
@@ -1028,7 +1030,7 @@ impl Command for RPopCount {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("RPOP"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.count.to_string()),
         ])
     }
@@ -1067,7 +1069,7 @@ impl Command for RPopCount {
 #[derive(Clone)]
 pub struct BlMPop {
     timeout: f64,
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     direction: ListDirection,
     count: Option<u64>,
 }
@@ -1076,7 +1078,7 @@ impl BlMPop {
     /// Create a new [`BlMPop`] command.
     pub fn new(
         timeout: f64,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         direction: ListDirection,
     ) -> Self {
         Self {
@@ -1104,7 +1106,7 @@ impl Command for BlMPop {
             bulk(self.keys.len().to_string()),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         args.push(bulk(self.direction.as_str()));
         if let Some(count) = self.count {
