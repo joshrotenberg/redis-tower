@@ -93,12 +93,14 @@ mod tls {
             let ca_pem = std::fs::read(&certs.ca_cert_file)
                 .map_err(|error| format!("failed to read generated CA: {error}"))?;
             let port = free_port()?;
+            let server_dir = run_dir.0.join("server");
 
             // `port 0` disables the plaintext listener so the server is
             // reachable only over TLS, proving the client speaks TLS.
             let server = RedisServer::new()
                 .port(0)
                 .tls_port(port)
+                .dir(server_dir)
                 .tls_cert_file(&certs.cert_file)
                 .tls_key_file(&certs.key_file)
                 .tls_ca_cert_file(&certs.ca_cert_file)
@@ -151,6 +153,129 @@ mod tls {
     fn native_tls_config(fixture: &TlsFixture) -> redis_tower_core::tls::TlsConfig {
         redis_tower_core::tls::TlsConfig::default_native_tls()
             .with_root_ca_pem(fixture.ca_pem.clone())
+    }
+
+    async fn wait_for_markers(
+        markers: &[std::path::PathBuf],
+        children: &mut [std::process::Child],
+    ) -> Result<(), String> {
+        loop {
+            if markers.iter().all(|marker| marker.exists()) {
+                return Ok(());
+            }
+            for child in &mut *children {
+                if let Some(status) = child
+                    .try_wait()
+                    .map_err(|error| format!("failed to inspect TLS fixture child: {error}"))?
+                {
+                    return Err(format!(
+                        "TLS fixture child exited before the concurrency barrier: {status}"
+                    ));
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    async fn run_cross_process_fixture_child(child_id: &str) {
+        let barrier = std::path::PathBuf::from(
+            std::env::var_os("REDIS_TOWER_TLS_BARRIER")
+                .expect("TLS fixture child requires REDIS_TOWER_TLS_BARRIER"),
+        );
+        std::fs::write(barrier.join(format!("launched-{child_id}")), b"")
+            .expect("write TLS fixture launch marker");
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !barrier.join("start").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("TLS fixture child did not receive the start marker");
+
+        let fixture = start_tls_server()
+            .await
+            .expect("required cross-process TLS fixture must start");
+        std::fs::write(barrier.join(format!("ready-{child_id}")), b"")
+            .expect("write TLS fixture ready marker");
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !barrier.join("release").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("TLS fixture child did not receive the release marker");
+        assert!(fixture._server.is_alive().await);
+    }
+
+    #[tokio::test]
+    async fn tls_fixtures_are_isolated_across_processes() {
+        if let Ok(child_id) = std::env::var("REDIS_TOWER_TLS_CHILD") {
+            run_cross_process_fixture_child(&child_id).await;
+            return;
+        }
+        if !tls_is_required() {
+            eprintln!(
+                "skipping cross-process TLS fixture test; \
+                 set REDIS_TEST_REQUIRE_TLS=1 to activate it"
+            );
+            return;
+        }
+
+        let _fixture_guard = TLS_FIXTURE_LOCK.lock().await;
+        let barrier = TestRunDir::create().expect("create cross-process TLS barrier directory");
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut children = Vec::new();
+        for child_id in ["one", "two"] {
+            let child = std::process::Command::new(&executable)
+                .args([
+                    "tls::tls_fixtures_are_isolated_across_processes",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env("REDIS_TOWER_TLS_CHILD", child_id)
+                .env("REDIS_TOWER_TLS_BARRIER", &barrier.0)
+                .spawn()
+                .expect("spawn cross-process TLS fixture child");
+            children.push(child);
+        }
+
+        let launched = [
+            barrier.0.join("launched-one"),
+            barrier.0.join("launched-two"),
+        ];
+        let launched_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            wait_for_markers(&launched, &mut children),
+        )
+        .await;
+        if !matches!(launched_result, Ok(Ok(()))) {
+            for child in &mut children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            panic!("TLS fixture children did not reach launch barrier: {launched_result:?}");
+        }
+        std::fs::write(barrier.0.join("start"), b"").expect("release TLS fixture start barrier");
+
+        let ready = [barrier.0.join("ready-one"), barrier.0.join("ready-two")];
+        let ready_result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            wait_for_markers(&ready, &mut children),
+        )
+        .await;
+        std::fs::write(barrier.0.join("release"), b"").expect("release TLS fixture children");
+        if !matches!(ready_result, Ok(Ok(()))) {
+            for child in &mut children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            panic!("TLS fixture children did not start independently: {ready_result:?}");
+        }
+        for mut child in children {
+            let status = child.wait().expect("wait for TLS fixture child");
+            assert!(status.success(), "TLS fixture child failed: {status}");
+        }
     }
 
     // -- rustls backend --

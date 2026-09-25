@@ -20,16 +20,16 @@ matches the current source tree.
 
 ### Compiled integration inventory
 
-The scoreboard-scoped packages compile **720 integration tests** across **41 test binaries**. **205** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
+The scoreboard-scoped packages compile **721 integration tests** across **41 test binaries**. **205** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
 
 | Surface | Package | Binaries | Compiled | `#[ignore]` | Pull request | Scheduled | No workflow selector |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Standalone | `redis-tower` | 30 | 497 | 0 | 497 | 229 | 0 |
+| Standalone | `redis-tower` | 30 | 498 | 0 | 498 | 229 | 0 |
 | Cluster | `redis-tower-cluster` | 1 | 104 | 104 | 104 | 0 | 0 |
 | Sentinel | `redis-tower-sentinel` | 2 | 88 | 88 | 88 | 0 | 0 |
 | Modules | `redis-tower-modules` | 7 | 15 | 13 | 15 | 13 | 0 |
 | Distributed primitives | `redis-tower-primitives` | 1 | 16 | 0 | 16 | 0 | 0 |
-| **Total** |  | **41** | **720** | **205** | **720** | **242** | **0** |
+| **Total** |  | **41** | **721** | **205** | **721** | **242** | **0** |
 
 Counts are unique compiled tests. A test selected by both pull-request and scheduled workflows appears in both cadence columns, but only once in the compiled total.
 

@@ -63,7 +63,10 @@ class CiWorkflowTests(unittest.TestCase):
 
         capability_test = CAPABILITY_TEST.read_text()
         self.assertIn("version_parser_accepts_release_and_prerelease_forms", capability_test)
-        self.assertIn("command_info_parser_rejects_resp2_and_resp3_nulls", capability_test)
+        self.assertIn(
+            "command_info_parser_rejects_null_malformed_and_mismatched_entries",
+            capability_test,
+        )
         self.assertIn("Frame::BulkString(None)", capability_test)
 
     def test_nightly_modules_preflight_capabilities_before_behavior(self) -> None:
@@ -85,8 +88,10 @@ class CiWorkflowTests(unittest.TestCase):
 
         tls_test = TLS_TEST.read_text()
         self.assertIn("with_root_ca_pem", tls_test)
+        self.assertIn('.dir(server_dir)', tls_test)
         self.assertIn("rejects_wrong_hostname_and_untrusted_ca", tls_test)
         self.assertIn("TLS_PASSWORD_ENCODED", tls_test)
+        self.assertIn("tls_fixtures_are_isolated_across_processes", tls_test)
         self.assertNotIn("danger_accept_invalid", tls_test)
         self.assertNotIn("SHUTDOWN", tls_test)
 

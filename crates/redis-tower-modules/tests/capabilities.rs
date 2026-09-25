@@ -5,6 +5,7 @@
 //! reachable but incompatible server cannot turn missing assertions into a
 //! green job.
 
+use bytes::Bytes;
 use redis_tower::Frame;
 use redis_tower::commands::{Info, RawCommand};
 use redis_tower_core::RedisConnection;
@@ -29,8 +30,19 @@ fn parse_version(value: &str) -> (u32, u32, u32) {
     (major, minor, patch)
 }
 
-fn command_info_entry_is_present(entry: &Frame) -> bool {
-    matches!(entry, Frame::Array(Some(fields)) if !fields.is_empty())
+fn command_info_entry_matches(required: &str, entry: &Frame) -> bool {
+    let Frame::Array(Some(fields)) = entry else {
+        return false;
+    };
+    let Some(name) = fields.first() else {
+        return false;
+    };
+    let name = match name {
+        Frame::BulkString(Some(name)) | Frame::SimpleString(name) => name.as_ref(),
+        _ => return false,
+    };
+    name.eq_ignore_ascii_case(required.as_bytes())
+        && matches!(fields.get(1), Some(Frame::Integer(_)))
 }
 
 #[tokio::test]
@@ -89,7 +101,7 @@ async fn required_server_version_and_commands_are_present() {
     );
     for (name, entry) in required_commands.iter().zip(entries) {
         assert!(
-            command_info_entry_is_present(&entry),
+            command_info_entry_matches(name, &entry),
             "required module command {name} is unavailable or malformed: {entry:?}"
         );
     }
@@ -107,16 +119,33 @@ fn version_parser_accepts_release_and_prerelease_forms() {
 }
 
 #[test]
-fn command_info_parser_rejects_resp2_and_resp3_nulls() {
-    for missing in [
+fn command_info_parser_rejects_null_malformed_and_mismatched_entries() {
+    for invalid in [
         Frame::BulkString(None),
         Frame::Null,
         Frame::Array(None),
         Frame::Array(Some(Vec::new())),
+        Frame::Array(Some(vec![Frame::Integer(1)])),
+        Frame::Array(Some(vec![Frame::Null, Frame::Integer(-3)])),
+        Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from_static(b"GET"))),
+            Frame::Integer(2),
+        ])),
+        Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from_static(b"JSON.SET"))),
+            Frame::BulkString(Some(Bytes::from_static(b"not-an-arity"))),
+        ])),
     ] {
-        assert!(!command_info_entry_is_present(&missing), "{missing:?}");
+        assert!(
+            !command_info_entry_matches("JSON.SET", &invalid),
+            "{invalid:?}"
+        );
     }
-    assert!(command_info_entry_is_present(&Frame::Array(Some(vec![
-        Frame::Integer(1),
-    ]))));
+    assert!(command_info_entry_matches(
+        "JSON.SET",
+        &Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::from_static(b"json.set"))),
+            Frame::Integer(-3),
+        ]))
+    ));
 }
