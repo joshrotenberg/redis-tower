@@ -4,8 +4,8 @@
 //! Subscription mode is stateful and is owned by
 //! [`redis_tower::PubSubConnection`](https://docs.rs/redis-tower/latest/redis_tower/struct.PubSubConnection.html),
 //! not by repeatedly executing the low-level subscribe command builders on a
-//! shared client. Introspection replies are typed maps or counts as documented
-//! on each command.
+//! shared client. Introspection replies are typed channel lists,
+//! channel/count pairs, or counts as documented on each command.
 //!
 //! ```
 //! use redis_tower_commands::Publish;

@@ -320,7 +320,8 @@ deciding whether a failed or abandoned operation may be attempted again:
 
 | State | What redis-tower knows | Safe conclusion |
 |---|---|---|
-| Waiting for Tower readiness, pool capacity, or queue admission | The request has not been accepted by that component | Dropping the future prevents that component from sending it |
+| Waiting for Tower readiness or worker queue admission | The request has not been accepted by that component | Dropping the future prevents that component from sending it |
+| Accepted by `ConnectionPool`, waiting for an available member | The pool counts the operation as accepted for graceful drain, but no member has received it | Dropping the future prevents wire dispatch and releases the accepted-operation count |
 | Accepted but still in the auto-pipeline batch window | The worker owns the request, but prunes a closed response channel before building the wire batch | A request proven pruned is unsent |
 | Partially or fully written | Redis may have received some or all request bytes | Execution is unknown unless a Redis reply later establishes an outcome |
 | Waiting for the reply | Redis may already have applied the command | A caller timeout or dropped future does not roll it back |
@@ -366,17 +367,18 @@ but messages published during the gap are lost. `MonitorStream` has no replay
 or resume cursor. Ad hoc `AUTH`, `SELECT`, `HELLO`, or tracking commands do not
 modify a factory and therefore are not automatically restored.
 
-The executable [differential lifecycle cases] distinguish queued cancellation,
-known replies, and lost non-idempotent replies. Treat any behavior not covered
-by the owning client's source/tests as unknown rather than assuming another
-client family's guarantee.
+The auto-pipeline [queued-cancellation contract] and [lost-reply contract]
+distinguish unsent work from a lost non-idempotent reply. Treat any behavior
+not covered by the owning client's source/tests as unknown rather than
+assuming another client family's guarantee.
 
 [`RedisConnection` implementation]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/connection.rs
 [auto-pipeline worker]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/auto_pipeline.rs
 [offline queue]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/resilient.rs
 [Cluster connection]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs
 [`ConnectionPool::close`]: https://docs.rs/redis-tower/latest/redis_tower/pool/struct.ConnectionPool.html#method.close
-[differential lifecycle cases]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/tests/differential_redis_rs.rs
+[queued-cancellation contract]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/auto_pipeline.rs#L3160
+[lost-reply contract]: https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/auto_pipeline.rs#L3216
 
 Do not retry every timeout automatically. Redis may have executed a write before
 the response was lost. The typed retry wrapper checks command idempotency and

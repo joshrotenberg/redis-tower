@@ -19,8 +19,8 @@
 //!   and diagnostics.
 //! - [`geo`], [`hyperloglog`], [`bitmap`], and [`mod@array`] -- specialized native
 //!   data structures (arrays require Redis 8.8+).
-//! - Feature-gated [`bloom`], [`sketch`], [`tdigest`], [`json`], [`search`],
-//!   [`timeseries`], and [`vector_sets`] -- Redis Stack and Redis 8 families.
+//! - Feature-gated [Bloom], [sketch], [T-Digest], [JSON], [Search],
+//!   [TimeSeries], and [Vector Set] pages -- Redis Stack and Redis 8 families.
 //!
 //! Every category page explains its response shapes and prerequisites and has
 //! a compiling example. The repository's [command cookbook] connects those
@@ -28,6 +28,13 @@
 //! custom commands, and dedicated session ownership.
 //!
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md
+//! [Bloom]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/bloom/
+//! [sketch]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/sketch/
+//! [T-Digest]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/tdigest/
+//! [JSON]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/json/
+//! [Search]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/search/
+//! [TimeSeries]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/timeseries/
+//! [Vector Set]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/vector_sets/
 //!
 //! # Builder Pattern
 //!

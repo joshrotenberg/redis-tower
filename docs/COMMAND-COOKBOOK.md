@@ -273,20 +273,23 @@ the complete routing key. Keyless node-local administration should use an
 explicit dedicated node connection. Unknown multi-key atomic layouts should
 not be guessed.
 
-Feature modules have both Cargo and server prerequisites:
+Feature modules have both Cargo and server prerequisites. Applications using
+the `redis-tower` facade need its `commands-*` feature names; applications
+depending directly on `redis-tower-commands` use the shorter names:
 
-| Rust feature | Public category | Server capability |
-|---|---|---|
-| `json` | `commands::json` | RedisJSON |
-| `search` | `commands::search` | Redis Search |
-| `bloom` | `commands::bloom` | RedisBloom Bloom/Cuckoo |
-| `sketch` | `commands::sketch` | RedisBloom CMS/Top-K |
-| `tdigest` | `commands::tdigest` | RedisBloom T-Digest |
-| `timeseries` | `commands::timeseries` | RedisTimeSeries |
-| `vector-sets` | `commands::vector_sets` | Redis Vector Sets |
+| `redis-tower` feature | `redis-tower-commands` feature | Public category | Server capability |
+|---|---|---|---|
+| `commands-json` | `json` | `commands::json` | RedisJSON |
+| `commands-search` | `search` | `commands::search` | Redis Search |
+| `commands-bloom` | `bloom` | `commands::bloom` | RedisBloom Bloom/Cuckoo |
+| `commands-sketch` | `sketch` | `commands::sketch` | RedisBloom CMS/Top-K |
+| `commands-tdigest` | `tdigest` | `commands::tdigest` | RedisBloom T-Digest |
+| `commands-timeseries` | `timeseries` | `commands::timeseries` | RedisTimeSeries |
+| `commands-vector-sets` | `vector-sets` | `commands::vector_sets` | Redis Vector Sets |
 
-The default `stack` feature enables all seven command families; it does not
-install those capabilities on the Redis server.
+The facade's default `commands-stack` feature and the command crate's default
+`stack` feature each enable all seven command families. Neither installs those
+capabilities on the Redis server.
 
 ## Pub/Sub and MONITOR
 
@@ -311,10 +314,12 @@ if let Some(message) = subscriber.next().await {
 ```
 
 `reconnect_with` installs a replacement connection and replays subscriptions
-that were previously confirmed. Messages published during the disconnect or
-before replay confirmation are not recovered. Cluster regular Pub/Sub is tied
-to an explicitly selected node; sharded Pub/Sub follows slot ownership through
-its separate API.
+that were previously confirmed. Messages published while disconnected or
+before Redis processes the replayed subscription are not recovered. Messages
+that arrive after server-side subscription processing but before the client
+reads the confirmation are buffered and delivered. Cluster regular Pub/Sub is
+tied to an explicitly selected node; sharded Pub/Sub follows slot ownership
+through its separate API.
 
 `MonitorStream::new` likewise consumes a fresh connection. There is no resume
 cursor and no automatic recovery of commands observed during a gap. MONITOR is

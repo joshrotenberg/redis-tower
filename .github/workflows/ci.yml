@@ -64,6 +64,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - name: Check minimal command documentation
+        run: cargo doc -p redis-tower-commands --no-default-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
       - name: Compile published redis-rs migration examples
         run: >-
           cargo check --locked

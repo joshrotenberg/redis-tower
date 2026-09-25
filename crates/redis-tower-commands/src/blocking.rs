@@ -13,10 +13,13 @@
 //! blocking commands on a dedicated `RedisConnection` or a pooled connection
 //! instead. Each such command reports `is_blocking() == true`.
 //!
-//! A Redis timeout is an ordinary `None` response. A caller-side cancellation
-//! after dispatch instead makes execution uncertain and causes redis-tower to
-//! quarantine the connection before reuse. Keep shutdown cancellation
-//! explicit.
+//! Redis timeout shapes are command-specific: list and sorted-set blockers
+//! return `None`, while `XREAD` / `XREADGROUP` return an empty stream vector.
+//! Cancellation after dispatch also depends on the owning client. A direct
+//! `RedisConnection` or pool member quarantines its socket; an auto-pipeline
+//! worker retains the in-flight batch, consumes its replies for alignment, and
+//! can keep a still-usable socket. Blocking commands should not use that shared
+//! worker in the first place. Keep shutdown cancellation explicit.
 //!
 //! ```
 //! use redis_tower_commands::BLPop;
