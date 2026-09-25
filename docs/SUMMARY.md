@@ -20,5 +20,6 @@
 
 - [Feature matrix](FEATURE-MATRIX.md)
 - [Test conformance](TEST-CONFORMANCE.md)
+- [Differential testing](DIFFERENTIAL-TESTING.md)
 - [Engineering hygiene](ENGINEERING-HYGIENE.md)
 - [Release process](RELEASING.md)

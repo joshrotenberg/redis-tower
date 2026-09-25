@@ -9,7 +9,7 @@ use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::pool::ConnectionPool;
-use redis_tower::{CacheTrackingMode, CachedClientConfig, Transaction};
+use redis_tower::{CacheTrackingMode, CachedClientConfig, Frame, Transaction};
 use redis_tower_cluster::{
     CachedMultiplexedClusterClient, ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan,
     ClusterScanItem, MultiplexedClusterClient, ReadPreference, ScanClusterStream, slot_for_key,
@@ -52,6 +52,67 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
     MultiplexedClusterClient::connect(&cluster.addr())
         .await
         .expect("failed to connect to multiplexed cluster")
+}
+
+#[tokio::test]
+#[ignore = "live: starts a dedicated Redis Cluster"]
+async fn diff_redis_rs_cluster_public_entry_point() {
+    let cluster = ensure_cluster().await;
+    let mut tower = ClusterConnection::connect(&cluster.addr())
+        .await
+        .expect("redis-tower cluster connection");
+    let seed_urls: Vec<_> = cluster
+        .node_addrs()
+        .into_iter()
+        .map(|addr| format!("redis://{addr}"))
+        .collect();
+    let client = redis::cluster::ClusterClient::new(seed_urls).expect("redis-rs cluster client");
+    let mut redis_rs = client
+        .get_async_connection()
+        .await
+        .expect("redis-rs cluster connection");
+
+    let tower_key = "redis_tower:diff:{cluster}:tower";
+    let redis_key = "redis_tower:diff:{cluster}:redis-rs";
+    tower.execute(Del::new(tower_key)).await.unwrap();
+    redis::cmd("DEL")
+        .arg(redis_key)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
+
+    let binary = [0xff, 0, 0x80];
+    tower
+        .execute(RawCommand::new("SET").arg(tower_key).arg(binary))
+        .await
+        .unwrap();
+    redis::cmd("SET")
+        .arg(redis_key)
+        .arg(&binary)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
+    let tower_value = tower
+        .execute(RawCommand::new("GET").arg(tower_key))
+        .await
+        .unwrap();
+    let redis_value = redis::cmd("GET")
+        .arg(redis_key)
+        .query_async::<Vec<u8>>(&mut redis_rs)
+        .await
+        .unwrap();
+    assert_eq!(
+        tower_value,
+        Frame::BulkString(Some(Bytes::from(redis_value))),
+        "binary GET diverged through the public Cluster connection"
+    );
+
+    tower.execute(Del::new(tower_key)).await.unwrap();
+    redis::cmd("DEL")
+        .arg(redis_key)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

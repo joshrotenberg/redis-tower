@@ -1,13 +1,14 @@
 name: Nightly Module Tests
 
-# Runs the five `#[ignore]`d redis-tower-modules integration suites (JSON,
-# Search, TimeSeries, probabilistic, Vector) against real Redis servers that
-# ship the modules. The main CI Redis is built without modules, so these suites
-# never run there; this nightly job is the only place they execute.
+# Runs the `#[ignore]`d redis-tower-modules integration suites (JSON, Search,
+# TimeSeries, probabilistic, Vector, and the redis-rs differential) against real
+# Redis servers that ship the modules. The main CI Redis is built without
+# modules, so these suites never run there; this nightly job is the only place
+# they execute.
 #
 # Two legs:
 #   - redis:8           bundles all former Stack modules natively, and Vector
-#                       Sets require Redis 8.0+, so this leg runs all five suites.
+#                       Sets require Redis 8.0+, so this leg runs every suite.
 #   - redis-stack 7.x   covers the 7.x module line (no Vector Sets), so it runs
 #                       the four non-vector suites.
 #

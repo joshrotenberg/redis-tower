@@ -4,7 +4,7 @@
 
 use bytes::Bytes;
 use redis_server_wrapper::{RedisSentinel, RedisSentinelHandle};
-use redis_tower::pool::ConnectionPool;
+use redis_tower::{Frame, pool::ConnectionPool};
 use redis_tower_commands::*;
 use redis_tower_sentinel::{
     MultiplexedSentinelClient, ReadPreference, SentinelClient, SentinelConnection,
@@ -50,6 +50,61 @@ async fn mux_sentinel_conn() -> MultiplexedSentinelClient {
     MultiplexedSentinelClient::connect(&addrs, "mymaster")
         .await
         .expect("failed to connect via multiplexed sentinel")
+}
+
+#[tokio::test]
+#[ignore = "live: starts a dedicated Redis Sentinel topology"]
+async fn diff_redis_rs_sentinel_public_entry_point() {
+    let sentinel = ensure_sentinel().await;
+    let mut tower = sentinel_conn().await;
+    let client = redis::Client::open(format!("redis://{}", sentinel.master_addr()))
+        .expect("redis-rs master URL");
+    let mut redis_rs = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("redis-rs master connection");
+
+    let tower_key = "redis_tower:diff:sentinel:tower";
+    let redis_key = "redis_tower:diff:sentinel:redis-rs";
+    tower.execute(Del::new(tower_key)).await.unwrap();
+    redis::cmd("DEL")
+        .arg(redis_key)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
+
+    let binary = [0xff, 0, 0x80];
+    tower
+        .execute(RawCommand::new("SET").arg(tower_key).arg(binary))
+        .await
+        .unwrap();
+    redis::cmd("SET")
+        .arg(redis_key)
+        .arg(&binary)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
+    let tower_value = tower
+        .execute(RawCommand::new("GET").arg(tower_key))
+        .await
+        .unwrap();
+    let redis_value = redis::cmd("GET")
+        .arg(redis_key)
+        .query_async::<Vec<u8>>(&mut redis_rs)
+        .await
+        .unwrap();
+    assert_eq!(
+        tower_value,
+        Frame::BulkString(Some(Bytes::from(redis_value))),
+        "binary GET diverged through the public Sentinel connection"
+    );
+
+    tower.execute(Del::new(tower_key)).await.unwrap();
+    redis::cmd("DEL")
+        .arg(redis_key)
+        .query_async::<redis::Value>(&mut redis_rs)
+        .await
+        .unwrap();
 }
 
 fn key(test: &str, name: &str) -> String {

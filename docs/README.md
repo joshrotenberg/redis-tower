@@ -31,6 +31,8 @@ If you are evaluating or adopting the project, start here:
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test
   inventory, topology and server matrices, and destructive fault coverage to
   their source and CI evidence.
+- [Differential testing](DIFFERENTIAL-TESTING.md) records the MCP-derived
+  semantic corpus against a pinned redis-rs oracle and its normalization rules.
 - The [release process](RELEASING.md) records the manual prepare/publish split,
   workspace publish order, validation gates, and post-publish verification.
 

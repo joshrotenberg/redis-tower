@@ -631,6 +631,18 @@ def derive_parity_variants(binaries: Iterable[TestBinary]) -> tuple[ParityVarian
     )
 
 
+def differential_tests(
+    binaries: Iterable[TestBinary],
+) -> tuple[tuple[TestBinary, str], ...]:
+    selected: list[tuple[TestBinary, str]] = []
+    for binary in binaries:
+        for test in binary.tests:
+            case_name = test.rsplit("::", 1)[-1]
+            if binary.target.startswith("differential_") or case_name.startswith("diff_"):
+                selected.append((binary, test))
+    return tuple(selected)
+
+
 def fault_tests(binaries: Iterable[TestBinary]) -> tuple[tuple[TestBinary, str], ...]:
     selected: list[tuple[TestBinary, str]] = []
     for binary in binaries:
@@ -755,6 +767,34 @@ def render_report(inventory: Inventory) -> str:
             )
     else:
         lines.append("No compiled `command_tests!` expansions were detected.")
+
+    lines.extend(["", "### Independent-client differential coverage", ""])
+    differentials = differential_tests(binaries)
+    if differentials:
+        lines.extend(
+            [
+                f"The independent redis-rs corpus contains **{len(differentials)} compiled "
+                "test entry points**. These are counted separately from shared-client "
+                "topology expansions.",
+                "",
+                "| Surface | Test binary | Compiled tests | Default |",
+                "|---|---|---:|---|",
+            ]
+        )
+        differential_binaries = sorted(
+            {binary for binary, _test in differentials}, key=binary_sort_key
+        )
+        for binary in differential_binaries:
+            tests = [test for selected, test in differentials if selected == binary]
+            ignored = [test for test in tests if test in set(binary.ignored)]
+            default = "ignored" if len(ignored) == len(tests) else "normal"
+            surface = SURFACE_BY_PACKAGE[binary.package].label
+            lines.append(
+                f"| {surface} | `{markdown_escape(binary.target)}` | "
+                f"{len(tests)} | {default} |"
+            )
+    else:
+        lines.append("No compiled independent-client differential tests were detected.")
 
     lines.extend(["", "### Server compatibility matrix", ""])
     if inventory.compatibility:

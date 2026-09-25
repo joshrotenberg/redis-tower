@@ -2969,6 +2969,112 @@ mod tests {
         service.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn lost_non_idempotent_reply_is_unknown_and_not_replayed_after_reconnect() {
+        use futures::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let server_executions = Arc::clone(&executions);
+        let server = tokio::spawn(async move {
+            let (first, _) = listener.accept().await.unwrap();
+            let mut first = Framed::new(
+                redis_tower_core::RedisStream::Tcp(first),
+                redis_tower_core::RespCodec::new(),
+            );
+            let request = first
+                .next()
+                .await
+                .expect("client closed before dispatch")
+                .expect("client sent an invalid request");
+            assert_eq!(
+                request,
+                Frame::SimpleString(bytes::Bytes::from_static(b"INCR-NON-IDEMPOTENT"))
+            );
+            server_executions.fetch_add(1, Ordering::SeqCst);
+            // The write executed, but its reply is lost. Closing here makes
+            // execution unknowable to the client rather than proving failure.
+            drop(first);
+
+            let (second, _) = listener.accept().await.unwrap();
+            let mut second = Framed::new(
+                redis_tower_core::RedisStream::Tcp(second),
+                redis_tower_core::RespCodec::new(),
+            );
+            let request = second
+                .next()
+                .await
+                .expect("client closed before post-reconnect probe")
+                .expect("client sent an invalid post-reconnect request");
+            assert_eq!(
+                request,
+                Frame::SimpleString(bytes::Bytes::from_static(b"READ-EXECUTION-COUNT")),
+                "the lost-reply INCR was replayed on the replacement connection"
+            );
+            second
+                .send(Frame::Integer(
+                    server_executions.load(Ordering::SeqCst) as i64
+                ))
+                .await
+                .unwrap();
+            let _ = second.next().await;
+        });
+
+        let factory = move || async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+            Ok(RedisConnection::from_stream(
+                redis_tower_core::RedisStream::Tcp(stream),
+            ))
+        };
+        let reconnect = AutoPipelineReconnectConfig::new(ReconnectConfig {
+            max_retries: Some(3),
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+            jitter: false,
+            connect_timeout: None,
+        });
+        let mut service =
+            AutoPipelineService::with_factory(factory, AutoPipelineConfig::default(), reconnect)
+                .await
+                .unwrap();
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        let lost = tokio::time::timeout(
+            Duration::from_secs(1),
+            service.call(Frame::SimpleString(bytes::Bytes::from_static(
+                b"INCR-NON-IDEMPOTENT",
+            ))),
+        )
+        .await
+        .expect("lost-reply command did not complete");
+        assert!(lost.is_err(), "a dropped reply was reported as success");
+
+        futures::future::poll_fn(|cx| service.poll_ready(cx))
+            .await
+            .unwrap();
+        let count = tokio::time::timeout(
+            Duration::from_secs(1),
+            service.call(Frame::SimpleString(bytes::Bytes::from_static(
+                b"READ-EXECUTION-COUNT",
+            ))),
+        )
+        .await
+        .expect("post-reconnect probe timed out")
+        .unwrap();
+        assert_eq!(count, Frame::Integer(1));
+        assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+        service.shutdown().await;
+        server.await.unwrap();
+    }
+
     #[test]
     fn is_readonly_frame_detects_readonly_errors_only() {
         use bytes::Bytes;
