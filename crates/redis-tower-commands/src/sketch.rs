@@ -1,3 +1,22 @@
+//! Count-Min Sketch and Top-K probabilistic data structures.
+//!
+//! Available with the `sketch` feature (included by `stack`) and requiring the
+//! RedisBloom module on the server. Initialization and mutation commands return
+//! status/count vectors; query commands return typed estimates or membership
+//! booleans.
+//!
+//! ```
+//! use redis_tower_commands::CmsInitByDim;
+//! use redis_tower_core::Command;
+//!
+//! let command = CmsInitByDim::new("frequency", 1000, 5);
+//! assert_eq!(command.name(), "CMS.INITBYDIM");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

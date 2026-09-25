@@ -23,6 +23,7 @@ redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true, features = ["stack"] }
 redis-tower-cluster = { workspace = true }
 redis-tower-sentinel = { workspace = true }
+redis-tower-client = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
@@ -37,6 +38,10 @@ opentelemetry-stdout = { version = "0.32", default-features = false, features = 
 [[example]]
 name = "basic"
 path = "basic.rs"
+
+[[example]]
+name = "command_cookbook"
+path = "command_cookbook.rs"
 
 [[example]]
 name = "pipeline"

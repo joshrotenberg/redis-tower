@@ -69,6 +69,9 @@ jobs:
           cargo check --locked
           --manifest-path release-tests/redis-rs-migration/Cargo.toml
 
+      - name: Compile command cookbook examples
+        run: cargo check -p redis-tower-examples --example command_cookbook
+
       - name: Build the documentation site
         run: mdbook build
 

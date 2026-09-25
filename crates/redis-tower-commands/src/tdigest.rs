@@ -1,3 +1,21 @@
+//! T-Digest quantile and distribution-estimation commands.
+//!
+//! Available with the `tdigest` feature (included by `stack`) and requiring the
+//! RedisBloom module on the server. Query replies preserve floating-point
+//! results and per-input ordering; estimates are approximate by design.
+//!
+//! ```
+//! use redis_tower_commands::TdigestAdd;
+//! use redis_tower_core::Command;
+//!
+//! let command = TdigestAdd::new("latency", [1.0, 2.0, 8.0]);
+//! assert_eq!(command.name(), "TDIGEST.ADD");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
+
 use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

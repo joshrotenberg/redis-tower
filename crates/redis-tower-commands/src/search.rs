@@ -1,8 +1,31 @@
+//! Redis Search index, query, aggregation, and utility commands.
+//!
+//! Available with the `search` feature (included by `stack`) and requiring
+//! Redis Search on the server. Query strings and schema grammar are textual;
+//! result rows are returned in the documented typed/raw shape for each command
+//! so applications can normalize RESP2/RESP3 differences deliberately.
+//!
+//! ```
+//! use redis_tower_commands::FtSearch;
+//! use redis_tower_core::Command;
+//!
+//! let command = FtSearch::new("idx:users", "@name:Ada").limit(0, 10);
+//! assert_eq!(command.name(), "FT.SEARCH");
+//! ```
+//!
+//! Search suggestions, dictionaries, spelling, synonyms, and configuration
+//! builders are re-exported through this module and the crate root. See the
+//! [command cookbook] for module reply normalization.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#raw-custom-and-module-replies
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::SortOrder;
+
+pub use crate::search_util::*;
 
 /// Field type for RediSearch schema definitions.
 #[derive(Clone)]

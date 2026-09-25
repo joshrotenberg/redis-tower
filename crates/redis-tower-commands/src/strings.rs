@@ -1,3 +1,24 @@
+//! String values, counters, conditional writes, and multi-key string commands.
+//!
+//! [`Get`] returns `Option<Bytes>` so a missing key remains distinct from an
+//! empty value; counters return integers or floats. [`Set`] always has an
+//! `Option<Bytes>` response because `GET` and conditional modes change Redis's
+//! reply meaning—interpret it together with the options used to build it.
+//!
+//! ```
+//! use redis_tower_commands::{Get, Set};
+//! use redis_tower_core::Command;
+//!
+//! let set = Set::new("session", "ready").ex(60).nx();
+//! let get = Get::new("session");
+//! assert_eq!((set.name(), get.name()), ("SET", "GET"));
+//! ```
+//!
+//! See the [command cookbook] for nil, numeric, option-dependent, and binary
+//! responses.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#typed-commands-and-response-shapes
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

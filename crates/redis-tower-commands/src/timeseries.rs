@@ -1,3 +1,22 @@
+//! RedisTimeSeries samples, labels, rules, and aggregations.
+//!
+//! Available with the `timeseries` feature (included by `stack`) and requiring
+//! RedisTimeSeries on the server. Timestamp and aggregation options are typed;
+//! range commands return ordered `(timestamp, value)` samples and multi-range
+//! commands retain their series/label structure.
+//!
+//! ```
+//! use redis_tower_commands::TsAdd;
+//! use redis_tower_core::Command;
+//!
+//! let command = TsAdd::new("temperature", 1_700_000_000_000_i64, 21.5);
+//! assert_eq!(command.name(), "TS.ADD");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

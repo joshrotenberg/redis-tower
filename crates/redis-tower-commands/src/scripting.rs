@@ -1,3 +1,24 @@
+//! Lua scripts and Redis Functions.
+//!
+//! [`Eval`] / [`EvalSha`] and function calls can return any RESP shape, so
+//! their response is a raw `Frame`. Declare every key with `.key(...)` so
+//! Cluster routing and Redis's key-access rules remain correct; ordinary
+//! arguments belong in `.arg(...)`.
+//!
+//! ```
+//! use redis_tower_commands::Eval;
+//! use redis_tower_core::Command;
+//!
+//! let command = Eval::new("return redis.call('GET', KEYS[1])")
+//!     .key("{account}:name");
+//! assert_eq!(command.name(), "EVAL");
+//! ```
+//!
+//! See the [command cookbook] for raw response normalization and same-slot
+//! requirements.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#raw-custom-and-module-replies
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

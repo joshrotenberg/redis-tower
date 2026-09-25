@@ -1,3 +1,22 @@
+//! RedisBloom Bloom-filter and Cuckoo-filter commands.
+//!
+//! Available with the `bloom` feature (included by `stack`) and requiring the
+//! RedisBloom module on the server. Add/existence commands return booleans or
+//! boolean vectors; reserve/info/dump commands have command-specific typed
+//! replies.
+//!
+//! ```
+//! use redis_tower_commands::BfAdd;
+//! use redis_tower_core::Command;
+//!
+//! let command = BfAdd::new("seen", "item:1");
+//! assert_eq!(command.name(), "BF.ADD");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

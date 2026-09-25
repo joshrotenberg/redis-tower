@@ -1,3 +1,22 @@
+//! Score-ordered sets, ranges, ranks, and set algebra.
+//!
+//! [`ZAdd`] returns a mutation count (modified count with `CH`), rank/score
+//! lookups are optional, and range commands preserve score order. Multi-key
+//! operations require one Cluster hash slot.
+//!
+//! ```
+//! use redis_tower_commands::{ZAdd, ZScore};
+//! use redis_tower_core::Command;
+//!
+//! let add = ZAdd::new("leaders").member(42.0, "ada");
+//! let score = ZScore::new("leaders", "ada");
+//! assert_eq!((add.name(), score.name()), ("ZADD", "ZSCORE"));
+//! ```
+//!
+//! See the [command cookbook] for response and Cluster guidance.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#pipelines-transactions-and-cluster-slots
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

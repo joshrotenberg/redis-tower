@@ -26,6 +26,9 @@ If you are evaluating or adopting the project, start here:
 - [Distributed primitives](PRIMITIVES.md) covers fenced locks, leader election,
   expirable semaphores, countdown latches, delayed queues, block-allocated IDs,
   Redis-time GCRA rate limiting, cluster keys, and failure behavior.
+- The [command cookbook](COMMAND-COOKBOOK.md) maps typed command categories to
+  response shapes, binary data, pipelines and transactions, stream ownership,
+  raw/module replies, dedicated sessions, and topology entry points.
 - The [client comparison](FEATURE-MATRIX.md) records pinned, primary-source
   contracts for Rust and cross-language Redis clients.
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test

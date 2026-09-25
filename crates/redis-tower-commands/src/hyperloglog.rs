@@ -1,3 +1,22 @@
+//! Probabilistic cardinality estimation with HyperLogLog.
+//!
+//! [`PfAdd`] reports whether registers changed, [`PfCount`] returns an
+//! estimated cardinality, and [`PfMerge`] combines sketches. Values are
+//! binary-safe; estimates are intentionally approximate.
+//!
+//! ```
+//! use redis_tower_commands::{PfAdd, PfCount};
+//! use redis_tower_core::Command;
+//!
+//! let add = PfAdd::new("visitors", "user:1");
+//! let count = PfCount::new("visitors");
+//! assert_eq!((add.name(), count.name()), ("PFADD", "PFCOUNT"));
+//! ```
+//!
+//! See the [command cookbook] for typed execution and response handling.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#typed-commands-and-response-shapes
+
 use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

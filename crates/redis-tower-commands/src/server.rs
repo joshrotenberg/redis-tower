@@ -1,3 +1,23 @@
+//! Connection state, server administration, and client-management commands.
+//!
+//! Stateless inspection such as [`Ping`] and [`Info`] can use ordinary
+//! clients. Commands that alter connection state (`SELECT`, tracking, reply
+//! mode) or the server itself require deliberate ownership and permissions;
+//! prefer the higher-level connection constructors for AUTH, protocol, and
+//! database setup so reconnects replay that state.
+//!
+//! ```
+//! use redis_tower_commands::{Info, Ping};
+//! use redis_tower_core::Command;
+//!
+//! assert_eq!(Ping::new().name(), "PING");
+//! assert_eq!(Info::new().name(), "INFO");
+//! ```
+//!
+//! See the [command cookbook] for stateful-session and administration rules.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#administration-and-diagnostics
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

@@ -39,6 +39,12 @@ class CiWorkflowTests(unittest.TestCase):
             "--manifest-path release-tests/redis-rs-migration/Cargo.toml", job
         )
 
+    def test_command_cookbook_examples_are_compiled(self) -> None:
+        job = documentation_job()
+        self.assertIn(
+            "cargo check -p redis-tower-examples --example command_cookbook", job
+        )
+
     def test_coverage_job_does_not_depend_on_unconfigured_codecov(self) -> None:
         job = coverage_job()
         self.assertIn("    permissions:\n      contents: read\n", job)

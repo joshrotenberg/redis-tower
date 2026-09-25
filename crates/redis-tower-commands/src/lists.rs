@@ -1,3 +1,23 @@
+//! Ordered lists and non-blocking list operations.
+//!
+//! Push and length commands return integers, range commands return ordered byte
+//! values, and pop commands represent an empty list as `None`. Use the
+//! [`blocking`](crate::blocking) family on an isolated connection when waiting
+//! for data.
+//!
+//! ```
+//! use redis_tower_commands::{LRange, LPush};
+//! use redis_tower_core::Command;
+//!
+//! let push = LPush::new("jobs", "job-1");
+//! let read = LRange::new("jobs", 0, -1);
+//! assert_eq!((push.name(), read.name()), ("LPUSH", "LRANGE"));
+//! ```
+//!
+//! See the [command cookbook] for blocking ownership and shutdown handling.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#streams-consumer-groups-and-blocking-reads
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

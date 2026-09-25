@@ -1,3 +1,23 @@
+//! Hash fields, field expiry, and numeric updates.
+//!
+//! Single-field reads such as [`HGet`] return `Option<Bytes>`; collection
+//! reads preserve Redis's field/value structure, and mutation/count commands
+//! return typed integers or booleans. Field-expiry commands require a Redis
+//! version that implements them.
+//!
+//! ```
+//! use redis_tower_commands::{HGet, HSet};
+//! use redis_tower_core::Command;
+//!
+//! let set = HSet::new("user:1", "name", "Ada");
+//! let get = HGet::new("user:1", "name");
+//! assert_eq!((set.name(), get.name()), ("HSET", "HGET"));
+//! ```
+//!
+//! See the [command cookbook] for nil, empty, and binary response handling.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#typed-commands-and-response-shapes
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

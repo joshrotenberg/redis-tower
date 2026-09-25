@@ -59,6 +59,14 @@
 //! # }
 //! ```
 //!
+//! Browse the concrete categories through [`commands::strings`],
+//! [`commands::hashes`], [`commands::streams`], [`commands::transaction`],
+//! [`commands::raw`], and the feature-gated module pages under [`commands`].
+//! The [command cookbook] connects those builders to response shapes, client
+//! choice, blocking/session ownership, and topology constraints.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md
+//!
 //! Redis keys and application data are byte strings, not necessarily UTF-8.
 //! Typed builders accept `&str`, `String`, byte slices, `Vec<u8>`, and
 //! [`bytes::Bytes`] through [`commands::CommandArg`] wherever Redis treats an
@@ -531,6 +539,9 @@ pub use redis_tower_core::tls::TlsConfig;
 ///
 /// Import everything with `use redis_tower::commands::*` for convenient access
 /// to the full command set including both core Redis and Redis Stack commands.
+/// Browse category modules such as [`strings`](crate::commands::strings),
+/// [`streams`](crate::commands::streams), and the feature-gated families for
+/// overviews and representative examples; root imports remain supported.
 pub mod commands {
     pub use redis_tower_commands::*;
 }

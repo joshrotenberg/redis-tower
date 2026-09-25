@@ -12,6 +12,23 @@
 //! worker for its entire wait, stalling every other concurrent caller. Run
 //! blocking commands on a dedicated `RedisConnection` or a pooled connection
 //! instead. Each such command reports `is_blocking() == true`.
+//!
+//! A Redis timeout is an ordinary `None` response. A caller-side cancellation
+//! after dispatch instead makes execution uncertain and causes redis-tower to
+//! quarantine the connection before reuse. Keep shutdown cancellation
+//! explicit.
+//!
+//! ```
+//! use redis_tower_commands::BLPop;
+//! use redis_tower_core::Command;
+//!
+//! let command = BLPop::new("jobs", 5.0);
+//! assert!(command.is_blocking());
+//! ```
+//!
+//! See the [command cookbook] for isolated blocking sessions.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#streams-consumer-groups-and-blocking-reads
 
 use crate::CommandArg;
 use bytes::Bytes;

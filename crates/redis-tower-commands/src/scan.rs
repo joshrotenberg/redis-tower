@@ -1,4 +1,21 @@
-//! SCAN family commands for cursor-based iteration.
+//! Cursor-based iteration over keys and collection members.
+//!
+//! [`Scan`], [`HScan`], [`SScan`], and [`ZScan`] return a cursor plus one page
+//! of results. A complete traversal continues until Redis returns cursor zero;
+//! pages may be empty and elements may repeat while the data set changes.
+//! Avoid [`Keys`](crate::keys::Keys) for production-wide iteration.
+//!
+//! ```
+//! use redis_tower_commands::Scan;
+//! use redis_tower_core::Command;
+//!
+//! let command = Scan::new().match_pattern("user:*").count(100);
+//! assert_eq!(command.name(), "SCAN");
+//! ```
+//!
+//! See the [command cookbook] for a complete cursor loop.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#cursor-iteration
 
 use crate::CommandArg;
 use bytes::Bytes;
