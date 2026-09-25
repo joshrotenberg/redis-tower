@@ -1,4 +1,24 @@
+use crate::ProtocolVersion;
 use crate::error::RedisError;
+
+#[derive(Debug)]
+pub(crate) struct ParsedRedisUrl {
+    pub(crate) url: RedisUrl,
+    pub(crate) protocol: Option<ProtocolVersion>,
+    /// Percent-decoded Unix path bytes. Keeping these separately from the
+    /// public string representation lets the connector open every path the
+    /// platform accepts without a lossy UTF-8 conversion.
+    #[cfg(unix)]
+    pub(crate) unix_path: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct UrlQuery {
+    database: Option<u16>,
+    username: Option<String>,
+    password: Option<String>,
+    protocol: Option<ProtocolVersion>,
+}
 
 /// Parsed Redis connection URL.
 ///
@@ -45,7 +65,12 @@ pub struct RedisUrl {
     /// Whether this is a Unix socket connection.
     pub unix: bool,
 
-    /// Unix socket path (if `unix` is true).
+    /// Percent-decoded Unix socket path (if `unix` is true).
+    ///
+    /// This string-only view cannot represent a non-UTF-8 Unix path. The
+    /// connection methods still support such paths directly from a URL;
+    /// [`parse_redis_url`] returns [`RedisError::InvalidUrl`] rather than
+    /// replacing invalid bytes.
     pub path: Option<String>,
 }
 
@@ -86,10 +111,23 @@ impl RedisUrl {
 /// Parse a Redis URL into connection parameters.
 ///
 /// Supported schemes:
-/// - `redis://[user:pass@]host[:port][/db]`
-/// - `rediss://[user:pass@]host[:port][/db]` (TLS)
+/// - `redis://[user:pass@]host[:port][/db][?protocol=resp2|resp3]`
+/// - `rediss://[user:pass@]host[:port][/db][?protocol=resp2|resp3]` (TLS)
 /// - `valkey://` / `valkeys://` -- aliases for `redis://` / `rediss://`
-/// - `unix:///path/to/socket[?db=N]`
+/// - `{unix|redis+unix|valkey+unix}:///path/to/socket` with optional query
+///   parameters `user`, `pass`, `db`, and `protocol`
+///
+/// Unix socket paths use URL path encoding, so `%20` is a space while `+`
+/// remains a literal plus. Unix query values use form encoding: both `%20`
+/// and `+` are spaces, and a literal plus is `%2B`. Query parameters may
+/// appear in any order; when repeated, the final value wins. Unknown query
+/// parameters are ignored for compatibility with other Redis clients.
+///
+/// `protocol` accepts `2`, `resp2`, `3`, or `resp3`. It is consumed by the
+/// connection methods and is therefore not represented in [`RedisUrl`]. An
+/// explicit [`ProtocolVersion`](crate::ProtocolVersion) in
+/// [`ConnectionConfig`](crate::ConnectionConfig) takes precedence; otherwise
+/// the URL value replaces automatic negotiation.
 ///
 /// IPv6 literals use URL brackets, for example `rediss://[::1]:6380/0`.
 /// [`RedisUrl::host`] retains the brackets for socket-address formatting;
@@ -100,22 +138,53 @@ impl RedisUrl {
 /// must be percent-encoded to appear in a URL). See [`percent_decode`] for
 /// the exact decoding rules.
 pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
-    if url.starts_with("unix://") {
-        let path = url.strip_prefix("unix://").unwrap();
-        let (path, db) = if let Some((p, query)) = path.split_once('?') {
-            let db = query
-                .strip_prefix("db=")
-                .and_then(|d| d.parse::<u16>().ok());
-            (p, db)
-        } else {
-            (path, None)
-        };
+    let parsed = parse_connection_url(url)?;
+    if parsed.url.unix && parsed.url.path.is_none() {
+        return Err(RedisError::InvalidUrl(
+            "percent-decoded Unix socket path is not valid UTF-8; use RedisConnection::connect_url to connect without a lossy conversion"
+                .to_string(),
+        ));
+    }
+    Ok(parsed.url)
+}
 
-        return Ok(RedisUrl {
-            unix: true,
-            path: Some(path.to_string()),
-            database: db,
-            ..Default::default()
+pub(crate) fn parse_connection_url(url: &str) -> Result<ParsedRedisUrl, RedisError> {
+    let unix_rest = ["unix://", "redis+unix://", "valkey+unix://"]
+        .into_iter()
+        .find_map(|scheme| url.strip_prefix(scheme));
+    if let Some(rest) = unix_rest {
+        let (encoded_path, query) = split_query(rest);
+        if encoded_path.is_empty() {
+            return Err(RedisError::InvalidUrl(
+                "unix URL missing socket path".to_string(),
+            ));
+        }
+        let path_bytes = percent_decode_bytes(encoded_path);
+        if path_bytes.is_empty() {
+            return Err(RedisError::InvalidUrl(
+                "unix URL missing socket path".to_string(),
+            ));
+        }
+        let query = parse_query(query, true)?;
+        if query.username.is_some() && query.password.is_none() {
+            return Err(RedisError::InvalidUrl(
+                "unix URL user parameter requires a pass parameter".to_string(),
+            ));
+        }
+        let path = String::from_utf8(path_bytes.clone()).ok();
+
+        return Ok(ParsedRedisUrl {
+            url: RedisUrl {
+                username: query.username,
+                password: query.password,
+                database: query.database,
+                unix: true,
+                path,
+                ..Default::default()
+            },
+            protocol: query.protocol,
+            #[cfg(unix)]
+            unix_path: Some(path_bytes),
         });
     }
 
@@ -131,9 +200,12 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         (false, rest)
     } else {
         return Err(RedisError::InvalidUrl(
-            "expected redis://, rediss://, valkey://, valkeys://, or unix:// scheme".into(),
+            "expected redis://, rediss://, valkey://, valkeys://, unix://, redis+unix://, or valkey+unix:// scheme".into(),
         ));
     };
+
+    let (rest, query) = split_query(rest);
+    let query = parse_query(query, false)?;
 
     let (auth, host_part) = if let Some((auth, rest)) = rest.split_once('@') {
         (Some(auth), rest)
@@ -172,15 +244,74 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         })
         .transpose()?;
 
-    Ok(RedisUrl {
-        host,
-        port,
-        username,
-        password,
-        database,
-        tls,
-        unix: false,
-        path: None,
+    Ok(ParsedRedisUrl {
+        url: RedisUrl {
+            host,
+            port,
+            username,
+            password,
+            database,
+            tls,
+            unix: false,
+            path: None,
+        },
+        protocol: query.protocol,
+        #[cfg(unix)]
+        unix_path: None,
+    })
+}
+
+fn split_query(input: &str) -> (&str, Option<&str>) {
+    input
+        .split_once('?')
+        .map_or((input, None), |(path, query)| (path, Some(query)))
+}
+
+fn parse_query(query: Option<&str>, unix: bool) -> Result<UrlQuery, RedisError> {
+    let mut parsed = UrlQuery::default();
+    for pair in query.into_iter().flat_map(|query| query.split('&')) {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = form_decode(key)?;
+        let value = form_decode(value)?;
+        match key.as_str() {
+            "db" if unix => {
+                parsed.database =
+                    Some(value.parse::<u16>().map_err(|_| {
+                        RedisError::InvalidUrl(format!("invalid database: {value}"))
+                    })?);
+            }
+            "user" if unix => parsed.username = Some(value),
+            "pass" if unix => parsed.password = Some(value),
+            "protocol" => {
+                parsed.protocol = Some(match value.as_str() {
+                    "2" | "resp2" => ProtocolVersion::Resp2,
+                    "3" | "resp3" => ProtocolVersion::Resp3,
+                    _ => {
+                        return Err(RedisError::InvalidUrl(format!(
+                            "invalid protocol version: {value}"
+                        )));
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(parsed)
+}
+
+fn form_decode(input: &str) -> Result<String, RedisError> {
+    let replaced;
+    let input = if input.contains('+') {
+        replaced = input.replace('+', " ");
+        &replaced
+    } else {
+        input
+    };
+    String::from_utf8(percent_decode_bytes(input)).map_err(|_| {
+        RedisError::InvalidUrl("percent-decoded URL query is not valid UTF-8".to_string())
     })
 }
 
@@ -246,8 +377,14 @@ fn parse_port(port: &str) -> Result<u16, RedisError> {
 /// Returns [`RedisError::InvalidUrl`] if the decoded bytes are not valid
 /// UTF-8.
 pub fn percent_decode(input: &str) -> Result<String, RedisError> {
+    String::from_utf8(percent_decode_bytes(input)).map_err(|_| {
+        RedisError::InvalidUrl("percent-decoded URL component is not valid UTF-8".to_string())
+    })
+}
+
+fn percent_decode_bytes(input: &str) -> Vec<u8> {
     if !input.contains('%') {
-        return Ok(input.to_string());
+        return input.as_bytes().to_vec();
     }
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -264,9 +401,7 @@ pub fn percent_decode(input: &str) -> Result<String, RedisError> {
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| {
-        RedisError::InvalidUrl("percent-decoded URL component is not valid UTF-8".to_string())
-    })
+    out
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
@@ -410,6 +545,79 @@ mod tests {
     }
 
     #[test]
+    fn parse_unix_aliases_decode_paths_and_setup_query() {
+        for scheme in ["unix", "redis+unix", "valkey+unix"] {
+            let input = format!(
+                "{scheme}:///tmp/redis%20socket+name.sock?pass=%26%3F%3D+%2A%2B&db=2&user=%25agent%25&protocol=resp3"
+            );
+            let parsed = parse_connection_url(&input).unwrap();
+
+            assert!(parsed.url.unix, "{scheme}");
+            assert_eq!(
+                parsed.url.path.as_deref(),
+                Some("/tmp/redis socket+name.sock"),
+                "{scheme}"
+            );
+            #[cfg(unix)]
+            assert_eq!(
+                parsed.unix_path.as_deref(),
+                Some(&b"/tmp/redis socket+name.sock"[..]),
+                "{scheme}"
+            );
+            assert_eq!(parsed.url.username.as_deref(), Some("%agent%"), "{scheme}");
+            assert_eq!(parsed.url.password.as_deref(), Some("&?= *+"), "{scheme}");
+            assert_eq!(parsed.url.database, Some(2), "{scheme}");
+            assert_eq!(parsed.protocol, Some(ProtocolVersion::Resp3), "{scheme}");
+        }
+    }
+
+    #[test]
+    fn url_protocol_accepts_redis_rs_spellings_and_last_value_wins() {
+        for (value, expected) in [
+            ("2", ProtocolVersion::Resp2),
+            ("resp2", ProtocolVersion::Resp2),
+            ("3", ProtocolVersion::Resp3),
+            ("resp3", ProtocolVersion::Resp3),
+        ] {
+            let parsed =
+                parse_connection_url(&format!("redis://localhost/?protocol={value}")).unwrap();
+            assert_eq!(parsed.protocol, Some(expected), "{value}");
+        }
+
+        let parsed =
+            parse_connection_url("unix:///tmp/redis.sock?db=1&db=2&protocol=resp2&protocol=resp3")
+                .unwrap();
+        assert_eq!(parsed.url.database, Some(2));
+        assert_eq!(parsed.protocol, Some(ProtocolVersion::Resp3));
+    }
+
+    #[test]
+    fn unix_url_rejects_incomplete_or_invalid_setup() {
+        for input in [
+            "unix://",
+            "redis+unix://?db=1",
+            "unix:///tmp/redis.sock?db=notanumber",
+            "unix:///tmp/redis.sock?user=agent",
+            "unix:///tmp/redis.sock?protocol=4",
+            "redis://localhost/?protocol=auto",
+        ] {
+            assert!(parse_redis_url(input).is_err(), "accepted {input}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_parser_preserves_non_utf8_unix_path_bytes() {
+        let parsed = parse_connection_url("unix:///tmp/redis-%FF.sock").unwrap();
+        assert_eq!(
+            parsed.unix_path.as_deref(),
+            Some(&b"/tmp/redis-\xff.sock"[..])
+        );
+        assert!(parsed.url.path.is_none());
+        assert!(parse_redis_url("unix:///tmp/redis-%FF.sock").is_err());
+    }
+
+    #[test]
     fn parse_invalid_scheme() {
         assert!(parse_redis_url("http://localhost").is_err());
     }
@@ -506,10 +714,8 @@ mod tests {
     }
 
     #[test]
-    fn parse_unix_with_invalid_db_ignored() {
-        let url = parse_redis_url("unix:///tmp/redis.sock?db=notanumber").unwrap();
-        assert!(url.unix);
-        assert_eq!(url.database, None);
+    fn parse_unix_with_invalid_db_is_rejected() {
+        assert!(parse_redis_url("unix:///tmp/redis.sock?db=notanumber").is_err());
     }
 
     #[test]

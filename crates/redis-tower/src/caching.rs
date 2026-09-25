@@ -251,8 +251,8 @@ impl CachedClient {
         Self::from_factory(factory, config).await
     }
 
-    /// Connect using a Redis URL (`redis://`, `rediss://`, or `unix://`) with
-    /// safe cache defaults.
+    /// Connect using a Redis/Valkey TCP, TLS, or Unix-socket URL with safe
+    /// cache defaults.
     ///
     /// URL authentication and database selection are applied independently to
     /// the data and invalidation connections.

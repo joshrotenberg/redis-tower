@@ -48,9 +48,9 @@
 //!
 //! # URL Parsing
 //!
-//! [`parse_redis_url`] and [`RedisUrl`] parse `redis://`, `rediss://` (TLS),
-//! and `redis+unix://` connection strings into structured configuration,
-//! including host, port, database selection, and authentication credentials.
+//! [`parse_redis_url`] and [`RedisUrl`] parse Redis and Valkey TCP, TLS, and
+//! Unix-socket connection strings into structured configuration, including
+//! host, port, decoded socket path, database, and authentication credentials.
 //!
 //! # Value Conversion
 //!
