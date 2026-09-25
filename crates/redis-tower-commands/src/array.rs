@@ -4,6 +4,22 @@
 //! unsigned: ordinary commands accept values through `u64::MAX - 1`;
 //! [`ArSeek`] uniquely accepts `u64::MAX` to place the insert cursor in its
 //! terminal state.
+//!
+//! Commands return typed array entries, counts, booleans, or optional byte
+//! values according to the Redis command. Check the server version before
+//! enabling an array-backed code path.
+//!
+//! ```
+//! use redis_tower_commands::ArGet;
+//! use redis_tower_core::Command;
+//!
+//! let command = ArGet::new("queue", 0);
+//! assert_eq!(command.name(), "ARGET");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
 
 use std::collections::HashMap;
 

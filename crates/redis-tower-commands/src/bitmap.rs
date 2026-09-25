@@ -1,3 +1,23 @@
+//! Bit-level operations over Redis string values.
+//!
+//! Use [`SetBit`] and [`GetBit`] for individual flags, [`BitCount`] for
+//! population counts, and [`BitOp`] / [`Bitfield`] for bulk operations. Offset
+//! and count replies are integers; bit reads are normalized to their typed
+//! command response.
+//!
+//! ```
+//! use redis_tower_commands::{GetBit, SetBit};
+//! use redis_tower_core::Command;
+//!
+//! let set = SetBit::new("daily:active", 42, 1);
+//! let get = GetBit::new("daily:active", 42);
+//! assert_eq!((set.name(), get.name()), ("SETBIT", "GETBIT"));
+//! ```
+//!
+//! See the [command cookbook] for binary key handling and response shapes.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#binary-keys-and-values
+
 use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

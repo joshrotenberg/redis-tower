@@ -1,3 +1,21 @@
+//! Redis ACL inspection and administration.
+//!
+//! Read commands such as [`AclWhoAmI`] and [`AclGetUser`] return the server's
+//! ACL representation; mutating commands require an appropriately privileged
+//! Redis user. Prefer structured application configuration over issuing ACL
+//! changes from normal request paths.
+//!
+//! ```
+//! use redis_tower_commands::AclWhoAmI;
+//! use redis_tower_core::Command;
+//!
+//! assert_eq!(AclWhoAmI::new().name(), "ACL WHOAMI");
+//! ```
+//!
+//! See the [command cookbook] for client and administration guidance.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#administration-and-diagnostics
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

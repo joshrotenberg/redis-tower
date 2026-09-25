@@ -1,3 +1,23 @@
+//! Escape hatches for custom, module, and newly introduced Redis commands.
+//!
+//! [`RawCommand`] preserves binary arguments and returns a raw `Frame`.
+//! [`RawCommand::query`] adds any `FromFrame` decoder while keeping identical
+//! wire bytes. Cluster callers must separately provide enough key/routing
+//! information for safe placement; a decoder does not make an unknown command
+//! routable.
+//!
+//! ```
+//! use redis_tower_commands::RawCommand;
+//! use redis_tower_core::Command;
+//!
+//! let command = RawCommand::new("SCARD").arg("members").query::<i64>();
+//! assert_eq!(command.name(), "SCARD");
+//! ```
+//!
+//! See the [command cookbook] for reply-shape and Cluster guidance.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#raw-custom-and-module-replies
+
 use std::marker::PhantomData;
 
 use redis_tower_core::{Command, Frame, FromFrame, RedisError};
@@ -46,7 +66,7 @@ impl RawCommand {
     ///
     /// Returns a [`TypedRawCommand`] whose `Response` is `T`, so `execute`
     /// yields a decoded value. `T` can be any type implementing
-    /// [`FromFrame`](redis_tower_core::FromFrame): scalars, `String`, `Bytes`,
+    /// [`FromFrame`]: scalars, `String`, `Bytes`,
     /// `Option<T>`, `Vec<T>`, tuples, and `HashMap<K, V>`.
     ///
     /// # Example

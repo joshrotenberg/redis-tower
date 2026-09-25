@@ -39,6 +39,19 @@ class CiWorkflowTests(unittest.TestCase):
             "--manifest-path release-tests/redis-rs-migration/Cargo.toml", job
         )
 
+    def test_command_cookbook_examples_are_compiled(self) -> None:
+        job = documentation_job()
+        self.assertIn(
+            "cargo check -p redis-tower-examples --example command_cookbook", job
+        )
+
+    def test_minimal_command_rustdoc_is_strict(self) -> None:
+        job = documentation_job()
+        self.assertIn(
+            "cargo doc -p redis-tower-commands --no-default-features --no-deps", job
+        )
+        self.assertGreaterEqual(job.count("RUSTDOCFLAGS: -D warnings"), 2)
+
     def test_coverage_job_does_not_depend_on_unconfigured_codecov(self) -> None:
         job = coverage_job()
         self.assertIn("    permissions:\n      contents: read\n", job)

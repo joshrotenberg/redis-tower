@@ -1,3 +1,22 @@
+//! Redis 8 Vector Set commands.
+//!
+//! Available with the `vector-sets` feature (included by `stack`) and requiring
+//! a Redis server with Vector Set support. [`VAdd`] accepts typed floating-point
+//! vectors; similarity queries return command-specific element/score shapes.
+//! Verify the server version before enabling this family.
+//!
+//! ```
+//! use redis_tower_commands::VAdd;
+//! use redis_tower_core::Command;
+//!
+//! let command = VAdd::new("embeddings", vec![0.1, 0.2, 0.3], "doc:1");
+//! assert_eq!(command.name(), "VADD");
+//! ```
+//!
+//! See the [command cookbook] for feature and server prerequisites.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

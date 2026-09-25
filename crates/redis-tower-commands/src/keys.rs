@@ -1,3 +1,24 @@
+//! Key lifecycle, expiry, migration, and metadata commands.
+//!
+//! Prefer [`Scan`](crate::scan::Scan) to [`Keys`] on production keyspaces.
+//! Multi-key commands must use one hash slot in Redis Cluster unless the
+//! higher-level cluster client explicitly splits them. Expiry and lookup
+//! commands use typed integer or optional responses rather than collapsing
+//! missing keys into empty values.
+//!
+//! ```
+//! use redis_tower_commands::{Expire, Ttl};
+//! use redis_tower_core::Command;
+//!
+//! let expire = Expire::new("session:1", 60);
+//! let ttl = Ttl::new("session:1");
+//! assert_eq!((expire.name(), ttl.name()), ("EXPIRE", "TTL"));
+//! ```
+//!
+//! See the [command cookbook] for Cluster and cursor guidance.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#pipelines-transactions-and-cluster-slots
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

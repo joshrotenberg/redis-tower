@@ -12,6 +12,26 @@
 //! worker for its entire wait, stalling every other concurrent caller. Run
 //! blocking commands on a dedicated `RedisConnection` or a pooled connection
 //! instead. Each such command reports `is_blocking() == true`.
+//!
+//! Redis timeout shapes are command-specific: list and sorted-set blockers
+//! return `None`, while `XREAD` / `XREADGROUP` return an empty stream vector.
+//! Cancellation after dispatch also depends on the owning client. A direct
+//! `RedisConnection` or pool member quarantines its socket; an auto-pipeline
+//! worker retains the in-flight batch, consumes its replies for alignment, and
+//! can keep a still-usable socket. Blocking commands should not use that shared
+//! worker in the first place. Keep shutdown cancellation explicit.
+//!
+//! ```
+//! use redis_tower_commands::BLPop;
+//! use redis_tower_core::Command;
+//!
+//! let command = BLPop::new("jobs", 5.0);
+//! assert!(command.is_blocking());
+//! ```
+//!
+//! See the [command cookbook] for isolated blocking sessions.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#streams-consumer-groups-and-blocking-reads
 
 use crate::CommandArg;
 use bytes::Bytes;

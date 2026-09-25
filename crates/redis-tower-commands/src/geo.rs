@@ -1,3 +1,23 @@
+//! Geospatial indexes backed by Redis sorted sets.
+//!
+//! [`GeoAdd`] stores longitude/latitude members. [`GeoSearch`] returns matching
+//! member names, [`GeoPos`] returns optional coordinates, [`GeoHash`] returns
+//! optional geohashes, [`GeoSearchStore`] returns a stored count, and
+//! [`GeoDist`] returns an optional distance. Units are explicit through
+//! [`GeoUnit`].
+//!
+//! ```
+//! use redis_tower_commands::GeoAdd;
+//! use redis_tower_core::Command;
+//!
+//! let command = GeoAdd::new("places").member(-122.4194, 37.7749, "sf");
+//! assert_eq!(command.name(), "GEOADD");
+//! ```
+//!
+//! See the [command cookbook] for choosing and executing typed commands.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#typed-commands-and-response-shapes
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

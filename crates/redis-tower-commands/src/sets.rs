@@ -1,3 +1,23 @@
+//! Unordered unique-member sets.
+//!
+//! Membership commands return booleans, cardinality and mutation commands
+//! return integers, and member/set operations return byte collections whose
+//! order is not stable. Multi-key algebra must use one hash slot in Cluster or
+//! be decomposed explicitly by the application.
+//!
+//! ```
+//! use redis_tower_commands::{SAdd, SIsMember};
+//! use redis_tower_core::Command;
+//!
+//! let add = SAdd::new("roles", "admin");
+//! let contains = SIsMember::new("roles", "admin");
+//! assert_eq!((add.name(), contains.name()), ("SADD", "SISMEMBER"));
+//! ```
+//!
+//! See the [command cookbook] for unordered responses and Cluster slots.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#pipelines-transactions-and-cluster-slots
+
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

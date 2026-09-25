@@ -1,4 +1,22 @@
-//! Redis Streams commands.
+//! Redis Streams, consumer groups, pending entries, and acknowledgements.
+//!
+//! [`XAdd`] returns an entry ID, range/read commands return structured
+//! [`StreamEntry`] values, and group acknowledgement returns a count. A read
+//! with `BLOCK` is a blocking operation: run it on a dedicated connection or
+//! an independently dispatched pool slot, never a shared multiplexed worker.
+//!
+//! ```
+//! use redis_tower_commands::{XAdd, XRead};
+//! use redis_tower_core::Command;
+//!
+//! let add = XAdd::new("events").field("kind", "created");
+//! let read = XRead::new("events", "0-0").count(10);
+//! assert_eq!((add.name(), read.name()), ("XADD", "XREAD"));
+//! ```
+//!
+//! See the [command cookbook] for groups, blocking ownership, and shutdown.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#streams-consumer-groups-and-blocking-reads
 
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

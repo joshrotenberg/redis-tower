@@ -1,3 +1,23 @@
+//! RedisJSON document commands.
+//!
+//! Available with the `json` feature (included by `stack`) and requiring
+//! RedisJSON on the server. JSON paths and serialized JSON values are textual
+//! grammar; Redis keys remain binary-safe. Commands return typed scalars,
+//! optional bytes, or raw JSON text according to the selected operation/path.
+//!
+//! ```
+//! use redis_tower_commands::{JsonGet, JsonSet};
+//! use redis_tower_core::Command;
+//!
+//! let set = JsonSet::new("user:1", "$", r#"{"name":"Ada"}"#);
+//! let get = JsonGet::new("user:1").path("$.name");
+//! assert_eq!((set.name(), get.name()), ("JSON.SET", "JSON.GET"));
+//! ```
+//!
+//! See the [command cookbook] for module reply normalization.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#raw-custom-and-module-replies
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

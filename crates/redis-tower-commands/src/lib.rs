@@ -8,27 +8,33 @@
 //!
 //! Commands are grouped by category:
 //!
-//! - **strings** -- `Get`, `Set`, `Incr`, `Append`, `MGet`, `MSet`, etc.
-//! - **keys** -- `Del`, `Exists`, `Expire`, `Ttl`, `Rename`, `Type`, etc.
-//! - **hashes** -- `HGet`, `HSet`, `HGetAll`, `HDel`, `HIncrBy`, etc.
-//! - **lists** -- `LPush`, `RPush`, `LPop`, `RPop`, `LRange`, `LLen`, etc.
-//! - **sets** -- `SAdd`, `SMembers`, `SRem`, `SIsMember`, `SUnion`, etc.
-//! - **sorted_sets** -- `ZAdd`, `ZRange`, `ZRank`, `ZScore`, etc.
-//! - **streams** -- `XAdd`, `XRead`, `XRange`, `XAck`, `XGroup`, etc.
-//! - **pubsub** -- `Publish`, `Subscribe`, `Unsubscribe`
-//! - **scripting** -- `Eval`, `EvalSha`, `ScriptLoad`, `ScriptExists`
-//! - **server** -- `Ping`, `FlushDb`, `FlushAll`, `DbSize`, `Info`, etc.
-//! - **geo** -- `GeoAdd`, `GeoSearch`, `GeoDist`, etc.
-//! - **hyperloglog** -- `PfAdd`, `PfCount`, `PfMerge`
-//! - **bitmap** -- `SetBit`, `GetBit`, `BitCount`, `BitOp`, etc.
-//! - **array** -- `ArGet`, `ArSet`, `ArScan`, `ArGrep`, etc. (Redis 8.8+)
-//! - **blocking** -- `BLPop`, `BRPop`, `BLMove`, `BZPopMin`, etc.
-//! - **scan** -- `Scan`, `HScan`, `SScan`, `ZScan`
-//! - **acl** -- ACL management commands
-//! - **cluster** -- `ClusterInfo`, `ClusterSlots`, etc.
-//! - **diagnostics** -- `SlowlogGet`, `DebugSleep`, `MemoryUsage`, etc.
-//! - **bloom** / **sketch** / **tdigest** / **json** / **search** /
-//!   **timeseries** / **vector_sets** -- Redis module commands
+//! - [`strings`] and [`keys`] -- values, counters, expiry, and key lifecycle.
+//! - [`hashes`], [`lists`], [`sets`], and [`sorted_sets`] -- collection data.
+//! - [`streams`] and [`blocking`] -- logs, consumer groups, and isolated waits.
+//! - [`scan`] -- cursor-based iteration without blocking the server.
+//! - [`transaction`] and [`scripting`] -- atomic batches and server-side logic.
+//! - [`pubsub`] -- publishing and introspection; subscriptions use the
+//!   higher-level `redis_tower::PubSubConnection` API.
+//! - [`server`], [`acl`], [`cluster`], and [`diagnostics`] -- administration
+//!   and diagnostics.
+//! - [`geo`], [`hyperloglog`], [`bitmap`], and [`mod@array`] -- specialized native
+//!   data structures (arrays require Redis 8.8+).
+//! - Feature-gated [Bloom], [sketch], [T-Digest], [JSON], [Search],
+//!   [TimeSeries], and [Vector Set] pages -- Redis Stack and Redis 8 families.
+//!
+//! Every category page explains its response shapes and prerequisites and has
+//! a compiling example. The repository's [command cookbook] connects those
+//! command builders to client choice, binary data, transactions, streams,
+//! custom commands, and dedicated session ownership.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md
+//! [Bloom]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/bloom/
+//! [sketch]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/sketch/
+//! [T-Digest]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/tdigest/
+//! [JSON]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/json/
+//! [Search]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/search/
+//! [TimeSeries]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/timeseries/
+//! [Vector Set]: https://docs.rs/redis-tower-commands/latest/redis_tower_commands/vector_sets/
 //!
 //! # Builder Pattern
 //!
@@ -84,29 +90,29 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 // -- Core Redis commands (always available) --
-mod acl;
+pub mod acl;
 mod arg;
-mod array;
-mod bitmap;
-mod blocking;
-mod cluster;
-mod diagnostics;
-mod geo;
-mod hashes;
+pub mod array;
+pub mod bitmap;
+pub mod blocking;
+pub mod cluster;
+pub mod diagnostics;
+pub mod geo;
+pub mod hashes;
 mod help;
-mod hyperloglog;
-mod keys;
-mod lists;
-mod pubsub;
-mod raw;
-mod scan;
-mod scripting;
-mod server;
-mod sets;
-mod sorted_sets;
-mod streams;
-mod strings;
-mod transaction;
+pub mod hyperloglog;
+pub mod keys;
+pub mod lists;
+pub mod pubsub;
+pub mod raw;
+pub mod scan;
+pub mod scripting;
+pub mod server;
+pub mod sets;
+pub mod sorted_sets;
+pub mod streams;
+pub mod strings;
+pub mod transaction;
 
 pub use acl::*;
 pub use arg::*;
@@ -133,48 +139,45 @@ pub use transaction::*;
 
 // -- Redis Stack module commands (feature-gated) --
 #[cfg(feature = "bloom")]
-mod bloom;
+pub mod bloom;
 #[cfg(feature = "bloom")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bloom")))]
 pub use bloom::*;
 
 #[cfg(feature = "json")]
-mod json;
+pub mod json;
 #[cfg(feature = "json")]
 #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
 pub use json::*;
 
 #[cfg(feature = "search")]
-mod search;
+pub mod search;
 #[cfg(feature = "search")]
 #[cfg_attr(docsrs, doc(cfg(feature = "search")))]
 pub use search::*;
 #[cfg(feature = "search")]
 mod search_util;
-#[cfg(feature = "search")]
-#[cfg_attr(docsrs, doc(cfg(feature = "search")))]
-pub use search_util::*;
 
 #[cfg(feature = "sketch")]
-mod sketch;
+pub mod sketch;
 #[cfg(feature = "sketch")]
 #[cfg_attr(docsrs, doc(cfg(feature = "sketch")))]
 pub use sketch::*;
 
 #[cfg(feature = "tdigest")]
-mod tdigest;
+pub mod tdigest;
 #[cfg(feature = "tdigest")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tdigest")))]
 pub use tdigest::*;
 
 #[cfg(feature = "timeseries")]
-mod timeseries;
+pub mod timeseries;
 #[cfg(feature = "timeseries")]
 #[cfg_attr(docsrs, doc(cfg(feature = "timeseries")))]
 pub use timeseries::*;
 
 #[cfg(feature = "vector-sets")]
-mod vector_sets;
+pub mod vector_sets;
 #[cfg(feature = "vector-sets")]
 #[cfg_attr(docsrs, doc(cfg(feature = "vector-sets")))]
 pub use vector_sets::*;

@@ -13,8 +13,9 @@
 //! Direct [`Transaction`](crate::Transaction) execution submits one atomic
 //! WATCH/MULTI/EXEC batch. Workflows that need separate calls while holding
 //! exclusive connection state, including the closure-based `transaction`
-//! helpers and blocking commands, require [`RedisConnection`] directly or via
-//! [`ConnectionPool`](crate::pool::ConnectionPool).
+//! helpers, require [`RedisConnection`] directly. Blocking commands require a
+//! dedicated [`RedisConnection`] or a pool sized for the number of simultaneous
+//! blockers; the pool does not expose a multi-call connection lease.
 //!
 //! # Example
 //!
@@ -84,7 +85,9 @@ use crate::transaction::TransactionExecutor;
 /// any number of tasks are safe; their commands are automatically batched into
 /// pipelines. Direct [`Transaction`](crate::Transaction) values are supported;
 /// for workflows requiring exclusive connection access across separate calls,
-/// use [`RedisConnection`] directly or [`ConnectionPool`](crate::pool::ConnectionPool).
+/// use [`RedisConnection`] directly. A [`ConnectionPool`](crate::pool::ConnectionPool)
+/// dispatches each command independently and cannot preserve connection-local
+/// state across calls.
 ///
 /// # Blocking commands
 ///

@@ -134,9 +134,10 @@ must not depend on shutdown running.
 - Expect the first command on a cold process to include connection latency.
 - Keep process liveness local; use Redis-backed readiness deliberately.
 - Size concurrency so one auto-pipelined connection is appropriate, or use a
-  bounded pool when commands need exclusive connection state.
+  bounded pool when individual blocking commands need independent sockets.
 - Never send blocking commands through `MultiplexedClient`; use a dedicated
-  connection or pool checkout instead.
+  connection or a pool sized for the maximum simultaneous blockers. The pool
+  dispatches commands; it does not expose a checkout for multi-call state.
 
 See [Production tuning](PRODUCTION-TUNING.md) for queue sizing, response
 timeouts, reconnect policy, and graceful shutdown details.

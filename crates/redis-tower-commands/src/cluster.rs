@@ -1,3 +1,21 @@
+//! Redis Cluster administration and topology inspection commands.
+//!
+//! These builders represent `CLUSTER ...` server commands such as
+//! [`ClusterInfo`] and [`ClusterSlots`]. They are distinct from the
+//! `redis-tower-cluster` client's automatic key routing. Most mutating cluster
+//! commands should be reserved for controlled operational tooling.
+//!
+//! ```
+//! use redis_tower_commands::ClusterInfo;
+//! use redis_tower_core::Command;
+//!
+//! assert_eq!(ClusterInfo::new().name(), "CLUSTER INFO");
+//! ```
+//!
+//! See the [command cookbook] for topology clients and routing ownership.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#standalone-cluster-sentinel-and-universal-entry-points
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

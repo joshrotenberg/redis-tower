@@ -1,3 +1,25 @@
+//! Publishing and Pub/Sub introspection commands.
+//!
+//! [`Publish`] and [`SPublish`] are ordinary request/response commands.
+//! Subscription mode is stateful and is owned by
+//! [`redis_tower::PubSubConnection`](https://docs.rs/redis-tower/latest/redis_tower/struct.PubSubConnection.html),
+//! not exposed as typed request/response commands in this crate. Do not send
+//! raw `SUBSCRIBE` commands through a shared client. Introspection replies are
+//! typed channel lists, channel/count pairs, or counts as documented on each
+//! command.
+//!
+//! ```
+//! use redis_tower_commands::Publish;
+//! use redis_tower_core::Command;
+//!
+//! let command = Publish::new("events", b"ready".as_slice());
+//! assert_eq!(command.name(), "PUBLISH");
+//! ```
+//!
+//! See the [command cookbook] for binary subscriptions and reconnect limits.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#pubsub-and-monitor
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};

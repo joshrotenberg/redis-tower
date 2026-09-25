@@ -1,3 +1,24 @@
+//! Low-level Redis transaction control commands.
+//!
+//! These builders expose `MULTI`, `EXEC`, `WATCH`, and related wire commands.
+//! Application code should normally use
+//! [`redis_tower::Transaction`](https://docs.rs/redis-tower/latest/redis_tower/struct.Transaction.html),
+//! which submits a complete atomic exchange and returns typed results. Do not
+//! issue these primitives as separate calls on a multiplexed connection.
+//!
+//! ```
+//! use redis_tower_commands::Watch;
+//! use redis_tower_core::Command;
+//!
+//! let command = Watch::keys(["account:1", "account:2"]);
+//! assert_eq!(command.name(), "WATCH");
+//! ```
+//!
+//! See the [command cookbook] for pipeline, transaction, and exclusive WATCH
+//! ownership rules.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#pipelines-transactions-and-cluster-slots
+
 use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};

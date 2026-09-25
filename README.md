@@ -450,6 +450,7 @@ let value = client.execute(Get::new("key"))?;
 ## Learn more
 
 - [Documentation home](https://joshrotenberg.com/redis-tower/)
+- [Command cookbook](https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md)
 - [Production tuning](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRODUCTION-TUNING.md)
 - [Serverless and scale-to-zero](https://github.com/joshrotenberg/redis-tower/blob/main/docs/SERVERLESS.md)
 - [Client-side caching](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLIENT-SIDE-CACHING.md)

@@ -1,3 +1,21 @@
+//! Memory, latency, slow-log, and debugging commands.
+//!
+//! Use these commands for bounded operational inspection. Some commands are
+//! expensive, disabled, or privilege-restricted on managed Redis services;
+//! treat `DEBUG` operations and large diagnostic replies as deliberate operator
+//! actions rather than request-path instrumentation.
+//!
+//! ```
+//! use redis_tower_commands::MemoryUsage;
+//! use redis_tower_core::Command;
+//!
+//! assert_eq!(MemoryUsage::new("cache:key").name(), "MEMORY USAGE");
+//! ```
+//!
+//! See the [command cookbook] for safer continuous observability choices.
+//!
+//! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#administration-and-diagnostics
+
 use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
