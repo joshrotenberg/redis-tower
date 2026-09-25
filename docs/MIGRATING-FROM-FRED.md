@@ -150,13 +150,22 @@ Fred commonly represents command options as additional method arguments.
 redis-tower puts them on a builder, which makes call sites self-describing:
 
 ```rust,ignore
-client.execute(Set::new("lease", "owner-a").nx().ex(30)).await?;
+use redis_tower::commands::SetStatus;
+
+let outcome = client
+    .execute(Set::new("lease", "owner-a").nx().ex(30).with_outcome())
+    .await?;
+if outcome.status == SetStatus::NotApplied {
+    println!("the lease already exists");
+}
 client.execute(Get::new("lease")).await?;
 ```
 
 Check the command type's rustdoc when translating a long Fred call: the builder
 methods serialize in Redis grammar order even when they are chained in another
-order.
+order. Call `with_outcome()` last when conditional `SET` code needs to
+distinguish an applied write from a failed `NX` or `XX` condition; the base
+`Set` keeps its original `Option<Bytes>` response for compatibility.
 
 ### Commands without a typed builder
 

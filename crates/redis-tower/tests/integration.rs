@@ -87,6 +87,7 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
         .concat()
     };
     let string_key = key(b"string");
+    let set_outcome_key = key(b"set-outcome");
     let empty_string_key = key(b"empty-string");
     let missing_string_key = key(b"missing-string");
     let hash_key = key(b"hash");
@@ -110,6 +111,7 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
 
     for redis_key in [
         &string_key,
+        &set_outcome_key,
         &empty_string_key,
         &missing_string_key,
         &hash_key,
@@ -161,6 +163,136 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
             None,
             Some(Bytes::new()),
         ]
+    );
+
+    assert_eq!(
+        conn.execute(Set::new(&set_outcome_key, value).with_outcome())
+            .await
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .nx()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .nx()
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::Value(Bytes::copy_from_slice(value)),
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"".as_slice())
+                .xx()
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Value(Bytes::copy_from_slice(value)),
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .nx()
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::Value(Bytes::new()),
+        }
+    );
+    conn.execute(Del::new(&set_outcome_key)).await.unwrap();
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .xx()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .xx()
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::Missing,
+        }
+    );
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"replacement".as_slice())
+                .nx()
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Missing,
+        }
+    );
+    assert_eq!(
+        conn.execute(Set::new(&set_outcome_key, value).get().with_outcome())
+            .await
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Value(Bytes::from_static(b"replacement")),
+        }
+    );
+    conn.execute(Del::new(&set_outcome_key)).await.unwrap();
+    assert_eq!(
+        conn.execute(
+            Set::new(&set_outcome_key, b"".as_slice())
+                .get()
+                .with_outcome(),
+        )
+        .await
+        .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Missing,
+        }
     );
 
     conn.execute(HSet::new(&hash_key, field, value))

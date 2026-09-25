@@ -1,15 +1,17 @@
 //! String values, counters, conditional writes, and multi-key string commands.
 //!
 //! [`Get`] returns `Option<Bytes>` so a missing key remains distinct from an
-//! empty value; counters return integers or floats. [`Set`] always has an
-//! `Option<Bytes>` response because `GET` and conditional modes change Redis's
-//! reply meaning—interpret it together with the options used to build it.
+//! empty value; counters return integers or floats. [`Set`] keeps its original
+//! `Option<Bytes>` response for compatibility. Finish a builder with
+//! [`Set::with_outcome`] when conditional code needs an unambiguous
+//! [`SetOutcome`] containing both the write status and any requested previous
+//! value.
 //!
 //! ```
 //! use redis_tower_commands::{Get, Set};
 //! use redis_tower_core::Command;
 //!
-//! let set = Set::new("session", "ready").ex(60).nx();
+//! let set = Set::new("session", "ready").ex(60).nx().with_outcome();
 //! let get = Get::new("session");
 //! assert_eq!((set.name(), get.name()), ("SET", "GET"));
 //! ```
@@ -69,8 +71,12 @@ impl Command for Get {
 
 /// SET key value \[EX seconds\] \[PX milliseconds\] \[NX|XX\] \[GET\]
 ///
-/// Sets `key` to hold `value`. Returns `Ok` on success, or the old value
-/// if `GET` is specified.
+/// Sets `key` to hold `value`.
+///
+/// The compatibility response is `Option<Bytes>`: `GET` returns the previous
+/// value, while both `OK` and a null conditional reply become `None`. Code that
+/// must distinguish an applied write from an unmet `NX` or `XX` condition
+/// should finish the builder with [`Set::with_outcome`].
 #[derive(Clone)]
 pub struct Set {
     key: CommandArg,
@@ -88,6 +94,55 @@ pub enum SetCondition {
     Nx,
     /// Only set if the key already exists.
     Xx,
+}
+
+/// Whether Redis applied a [`Set`] operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetStatus {
+    /// Redis stored the requested value.
+    Applied,
+    /// Redis left the key unchanged because an `NX` or `XX` condition failed.
+    NotApplied,
+}
+
+/// Previous-value information returned by [`Set::with_outcome`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetPreviousValue {
+    /// `GET` was not requested, so Redis did not report the previous value.
+    NotRequested,
+    /// `GET` was requested and the key had no previous value.
+    Missing,
+    /// `GET` was requested and Redis returned the previous binary value.
+    Value(Bytes),
+}
+
+/// Unambiguous response from [`Set::with_outcome`].
+///
+/// `status` and `previous` are independent: a conditional write can be applied
+/// or rejected, while the previous value can be unrequested, missing, empty,
+/// or arbitrary binary data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetOutcome {
+    /// Whether Redis applied the write.
+    pub status: SetStatus,
+    /// Previous-value information, including whether `GET` was requested.
+    pub previous: SetPreviousValue,
+}
+
+impl SetOutcome {
+    /// Return `true` when Redis applied the write.
+    pub fn is_applied(&self) -> bool {
+        self.status == SetStatus::Applied
+    }
+}
+
+/// A [`Set`] command whose response is an unambiguous [`SetOutcome`].
+///
+/// Create this command by calling [`Set::with_outcome`] after configuring all
+/// desired `SET` options.
+#[derive(Clone)]
+pub struct SetWithOutcome {
+    command: Set,
 }
 
 impl Set {
@@ -134,6 +189,67 @@ impl Set {
         self.get = true;
         self
     }
+
+    /// Return an unambiguous write status and previous-value result.
+    ///
+    /// This additive response mode leaves [`Set`]'s original `Option<Bytes>`
+    /// response intact for compatibility. Call it after configuring the
+    /// command:
+    ///
+    /// ```
+    /// use redis_tower_commands::{Set, SetPreviousValue, SetStatus};
+    /// use redis_tower_core::Command;
+    ///
+    /// let command = Set::new("lease", "owner").nx().get().with_outcome();
+    /// assert_eq!(command.name(), "SET");
+    /// let _ = (SetStatus::Applied, SetPreviousValue::Missing);
+    /// ```
+    pub fn with_outcome(self) -> SetWithOutcome {
+        SetWithOutcome { command: self }
+    }
+
+    fn parse_outcome(&self, frame: Frame) -> Result<SetOutcome, RedisError> {
+        if !self.get {
+            return match frame {
+                Frame::SimpleString(value) if &value[..] == b"OK" => Ok(SetOutcome {
+                    status: SetStatus::Applied,
+                    previous: SetPreviousValue::NotRequested,
+                }),
+                Frame::Null | Frame::BulkString(None) if self.condition.is_some() => {
+                    Ok(SetOutcome {
+                        status: SetStatus::NotApplied,
+                        previous: SetPreviousValue::NotRequested,
+                    })
+                }
+                other => Err(RedisError::UnexpectedResponse {
+                    expected: "OK, or null for a conditional SET",
+                    actual: format!("{other:?}"),
+                }),
+            };
+        }
+
+        let previous = match frame {
+            Frame::BulkString(Some(value)) => SetPreviousValue::Value(value),
+            Frame::BulkString(None) | Frame::Null => SetPreviousValue::Missing,
+            other => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "bulk string or null for SET GET",
+                    actual: format!("{other:?}"),
+                });
+            }
+        };
+
+        let status = match (&self.condition, &previous) {
+            (None, _) => SetStatus::Applied,
+            (Some(SetCondition::Nx), SetPreviousValue::Missing) => SetStatus::Applied,
+            (Some(SetCondition::Nx), SetPreviousValue::Value(_)) => SetStatus::NotApplied,
+            (Some(SetCondition::Xx), SetPreviousValue::Missing) => SetStatus::NotApplied,
+            (Some(SetCondition::Xx), SetPreviousValue::Value(_)) => SetStatus::Applied,
+            (_, SetPreviousValue::NotRequested) => unreachable!("SET GET always reports a value"),
+        };
+
+        Ok(SetOutcome { status, previous })
+    }
 }
 
 impl Command for Set {
@@ -176,6 +292,22 @@ impl Command for Set {
                 actual: format!("{other:?}"),
             }),
         }
+    }
+
+    fn name(&self) -> &str {
+        "SET"
+    }
+}
+
+impl Command for SetWithOutcome {
+    type Response = SetOutcome;
+
+    fn to_frame(&self) -> Frame {
+        self.command.to_frame()
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        self.command.parse_outcome(frame)
     }
 
     fn name(&self) -> &str {

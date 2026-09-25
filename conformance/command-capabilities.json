@@ -16337,13 +16337,18 @@
       "availability": {
         "disposition": "typed_builder",
         "api": [
-          "redis_tower_commands::Set"
+          "redis_tower_commands::Set",
+          "redis_tower_commands::SetWithOutcome"
         ],
         "rationale": "A dedicated typed Command implementation is present.",
         "source_refs": [
           {
             "path": "crates/redis-tower-commands/src/strings.rs",
             "symbol": "Set"
+          },
+          {
+            "path": "crates/redis-tower-commands/src/strings.rs",
+            "symbol": "SetWithOutcome"
           }
         ]
       },
@@ -16351,8 +16356,8 @@
         "status": "partial",
         "binary_inputs": "verified",
         "options": "EX/PX, NX/XX and GET are typed; EXAT/PXAT/KEEPTTL and Redis 8.4 IFEQ/IFNE/IFDEQ/IFDNE are unimplemented",
-        "response": "Option<Bytes>; current API cannot distinguish OK from a null NX/XX rejection without GET",
-        "notes": "Differential coverage exercises NX+GET and XX+GET, not expiry combinations. A richer conditional outcome is tracked by issue #729."
+        "response": "Set::with_outcome returns independent Applied/NotApplied status and NotRequested/Missing/Value previous-value state; base Set preserves the legacy Option<Bytes> response",
+        "notes": "RESP2/RESP3 live and parser coverage exercises ordinary SET plus all applied/rejected NX/XX branches with and without GET, including missing, empty and binary previous values. Expiry combinations are not covered."
       },
       "operations": {
         "status": "verified",
@@ -23418,7 +23423,7 @@
     {
       "id": "command.set-options",
       "anchor": "behavior-command-set-options",
-      "description": "SET NX+GET and XX+GET builder combinations are compared with redis-rs; expiry combinations are not covered, and the current ambiguous conditional null outcome remains recorded as partial.",
+      "description": "SET outcome mode distinguishes applied and rejected NX/XX writes independently from unrequested, missing, empty and binary previous values. RESP2/RESP3 parser and live tests cover the complete supported outcome matrix; NX+GET and XX+GET branches are also compared with redis-rs. Expiry combinations remain outside this behavior row.",
       "dimensions": [
         "typed-semantics",
         "external-differential"
@@ -23436,6 +23441,30 @@
       ],
       "tests": [
         {
+          "path": "crates/redis-tower-commands/tests/parse_response.rs",
+          "symbol": "set_outcome_without_get_distinguishes_condition_status"
+        },
+        {
+          "path": "crates/redis-tower-commands/tests/parse_response.rs",
+          "symbol": "set_outcome_get_maps_nx_and_xx_semantics"
+        },
+        {
+          "path": "crates/redis-test-harness/src/command_tests.rs",
+          "symbol": "cmd_set_nx"
+        },
+        {
+          "path": "crates/redis-test-harness/src/command_tests.rs",
+          "symbol": "cmd_set_xx"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp2"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp3"
+        },
+        {
           "path": "crates/redis-tower/tests/differential_redis_rs.rs",
           "symbol": "diff_mcp_typed_set_builder_options"
         }
@@ -23443,13 +23472,17 @@
       "ci": [
         {
           "path": ".github/workflows/ci.yml",
+          "symbol": "test-unit:"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
           "symbol": "test-integration:"
         }
       ],
       "last_observed_pass": {
         "date": "2026-09-25",
-        "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478",
-        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"
+        "commit": "bdbcdf38471b3f6da4c137f37251419573e5139c",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36127105812"
       }
     },
     {

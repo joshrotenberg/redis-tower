@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use redis_tower_commands::*;
-use redis_tower_core::Frame;
+use redis_tower_core::{Command, Frame};
 use redis_tower_test::mock::MockConnection;
 
 // -- Strings --
@@ -24,6 +24,133 @@ fn set_wrong_type() {
     mock.enqueue(Frame::Integer(42)); // SET expects SimpleString OK
     let result = mock.execute(Set::new("key", "val"));
     assert!(result.is_err());
+}
+
+#[test]
+fn set_outcome_without_get_distinguishes_condition_status() {
+    let ok = Frame::SimpleString(Bytes::from_static(b"OK"));
+    assert_eq!(
+        Set::new("key", "value")
+            .with_outcome()
+            .parse_response(ok.clone())
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .nx()
+            .with_outcome()
+            .parse_response(Frame::BulkString(None))
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .xx()
+            .with_outcome()
+            .parse_response(Frame::Null)
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::NotRequested,
+        }
+    );
+    assert!(
+        Set::new("key", "value")
+            .with_outcome()
+            .parse_response(Frame::Null)
+            .is_err(),
+        "an unconditional SET cannot legitimately return null"
+    );
+}
+
+#[test]
+fn set_outcome_get_maps_nx_and_xx_semantics() {
+    let binary = Bytes::from_static(b"\0\xffprevious");
+    assert_eq!(
+        Set::new("key", "value")
+            .get()
+            .with_outcome()
+            .parse_response(Frame::BulkString(Some(binary.clone())))
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Value(binary.clone()),
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .get()
+            .with_outcome()
+            .parse_response(Frame::Null)
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Missing,
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .nx()
+            .get()
+            .with_outcome()
+            .parse_response(Frame::BulkString(Some(Bytes::new())))
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::Value(Bytes::new()),
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .nx()
+            .get()
+            .with_outcome()
+            .parse_response(Frame::BulkString(None))
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Missing,
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .xx()
+            .get()
+            .with_outcome()
+            .parse_response(Frame::BulkString(Some(binary.clone())))
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::Applied,
+            previous: SetPreviousValue::Value(binary),
+        }
+    );
+    assert_eq!(
+        Set::new("key", "value")
+            .xx()
+            .get()
+            .with_outcome()
+            .parse_response(Frame::Null)
+            .unwrap(),
+        SetOutcome {
+            status: SetStatus::NotApplied,
+            previous: SetPreviousValue::Missing,
+        }
+    );
+    assert!(
+        Set::new("key", "value")
+            .get()
+            .with_outcome()
+            .parse_response(Frame::SimpleString(Bytes::from_static(b"OK")))
+            .is_err(),
+        "SET GET must return the previous value shape"
+    );
 }
 
 #[test]

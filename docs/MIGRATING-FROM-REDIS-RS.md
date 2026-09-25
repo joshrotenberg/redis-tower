@@ -144,6 +144,35 @@ use redis_tower::RedisValueExt;
 let value: String = client.execute(Get::new("key")).await?.parse_into()?;
 ```
 
+`SET` is one place where choosing a return conversion is not enough. Redis uses
+`OK`, null, and the previous bulk value differently depending on `NX`, `XX`, and
+`GET`. The base redis-tower `Set` keeps its original `Option<Bytes>` response so
+existing code continues to compile, but that compatibility shape maps both
+`OK` and a rejected conditional write to `None`. Use the additive outcome mode
+when the decision matters:
+
+```rust,ignore
+use redis_tower::commands::{Set, SetPreviousValue, SetStatus};
+
+let outcome = client
+    .execute(Set::new("lease", "owner-a").nx().get().with_outcome())
+    .await?;
+
+match (outcome.status, outcome.previous) {
+    (SetStatus::Applied, SetPreviousValue::Missing) => {
+        println!("lease acquired from an absent key");
+    }
+    (SetStatus::NotApplied, SetPreviousValue::Value(owner)) => {
+        println!("lease already held by {owner:?}");
+    }
+    other => println!("other SET outcome: {other:?}"),
+}
+```
+
+Call `with_outcome()` last. Without `GET`, the status remains unambiguous but
+the previous value is `SetPreviousValue::NotRequested`; with `GET`, missing,
+empty, and arbitrary binary previous values remain distinct.
+
 Do not assume identical public values just because both clients decoded the
 same RESP frame. RESP2 may represent a map as a flat array; RESP3 has map, set,
 boolean, and verbatim-string types. redis-rs `Value`, redis-tower `Frame`, and a
