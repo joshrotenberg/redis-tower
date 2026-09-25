@@ -374,7 +374,7 @@
         {"path": ".github/workflows/ci.yml", "symbol": "test-unit:"},
         {"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}
       ],
-      "last_observed_pass": {"date": "2026-09-25", "commit": "6077899be7386a62790c41e22e6f026f3e98e8bf", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395"}
+      "last_observed_pass": {"date": "2026-09-25", "commit": "07d10b1c0901593eca0d0c6f4b7e5e33021caa3a", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36124290976"}
     },
     {
       "id": "command.blocking-dedicated",
@@ -419,7 +419,7 @@
         {"path": ".github/workflows/ci.yml", "symbol": "test-unit:"},
         {"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}
       ],
-      "last_observed_pass": {"date": "2026-09-25", "commit": "6077899be7386a62790c41e22e6f026f3e98e8bf", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395"}
+      "last_observed_pass": {"date": "2026-09-25", "commit": "07d10b1c0901593eca0d0c6f4b7e5e33021caa3a", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36124290976"}
     },
     {
       "id": "command.eval-declared-keys",

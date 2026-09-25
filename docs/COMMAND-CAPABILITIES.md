@@ -101,7 +101,7 @@ Raw RESP2/RESP3 scalar, nil, empty, binary and numeric replies are compared with
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
 - Source tests: [`diff_mcp_scalar_nil_binary_and_numeric_boundaries`](../crates/redis-tower/tests/differential_redis_rs.rs), [`strings_preserve_invalid_utf8_and_protocol_looking_payloads`](../crates/redis-tower-commands/tests/binary_inputs.rs), [`typed_binary_inputs_roundtrip_resp2`](../crates/redis-tower/tests/integration.rs), [`typed_binary_inputs_roundtrip_resp3`](../crates/redis-tower/tests/integration.rs), [`get_nonexistent`](../crates/redis-tower/tests/integration.rs), [`mget`](../crates/redis-tower/tests/integration.rs)
 - Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: [2026-09-25 at `6077899be738`](https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395)
+- Last observed pass: [2026-09-25 at `07d10b1c0901`](https://github.com/joshrotenberg/redis-tower/actions/runs/36124290976)
 
 ### Behavior command blocking dedicated
 
@@ -125,7 +125,7 @@ Raw hash, collection and Stream replies are compared with redis-rs using indepen
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
 - Source tests: [`diff_mcp_hash_collection_and_stream_shapes`](../crates/redis-tower/tests/differential_redis_rs.rs), [`typed_binary_inputs_roundtrip_resp2`](../crates/redis-tower/tests/integration.rs), [`typed_binary_inputs_roundtrip_resp3`](../crates/redis-tower/tests/integration.rs), [`hgetall`](../crates/redis-tower/tests/integration.rs), [`hgetall_empty`](../crates/redis-tower/tests/integration.rs), [`resp3_hgetall_map`](../crates/redis-tower-commands/tests/parse_response.rs)
 - Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: [2026-09-25 at `6077899be738`](https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395)
+- Last observed pass: [2026-09-25 at `07d10b1c0901`](https://github.com/joshrotenberg/redis-tower/actions/runs/36124290976)
 
 ### Behavior command eval declared keys
 
