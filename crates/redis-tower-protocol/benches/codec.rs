@@ -177,7 +177,8 @@ fn bench_decode_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-/// Decode mixed replies as bytes arrive in deliberately awkward fragments.
+/// Decode a smaller mixed fixture (payloads through 256 bytes) as bytes arrive
+/// in deliberately awkward fragments.
 ///
 /// Incomplete attempts must not materialize a frame. This measures scanner
 /// work, receive-buffer growth, and the one final first-frame copy together.

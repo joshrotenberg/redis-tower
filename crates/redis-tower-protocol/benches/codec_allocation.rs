@@ -795,7 +795,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "samples": options.samples,
             "iterations_per_sample": options.iterations,
             "warmup_iterations": 3,
-            "allocator": "instrumented std::alloc::System; requested bytes, not resident memory",
+            "allocator": "instrumented std::alloc::System; allocated_bytes is successful initial Layout sizes plus positive realloc growth, live_bytes_delta is the change in requested live Layout bytes, and both exclude allocator metadata and rounding",
             "timing": "single-process raw samples with allocation instrumentation active; directional mechanism evidence, not client throughput",
             "copied_wire_bytes": "deterministic bytes copied solely to create parser input",
         },

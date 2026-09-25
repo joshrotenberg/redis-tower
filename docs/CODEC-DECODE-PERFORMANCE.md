@@ -39,16 +39,19 @@ The checked [raw evidence](../conformance/codec-copy-evidence.json) was recorded
 on macOS arm64 at source `f9d07f10c742e4c3d7e53355068a2e6043fd67a3`
 with Rust 1.98.1, Cargo 1.98.1, `bytes` 1.12.1, `resp-rs` 0.1.8,
 `tokio-util` 0.7.19, and Criterion 0.5.1. The source tree was clean when the
-run began. Allocation values are requested bytes observed through an
-instrumented `System` allocator, not RSS. Durations are 30 raw within-process
-samples of 20 iterations with allocation instrumentation active. They are
-directional mechanism evidence, not Redis client throughput or a cross-host
-performance claim.
+run began. Allocation values are requested layout bytes observed through an
+instrumented `System` allocator, not RSS. “Allocated” is the sum of successful
+initial layout sizes plus positive growth during reallocation; “live” is the
+change in requested live layout bytes. Neither value includes allocator
+metadata or size-class rounding. Durations are 30 raw within-process samples
+of 20 iterations with allocation instrumentation active. They are directional
+mechanism evidence, not Redis client throughput or a cross-host performance
+claim.
 
 The retained-batch rows below keep every decoded frame until the batch is
 complete. “Copied wire” counts only bytes copied to create parser input;
-“allocated” and “live” also include receive storage, `Frame` values, aggregate
-vectors, and allocator overhead.
+“allocated” and “live” also include the requested layout sizes for receive
+storage, `Frame` values, and aggregate vectors.
 
 | Scenario and strategy | Copied wire | Allocated through decode | Live after decode | Median time |
 |---|---:|---:|---:|---:|
@@ -90,13 +93,15 @@ Criterion now includes:
 
 - dropped and batch-retained lifetimes for 100 simple replies;
 - dropped and batch-retained mixed payloads from zero through 4 KiB; and
-- the same mixed wire delivered in 1-, 7-, 64-, and 1,024-byte fragments.
+- a smaller mixed fixture with payloads through 256 bytes, delivered in 1-,
+  7-, 64-, and 1,024-byte fragments.
 
-The raw allocation artifact repeats those four fragment sizes over 112 mixed
-frames, retains the decoded batch, and records receive-buffer reallocations and
-requested bytes. Every fragmentation plan decodes frames equivalent to the
-contiguous production path and reports exactly one frame's wire bytes per
-completed materialization.
+The raw allocation artifact repeats those four fragment sizes over the same
+smaller 112-frame fixture, retains the decoded batch, and records
+receive-buffer reallocations, net acquired requested layout bytes, and the
+change in requested live layout bytes. Every fragmentation plan decodes frames
+equivalent to the contiguous production path and reports exactly one frame's
+wire bytes per completed materialization.
 
 | Delivery chunk | Copied wire | Allocated through decode | Buffer reallocations | Median time |
 |---:|---:|---:|---:|---:|
