@@ -27,6 +27,16 @@ class CapabilityFixture:
             "GET": {"group": "string", "summary": "Get.", "since": "1.0.0"},
             "SUBSCRIBE": {"group": "pubsub", "summary": "Subscribe.", "since": "2.0.0"},
             "ACL LOG": {"group": "server", "summary": "ACL log.", "since": "6.0.0"},
+            "FT.CURSOR DEL": {
+                "group": "search",
+                "summary": "Delete cursor.",
+                "since": "1.0.0",
+            },
+            "FT.CURSOR READ": {
+                "group": "search",
+                "summary": "Read cursor.",
+                "since": "1.0.0",
+            },
             "OLD": {
                 "group": "string",
                 "summary": "Old.",
@@ -52,6 +62,12 @@ class CapabilityFixture:
             impl Command for AclLogReset {
                 fn name(&self) -> &str { "ACL LOG RESET" }
             }
+            impl Command for FtCursorDel {
+                fn name(&self) -> &str { "FT.CURSOR" }
+            }
+            impl Command for FtCursorRead {
+                fn name(&self) -> &str { "FT.CURSOR" }
+            }
             """,
             encoding="utf-8",
         )
@@ -61,6 +77,9 @@ class CapabilityFixture:
         metadata_files = [
             {
                 "filename": source.filename,
+                "raw_sha256": hashlib.sha256(
+                    (self.metadata / source.filename).read_bytes()
+                ).hexdigest(),
                 "sha256": hashlib.sha256(
                     (self.metadata / source.filename).read_bytes()
                 ).hexdigest(),
@@ -73,6 +92,7 @@ class CapabilityFixture:
                 "redis_version": "fixture",
                 "docs_revision": "0" * 40,
                 "source_url": "https://example.invalid/fixture",
+                "normalization": "strip trailing spaces and tabs from every line",
                 "metadata_files": metadata_files,
             },
             "non_builder_commands": [
@@ -111,12 +131,20 @@ class CommandCapabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "full 40-character"):
                 fetch_snapshot("main", output)
 
-            payload = b'{"GET":{"group":"string"}}\n'
+            payload = b'{"GET":{"group":"string"}}  \n'
             with mock.patch("fetch_command_metadata.fetch", return_value=payload):
                 provenance = fetch_snapshot("a" * 40, output)
             self.assertEqual(provenance["docs_revision"], "a" * 40)
             self.assertEqual(len(provenance["files"]), len(SOURCES))
             self.assertTrue((output / "PROVENANCE.json").is_file())
+            self.assertEqual(
+                provenance["normalization"],
+                "strip trailing spaces and tabs from every line",
+            )
+            for item in provenance["files"]:
+                self.assertNotEqual(item["raw_sha256"], item["sha256"])
+                written = (output / item["filename"]).read_bytes()
+                self.assertEqual(written, b'{"GET":{"group":"string"}}\n')
 
     def test_explicit_dispositions_scope_and_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -129,6 +157,14 @@ class CommandCapabilityTests(unittest.TestCase):
             )
             self.assertEqual(
                 rows["ACL LOG"]["availability"]["disposition"], "typed_builder"
+            )
+            self.assertEqual(
+                rows["FT.CURSOR DEL"]["availability"]["api"],
+                ["redis_tower_commands::FtCursorDel"],
+            )
+            self.assertEqual(
+                rows["FT.CURSOR READ"]["availability"]["api"],
+                ["redis_tower_commands::FtCursorRead"],
             )
             self.assertEqual(
                 rows["SUBSCRIBE"]["availability"]["disposition"], "dedicated_api"
@@ -188,8 +224,14 @@ class CommandCapabilityTests(unittest.TestCase):
     def test_generation_is_deterministic_and_offline(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             fixture = CapabilityFixture(Path(directory))
-            first = serialized_json(fixture.build())
-            second = serialized_json(fixture.build())
+            blocked = AssertionError("ordinary generation attempted network access")
+            with (
+                mock.patch("socket.create_connection", side_effect=blocked),
+                mock.patch("socket.socket.connect", side_effect=blocked),
+                mock.patch("urllib.request.urlopen", side_effect=blocked),
+            ):
+                first = serialized_json(fixture.build())
+                second = serialized_json(fixture.build())
             self.assertEqual(first, second)
 
     def test_metadata_comparison_reports_definition_drift(self) -> None:
@@ -202,6 +244,12 @@ class CommandCapabilityTests(unittest.TestCase):
                 if source == SOURCES[0]:
                     value["GET"]["since"] = "2.0.0"
                     value["GET"]["arguments"] = [{"name": "key", "type": "key"}]
+                    value["GET"]["key_specs"] = [{"RW": True}]
+                    value["GET"]["command_flags"] = ["READONLY"]
+                    value["GET"]["arity"] = 2
+                    value["GET"]["summary"] = "Changed summary."
+                    value["GET"]["history"] = [["2.0.0", "Changed history."]]
+                    value["GET"]["deprecated_since"] = "9.0.0"
                     value["NEW"] = {"group": "string", "summary": "New."}
                     del value["OLD"]
                 (candidate / source.filename).write_text(json.dumps(value))
@@ -210,7 +258,11 @@ class CommandCapabilityTests(unittest.TestCase):
             self.assertTrue(drift)
             self.assertIn("`NEW`", report)
             self.assertIn("`OLD`", report)
-            self.assertIn("`GET`: since, arguments/options", report)
+            self.assertIn(
+                "`GET`: scope, since, deprecation, arguments/options, key specs, "
+                "command flags, arity, definition",
+                report,
+            )
 
 
 if __name__ == "__main__":

@@ -32,29 +32,32 @@ def fetch_snapshot(ref: str, output_dir: Path) -> dict[str, object]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
 
-    downloads: list[tuple[Source, str, bytes]] = []
+    downloads: list[tuple[Source, str, bytes, str]] = []
     for source in SOURCES:
         url = (
             "https://raw.githubusercontent.com/redis/docs/"
             f"{ref}/data/{source.filename}"
         )
-        payload = fetch(url)
-        # Validate before preserving the exact downloaded bytes.
-        parsed = json.loads(payload)
+        raw_payload = fetch(url)
+        raw_digest = hashlib.sha256(raw_payload).hexdigest()
+        # Validate the downloaded bytes before applying the repository's explicit
+        # trailing-whitespace normalization.
+        parsed = json.loads(raw_payload)
         if not isinstance(parsed, dict):
             raise ValueError(f"{source.filename}: metadata must be a JSON object")
         # Upstream metadata occasionally contains insignificant trailing spaces.
         # Normalize those so vendored files pass repository whitespace checks.
-        payload = re.sub(rb"[ \t]+(?=\r?$)", b"", payload, flags=re.MULTILINE)
-        downloads.append((source, url, payload))
+        payload = re.sub(rb"[ \t]+(?=\r?$)", b"", raw_payload, flags=re.MULTILINE)
+        downloads.append((source, url, payload, raw_digest))
 
     output_dir.mkdir(parents=True, exist_ok=True)
     files: list[dict[str, str]] = []
-    for source, url, payload in downloads:
+    for source, url, payload, raw_digest in downloads:
         (output_dir / source.filename).write_bytes(payload)
         files.append(
             {
                 "filename": source.filename,
+                "raw_sha256": raw_digest,
                 "sha256": hashlib.sha256(payload).hexdigest(),
                 "source_url": url,
             }
@@ -62,6 +65,7 @@ def fetch_snapshot(ref: str, output_dir: Path) -> dict[str, object]:
 
     provenance: dict[str, object] = {
         "docs_revision": ref.lower(),
+        "normalization": "strip trailing spaces and tabs from every line",
         "files": files,
     }
     (output_dir / "PROVENANCE.json").write_text(

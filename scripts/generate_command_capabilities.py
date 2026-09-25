@@ -62,6 +62,14 @@ NON_BUILDER_DISPOSITIONS = {
 }
 WIRE_STATUSES = {"supported", "rejected", "planned", "unverified"}
 
+# The command-name scanner intentionally treats FT.CURSOR as one implementation
+# family. The capability ledger needs the narrower type-to-subcommand mapping so
+# it does not claim that each builder implements both documented variants.
+TYPED_API_ALIASES: dict[tuple[str, str], tuple[str, ...]] = {
+    ("FT.CURSOR", "FtCursorDel"): ("FT.CURSOR DEL",),
+    ("FT.CURSOR", "FtCursorRead"): ("FT.CURSOR READ",),
+}
+
 
 @dataclass(frozen=True)
 class TypedApi:
@@ -181,9 +189,15 @@ def resolve_typed_apis(
     resolve_typed_names(set(literal_apis), metadata)
     resolved: dict[str, list[TypedApi]] = {}
     for literal_name, apis in literal_apis.items():
-        targets = (literal_name,) if literal_name in metadata else COMMAND_ALIASES[literal_name]
-        for target in targets:
-            resolved.setdefault(target, []).extend(apis)
+        for api in apis:
+            if literal_name in metadata:
+                targets = (literal_name,)
+            else:
+                targets = TYPED_API_ALIASES.get(
+                    (literal_name, api.symbol), COMMAND_ALIASES[literal_name]
+                )
+            for target in targets:
+                resolved.setdefault(target, []).append(api)
     for name, apis in resolved.items():
         resolved[name] = sorted(set(apis), key=lambda item: (item.api, item.path))
     return resolved
@@ -271,6 +285,10 @@ def validate_details(
         raise ValueError("provenance.docs_revision must be a lowercase full commit SHA")
     if not provenance["source_url"].startswith("https://"):
         raise ValueError("provenance.source_url must be an https URL")
+    if not isinstance(provenance.get("normalization"), str) or not provenance[
+        "normalization"
+    ].strip():
+        raise ValueError("provenance.normalization must be a non-empty string")
     files = provenance.get("metadata_files")
     if not isinstance(files, list):
         raise ValueError("provenance.metadata_files must be a list")
@@ -281,11 +299,18 @@ def validate_details(
             raise ValueError("metadata file provenance entries must be objects")
         filename = item.get("filename")
         digest = item.get("sha256")
+        raw_digest = item.get("raw_sha256")
         if not isinstance(filename, str) or filename in seen_files:
             raise ValueError(f"duplicate or invalid metadata filename: {filename!r}")
         seen_files.add(filename)
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError(f"{filename}: sha256 must be 64 lowercase hex characters")
+        if not isinstance(raw_digest, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", raw_digest
+        ):
+            raise ValueError(
+                f"{filename}: raw_sha256 must be 64 lowercase hex characters"
+            )
         path = metadata_dir / filename
         if not path.is_file():
             raise ValueError(f"pinned metadata file is missing: {path}")
@@ -602,7 +627,9 @@ def render_report(ledger: dict[str, Any]) -> str:
         f"- Pinned metadata entries: **{provenance['entry_count']}**",
         f"- Scoped command names: **{provenance['scoped_count']}**",
         "- Ordinary generation and CI are offline; each vendored metadata file is "
-        "SHA-256 verified from the detail manifest.",
+        "SHA-256 verified from the detail manifest. The manifest records both the "
+        "upstream byte digest and the digest after documented trailing-whitespace "
+        "normalization.",
         "",
         "## Availability dispositions",
         "",
@@ -769,8 +796,9 @@ def render_report(ledger: dict[str, Any]) -> str:
             "  --compare-metadata /tmp/redis-command-metadata",
             "```",
             "",
-            "The comparison reports added/removed names, scope changes, version/group "
-            "changes, and argument/option metadata changes. Updating the five vendored "
+            "The comparison reports added/removed names and any command-definition "
+            "change, including scope, routing keys/flags, arity, versions, summaries, "
+            "history, and arguments/options. Updating the five vendored "
             "files, their hashes, and every new disposition is a reviewed repository "
             "change. The downstream MCP project's "
             f"[Redis 8.10.1 application ledger]({DOWNSTREAM_LEDGER_URL}) "
@@ -803,12 +831,46 @@ def compare_metadata(
             fields.append("group")
         old_raw = baseline_raw[name]["metadata"]
         new_raw = candidate_raw[name]["metadata"]
+        if (
+            baseline_raw[name]["tier"] != candidate_raw[name]["tier"]
+            or baseline_raw[name]["source_file"]
+            != candidate_raw[name]["source_file"]
+        ):
+            fields.append("tier/source")
         if old_raw.get("since") != new_raw.get("since"):
             fields.append("since")
+        if old_raw.get("deprecated_since") != new_raw.get("deprecated_since"):
+            fields.append("deprecation")
         if canonical_digest(old_raw.get("arguments", [])) != canonical_digest(
             new_raw.get("arguments", [])
         ):
             fields.append("arguments/options")
+        for raw_field, label, default in (
+            ("key_specs", "key specs", []),
+            ("command_flags", "command flags", []),
+            ("arity", "arity", None),
+        ):
+            if canonical_digest(old_raw.get(raw_field, default)) != canonical_digest(
+                new_raw.get(raw_field, default)
+            ):
+                fields.append(label)
+        separately_compared = {
+            "arguments",
+            "arity",
+            "command_flags",
+            "deprecated_since",
+            "group",
+            "key_specs",
+            "since",
+        }
+        old_remainder = {
+            key: value for key, value in old_raw.items() if key not in separately_compared
+        }
+        new_remainder = {
+            key: value for key, value in new_raw.items() if key not in separately_compared
+        }
+        if canonical_digest(old_remainder) != canonical_digest(new_remainder):
+            fields.append("definition")
         if fields:
             changed.append((name, fields))
 
@@ -817,7 +879,7 @@ def compare_metadata(
         "",
         f"- Added definitions: {len(added)}",
         f"- Removed definitions: {len(removed)}",
-        f"- Changed scope/group/version/arguments: {len(changed)}",
+        f"- Changed definitions: {len(changed)}",
         "",
     ]
     if added:

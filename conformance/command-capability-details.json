@@ -4,25 +4,31 @@
     "redis_version": "8.8",
     "docs_revision": "ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0",
     "source_url": "https://github.com/redis/docs/tree/ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0/data",
+    "normalization": "strip trailing spaces and tabs from every line",
     "metadata_files": [
       {
         "filename": "commands_core.json",
+        "raw_sha256": "481da5f4238e73b88caef01333eeb535c24de15b8c3810df707d86690e9c491f",
         "sha256": "481da5f4238e73b88caef01333eeb535c24de15b8c3810df707d86690e9c491f"
       },
       {
         "filename": "commands_redisbloom.json",
+        "raw_sha256": "48a2a7f56e6e1d7bd520a92ef9257c7b1fe78dca73c9c41565ce25d145fbd52f",
         "sha256": "48a2a7f56e6e1d7bd520a92ef9257c7b1fe78dca73c9c41565ce25d145fbd52f"
       },
       {
         "filename": "commands_redisearch.json",
+        "raw_sha256": "fc92a861511b1c0513e0909f747fdb531bcf15dcd40780605fb601e51978f87d",
         "sha256": "fc92a861511b1c0513e0909f747fdb531bcf15dcd40780605fb601e51978f87d"
       },
       {
         "filename": "commands_redisjson.json",
+        "raw_sha256": "8f192eccecc15e9a885ddb3b894ebc8eba529e440152162bfbe70a164b5b7970",
         "sha256": "10b950616b8b8de9095559cc778e2333327e9468a1fa9afcdf83c7202229b72b"
       },
       {
         "filename": "commands_redistimeseries.json",
+        "raw_sha256": "8b1199dea1ad9c3849ac97125fa937f9f51e0dd172fe662205bba4a2106fe80c",
         "sha256": "8b1199dea1ad9c3849ac97125fa937f9f51e0dd172fe662205bba4a2106fe80c"
       }
     ]
@@ -86,9 +92,12 @@
     {
       "name": "PSUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ClusterPubSubConnection", "redis_tower_cluster::BinaryClusterPubSubConnection"],
       "rationale": "Pattern subscription changes a dedicated socket into Pub/Sub mode and is owned by the streaming session API.",
-      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "psubscribe_bytes"}]
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "psubscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "psubscribe_bytes"}
+      ]
     },
     {
       "name": "PSYNC",
@@ -100,9 +109,12 @@
     {
       "name": "PUNSUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ClusterPubSubConnection", "redis_tower_cluster::BinaryClusterPubSubConnection"],
       "rationale": "Pattern unsubscription is part of the stateful Pub/Sub session and its acknowledgement stream.",
-      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "punsubscribe_bytes"}]
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "punsubscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "punsubscribe_bytes"}
+      ]
     },
     {
       "name": "READONLY",
@@ -121,23 +133,32 @@
     {
       "name": "SSUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
-      "rationale": "Sharded Pub/Sub requires a dedicated slot-aware session that follows the channel slot's owner.",
-      "source_refs": [{"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "ssubscribe_bytes"}]
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
+      "rationale": "Sharded Pub/Sub uses a dedicated standalone session or a slot-aware Cluster session that follows the channel slot's owner.",
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "ssubscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "ssubscribe_bytes"}
+      ]
     },
     {
       "name": "SUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ClusterPubSubConnection", "redis_tower_cluster::BinaryClusterPubSubConnection"],
       "rationale": "Subscription changes the connection protocol mode and is exposed through a dedicated streaming session rather than a stateless command builder.",
-      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "subscribe_bytes"}]
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "subscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "subscribe_bytes"}
+      ]
     },
     {
       "name": "SUNSUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
-      "rationale": "Sharded unsubscription is owned by the slot-aware Pub/Sub session and its confirmation handling.",
-      "source_refs": [{"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "sunsubscribe_bytes"}]
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
+      "rationale": "Sharded unsubscription is owned by the dedicated standalone or slot-aware Cluster Pub/Sub session and its confirmation handling.",
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "sunsubscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "sunsubscribe_bytes"}
+      ]
     },
     {
       "name": "SYNC",
@@ -156,9 +177,12 @@
     {
       "name": "UNSUBSCRIBE",
       "disposition": "dedicated_api",
-      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection", "redis_tower_cluster::ClusterPubSubConnection", "redis_tower_cluster::BinaryClusterPubSubConnection"],
       "rationale": "Unsubscription and its confirmations are part of the stateful Pub/Sub session.",
-      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "unsubscribe_bytes"}]
+      "source_refs": [
+        {"path": "crates/redis-tower/src/pubsub.rs", "symbol": "unsubscribe_bytes"},
+        {"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "unsubscribe_bytes"}
+      ]
     }
   ],
   "command_details": [
@@ -177,8 +201,8 @@
     {
       "name": "BLPOP",
       "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more keys plus timeout", "response": "optional key/value pair; None on Redis timeout", "notes": "Caller cancellation after write cannot prove that no element was delivered."},
-      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "dedicated connection or independently dispatched pool member", "notes": "Dedicated-session behavior is verified; Cluster key routing is not linked to a command-specific live test here."},
-      "evidence": ["command.blocking-dedicated", "command.binary-and-scalar"]
+      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "exclusive connection recommended; a multiplexed response deadline can fail a slow command and retire its worker", "notes": "Standalone value and Redis-timeout replies are verified. Cluster routing and non-stalling concurrent isolation are not command-specifically verified here."},
+      "evidence": ["command.blocking-dedicated"]
     },
     {
       "name": "CLIENT TRACKING",
@@ -194,7 +218,7 @@
     },
     {
       "name": "FT.SEARCH",
-      "semantics": {"status": "partial", "binary_inputs": "partial", "options": "typed query builder covers documented Search options at the pinned baseline", "response": "typed Search result with protocol-aware normalization", "notes": "Requires the search Cargo feature and Redis Search server capability."},
+      "semantics": {"status": "partial", "binary_inputs": "partial", "options": "FtSearch supports NOCONTENT, VERBATIM, WITHSCORES, LIMIT, RETURN and SORTBY; other documented options are not exposed by this builder", "response": "raw Frame", "notes": "The separate high-level SearchClient::search API performs typed result deserialization. Both require the search Cargo feature and Redis Search server capability."},
       "operations": {"status": "partial", "keys": "index name", "routing": "module/topology dependent", "session": "stateless command", "notes": "Module availability is proven separately from compilation."},
       "evidence": ["module.behavior-differential"]
     },
@@ -206,7 +230,7 @@
     },
     {
       "name": "HGETALL",
-      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "none", "response": "field/value map from RESP2 flat arrays or RESP3 maps", "notes": "Binary fields and values are preserved."},
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "none", "response": "Vec<(Bytes, Bytes)> parsed from RESP2 flat arrays or RESP3 maps", "notes": "Binary fields and values are preserved; the public response is an ordered pair vector, not a map type."},
       "operations": {"status": "verified", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Large hashes can produce large replies."},
       "evidence": ["command.collection-stream-shapes", "topology.cluster-core-routing"]
     },
@@ -236,7 +260,7 @@
     },
     {
       "name": "SCAN",
-      "semantics": {"status": "verified", "binary_inputs": "partial", "options": "cursor, MATCH, COUNT, TYPE", "response": "cursor plus a possibly empty page of binary keys", "notes": "Continue until cursor zero; changing keyspaces can repeat elements."},
+      "semantics": {"status": "partial", "binary_inputs": "partial", "options": "cursor, MATCH and COUNT are live-tested; TYPE is encoded by the builder but is not live-tested here", "response": "cursor plus a possibly empty page of binary keys", "notes": "Continue until cursor zero; changing keyspaces can repeat elements."},
       "operations": {"status": "verified", "keys": "none", "routing": "one selected node; use ClusterScan for all nodes", "session": "cursor sequence without connection affinity", "notes": "A normal Cluster SCAN is not cluster-wide."},
       "evidence": ["command.scan-cursor"]
     },
@@ -248,14 +272,14 @@
     },
     {
       "name": "SET",
-      "semantics": {"status": "partial", "binary_inputs": "verified", "options": "EX/PX/EXAT/PXAT/KEEPTTL, NX/XX and GET are typed; Redis 8.4 IFEQ/IFNE/IFDEQ/IFDNE are unverified/unimplemented", "response": "Option<Bytes>; current API cannot distinguish OK from a null NX/XX rejection without GET", "notes": "A richer conditional outcome is tracked by issue #729."},
+      "semantics": {"status": "partial", "binary_inputs": "verified", "options": "EX/PX, NX/XX and GET are typed; EXAT/PXAT/KEEPTTL and Redis 8.4 IFEQ/IFNE/IFDEQ/IFDNE are unimplemented", "response": "Option<Bytes>; current API cannot distinguish OK from a null NX/XX rejection without GET", "notes": "Differential coverage exercises NX+GET and XX+GET, not expiry combinations. A richer conditional outcome is tracked by issue #729."},
       "operations": {"status": "verified", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Non-idempotent option combinations are not replayed by typed retry policy."},
       "evidence": ["command.set-options", "command.binary-and-scalar", "topology.cluster-core-routing"]
     },
     {
       "name": "SSUBSCRIBE",
       "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more shard channels in one slot", "response": "subscription confirmations and message stream", "notes": "Messages during a disconnect before server-side resubscription are not recovered."},
-      "operations": {"status": "verified", "keys": "channel hash slots", "routing": "current owner of the shared slot", "session": "dedicated sharded Cluster Pub/Sub connection", "notes": "Cross-slot subscription sets are rejected before dispatch."},
+      "operations": {"status": "verified", "keys": "channel hash slots", "routing": "standalone server or current Cluster owner of the shared slot", "session": "dedicated standalone or sharded Cluster Pub/Sub connection", "notes": "Cluster cross-slot subscription sets are rejected before dispatch."},
       "evidence": ["session.pubsub-reconnect"]
     },
     {
@@ -272,9 +296,9 @@
     },
     {
       "name": "XREADGROUP",
-      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "group, consumer, streams, IDs, COUNT, BLOCK, NOACK", "response": "stream/entry structures; empty vector on blocking timeout", "notes": "The application owns processing and acknowledgement order."},
-      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "dedicated connection when BLOCK is used", "notes": "Standalone response and blocking isolation are verified; Cluster routing remains unaudited here."},
-      "evidence": ["command.collection-stream-shapes", "command.blocking-dedicated"]
+      "semantics": {"status": "partial", "binary_inputs": "partial", "options": "group, consumer, streams, IDs, COUNT and BLOCK; NOACK is not exposed by the builder", "response": "typed stream/entry vector for the tested non-blocking consumer-group lifecycle", "notes": "The builder accepts byte-preserving CommandArg inputs, but the live XREADGROUP evidence uses text identifiers. Blocking timeout shape is not command-specifically verified here."},
+      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "exclusive connection recommended when BLOCK is used", "notes": "Standalone consumer-group behavior is verified; blocking isolation and Cluster routing remain unaudited here."},
+      "evidence": ["command.stream-consumer-group"]
     }
   ],
   "wire_contracts": [
@@ -341,13 +365,19 @@
     {
       "id": "command.blocking-dedicated",
       "anchor": "behavior-command-blocking-dedicated",
-      "description": "Blocking commands use isolated sessions, preserve timeout reply shapes and do not stall the shared multiplexed worker in the tested workflow.",
+      "description": "Typed BLPOP returns a key/value pair when data is available and None after a Redis timeout on an exclusive connection. A separate multiplexed raw BLPOP test proves the configured response deadline returns CommandTimeout; the differential BLMOVE case is immediate because its source list is preloaded.",
       "dimensions": ["typed-semantics", "session-ownership"],
       "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
       "protocols": ["RESP2", "RESP3"],
       "features": ["core commands"],
       "topologies": ["standalone"],
-      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_blocking_command_uses_dedicated_sessions"}],
+      "tests": [
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "blpop_with_data"},
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "blpop_timeout"},
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "multiplexed_response_timeout_trips_on_slow_command"},
+        {"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_blocking_command_uses_dedicated_sessions"},
+        {"path": "crates/redis-tower-commands/tests/binary_inputs.rs", "symbol": "lifecycle_blocking_scan_and_routing_arguments_are_byte_exact"}
+      ],
       "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
       "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
     },
@@ -393,13 +423,29 @@
     {
       "id": "command.set-options",
       "anchor": "behavior-command-set-options",
-      "description": "SET expiry, condition and GET builder combinations are compared with redis-rs; the current ambiguous conditional null outcome remains recorded as partial.",
+      "description": "SET NX+GET and XX+GET builder combinations are compared with redis-rs; expiry combinations are not covered, and the current ambiguous conditional null outcome remains recorded as partial.",
       "dimensions": ["typed-semantics", "external-differential"],
       "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
       "protocols": ["RESP2", "RESP3"],
       "features": ["core commands"],
       "topologies": ["standalone"],
       "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_typed_set_builder_options"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.stream-consumer-group",
+      "anchor": "behavior-command-stream-consumer-group",
+      "description": "A typed XREADGROUP call reads new entries in a standalone consumer-group lifecycle, after which typed pending, acknowledgement, claim and autoclaim operations verify ownership transitions.",
+      "dimensions": ["typed-semantics", "session-ownership"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/test_streams.rs", "symbol": "stream_consumer_group_lifecycle"},
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "streams_consumer_groups"}
+      ],
       "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
       "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
     },
@@ -431,7 +477,14 @@
       "tests": [
         {"path": "crates/redis-tower-modules/tests/capabilities.rs", "symbol": "required_server_version_and_commands_are_present"},
         {"path": "crates/redis-tower-modules/tests/differential_module_replies.rs", "symbol": "differential_json_raw_replies_match_redis_rs"},
-        {"path": "crates/redis-tower-modules/tests/search_integration.rs", "symbol": "search_create_index_and_query"}
+        {"path": "crates/redis-tower-modules/tests/search_integration.rs", "symbol": "search_create_index_and_query"},
+        {"path": "crates/redis-tower-modules/tests/timeseries_integration.rs", "symbol": "timeseries_add_and_range"},
+        {"path": "crates/redis-tower-modules/tests/probabilistic_integration.rs", "symbol": "bloom_filter_add_and_exists"},
+        {"path": "crates/redis-tower-modules/tests/probabilistic_integration.rs", "symbol": "cuckoo_filter_add_exists_del"},
+        {"path": "crates/redis-tower-modules/tests/probabilistic_integration.rs", "symbol": "count_min_sketch_incrby_and_query"},
+        {"path": "crates/redis-tower-modules/tests/probabilistic_integration.rs", "symbol": "topk_reserve_add_and_query"},
+        {"path": "crates/redis-tower-modules/tests/probabilistic_integration.rs", "symbol": "tdigest_create_add_and_quantile"},
+        {"path": "crates/redis-tower-modules/tests/vector_integration.rs", "symbol": "vector_set_basic_lifecycle"}
       ],
       "ci": [{"path": ".github/workflows/module-gate.yml", "symbol": "modules:"}],
       "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325348/job/108014375327"}
