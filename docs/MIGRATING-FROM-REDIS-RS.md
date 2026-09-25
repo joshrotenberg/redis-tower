@@ -236,7 +236,8 @@ match Transaction::new()
 ```
 
 For read-compute-write WATCH loops, keep the entire loop on a dedicated
-`RedisConnection` or an explicitly exclusive pool connection.
+`RedisConnection` (or another connection instance that the application owns
+exclusively for the full loop).
 
 ## Dedicated and stateful sessions
 
