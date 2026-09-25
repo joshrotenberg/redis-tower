@@ -169,11 +169,13 @@
 //! use tower::Service;
 //!
 //! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-//! let mut svc = CommandAdapter::new(
-//!     AutoPipelineService::new(conn, AutoPipelineConfig::default()),
-//! );
+//! let pipeline = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+//! let shutdown = pipeline.shutdown_handle();
+//! let mut svc = CommandAdapter::new(pipeline);
 //! let val: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
 //! # let _ = val;
+//! drop(svc);
+//! shutdown.shutdown().await;
 //! # Ok(())
 //! # }
 //! ```
@@ -431,7 +433,7 @@ pub mod json_api;
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod search_api;
 
-pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService};
+pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService, AutoPipelineShutdownHandle};
 pub use cache_layer::{CacheConfig, CacheLayer, CacheService, ReleaseReadiness};
 pub use cache_state::{CacheState, CacheStatistics};
 pub use caching::{CacheTrackingMode, CachedClient, CachedClientConfig};

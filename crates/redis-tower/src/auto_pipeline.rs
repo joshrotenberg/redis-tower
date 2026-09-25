@@ -14,9 +14,13 @@
 //! use tower::Service;
 //!
 //! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
-//! let mut svc = CommandAdapter::new(AutoPipelineService::new(conn, AutoPipelineConfig::default()));
+//! let pipeline = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+//! let shutdown = pipeline.shutdown_handle();
+//! let mut svc = CommandAdapter::new(pipeline);
 //! let value: Option<bytes::Bytes> = svc.call(Get::new("key")).await?;
 //! # let _ = value;
+//! drop(svc);
+//! shutdown.shutdown().await;
 //! # Ok(())
 //! # }
 //! ```
@@ -28,7 +32,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use redis_tower_core::{Frame, ReceivedPushFrame, RedisConnection, RedisError};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, futures::OwnedNotified, mpsc, oneshot, watch};
 use tokio_util::sync::PollSender;
 use tower_service::Service;
 use tracing::warn;
@@ -284,8 +288,11 @@ impl WorkerRequest {
 /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let conn = RedisConnection::connect("127.0.0.1:6379").await?;
 /// # let config = AutoPipelineConfig::default();
-/// let svc = CommandAdapter::new(AutoPipelineService::new(conn, config));
+/// let pipeline = AutoPipelineService::new(conn, config);
+/// let shutdown = pipeline.shutdown_handle();
+/// let svc = CommandAdapter::new(pipeline);
 /// # let _ = svc;
+/// # shutdown.shutdown().await;
 /// # Ok(())
 /// # }
 /// ```
@@ -302,6 +309,10 @@ pub struct AutoPipelineService {
     /// Counts only public service handles. Dropping the final lease wakes and
     /// cancels a worker that may be inside reconnect backoff or a factory call.
     lease: WorkerLease,
+    /// Per-clone notification future used to wake a pending `poll_ready` when
+    /// controlled shutdown begins, even while the worker is draining an
+    /// in-flight command and cannot close the request receiver yet.
+    shutdown_notified: Pin<Box<OwnedNotified>>,
     /// Shared connection-health view. The sender is owned only by the worker,
     /// so this channel closes when that worker terminates even if service
     /// clones remain alive.
@@ -309,15 +320,70 @@ pub struct AutoPipelineService {
     worker: Arc<WorkerHandle>,
 }
 
+/// An owned controller for an [`AutoPipelineService`] background worker.
+///
+/// Obtain this handle with [`AutoPipelineService::shutdown_handle`] before the
+/// service is cloned, layered, or stored behind a trait object. Calling
+/// [`shutdown`](Self::shutdown) stops admission across every service clone,
+/// drains requests already accepted by a connected worker, cancels reconnect
+/// or deferred-connect work, and joins the worker. Calls through surviving
+/// service clones then fail with [`RedisError::ConnectionClosed`].
+///
+/// The handle is cloneable and shutdown is idempotent. Concurrent callers all
+/// wait for the same worker. Dropping a handle without calling `shutdown` does
+/// not stop the service.
+#[derive(Clone)]
+#[must_use = "retain the handle and call shutdown() during orderly application shutdown"]
+pub struct AutoPipelineShutdownHandle {
+    control: Arc<WorkerControl>,
+    worker: Arc<WorkerHandle>,
+}
+
+impl std::fmt::Debug for AutoPipelineShutdownHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AutoPipelineShutdownHandle")
+            .field("shutdown_requested", &self.is_shutdown_requested())
+            .field("worker_finished", &self.worker.is_finished())
+            .finish()
+    }
+}
+
+impl AutoPipelineShutdownHandle {
+    /// Stop admission, finish or fail accepted work, and join the worker.
+    ///
+    /// A connected worker drains its accepted queue before exiting. If no
+    /// usable connection exists, queued requests fail with
+    /// [`RedisError::ConnectionClosed`] rather than being replayed during
+    /// shutdown. Repeated and concurrent calls are safe and wait for the same
+    /// terminal worker state.
+    pub async fn shutdown(&self) {
+        self.control.request_shutdown();
+        self.worker.join().await;
+    }
+
+    /// Return whether controlled shutdown has begun.
+    pub fn is_shutdown_requested(&self) -> bool {
+        self.control.is_shutdown_requested()
+    }
+
+    /// Return whether the background worker has finished.
+    pub fn is_finished(&self) -> bool {
+        self.worker.is_finished()
+    }
+}
+
 struct WorkerControl {
     state: Mutex<WorkerControlState>,
     shutdown_tx: watch::Sender<bool>,
+    shutdown_notify: Arc<Notify>,
     event_bus: Option<ConnectionEventBus>,
 }
 
 struct WorkerControlState {
     handles: usize,
     worker_running: bool,
+    shutdown_requested: bool,
     shutdown_published: bool,
 }
 
@@ -327,9 +393,11 @@ impl WorkerControl {
             state: Mutex::new(WorkerControlState {
                 handles: 1,
                 worker_running: true,
+                shutdown_requested: false,
                 shutdown_published: false,
             }),
             shutdown_tx,
+            shutdown_notify: Arc::new(Notify::new()),
             event_bus,
         }
     }
@@ -346,20 +414,65 @@ impl WorkerControl {
     }
 
     fn release_handle(&self) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.handles = state
-            .handles
-            .checked_sub(1)
-            .expect("AutoPipelineService handle count underflowed");
-        if state.handles == 0 {
+        let should_signal = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.handles = state
+                .handles
+                .checked_sub(1)
+                .expect("AutoPipelineService handle count underflowed");
+            let should_signal = state.handles == 0 && !state.shutdown_requested;
+            if state.handles == 0 {
+                state.shutdown_requested = true;
+                if !state.worker_running {
+                    self.publish_shutdown_locked(&mut state);
+                }
+            }
+            should_signal
+        };
+        if should_signal {
             self.shutdown_tx.send_replace(true);
+            self.shutdown_notify.notify_waiters();
+        }
+    }
+
+    fn request_shutdown(&self) {
+        let should_signal = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let should_signal = !state.shutdown_requested;
+            state.shutdown_requested = true;
             if !state.worker_running {
                 self.publish_shutdown_locked(&mut state);
             }
+            should_signal
+        };
+        if should_signal {
+            self.shutdown_tx.send_replace(true);
+            self.shutdown_notify.notify_waiters();
         }
+    }
+
+    fn shutdown_notified(&self) -> OwnedNotified {
+        Arc::clone(&self.shutdown_notify).notified_owned()
+    }
+
+    fn is_shutdown_requested(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .shutdown_requested
+    }
+
+    fn handle_count(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .handles
     }
 
     fn worker_finished(&self) {
@@ -368,7 +481,7 @@ impl WorkerControl {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.worker_running = false;
-        if state.handles == 0 {
+        if state.shutdown_requested {
             self.publish_shutdown_locked(&mut state);
         }
     }
@@ -393,7 +506,24 @@ impl WorkerControl {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.handles == 0 { None } else { Some(f()) }
+        if state.handles == 0 || state.shutdown_requested {
+            None
+        } else {
+            Some(f())
+        }
+    }
+
+    /// Linearize request admission against explicit or final-handle shutdown.
+    fn with_admission<R>(&self, f: impl FnOnce() -> R) -> Option<R> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.shutdown_requested {
+            None
+        } else {
+            Some(f())
+        }
     }
 }
 
@@ -464,25 +594,35 @@ impl Drop for WorkerLease {
 /// Wrapper around the background task's [`JoinHandle`](tokio::task::JoinHandle)
 /// that emits a warning when dropped without being cleanly shut down.
 ///
-/// Stores the handle in an `Option` so it can be `take()`n by [`shutdown()`]
-/// without conflicting with the `Drop` impl.
+/// Stores the join handle behind an async mutex so consuming service shutdown
+/// and independently owned [`AutoPipelineShutdownHandle`] clones can perform
+/// one cancellation-safe, idempotent join.
 struct WorkerHandle {
-    handle: Option<tokio::task::JoinHandle<()>>,
+    handle: AsyncMutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl WorkerHandle {
     fn new(handle: tokio::task::JoinHandle<()>) -> Self {
         Self {
-            handle: Some(handle),
+            handle: AsyncMutex::new(Some(handle)),
         }
     }
 
     /// Returns `true` if the background task has already finished.
     fn is_finished(&self) -> bool {
         self.handle
-            .as_ref()
-            .map(|h| h.is_finished())
-            .unwrap_or(true)
+            .try_lock()
+            .map(|handle| handle.as_ref().is_none_or(|handle| handle.is_finished()))
+            .unwrap_or(false)
+    }
+
+    /// Cancellation-safe, idempotent join shared by every lifecycle handle.
+    async fn join(&self) {
+        let mut handle = self.handle.lock().await;
+        if let Some(handle) = handle.as_mut() {
+            let _ = handle.await;
+        }
+        handle.take();
     }
 }
 
@@ -491,7 +631,12 @@ impl Drop for WorkerHandle {
         // If the task has not yet finished when the last Arc<WorkerHandle>
         // is dropped, the JoinHandle is being abandoned. Any in-flight
         // requests in the pipeline worker may be silently dropped.
-        if !self.is_finished() {
+        let unfinished = self
+            .handle
+            .try_lock()
+            .map(|handle| handle.as_ref().is_some_and(|handle| !handle.is_finished()))
+            .unwrap_or(false);
+        if unfinished {
             warn!(
                 "AutoPipelineService dropped without calling shutdown(); \
                  background worker may still have queued requests in flight"
@@ -760,6 +905,7 @@ impl AutoPipelineService {
             poll_tx,
             shed_load,
             lease,
+            shutdown_notified: Box::pin(control.shutdown_notified()),
             connection_health,
             worker: Arc::new(WorkerHandle::new(handle)),
         }
@@ -787,17 +933,36 @@ impl AutoPipelineService {
             response_tx: resp_tx,
         };
         if self.shed_load {
-            self.tx.try_send(request).map_err(|e| match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
-            })?;
+            self.lease
+                .control
+                .with_admission(|| {
+                    self.tx.try_send(request).map_err(|e| match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            RedisError::ConnectionClosed
+                        }
+                    })
+                })
+                .ok_or(RedisError::ConnectionClosed)??;
         } else {
             // Back-pressure: await a free slot rather than failing fast.
-            self.tx
-                .reserve()
-                .await
-                .map_err(|_| RedisError::ConnectionClosed)?
-                .send(request);
+            // Create the notification future before checking state so a
+            // shutdown racing this admission cannot be missed.
+            let shutdown = self.lease.control.shutdown_notified();
+            if self.lease.control.is_shutdown_requested() {
+                return Err(RedisError::ConnectionClosed);
+            }
+            let permit = tokio::select! {
+                biased;
+                () = shutdown => return Err(RedisError::ConnectionClosed),
+                permit = self.tx.reserve() => {
+                    permit.map_err(|_| RedisError::ConnectionClosed)?
+                }
+            };
+            self.lease
+                .control
+                .with_admission(|| permit.send(request))
+                .ok_or(RedisError::ConnectionClosed)?;
         }
         resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
     }
@@ -833,14 +998,29 @@ impl AutoPipelineService {
         };
 
         let send_result = if self.shed_load {
-            self.tx.try_send(request).map_err(|e| match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
-            })
+            self.lease
+                .control
+                .with_admission(|| {
+                    self.tx.try_send(request).map_err(|e| match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            RedisError::ConnectionClosed
+                        }
+                    })
+                })
+                .unwrap_or(Err(RedisError::ConnectionClosed))
         } else {
-            self.poll_tx
-                .send_item(request)
-                .map_err(|_| RedisError::ConnectionClosed)
+            self.lease
+                .control
+                .with_admission(|| {
+                    self.poll_tx
+                        .send_item(request)
+                        .map_err(|_| RedisError::ConnectionClosed)
+                })
+                .unwrap_or_else(|| {
+                    let _ = self.poll_tx.abort_send();
+                    Err(RedisError::ConnectionClosed)
+                })
         };
 
         Box::pin(async move {
@@ -858,6 +1038,19 @@ impl AutoPipelineService {
     /// the auto-pipeline queue's full capacity.
     pub(crate) fn release_reservation(&mut self) {
         let _ = self.poll_tx.abort_send();
+    }
+
+    /// Return an owned controller for this service's shared worker.
+    ///
+    /// Retain the handle before moving the service into Tower layers, a router,
+    /// or a trait object. Unlike [`Self::shutdown`], the handle stops the worker
+    /// even while public service clones still exist. Shutdown is idempotent and
+    /// all handle clones wait for the same queue drain and worker join.
+    pub fn shutdown_handle(&self) -> AutoPipelineShutdownHandle {
+        AutoPipelineShutdownHandle {
+            control: Arc::clone(&self.lease.control),
+            worker: Arc::clone(&self.worker),
+        }
     }
 
     /// Gracefully shut down the pipeline service.
@@ -879,8 +1072,11 @@ impl AutoPipelineService {
     /// in-progress factory call before the worker exits.
     ///
     /// For clean application shutdown, prefer calling `shutdown()` over
-    /// simply dropping the service.
+    /// simply dropping the service. When the final concrete clone cannot be
+    /// recovered, retain [`Self::shutdown_handle`] before distributing clones.
     pub async fn shutdown(self) {
+        let control = Arc::clone(&self.lease.control);
+        let worker = Arc::clone(&self.worker);
         // Drop both sender handles first: decrements the sender count. When all
         // senders are gone the worker's `recv()` returns `None` and the worker
         // exits after flushing any remaining batch. `poll_tx` holds its own
@@ -892,14 +1088,12 @@ impl AutoPipelineService {
         // the request channel, so reconnect backoff and hanging factories are
         // cancellation-safe too.
         drop(self.lease);
-        // Attempt to take sole ownership of the WorkerHandle Arc. Succeeds
-        // only when we hold the last reference (all other clones have already
-        // been dropped or shut down), in which case we await the worker to
-        // ensure the final batch is flushed before we return.
-        if let Ok(mut worker_handle) = Arc::try_unwrap(self.worker)
-            && let Some(handle) = worker_handle.handle.take()
-        {
-            let _ = handle.await;
+        drop(self.worker);
+        // The final public service handle joins the worker even when a
+        // shutdown handle is retained elsewhere. Non-final clones preserve
+        // the historical behavior and return without stopping shared work.
+        if control.handle_count() == 0 {
+            worker.join().await;
         }
     }
 
@@ -1085,7 +1279,11 @@ async fn pipeline_worker(
         // receiver rejects any sender retained outside a public service
         // handle while still allowing already-buffered requests to drain.
         let first = if shutting_down {
-            rx.recv().await
+            // Admission is already disabled under WorkerControl's state lock,
+            // so every accepted request is synchronously visible in the
+            // receiver buffer. Do not await unused permits held by surviving
+            // clones; they were never accepted and cannot be filled now.
+            rx.try_recv().ok()
         } else {
             loop {
                 tokio::select! {
@@ -1093,7 +1291,7 @@ async fn pipeline_worker(
                     () = wait_for_shutdown(&mut shutdown) => {
                         shutting_down = true;
                         rx.close();
-                        break rx.recv().await;
+                        break rx.try_recv().ok();
                     }
                     control_message = recv_maintenance_control(&mut maintenance_control_rx) => {
                         apply_maintenance_control(
@@ -1991,6 +2189,18 @@ impl Service<Frame> for AutoPipelineService {
     type Future = Pin<Box<dyn Future<Output = Result<Frame, RedisError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        if self.lease.control.is_shutdown_requested() {
+            let _ = self.poll_tx.abort_send();
+            return Poll::Ready(Err(RedisError::ConnectionClosed));
+        }
+        // Register a per-clone wake before polling the queue. Recheck the
+        // linearized state afterward so shutdown cannot race between the first
+        // check and notification registration.
+        let shutdown_poll = self.shutdown_notified.as_mut().poll(cx);
+        if shutdown_poll.is_ready() || self.lease.control.is_shutdown_requested() {
+            let _ = self.poll_tx.abort_send();
+            return Poll::Ready(Err(RedisError::ConnectionClosed));
+        }
         if self.shed_load {
             // Load-shedding: readiness only reflects channel liveness; `call`
             // does the (possibly failing) `try_send`.
@@ -2018,10 +2228,18 @@ impl Service<Frame> for AutoPipelineService {
             // unpolled response future must not retain a hidden channel sender
             // that can keep the worker alive after the final service handle is
             // shut down.
-            let send_result = self.tx.try_send(request).map_err(|e| match e {
-                tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
-                tokio::sync::mpsc::error::TrySendError::Closed(_) => RedisError::ConnectionClosed,
-            });
+            let send_result = self
+                .lease
+                .control
+                .with_admission(|| {
+                    self.tx.try_send(request).map_err(|e| match e {
+                        tokio::sync::mpsc::error::TrySendError::Full(_) => RedisError::QueueFull,
+                        tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                            RedisError::ConnectionClosed
+                        }
+                    })
+                })
+                .unwrap_or(Err(RedisError::ConnectionClosed));
             return Box::pin(async move {
                 send_result?;
                 resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
@@ -2031,9 +2249,17 @@ impl Service<Frame> for AutoPipelineService {
         // Back-pressure: fill the slot reserved by `poll_ready`. Per the Tower
         // contract, `poll_ready` must have returned `Ready(Ok)` first.
         let send_result = self
-            .poll_tx
-            .send_item(request)
-            .map_err(|_| RedisError::ConnectionClosed);
+            .lease
+            .control
+            .with_admission(|| {
+                self.poll_tx
+                    .send_item(request)
+                    .map_err(|_| RedisError::ConnectionClosed)
+            })
+            .unwrap_or_else(|| {
+                let _ = self.poll_tx.abort_send();
+                Err(RedisError::ConnectionClosed)
+            });
         Box::pin(async move {
             send_result?;
             resp_rx.await.map_err(|_| RedisError::ConnectionClosed)?
@@ -2049,6 +2275,7 @@ impl Clone for AutoPipelineService {
             poll_tx: PollSender::new(self.tx.clone()),
             shed_load: self.shed_load,
             lease: self.lease.clone(),
+            shutdown_notified: Box::pin(self.lease.control.shutdown_notified()),
             connection_health: self.connection_health.clone(),
             worker: Arc::clone(&self.worker),
         }
@@ -2465,7 +2692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn final_handle_shutdown_cancels_hanging_unlimited_reconnect() {
+    async fn shutdown_handle_cancels_hanging_unlimited_reconnect_with_clones() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::{Notify, oneshot};
 
@@ -2516,6 +2743,8 @@ mod tests {
         )
         .await
         .unwrap();
+        let mut surviving_clone = service.clone();
+        let shutdown = service.shutdown_handle();
         assert_eq!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Connected
@@ -2536,16 +2765,30 @@ mod tests {
             }
         );
         reconnect_entered.notified().await;
-
-        tokio::time::timeout(Duration::from_secs(1), service.shutdown())
+        futures::future::poll_fn(|cx| surviving_clone.poll_ready(cx))
             .await
-            .expect("final-handle shutdown must cancel a hanging reconnect factory");
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), shutdown.shutdown())
+            .await
+            .expect("controlled shutdown must cancel a hanging reconnect factory");
         assert_eq!(
             event_stream.recv().await.unwrap(),
             ConnectionEvent::Disconnected {
                 reason: ConnectionDisconnectReason::Shutdown,
             }
         );
+        assert!(matches!(
+            surviving_clone
+                .call(Frame::SimpleString(bytes::Bytes::from_static(b"PING")))
+                .await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(shutdown.is_shutdown_requested());
+        assert!(shutdown.is_finished());
+        drop(surviving_clone);
+        drop(service);
+        drop(shutdown);
         assert_eq!(
             event_stream.recv().await.unwrap_err(),
             crate::reconnect::ConnectionEventRecvError::Closed
@@ -3105,6 +3348,7 @@ mod tests {
             poll_tx: PollSender::new(tx.clone()),
             tx,
             shed_load,
+            shutdown_notified: Box::pin(control.shutdown_notified()),
             lease: WorkerLease { control },
             connection_health,
             worker: Arc::new(WorkerHandle::new(handle)),
@@ -3204,6 +3448,266 @@ mod tests {
             crate::reconnect::ConnectionEventRecvError::Closed
         );
 
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_handle_drains_trait_erased_clones_and_is_idempotent() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::sync::oneshot;
+        use tokio_util::codec::Framed;
+        use tower::util::BoxCloneService;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let request = Frame::SimpleString(bytes::Bytes::from_static(b"PING"));
+        let expected_request = request.clone();
+        let (request_seen_tx, request_seen_rx) = oneshot::channel();
+        let (send_reply_tx, send_reply_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Tcp(stream),
+                redis_tower_core::RespCodec::new(),
+            );
+            assert_eq!(framed.next().await.unwrap().unwrap(), expected_request);
+            let _ = request_seen_tx.send(());
+            send_reply_rx.await.unwrap();
+            framed
+                .send(Frame::SimpleString(bytes::Bytes::from_static(b"PONG")))
+                .await
+                .unwrap();
+            assert!(framed.next().await.is_none());
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(stream));
+        let events = ConnectionEventBus::new(4);
+        let mut event_stream = events.subscribe();
+        let service = AutoPipelineService::new_with_events(
+            conn,
+            AutoPipelineConfig {
+                batch_window: Duration::from_secs(30),
+                ..AutoPipelineConfig::default()
+            },
+            events,
+        );
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Connected
+        );
+
+        let shutdown = service.shutdown_handle();
+        let mut erased: BoxCloneService<Frame, Frame, RedisError> = BoxCloneService::new(service);
+        let mut surviving_clone = erased.clone();
+        let mut idle_reserved_clone = erased.clone();
+        futures::future::poll_fn(|cx| erased.poll_ready(cx))
+            .await
+            .unwrap();
+        let response = erased.call(request);
+        futures::future::poll_fn(|cx| idle_reserved_clone.poll_ready(cx))
+            .await
+            .unwrap();
+
+        let first_shutdown = shutdown.clone();
+        let second_shutdown = shutdown.clone();
+        let shutdown_task = tokio::spawn(async move {
+            tokio::join!(first_shutdown.shutdown(), second_shutdown.shutdown());
+        });
+        tokio::time::timeout(Duration::from_secs(1), request_seen_rx)
+            .await
+            .expect("controlled shutdown did not drain the accepted request")
+            .unwrap();
+        send_reply_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), shutdown_task)
+            .await
+            .expect("concurrent shutdown handles did not join the worker")
+            .unwrap();
+
+        assert_eq!(
+            response.await.unwrap(),
+            Frame::SimpleString(bytes::Bytes::from_static(b"PONG"))
+        );
+        assert!(shutdown.is_shutdown_requested());
+        assert!(shutdown.is_finished());
+        assert!(
+            futures::future::poll_fn(|cx| surviving_clone.poll_ready(cx))
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            surviving_clone.call(Frame::Integer(1)).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(matches!(
+            idle_reserved_clone.call(Frame::Integer(2)).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert_eq!(
+            event_stream.recv().await.unwrap(),
+            ConnectionEvent::Disconnected {
+                reason: ConnectionDisconnectReason::Shutdown,
+            }
+        );
+
+        drop(erased);
+        drop(surviving_clone);
+        drop(idle_reserved_clone);
+        drop(shutdown);
+        assert_eq!(
+            event_stream.recv().await.unwrap_err(),
+            crate::reconnect::ConnectionEventRecvError::Closed
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_handle_wakes_blocked_backpressure_before_drain_completes() {
+        use futures::{SinkExt, StreamExt};
+        use tokio::sync::oneshot;
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let first_request = Frame::SimpleString(bytes::Bytes::from_static(b"FIRST"));
+        let second_request = Frame::SimpleString(bytes::Bytes::from_static(b"SECOND"));
+        let (first_seen_tx, first_seen_rx) = oneshot::channel();
+        let (release_first_tx, release_first_rx) = oneshot::channel();
+        let server = tokio::spawn({
+            let first_request = first_request.clone();
+            let second_request = second_request.clone();
+            async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut framed = Framed::new(
+                    redis_tower_core::RedisStream::Tcp(stream),
+                    redis_tower_core::RespCodec::new(),
+                );
+                assert_eq!(framed.next().await.unwrap().unwrap(), first_request);
+                let _ = first_seen_tx.send(());
+                release_first_rx.await.unwrap();
+                framed.send(Frame::Integer(1)).await.unwrap();
+                assert_eq!(framed.next().await.unwrap().unwrap(), second_request);
+                framed.send(Frame::Integer(2)).await.unwrap();
+                assert!(framed.next().await.is_none());
+            }
+        });
+
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(stream));
+        let mut first = AutoPipelineService::new(
+            conn,
+            AutoPipelineConfig {
+                queue_capacity: 1,
+                max_batch_size: 1,
+                batch_window: Duration::ZERO,
+                ..AutoPipelineConfig::default()
+            },
+        );
+        let shutdown = first.shutdown_handle();
+
+        futures::future::poll_fn(|cx| first.poll_ready(cx))
+            .await
+            .unwrap();
+        let first_response = first.call(first_request);
+        first_seen_rx.await.unwrap();
+
+        let mut second = first.clone();
+        futures::future::poll_fn(|cx| second.poll_ready(cx))
+            .await
+            .unwrap();
+        let second_response = second.call(second_request);
+
+        let mut pending_ready_service = first.clone();
+        let (ready_pending_tx, ready_pending_rx) = oneshot::channel();
+        let pending_ready_task = tokio::spawn(async move {
+            let mut ready_pending_tx = Some(ready_pending_tx);
+            futures::future::poll_fn(|cx| {
+                let poll = pending_ready_service.poll_ready(cx);
+                if poll.is_pending()
+                    && let Some(ready_pending_tx) = ready_pending_tx.take()
+                {
+                    let _ = ready_pending_tx.send(());
+                }
+                poll
+            })
+            .await
+        });
+
+        let mut pending_pipeline_service = first.clone();
+        let (pipeline_pending_tx, pipeline_pending_rx) = oneshot::channel();
+        let pending_pipeline_task = tokio::spawn(async move {
+            let pending_pipeline = pending_pipeline_service.call_pipeline(vec![Frame::Integer(3)]);
+            tokio::pin!(pending_pipeline);
+            let mut pipeline_pending_tx = Some(pipeline_pending_tx);
+            futures::future::poll_fn(|cx| {
+                let poll = pending_pipeline.as_mut().poll(cx);
+                if poll.is_pending()
+                    && let Some(pipeline_pending_tx) = pipeline_pending_tx.take()
+                {
+                    let _ = pipeline_pending_tx.send(());
+                }
+                poll
+            })
+            .await
+        });
+
+        ready_pending_rx
+            .await
+            .expect("poll_ready completed before the queue was released");
+        pipeline_pending_rx
+            .await
+            .expect("call_pipeline completed before the queue was released");
+
+        let shutdown_task = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.shutdown().await }
+        });
+        while !shutdown.is_shutdown_requested() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), pending_ready_task)
+                .await
+                .expect("pending poll_ready was not woken by shutdown")
+                .unwrap(),
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), pending_pipeline_task)
+                .await
+                .expect("pending call_pipeline was not woken by shutdown")
+                .unwrap(),
+            Err(RedisError::ConnectionClosed)
+        ));
+
+        let mut new_pipeline_service = first.clone();
+        assert!(matches!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                new_pipeline_service.call_pipeline(vec![Frame::Integer(4)]),
+            )
+            .await
+            .expect("a new call_pipeline blocked after shutdown"),
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(
+            !shutdown_task.is_finished(),
+            "shutdown returned before accepted work drained"
+        );
+
+        release_first_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), shutdown_task)
+            .await
+            .expect("shutdown did not finish after accepted work drained")
+            .unwrap();
+        assert_eq!(first_response.await.unwrap(), Frame::Integer(1));
+        assert_eq!(second_response.await.unwrap(), Frame::Integer(2));
+
+        drop(first);
+        drop(second);
+        drop(new_pipeline_service);
+        drop(shutdown);
         server.await.unwrap();
     }
 
