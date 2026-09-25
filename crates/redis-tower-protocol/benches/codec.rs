@@ -5,9 +5,51 @@
 //! in the codec allocation path.
 
 use bytes::{Bytes, BytesMut};
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use redis_tower_protocol::{Frame, RespCodec};
+use std::hint::black_box;
 use tokio_util::codec::{Decoder, Encoder};
+
+fn bulk_wire(size: usize, seed: u8) -> Vec<u8> {
+    let mut wire = format!("${size}\r\n").into_bytes();
+    wire.extend((0..size).map(|offset| seed.wrapping_add(offset as u8)));
+    wire.extend_from_slice(b"\r\n");
+    wire
+}
+
+fn mixed_pipeline(rounds: usize, include_large_payload: bool) -> Vec<u8> {
+    let mut wire = Vec::new();
+    for round in 0..rounds {
+        wire.extend_from_slice(b"+OK\r\n");
+        wire.extend_from_slice(&bulk_wire(0, round as u8));
+        wire.extend_from_slice(&bulk_wire(16, round as u8));
+        wire.extend_from_slice(&bulk_wire(256, round as u8));
+        if include_large_payload {
+            wire.extend_from_slice(&bulk_wire(4096, round as u8));
+        }
+        wire.extend_from_slice(b":42\r\n");
+        wire.extend_from_slice(b">2\r\n+invalidate\r\n$3\r\nkey\r\n");
+        wire.extend_from_slice(b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n");
+    }
+    wire
+}
+
+fn decode_pipeline(bytes: &[u8], retain: bool) -> usize {
+    let mut buf = BytesMut::from(bytes);
+    let mut codec = RespCodec::new();
+    let mut frames = retain.then(Vec::new);
+    let mut count = 0;
+    while let Some(frame) = codec.decode(&mut buf).unwrap() {
+        count += 1;
+        if let Some(frames) = frames.as_mut() {
+            frames.push(frame);
+        } else {
+            black_box(frame);
+        }
+    }
+    black_box(frames);
+    count
+}
 
 fn bench_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("codec_encode");
@@ -107,17 +149,64 @@ fn bench_decode_pipeline(c: &mut Criterion) {
         .collect();
 
     c.bench_function("decode_pipeline_100", |b| {
-        b.iter(|| {
-            let mut buf = BytesMut::from(pipeline_bytes.as_slice());
-            let mut codec = RespCodec::new();
-            let mut count = 0usize;
-            while codec.decode(&mut buf).unwrap().is_some() {
-                count += 1;
-            }
-            count
-        });
+        b.iter(|| decode_pipeline(pipeline_bytes.as_slice(), false));
     });
+
+    let mixed = mixed_pipeline(32, true);
+    let mut group = c.benchmark_group("codec_decode_pipeline");
+    for (name, bytes) in [
+        ("simple_100", pipeline_bytes.as_slice()),
+        ("mixed_payloads", mixed.as_slice()),
+    ] {
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        for retain in [false, true] {
+            let lifetime = if retain { "retain" } else { "drop" };
+            group.bench_with_input(BenchmarkId::new(lifetime, name), &bytes, |b, bytes| {
+                b.iter(|| decode_pipeline(bytes, retain))
+            });
+        }
+    }
+    group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode, bench_decode_pipeline);
+/// Decode mixed replies as bytes arrive in deliberately awkward fragments.
+///
+/// Incomplete attempts must not materialize a frame. This measures scanner
+/// work, receive-buffer growth, and the one final first-frame copy together.
+fn bench_decode_fragmented(c: &mut Criterion) {
+    let wire = mixed_pipeline(16, false);
+    let mut group = c.benchmark_group("codec_decode_fragmented");
+    group.throughput(Throughput::Bytes(wire.len() as u64));
+
+    for chunk_size in [1usize, 7, 64, 1024] {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(chunk_size),
+            &chunk_size,
+            |b, &chunk_size| {
+                b.iter(|| {
+                    let mut input = BytesMut::new();
+                    let mut codec = RespCodec::new();
+                    let mut frames = Vec::new();
+                    for chunk in wire.chunks(chunk_size) {
+                        input.extend_from_slice(chunk);
+                        while let Some(frame) = codec.decode(&mut input).unwrap() {
+                            frames.push(frame);
+                        }
+                    }
+                    assert!(input.is_empty());
+                    black_box(frames)
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_decode,
+    bench_decode_pipeline,
+    bench_decode_fragmented
+);
 criterion_main!(benches);

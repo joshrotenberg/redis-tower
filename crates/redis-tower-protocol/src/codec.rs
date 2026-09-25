@@ -8,6 +8,7 @@ use crate::error::ProtocolError;
 #[cfg(test)]
 thread_local! {
     static TEST_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_MATERIALIZED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Default maximum wire size, in bytes, of a single decoded frame.
@@ -105,7 +106,10 @@ impl Decoder for RespCodec {
         };
 
         #[cfg(test)]
-        TEST_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+        {
+            TEST_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+            TEST_MATERIALIZED_BYTES.with(|bytes| bytes.set(bytes.get() + frame_len));
+        }
 
         // Materialize only a complete, bounded first frame. BytesMut::clone()
         // copies, so cloning the entire unread pipeline here would repeatedly
@@ -708,6 +712,7 @@ mod limit_tests {
     #[test]
     fn incomplete_aggregate_cardinality_never_reaches_materialization() {
         TEST_MATERIALIZATIONS.with(|count| count.set(0));
+        TEST_MATERIALIZED_BYTES.with(|bytes| bytes.set(0));
         let mut codec = RespCodec::new();
         for header in [b"*4096\r\n".as_slice(), b"%4096\r\n"] {
             let mut input = BytesMut::from(header);
@@ -715,10 +720,86 @@ mod limit_tests {
             assert_eq!(&input[..], header);
         }
         TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+        TEST_MATERIALIZED_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
 
         let mut complete = BytesMut::from(&b"*1\r\n+OK\r\n"[..]);
         assert!(codec.decode(&mut complete).unwrap().is_some());
         TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        TEST_MATERIALIZED_BYTES.with(|bytes| assert_eq!(bytes.get(), 9));
+    }
+
+    #[test]
+    fn pipelined_decode_materializes_each_completed_frame_exactly_once() {
+        let wires: [&[u8]; 5] = [
+            b"+OK\r\n",
+            b"$6\r\na\0\xff\r\nz\r\n",
+            b":42\r\n",
+            b">2\r\n+invalidate\r\n$3\r\nkey\r\n",
+            b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        ];
+        let mut pipeline = Vec::new();
+        for _ in 0..32 {
+            for wire in wires {
+                pipeline.extend_from_slice(wire);
+            }
+        }
+        let expected_frames = wires.len() * 32;
+        let expected_bytes = pipeline.len();
+        let historical_whole_buffer_copy_bytes = (0..32)
+            .flat_map(|_| wires)
+            .scan(expected_bytes, |remaining, wire| {
+                let copied = *remaining;
+                *remaining -= wire.len();
+                Some(copied)
+            })
+            .sum::<usize>();
+
+        TEST_MATERIALIZATIONS.with(|count| count.set(0));
+        TEST_MATERIALIZED_BYTES.with(|bytes| bytes.set(0));
+        let mut codec = RespCodec::new();
+        let mut input = BytesMut::from(pipeline.as_slice());
+        let mut frames = Vec::with_capacity(expected_frames);
+        while let Some(frame) = codec.decode(&mut input).unwrap() {
+            frames.push(frame);
+        }
+
+        assert_eq!(frames.len(), expected_frames);
+        assert!(input.is_empty());
+        assert!(
+            matches!(frames[1], Frame::BulkString(Some(ref value)) if value.as_ref() == b"a\0\xff\r\nz")
+        );
+        assert!(matches!(frames[3], Frame::Push(ref values) if values.len() == 2));
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), expected_frames));
+        TEST_MATERIALIZED_BYTES.with(|bytes| assert_eq!(bytes.get(), expected_bytes));
+        assert!(
+            historical_whole_buffer_copy_bytes > expected_bytes * 50,
+            "the regression fixture must distinguish first-frame from whole-buffer copying"
+        );
+    }
+
+    #[test]
+    fn fragmented_input_is_not_materialized_until_the_frame_is_complete() {
+        let wire = b"$8\r\na\0\xff\r\nxyz\r\n";
+        TEST_MATERIALIZATIONS.with(|count| count.set(0));
+        TEST_MATERIALIZED_BYTES.with(|bytes| bytes.set(0));
+        let mut codec = RespCodec::new();
+        let mut input = BytesMut::new();
+
+        for (index, byte) in wire.iter().enumerate() {
+            input.extend_from_slice(std::slice::from_ref(byte));
+            let decoded = codec.decode(&mut input).unwrap();
+            if index + 1 == wire.len() {
+                assert!(decoded.is_some());
+            } else {
+                assert!(decoded.is_none());
+                TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+                TEST_MATERIALIZED_BYTES.with(|bytes| assert_eq!(bytes.get(), 0));
+            }
+        }
+
+        assert!(input.is_empty());
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
+        TEST_MATERIALIZED_BYTES.with(|bytes| assert_eq!(bytes.get(), wire.len()));
     }
 
     #[test]
