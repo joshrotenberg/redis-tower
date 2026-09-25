@@ -31,5 +31,6 @@ the preparation command materializes their exact bytes. Generated inputs under
 CI builds both targets, tests the shared oracle, and gives each target a
 ten-second smoke campaign. The bounded weekly/manual workflow retains the final
 corpus, crashes, log, source and dependency provenance, duration, and outcome
-for 90 days. The full contract and mutation classification live in
-[`docs/PROTOCOL-TESTING.md`](../docs/PROTOCOL-TESTING.md).
+for 90 days. Resolved Cargo manifests and ignored lockfiles are copied into the
+evidence alongside their hashes. The full contract and mutation classification
+live in [`docs/PROTOCOL-TESTING.md`](../docs/PROTOCOL-TESTING.md).

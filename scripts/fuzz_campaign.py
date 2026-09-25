@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import time
 from dataclasses import dataclass
@@ -72,18 +74,30 @@ def tree_provenance(path: Path) -> dict[str, object]:
     }
 
 
-def dependency_provenance(repo_root: Path) -> dict[str, str]:
+def retain_dependencies(repo_root: Path, output_dir: Path) -> dict[str, dict[str, str]]:
+    """Copy resolved manifests/locks into the evidence and return their hashes."""
+    destination_root = output_dir / "dependencies"
+    if destination_root.exists():
+        shutil.rmtree(destination_root)
     candidates = (
         repo_root / "Cargo.toml",
         repo_root / "Cargo.lock",
         repo_root / "fuzz" / "Cargo.toml",
         repo_root / "fuzz" / "Cargo.lock",
     )
-    return {
-        path.relative_to(repo_root).as_posix(): file_sha256(path)
-        for path in candidates
-        if path.is_file()
-    }
+    retained: dict[str, dict[str, str]] = {}
+    for source in candidates:
+        if not source.is_file():
+            continue
+        relative = source.relative_to(repo_root)
+        destination = destination_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        retained[relative.as_posix()] = {
+            "sha256": file_sha256(destination),
+            "artifact": destination.relative_to(output_dir).as_posix(),
+        }
+    return retained
 
 
 def write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -110,6 +124,18 @@ def prepare_corpus(seed_dir: Path, corpus_dir: Path) -> None:
         destination.write_bytes(contents)
 
 
+def completion_failure(log_path: Path, elapsed: float, duration: int) -> str | None:
+    """Return why a zero-exit libFuzzer run is not a completed campaign."""
+    log = log_path.read_bytes() if log_path.is_file() else b""
+    if b"libFuzzer: exiting as requested" in log:
+        return "libFuzzer reported a graceful early interruption"
+    if elapsed < duration:
+        return "campaign exited before its requested wall-clock duration"
+    if re.search(rb"(?m)^Done [0-9]+ runs in [0-9]+ second\(s\)\r?$", log) is None:
+        return "libFuzzer completion evidence is absent from the campaign log"
+    return None
+
+
 def run_campaign(
     campaign: Campaign,
     *,
@@ -117,11 +143,6 @@ def run_campaign(
     monotonic: Callable[[], float] = time.monotonic,
     timestamp: Callable[[], str] = utc_now,
 ) -> int:
-    if not 1 <= campaign.duration_seconds <= MAX_DURATION_SECONDS:
-        raise ValueError("campaign duration is outside the bounded range")
-
-    prepare_corpus(campaign.seed_dir, campaign.corpus_dir)
-    campaign.artifact_dir.mkdir(parents=True, exist_ok=True)
     campaign.output_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = campaign.output_dir / "manifest.json"
     log_path = campaign.output_dir / "campaign.log"
@@ -144,16 +165,28 @@ def run_campaign(
         "duration_limit_seconds": campaign.duration_seconds,
         "started_at": timestamp(),
         "command": command,
-        "dependencies": dependency_provenance(campaign.repo_root),
-        "reviewed_seeds": tree_provenance(campaign.seed_dir),
-        "starting_corpus": tree_provenance(campaign.corpus_dir),
     }
     write_json_atomic(manifest_path, manifest)
     started = monotonic()
     exit_code = 127
+    process_exit_code: int | None = None
     status = "failed"
     failure: str | None = None
     try:
+        if not 1 <= campaign.duration_seconds <= MAX_DURATION_SECONDS:
+            raise ValueError("campaign duration is outside the bounded range")
+        prepare_corpus(campaign.seed_dir, campaign.corpus_dir)
+        campaign.artifact_dir.mkdir(parents=True, exist_ok=True)
+        manifest.update(
+            {
+                "dependencies": retain_dependencies(
+                    campaign.repo_root, campaign.output_dir
+                ),
+                "reviewed_seeds": tree_provenance(campaign.seed_dir),
+                "starting_corpus": tree_provenance(campaign.corpus_dir),
+            }
+        )
+        write_json_atomic(manifest_path, manifest)
         with log_path.open("wb") as log:
             result = runner(
                 command,
@@ -162,25 +195,41 @@ def run_campaign(
                 stderr=subprocess.STDOUT,
                 check=False,
             )
-        exit_code = result.returncode
-        status = "passed" if exit_code == 0 else "failed"
+        process_exit_code = result.returncode
     except KeyboardInterrupt:
         exit_code = 130
         status = "interrupted"
         failure = "campaign interrupted"
-    except OSError as error:
+    except (OSError, ValueError) as error:
         failure = str(error)
     finally:
+        elapsed = monotonic() - started
+        if process_exit_code is not None:
+            if process_exit_code == 0:
+                failure = completion_failure(
+                    log_path, elapsed, campaign.duration_seconds
+                )
+                if failure is None:
+                    exit_code = 0
+                    status = "passed"
+                else:
+                    exit_code = 1
+                    status = "incomplete"
+            else:
+                exit_code = process_exit_code
+                status = "failed"
         manifest.update(
             {
                 "status": status,
                 "exit_code": exit_code,
                 "completed_at": timestamp(),
-                "elapsed_seconds": round(monotonic() - started, 6),
+                "elapsed_seconds": round(elapsed, 6),
                 "final_corpus": tree_provenance(campaign.corpus_dir),
                 "artifacts": tree_provenance(campaign.artifact_dir),
             }
         )
+        if process_exit_code is not None:
+            manifest["process_exit_code"] = process_exit_code
         if failure is not None:
             manifest["failure"] = failure
         write_json_atomic(manifest_path, manifest)

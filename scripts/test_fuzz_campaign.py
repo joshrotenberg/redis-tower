@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import dataclasses
+import hashlib
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -40,9 +43,10 @@ class FuzzCampaignTests(unittest.TestCase):
             def runner(command, **kwargs):
                 self.assertIn("-max_total_time=17", command)
                 (campaign.corpus_dir / "discovered").write_bytes(b"new")
+                kwargs["stdout"].write(b"Done 123 runs in 17 second(s)\n")
                 return subprocess.CompletedProcess(command, 0)
 
-            times = iter((10.0, 12.5))
+            times = iter((10.0, 27.5))
             stamps = iter(("start", "finish"))
             self.assertEqual(
                 fuzz_campaign.run_campaign(
@@ -56,9 +60,15 @@ class FuzzCampaignTests(unittest.TestCase):
             manifest = json.loads((campaign.output_dir / "manifest.json").read_text())
             self.assertEqual(manifest["status"], "passed")
             self.assertEqual(manifest["exit_code"], 0)
-            self.assertEqual(manifest["elapsed_seconds"], 2.5)
+            self.assertEqual(manifest["elapsed_seconds"], 17.5)
             self.assertEqual(manifest["source_sha"], "abc123")
             self.assertIn("fuzz/Cargo.lock", manifest["dependencies"])
+            dependency = manifest["dependencies"]["fuzz/Cargo.lock"]
+            retained = campaign.output_dir / dependency["artifact"]
+            self.assertEqual(retained.read_text(), "version = 4\n")
+            self.assertEqual(
+                dependency["sha256"], hashlib.sha256(retained.read_bytes()).hexdigest()
+            )
             self.assertEqual(manifest["reviewed_seeds"]["file_count"], 1)
             self.assertEqual(manifest["final_corpus"]["file_count"], 2)
             self.assertEqual((campaign.corpus_dir / "simple").read_bytes(), b"+OK\r\n")
@@ -75,6 +85,44 @@ class FuzzCampaignTests(unittest.TestCase):
             self.assertEqual(manifest["status"], "failed")
             self.assertEqual(manifest["exit_code"], 77)
 
+    def test_graceful_child_interruption_with_zero_exit_is_not_a_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = self.make_campaign(Path(directory))
+
+            def runner(command, **kwargs):
+                kwargs["stdout"].write(
+                    b"libFuzzer: exiting as requested\n"
+                    b"stat::number_of_executed_units: 12\n"
+                )
+                return subprocess.CompletedProcess(command, 0)
+
+            times = iter((1.0, 30.0))
+            self.assertEqual(
+                fuzz_campaign.run_campaign(
+                    campaign, runner=runner, monotonic=lambda: next(times)
+                ),
+                1,
+            )
+            manifest = json.loads((campaign.output_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertEqual(manifest["process_exit_code"], 0)
+            self.assertEqual(manifest["exit_code"], 1)
+            self.assertIn("early interruption", manifest["failure"])
+
+    def test_preparation_failure_replaces_a_stale_pass_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = self.make_campaign(Path(directory))
+            campaign.output_dir.mkdir(parents=True)
+            manifest_path = campaign.output_dir / "manifest.json"
+            manifest_path.write_text('{"status":"passed","exit_code":0}\n')
+            shutil.rmtree(campaign.seed_dir)
+
+            self.assertEqual(fuzz_campaign.run_campaign(campaign), 127)
+            manifest = json.loads(manifest_path.read_text())
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(manifest["source_sha"], "abc123")
+            self.assertNotEqual(manifest["exit_code"], 0)
+
     def test_interruption_is_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             campaign = self.make_campaign(Path(directory))
@@ -86,6 +134,26 @@ class FuzzCampaignTests(unittest.TestCase):
             manifest = json.loads((campaign.output_dir / "manifest.json").read_text())
             self.assertEqual(manifest["status"], "interrupted")
             self.assertNotEqual(manifest["status"], "passed")
+
+    def test_zero_exit_without_normal_completion_evidence_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            campaign = dataclasses.replace(
+                self.make_campaign(Path(directory)), duration_seconds=1
+            )
+
+            def runner(command, **kwargs):
+                return subprocess.CompletedProcess(command, 0)
+
+            times = iter((1.0, 3.0))
+            self.assertEqual(
+                fuzz_campaign.run_campaign(
+                    campaign, runner=runner, monotonic=lambda: next(times)
+                ),
+                1,
+            )
+            manifest = json.loads((campaign.output_dir / "manifest.json").read_text())
+            self.assertEqual(manifest["status"], "incomplete")
+            self.assertIn("completion evidence", manifest["failure"])
 
     def test_duration_is_positive_and_bounded(self) -> None:
         self.assertEqual(fuzz_campaign.positive_bounded_duration("1"), 1)

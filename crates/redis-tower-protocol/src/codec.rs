@@ -5,6 +5,11 @@ use tokio_util::codec::{Decoder, Encoder};
 use crate::Frame;
 use crate::error::ProtocolError;
 
+#[cfg(test)]
+thread_local! {
+    static TEST_MATERIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Default maximum wire size, in bytes, of a single decoded frame.
 ///
 /// The 512 MiB limit includes headers, payloads, and aggregate children. It is
@@ -98,6 +103,9 @@ impl Decoder for RespCodec {
         let Some(frame_len) = crate::preflight::frame_len(src, self.limits)? else {
             return Ok(None);
         };
+
+        #[cfg(test)]
+        TEST_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
 
         // Materialize only a complete, bounded first frame. BytesMut::clone()
         // copies, so cloning the entire unread pipeline here would repeatedly
@@ -695,6 +703,22 @@ mod limit_tests {
             "unexpected error: {err:?}"
         );
         assert_eq!(buf.as_ref(), b"$1000000\r\n");
+    }
+
+    #[test]
+    fn incomplete_aggregate_cardinality_never_reaches_materialization() {
+        TEST_MATERIALIZATIONS.with(|count| count.set(0));
+        let mut codec = RespCodec::new();
+        for header in [b"*4096\r\n".as_slice(), b"%4096\r\n"] {
+            let mut input = BytesMut::from(header);
+            assert!(codec.decode(&mut input).unwrap().is_none());
+            assert_eq!(&input[..], header);
+        }
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+
+        let mut complete = BytesMut::from(&b"*1\r\n+OK\r\n"[..]);
+        assert!(codec.decode(&mut complete).unwrap().is_some());
+        TEST_MATERIALIZATIONS.with(|count| assert_eq!(count.get(), 1));
     }
 
     #[test]

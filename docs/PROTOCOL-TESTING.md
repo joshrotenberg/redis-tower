@@ -32,7 +32,10 @@ receive support from the variants exposed by `resp-rs`.
 The declared-cardinality regression uses a test-only scan observer: an array
 or map declaring ten million entries visits exactly its one available header
 and never spills the inline nesting stack. This deterministically verifies
-constant pre-materialization work without attempting a dangerous allocation.
+constant scan work without attempting a dangerous allocation. A separate
+test-only materialization counter wraps the public `RespCodec::decode` path:
+modest incomplete array and map declarations leave it at zero, while a complete
+array is the positive control that increments it.
 
 ## Fragmentation oracle
 
@@ -69,15 +72,19 @@ The plan is capped at 16 bytes and each value maps to a non-zero chunk size.
 Inputs shorter than four bytes are treated as raw wire with conservative
 limits. Reviewed seeds live as named hexadecimal fixtures under
 `fuzz/corpus-seeds/`; generated corpus entries and crash artifacts remain
-ignored working state.
+ignored working state. Every `decode_chunked` seed starts with a one-byte plan,
+so its intended boundary behavior is exercised before mutation discovers new
+partitions.
 
 Pull requests run ten seconds per target. The weekly and manually dispatchable
 `Scheduled Fuzzing` workflow accepts a one-to-3,600-second duration per target.
 Each job retains its reviewed starting seeds, final corpus, crash artifacts,
-log, toolchain versions, source SHA, dependency-file hashes, duration, exit
-code, and terminal status for 90 days. The manifest is written as `running`
-before cargo-fuzz starts and changes to `passed` only after a zero exit code;
-an interruption therefore cannot masquerade as a completed pass.
+log, toolchain versions, source SHA, resolved Cargo manifests and lockfiles,
+their hashes, duration, exit code, and terminal status for 90 days. The manifest
+is replaced with `running` before seed preparation and changes to `passed` only
+after a zero process exit, the requested wall time, and libFuzzer's normal
+completion record. Graceful signal exits are explicitly rejected, so an
+interruption cannot masquerade as a completed pass.
 
 For local reproduction:
 

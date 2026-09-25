@@ -330,15 +330,62 @@ fn nested_maps_consume_the_same_depth_budget_as_other_aggregates() {
 
 #[test]
 fn independent_mixed_wire_fixtures_are_partition_invariant() {
-    let fixtures: &[&[u8]] = &[
-        b"+OK\r\n-ERR nope\r\n:42\r\n$-1\r\n",
-        b"%2\r\n+map\r\n~2\r\n+a\r\n+b\r\n+push\r\n>2\r\n+invalidate\r\n$1\r\nk\r\n",
-        b"*6\r\n!4\r\noops\r\n,inf\r\n,-inf\r\n,nan\r\n(12345678901234567890\r\n=7\r\ntxt:abc\r\n",
-        b"$25\r\n*?\r\n|1\r\n+looks\r\n+framed\r\n\r\n+LATER\r\n",
+    let fixtures = [
+        (
+            b"+OK\r\n-ERR nope\r\n:42\r\n$-1\r\n".as_slice(),
+            vec![
+                Frame::SimpleString(Bytes::from_static(b"OK")),
+                Frame::Error(Bytes::from_static(b"ERR nope")),
+                Frame::Integer(42),
+                Frame::BulkString(None),
+            ],
+        ),
+        (
+            b"%2\r\n+map\r\n~2\r\n+a\r\n+b\r\n+push\r\n>2\r\n+invalidate\r\n$1\r\nk\r\n".as_slice(),
+            vec![Frame::Map(vec![
+                (
+                    Frame::SimpleString(Bytes::from_static(b"map")),
+                    Frame::Set(vec![
+                        Frame::SimpleString(Bytes::from_static(b"a")),
+                        Frame::SimpleString(Bytes::from_static(b"b")),
+                    ]),
+                ),
+                (
+                    Frame::SimpleString(Bytes::from_static(b"push")),
+                    Frame::Push(vec![
+                        Frame::SimpleString(Bytes::from_static(b"invalidate")),
+                        Frame::BulkString(Some(Bytes::from_static(b"k"))),
+                    ]),
+                ),
+            ])],
+        ),
+        (
+            b"*6\r\n!4\r\noops\r\n,inf\r\n,-inf\r\n,nan\r\n(12345678901234567890\r\n=7\r\ntxt:abc\r\n".as_slice(),
+            vec![Frame::Array(Some(vec![
+                Frame::BlobError(Bytes::from_static(b"oops")),
+                Frame::SpecialFloat(Bytes::from_static(b"inf")),
+                Frame::SpecialFloat(Bytes::from_static(b"-inf")),
+                Frame::SpecialFloat(Bytes::from_static(b"nan")),
+                Frame::BigNumber(Bytes::from_static(b"12345678901234567890")),
+                Frame::VerbatimString(
+                    Bytes::from_static(b"txt"),
+                    Bytes::from_static(b"abc"),
+                ),
+            ]))],
+        ),
+        (
+            b"$25\r\n*?\r\n|1\r\n+looks\r\n+framed\r\n\r\n+LATER\r\n".as_slice(),
+            vec![
+                Frame::BulkString(Some(Bytes::from_static(
+                    b"*?\r\n|1\r\n+looks\r\n+framed\r\n",
+                ))),
+                Frame::SimpleString(Bytes::from_static(b"LATER")),
+            ],
+        ),
     ];
 
-    for &wire in fixtures {
-        let expected = decode_pipeline(wire, &[wire.len().max(1)]);
+    for (wire, expected_frames) in fixtures {
+        let expected = (expected_frames, Vec::new());
         for split in 0..=wire.len() {
             let first = split.max(1);
             let second = wire.len().saturating_sub(split).max(1);
