@@ -9,7 +9,7 @@ mod common;
 use std::fmt;
 
 use common::redis_addr;
-use redis_tower::commands::RawCommand;
+use redis_tower::commands::{RawCommand, Set};
 use redis_tower::{
     Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
     TransactionResult,
@@ -17,6 +17,7 @@ use redis_tower::{
 
 const CORPUS_SEED: u64 = 0x5245_4449_535f_4d43;
 const REDIS_RS_VERSION: &str = "1.7.0";
+const REDIS_TOWER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Copy, Debug)]
 enum Protocol {
@@ -157,7 +158,7 @@ fn redis_rs_value(value: redis::Value) -> SemanticValue {
         redis::Value::Double(value) => SemanticValue::Double(float_text(value)),
         redis::Value::Boolean(value) => SemanticValue::Boolean(value),
         redis::Value::VerbatimString { text, .. } => SemanticValue::Bytes(text.into_bytes()),
-        redis::Value::BigNumber(value) => SemanticValue::Bytes(value),
+        redis::Value::BigNumber(value) => SemanticValue::Bytes(value.to_string().into_bytes()),
         redis::Value::Push { data, .. } => {
             SemanticValue::Array(data.into_iter().map(redis_rs_value).collect())
         }
@@ -176,12 +177,9 @@ fn unordered(value: SemanticValue) -> SemanticValue {
     }
 }
 
-fn pairs(value: SemanticValue) -> SemanticValue {
+fn pair_entries(value: SemanticValue) -> SemanticValue {
     match value {
-        SemanticValue::Map(mut values) => {
-            values.sort();
-            SemanticValue::Map(values)
-        }
+        SemanticValue::Map(values) => SemanticValue::Map(values),
         SemanticValue::Array(values) => {
             let mut result = Vec::new();
             if values
@@ -206,20 +204,43 @@ fn pairs(value: SemanticValue) -> SemanticValue {
                     result.push((first, values.next().expect("even length checked")));
                 }
             }
-            result.sort();
             SemanticValue::Map(result)
         }
         other => other,
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+fn pairs(value: SemanticValue) -> SemanticValue {
+    match pair_entries(value) {
+        SemanticValue::Map(mut values) => {
+            values.sort();
+            SemanticValue::Map(values)
+        }
+        other => other,
+    }
+}
+
+fn diagnostic(
+    case: &str,
+    step: &str,
+    side: &str,
+    protocol: Protocol,
+    server_version: &str,
+) -> String {
+    format!(
+        "case={case} step={step} side={side} protocol={protocol} server={server_version} \
+         redis-tower={REDIS_TOWER_VERSION} redis-rs={REDIS_RS_VERSION} seed={CORPUS_SEED:#x}"
+    )
+}
+
+#[derive(Clone, Debug)]
 struct ObservedError {
     code: String,
     server: bool,
+    diagnostic: String,
 }
 
-fn tower_error(error: RedisError) -> ObservedError {
+fn tower_error(error: RedisError, diagnostic: String) -> ObservedError {
     let rendered = error.to_string();
     let prefix = error.server_error_prefix();
     let code = match prefix {
@@ -235,30 +256,54 @@ fn tower_error(error: RedisError) -> ObservedError {
     ObservedError {
         server: error.server_error_prefix().is_some(),
         code,
+        diagnostic,
     }
 }
 
-fn redis_rs_error(error: redis::RedisError) -> ObservedError {
+fn redis_rs_error(error: redis::RedisError, diagnostic: String) -> ObservedError {
     ObservedError {
         code: error.code().unwrap_or("CLIENT").to_owned(),
         server: error.code().is_some(),
+        diagnostic,
     }
 }
 
 struct TowerAdapter {
     connection: RedisConnection,
+    case: &'static str,
+    protocol: Protocol,
+    server_version: String,
 }
 
 impl TowerAdapter {
-    async fn connect(addr: &str, protocol: Protocol) -> Self {
+    async fn connect(addr: &str, case: &'static str, protocol: Protocol) -> Self {
+        let context = diagnostic(case, "CONNECT", "redis-tower", protocol, "unavailable");
         Self {
             connection: RedisConnection::connect_with_protocol(addr, protocol.tower())
                 .await
-                .unwrap_or_else(|error| panic!("redis-tower {protocol} connect failed: {error}")),
+                .unwrap_or_else(|error| panic!("{context} error={error}")),
+            case,
+            protocol,
+            server_version: "unavailable".to_owned(),
         }
     }
 
+    fn set_server_version(&mut self, version: &str) {
+        self.server_version = version.to_owned();
+    }
+
+    fn diagnostic(&self, command: &str) -> String {
+        diagnostic(
+            self.case,
+            command,
+            "redis-tower",
+            self.protocol,
+            &self.server_version,
+        )
+    }
+
     async fn raw(&mut self, command: &str, args: &[&[u8]]) -> Result<SemanticValue, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let command = args
             .iter()
             .fold(RawCommand::new(command), |command, arg| command.arg(arg));
@@ -266,43 +311,73 @@ impl TowerAdapter {
             .execute(command)
             .await
             .map(tower_value)
-            .map_err(tower_error)
+            .map_err(|error| tower_error(error, diagnostic))
     }
 
     async fn u64(&mut self, command: &str, args: &[&[u8]]) -> Result<u64, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let command = args
             .iter()
             .fold(RawCommand::new(command), |command, arg| command.arg(arg))
             .query::<u64>();
-        self.connection.execute(command).await.map_err(tower_error)
+        self.connection
+            .execute(command)
+            .await
+            .map_err(|error| tower_error(error, diagnostic))
     }
 
     async fn string(&mut self, command: &str, args: &[&[u8]]) -> Result<String, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let command = args
             .iter()
             .fold(RawCommand::new(command), |command, arg| command.arg(arg))
             .query::<String>();
-        self.connection.execute(command).await.map_err(tower_error)
+        self.connection
+            .execute(command)
+            .await
+            .map_err(|error| tower_error(error, diagnostic))
     }
 }
 
 struct RedisRsAdapter {
     connection: redis::aio::MultiplexedConnection,
+    case: &'static str,
+    protocol: Protocol,
+    server_version: String,
 }
 
 impl RedisRsAdapter {
-    async fn connect(addr: &str, protocol: Protocol) -> Self {
+    async fn connect(addr: &str, case: &'static str, protocol: Protocol) -> Self {
         let url = format!("redis://{addr}/?protocol={}", protocol.query());
         let client = redis::Client::open(url).expect("valid redis-rs URL");
+        let context = diagnostic(case, "CONNECT", "redis-rs", protocol, "unavailable");
         Self {
             connection: client
                 .get_multiplexed_async_connection()
                 .await
-                .unwrap_or_else(|error| panic!("redis-rs {protocol} connect failed: {error}")),
+                .unwrap_or_else(|error| panic!("{context} error={error}")),
+            case,
+            protocol,
+            server_version: "unavailable".to_owned(),
         }
     }
 
+    fn set_server_version(&mut self, version: &str) {
+        self.server_version = version.to_owned();
+    }
+
+    fn diagnostic(&self, command: &str) -> String {
+        diagnostic(
+            self.case,
+            command,
+            "redis-rs",
+            self.protocol,
+            &self.server_version,
+        )
+    }
+
     async fn raw(&mut self, command: &str, args: &[&[u8]]) -> Result<SemanticValue, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let mut command = redis::cmd(command);
         for arg in args {
             command.arg(arg);
@@ -311,10 +386,11 @@ impl RedisRsAdapter {
             .query_async::<redis::Value>(&mut self.connection)
             .await
             .map(redis_rs_value)
-            .map_err(redis_rs_error)
+            .map_err(|error| redis_rs_error(error, diagnostic))
     }
 
     async fn u64(&mut self, command: &str, args: &[&[u8]]) -> Result<u64, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let mut command = redis::cmd(command);
         for arg in args {
             command.arg(arg);
@@ -322,10 +398,11 @@ impl RedisRsAdapter {
         command
             .query_async::<u64>(&mut self.connection)
             .await
-            .map_err(redis_rs_error)
+            .map_err(|error| redis_rs_error(error, diagnostic))
     }
 
     async fn string(&mut self, command: &str, args: &[&[u8]]) -> Result<String, ObservedError> {
+        let diagnostic = self.diagnostic(command);
         let mut command = redis::cmd(command);
         for arg in args {
             command.arg(arg);
@@ -333,7 +410,7 @@ impl RedisRsAdapter {
         command
             .query_async::<String>(&mut self.connection)
             .await
-            .map_err(redis_rs_error)
+            .map_err(|error| redis_rs_error(error, diagnostic))
     }
 }
 
@@ -348,8 +425,8 @@ struct Pair {
 impl Pair {
     async fn connect(case: &'static str, protocol: Protocol) -> Self {
         let addr = redis_addr().await;
-        let mut tower = TowerAdapter::connect(addr, protocol).await;
-        let redis_rs = RedisRsAdapter::connect(addr, protocol).await;
+        let mut tower = TowerAdapter::connect(addr, case, protocol).await;
+        let mut redis_rs = RedisRsAdapter::connect(addr, case, protocol).await;
         let info = tower
             .raw("INFO", &[b"server"])
             .await
@@ -364,13 +441,17 @@ impl Pair {
             .unwrap_or("unknown")
             .trim()
             .to_owned();
-        Self {
+        tower.set_server_version(&server_version);
+        redis_rs.set_server_version(&server_version);
+        let pair = Self {
             tower,
             redis_rs,
             case,
             protocol,
             server_version,
-        }
+        };
+        eprintln!("differential leg: {}", pair.diagnostic("START", "both"));
+        pair
     }
 
     fn key(&self, side: &str, suffix: &str) -> Vec<u8> {
@@ -390,17 +471,26 @@ impl Pair {
     fn same(&self, step: &str, tower: SemanticValue, redis_rs: SemanticValue) {
         assert_eq!(
             tower, redis_rs,
-            "case={} step={step} protocol={} server={} redis-rs={} seed={CORPUS_SEED:#x}",
-            self.case, self.protocol, self.server_version, REDIS_RS_VERSION
+            "case={} step={step} protocol={} server={} redis-tower={} redis-rs={} seed={CORPUS_SEED:#x}",
+            self.case, self.protocol, self.server_version, REDIS_TOWER_VERSION, REDIS_RS_VERSION
         );
     }
 
     fn same_error(&self, step: &str, tower: ObservedError, redis_rs: ObservedError) {
         assert_eq!(
-            tower, redis_rs,
-            "case={} step={step} protocol={} server={} redis-rs={} seed={CORPUS_SEED:#x}",
-            self.case, self.protocol, self.server_version, REDIS_RS_VERSION
+            (tower.code, tower.server),
+            (redis_rs.code, redis_rs.server),
+            "case={} step={step} protocol={} server={} redis-tower={} redis-rs={} seed={CORPUS_SEED:#x}",
+            self.case,
+            self.protocol,
+            self.server_version,
+            REDIS_TOWER_VERSION,
+            REDIS_RS_VERSION
         );
+    }
+
+    fn diagnostic(&self, step: &str, side: &str) -> String {
+        diagnostic(self.case, step, side, self.protocol, &self.server_version)
     }
 
     async fn reset(&mut self, tower_key: &[u8], redis_key: &[u8]) {
@@ -497,11 +587,99 @@ async fn diff_mcp_scalar_nil_binary_and_numeric_boundaries() {
             .raw("SET", &[&redis_number, b"-1"])
             .await
             .unwrap();
-        assert!(pair.tower.u64("GET", &[&tower_number]).await.is_err());
-        assert!(pair.redis_rs.u64("GET", &[&redis_number]).await.is_err());
+        let tower_range = pair.tower.u64("GET", &[&tower_number]).await.unwrap_err();
+        let redis_range = pair
+            .redis_rs
+            .u64("GET", &[&redis_number])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            tower_range.diagnostic,
+            pair.diagnostic("GET", "redis-tower")
+        );
+        assert_eq!(redis_range.diagnostic, pair.diagnostic("GET", "redis-rs"));
 
-        assert!(pair.tower.string("ECHO", &[&payload]).await.is_err());
-        assert!(pair.redis_rs.string("ECHO", &[&payload]).await.is_err());
+        let tower_utf8 = pair.tower.string("ECHO", &[&payload]).await.unwrap_err();
+        let redis_utf8 = pair.redis_rs.string("ECHO", &[&payload]).await.unwrap_err();
+        assert_eq!(
+            tower_utf8.diagnostic,
+            pair.diagnostic("ECHO", "redis-tower")
+        );
+        assert_eq!(redis_utf8.diagnostic, pair.diagnostic("ECHO", "redis-rs"));
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_typed_set_builder_options() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("typed-set-options", protocol).await;
+        let tower_key = pair.key("tower", "set-option");
+        let redis_key = pair.key("redis-rs", "set-option");
+        let tower_typed_key =
+            String::from_utf8(tower_key.clone()).expect("generated test key is UTF-8");
+        pair.reset(&tower_key, &redis_key).await;
+
+        pair.tower
+            .raw("SET", &[&tower_key, b"existing"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_key, b"existing"])
+            .await
+            .unwrap();
+
+        let tower_context = pair.diagnostic("SET NX GET", "redis-tower");
+        let tower_nx = pair
+            .tower
+            .connection
+            .execute(Set::new(tower_typed_key.clone(), "replacement").nx().get())
+            .await
+            .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+        let redis_context = pair.diagnostic("SET NX GET", "redis-rs");
+        let redis_nx = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg("replacement")
+            .arg("NX")
+            .arg("GET")
+            .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
+            .await
+            .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+        assert_eq!(
+            tower_nx.map(|value| value.to_vec()),
+            redis_nx,
+            "{}",
+            pair.diagnostic("SET NX GET result", "both")
+        );
+        let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
+        pair.same("SET NX stored value", tower, redis_rs);
+
+        pair.reset(&tower_key, &redis_key).await;
+        let tower_context = pair.diagnostic("SET XX GET", "redis-tower");
+        let tower_xx = pair
+            .tower
+            .connection
+            .execute(Set::new(tower_typed_key.clone(), "replacement").xx().get())
+            .await
+            .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+        let redis_context = pair.diagnostic("SET XX GET", "redis-rs");
+        let redis_xx = redis::cmd("SET")
+            .arg(&redis_key)
+            .arg("replacement")
+            .arg("XX")
+            .arg("GET")
+            .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
+            .await
+            .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+        assert_eq!(
+            tower_xx.map(|value| value.to_vec()),
+            redis_xx,
+            "{}",
+            pair.diagnostic("SET XX GET result", "both")
+        );
+        let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
+        pair.same("SET XX stored value", tower, redis_rs);
     }
 }
 
@@ -573,20 +751,20 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         let redis_zset = pair.key("redis-rs", "zset");
         pair.reset(&tower_zset, &redis_zset).await;
         pair.tower
-            .raw("ZADD", &[&tower_zset, b"2.5", b"beta", b"1", b"alpha"])
+            .raw("ZADD", &[&tower_zset, b"1", b"beta", b"2.5", b"alpha"])
             .await
             .unwrap();
         pair.redis_rs
-            .raw("ZADD", &[&redis_zset, b"2.5", b"beta", b"1", b"alpha"])
+            .raw("ZADD", &[&redis_zset, b"1", b"beta", b"2.5", b"alpha"])
             .await
             .unwrap();
-        let tower = pairs(
+        let tower = pair_entries(
             pair.tower
                 .raw("ZRANGE", &[&tower_zset, b"0", b"-1", b"WITHSCORES"])
                 .await
                 .unwrap(),
         );
-        let redis_rs = pairs(
+        let redis_rs = pair_entries(
             pair.redis_rs
                 .raw("ZRANGE", &[&redis_zset, b"0", b"-1", b"WITHSCORES"])
                 .await
@@ -859,8 +1037,10 @@ async fn diff_mcp_pipeline_and_transaction_outcomes() {
         pair.redis_rs.raw("WATCH", &[&redis_watch]).await.unwrap();
 
         let addr = redis_addr().await;
-        let mut tower_mutator = TowerAdapter::connect(addr, protocol).await;
-        let mut redis_mutator = RedisRsAdapter::connect(addr, protocol).await;
+        let mut tower_mutator = TowerAdapter::connect(addr, pair.case, protocol).await;
+        let mut redis_mutator = RedisRsAdapter::connect(addr, pair.case, protocol).await;
+        tower_mutator.set_server_version(&pair.server_version);
+        redis_mutator.set_server_version(&pair.server_version);
         tower_mutator
             .raw("SET", &[&tower_watch, b"changed"])
             .await
@@ -935,10 +1115,31 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
         require_single_execution(2).is_err(),
         "accidental replay was not detected"
     );
+    let ranked = SemanticValue::Array(vec![
+        SemanticValue::Array(vec![
+            SemanticValue::Bytes(b"beta".to_vec()),
+            SemanticValue::Bytes(b"1".to_vec()),
+        ]),
+        SemanticValue::Array(vec![
+            SemanticValue::Bytes(b"alpha".to_vec()),
+            SemanticValue::Bytes(b"2.5".to_vec()),
+        ]),
+    ]);
+    let mut reversed = ranked.clone();
+    let SemanticValue::Array(ref mut entries) = reversed else {
+        unreachable!("ranked fixture is an array")
+    };
+    entries.reverse();
+    assert!(
+        mismatch(pair_entries(ranked), pair_entries(reversed)).is_err(),
+        "a changed sorted-set rank order was not detected"
+    );
 
     let mut pair = Pair::connect("negative-option-control", Protocol::Resp3).await;
     let tower_key = pair.key("tower", "set-option");
     let redis_key = pair.key("redis-rs", "set-option");
+    let tower_typed_key =
+        String::from_utf8(tower_key.clone()).expect("generated test key is UTF-8");
     pair.reset(&tower_key, &redis_key).await;
     pair.tower
         .raw("SET", &[&tower_key, b"existing"])
@@ -948,18 +1149,25 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
         .raw("SET", &[&redis_key, b"existing"])
         .await
         .unwrap();
-    let tower = pair
-        .tower
-        .raw("SET", &[&tower_key, b"replacement", b"NX"])
+    let tower_context = pair.diagnostic("SET NX GET negative control", "redis-tower");
+    pair.tower
+        .connection
+        .execute(Set::new(tower_typed_key, "replacement").nx().get())
         .await
-        .unwrap();
-    let redis_rs = pair
-        .redis_rs
-        .raw("SET", &[&redis_key, b"replacement"])
+        .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+    let redis_context = pair.diagnostic("SET GET without NX negative control", "redis-rs");
+    redis::cmd("SET")
+        .arg(&redis_key)
+        .arg("replacement")
+        .arg("GET")
+        .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+    let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+    let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
     assert!(
         mismatch(tower, redis_rs).is_err(),
-        "a changed SET option was not detected"
+        "{}: a changed typed SET option was not detected",
+        pair.diagnostic("SET option negative control", "both")
     );
 }

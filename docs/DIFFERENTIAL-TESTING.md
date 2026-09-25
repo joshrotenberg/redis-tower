@@ -9,8 +9,10 @@ contract.
 The test-only dependency is pinned to `redis = 1.7.0`; the per-PR job records
 the resolved oracle package with `cargo tree` alongside the Redis server
 version. It is not a production dependency.
-Standalone failures report the case, step, selected RESP protocol, live Redis
-version, redis-rs version, and deterministic seed (`0x52454449535f4d43`).
+Standalone command and conversion failures report the case, command or step,
+adapter side, selected RESP protocol, live Redis version, both client versions,
+and deterministic seed (`0x52454449535f4d43`). Connection failures use
+`server=unavailable` because no server version can be queried safely.
 
 ## Initial MCP-derived case ledger
 
@@ -18,6 +20,7 @@ version, redis-rs version, and deterministic seed (`0x52454449535f4d43`).
 |---|---|---|---|---|---|
 | Scalar, null, empty, and binary | `GET` missing; binary-safe `SET`/`GET`/`ECHO`; `MGET` over present, missing, and empty values in per-client namespaces | Null stays distinct from empty bytes; arbitrary bytes round-trip without UTF-8 loss | RESP2 and RESP3; Redis 7.4.3 and 8.0.6 per PR | `RedisConnection` + `RawCommand` | async `MultiplexedConnection` + `Cmd` |
 | Numeric boundaries and decoding | Store `u64::MAX`, `-1`, and invalid UTF-8 as bulk values | Both decode the maximum as `u64`; both reject negative-to-`u64` and invalid UTF-8-to-`String` conversions | RESP2 and RESP3 | `TypedRawCommand<u64/String>` | `FromRedisValue<u64/String>` |
+| Typed builder options | Exercise `Set::nx().get()` against an existing key and `Set::xx().get()` against a missing key; compare the returned old value and a follow-up `GET` | Builder options reach the wire: NX preserves the existing value and XX does not create a missing key | RESP2 and RESP3 | typed `Set` builder | `Cmd` with explicit `NX`/`XX`/`GET` arguments |
 | Hashes and unordered sets | Binary hash value plus multiple fields; set members inserted in a different lexical order | HGETALL compares as sorted pairs; SMEMBERS compares as a sorted collection | RESP2 flat pairs / arrays and RESP3 maps / sets | Raw response normalized after decode | Raw response normalized after decode |
 | Lists and sorted sets | Ordered list including binary bytes; `ZRANGE WITHSCORES` | List order is preserved; zset member/score pairs survive RESP2/RESP3 shape differences | RESP2 and RESP3 | Raw response | Raw response |
 | Streams and nested replies | Deterministic `XADD 1-0`, then `XRANGE` | Entry IDs, field order, binary values, and nested structure agree | Redis 5+; RESP2 and RESP3 | Raw response | Raw response |
@@ -52,8 +55,9 @@ Normalization is deliberately narrow:
   rejection, while server-originated error codes must agree.
 
 The negative controls prove that the comparator rejects lossy binary
-conversion and a changed `SET NX` option. A replay-count control and the live
-lost-reply fixture fail if a non-idempotent request executes twice.
+conversion, reversed sorted-set rank order, and a removed `NX` option from the
+typed `Set` path. A replay-count control and the live lost-reply fixture fail
+if a non-idempotent request executes twice.
 
 ## Cancellation and unknown execution
 
