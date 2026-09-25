@@ -21,6 +21,10 @@ use crate::error::RedisError;
 #[derive(Debug, Clone)]
 pub struct RedisUrl {
     /// Host to connect to.
+    ///
+    /// Bracketed IPv6 URL literals retain their brackets so joining this
+    /// field with [`port`](Self::port) produces an unambiguous socket address.
+    /// Connection setup removes those brackets before passing the host to TLS.
     pub host: String,
 
     /// Port number (default: 6379).
@@ -60,6 +64,20 @@ impl Default for RedisUrl {
     }
 }
 
+impl RedisUrl {
+    pub(crate) fn tcp_addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    pub(crate) fn tls_server_name(&self) -> &str {
+        self.host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(&self.host)
+    }
+}
+
 /// Parse a Redis URL into connection parameters.
 ///
 /// Supported schemes:
@@ -67,6 +85,10 @@ impl Default for RedisUrl {
 /// - `rediss://[user:pass@]host[:port][/db]` (TLS)
 /// - `valkey://` / `valkeys://` -- aliases for `redis://` / `rediss://`
 /// - `unix:///path/to/socket[?db=N]`
+///
+/// IPv6 literals use URL brackets, for example `rediss://[::1]:6380/0`.
+/// [`RedisUrl::host`] retains the brackets for socket-address formatting;
+/// connection setup removes them before TLS server-name validation.
 ///
 /// The username and password are percent-decoded (managed-service passwords
 /// routinely contain URL-special characters such as `@`, `:`, and `/`, which
@@ -135,14 +157,7 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         (host_part, None)
     };
 
-    let (host, port) = if let Some((h, p)) = host_port.rsplit_once(':') {
-        let port = p
-            .parse::<u16>()
-            .map_err(|_| RedisError::InvalidUrl(format!("invalid port: {p}")))?;
-        (h.to_string(), port)
-    } else {
-        (host_port.to_string(), 6379)
-    };
+    let (host, port) = parse_host_port(host_port)?;
 
     let database = db_str
         .filter(|s| !s.is_empty())
@@ -162,6 +177,53 @@ pub fn parse_redis_url(url: &str) -> Result<RedisUrl, RedisError> {
         unix: false,
         path: None,
     })
+}
+
+fn parse_host_port(host_port: &str) -> Result<(String, u16), RedisError> {
+    if let Some(ipv6) = host_port.strip_prefix('[') {
+        let close = ipv6
+            .find(']')
+            .ok_or_else(|| RedisError::InvalidUrl("unterminated IPv6 address".to_string()))?;
+        if close == 0 {
+            return Err(RedisError::InvalidUrl("empty IPv6 address".to_string()));
+        }
+        ipv6[..close].parse::<std::net::Ipv6Addr>().map_err(|_| {
+            RedisError::InvalidUrl(format!("invalid IPv6 address: {}", &ipv6[..close]))
+        })?;
+
+        // Keep brackets on the parsed host: `host:port` remains a valid
+        // socket address, while `RedisUrl::tls_server_name` supplies the
+        // unbracketed literal required by TLS libraries.
+        let bracketed_host = &host_port[..close + 2];
+        let suffix = &ipv6[close + 1..];
+        let port = match suffix.strip_prefix(':') {
+            Some(port) => parse_port(port)?,
+            None if suffix.is_empty() => 6379,
+            None => {
+                return Err(RedisError::InvalidUrl(
+                    "unexpected characters after IPv6 address".to_string(),
+                ));
+            }
+        };
+        return Ok((bracketed_host.to_string(), port));
+    }
+
+    if host_port.matches(':').count() > 1 {
+        return Err(RedisError::InvalidUrl(
+            "IPv6 addresses in Redis URLs must be enclosed in brackets".to_string(),
+        ));
+    }
+
+    if let Some((host, port)) = host_port.rsplit_once(':') {
+        Ok((host.to_string(), parse_port(port)?))
+    } else {
+        Ok((host_port.to_string(), 6379))
+    }
+}
+
+fn parse_port(port: &str) -> Result<u16, RedisError> {
+    port.parse::<u16>()
+        .map_err(|_| RedisError::InvalidUrl(format!("invalid port: {port}")))
 }
 
 /// Decode percent-encoded (`%XX`) sequences in a URL component.
@@ -259,6 +321,56 @@ mod tests {
         assert!(url.tls);
         assert_eq!(url.host, "host");
         assert_eq!(url.port, 6380);
+    }
+
+    #[test]
+    fn parse_tls_ipv6_urls_separate_socket_and_server_names() {
+        for (input, expected_port) in [
+            ("rediss://[::1]/", 6379),
+            ("rediss://[::1]:6380/", 6380),
+            ("valkeys://[::1]/", 6379),
+            ("valkeys://[::1]:6380/", 6380),
+        ] {
+            let url = parse_redis_url(input).unwrap();
+            assert!(url.tls, "{input}");
+            assert_eq!(url.host, "[::1]", "{input}");
+            assert_eq!(url.port, expected_port, "{input}");
+            assert_eq!(url.tcp_addr(), format!("[::1]:{expected_port}"), "{input}");
+            #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+            assert_eq!(url.tls_server_name(), "::1", "{input}");
+        }
+    }
+
+    #[test]
+    fn tcp_targets_preserve_hostname_and_ipv4_behavior() {
+        for (input, host, address) in [
+            (
+                "rediss://redis.example.com:6380",
+                "redis.example.com",
+                "redis.example.com:6380",
+            ),
+            ("rediss://127.0.0.1:6380", "127.0.0.1", "127.0.0.1:6380"),
+        ] {
+            let url = parse_redis_url(input).unwrap();
+            assert_eq!(url.host, host);
+            assert_eq!(url.tcp_addr(), address);
+            #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+            assert_eq!(url.tls_server_name(), host);
+        }
+    }
+
+    #[test]
+    fn malformed_ipv6_authorities_are_rejected() {
+        for input in [
+            "rediss://[::1",
+            "rediss://[]",
+            "rediss://[::1]extra",
+            "rediss://[::1]:not-a-port",
+            "rediss://[not-ipv6]",
+            "rediss://::1",
+        ] {
+            assert!(parse_redis_url(input).is_err(), "accepted {input}");
+        }
     }
 
     #[test]

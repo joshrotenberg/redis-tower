@@ -438,7 +438,7 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     // A self-signed P-256 cert + its PKCS#8 key, used to exercise PEM parsing.
@@ -459,6 +459,21 @@ MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgju5KBtu0Tyd5YVXR\n\
 JwQS3S1hW6Ts2I3ASTerbjBlJPahRANCAARTJOAo81mVG4sncY5w6LVlG+y3O4ll\n\
 aHzx7UOqMKxs4Csh4kTiDRmwUoIq9DISRM1uYUR5dR9MjoMk/NEt3Jxp\n\
 -----END PRIVATE KEY-----\n";
+
+    #[cfg(feature = "tls-rustls")]
+    pub(crate) fn server_config() -> std::sync::Arc<rustls::ServerConfig> {
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ServerConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                parse_certs_pem(TEST_CERT.as_bytes()).unwrap(),
+                parse_private_key_pem(TEST_KEY.as_bytes()).unwrap(),
+            )
+            .unwrap();
+        std::sync::Arc::new(config)
+    }
 
     #[cfg(feature = "tls-rustls")]
     #[test]
