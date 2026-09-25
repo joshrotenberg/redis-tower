@@ -74,6 +74,10 @@ class CapabilityFixture:
         (self.root / "api.rs").write_text(
             "fn subscribe_bytes() {}\n", encoding="utf-8"
         )
+        license_path = self.root / "metadata-license.txt"
+        notice_path = self.root / "metadata-notice.md"
+        license_path.write_text("fixture license\n", encoding="utf-8")
+        notice_path.write_text("# Fixture metadata notice\n", encoding="utf-8")
         metadata_files = [
             {
                 "filename": source.filename,
@@ -93,6 +97,13 @@ class CapabilityFixture:
                 "docs_revision": "0" * 40,
                 "source_url": "https://example.invalid/fixture",
                 "normalization": "strip trailing spaces and tabs from every line",
+                "license": {
+                    "filename": license_path.name,
+                    "notice": notice_path.name,
+                    "spdx": "CC-BY-NC-SA-4.0",
+                    "sha256": hashlib.sha256(license_path.read_bytes()).hexdigest(),
+                    "source_url": "https://example.invalid/fixture-license",
+                },
                 "metadata_files": metadata_files,
             },
             "non_builder_commands": [
@@ -137,6 +148,10 @@ class CommandCapabilityTests(unittest.TestCase):
             self.assertEqual(provenance["docs_revision"], "a" * 40)
             self.assertEqual(len(provenance["files"]), len(SOURCES))
             self.assertTrue((output / "PROVENANCE.json").is_file())
+            self.assertEqual((output / "LICENSE").read_bytes(), payload)
+            self.assertEqual(
+                provenance["license"]["sha256"], hashlib.sha256(payload).hexdigest()
+            )
             self.assertEqual(
                 provenance["normalization"],
                 "strip trailing spaces and tabs from every line",

@@ -32,6 +32,11 @@ def fetch_snapshot(ref: str, output_dir: Path) -> dict[str, object]:
     if output_dir.exists() and any(output_dir.iterdir()):
         raise ValueError(f"output directory is not empty: {output_dir}")
 
+    license_url = f"https://raw.githubusercontent.com/redis/docs/{ref}/LICENSE"
+    license_payload = fetch(license_url)
+    if not license_payload:
+        raise ValueError("upstream Redis documentation license is empty")
+
     downloads: list[tuple[Source, str, bytes, str]] = []
     for source in SOURCES:
         url = (
@@ -51,6 +56,7 @@ def fetch_snapshot(ref: str, output_dir: Path) -> dict[str, object]:
         downloads.append((source, url, payload, raw_digest))
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "LICENSE").write_bytes(license_payload)
     files: list[dict[str, str]] = []
     for source, url, payload, raw_digest in downloads:
         (output_dir / source.filename).write_bytes(payload)
@@ -66,6 +72,11 @@ def fetch_snapshot(ref: str, output_dir: Path) -> dict[str, object]:
     provenance: dict[str, object] = {
         "docs_revision": ref.lower(),
         "normalization": "strip trailing spaces and tabs from every line",
+        "license": {
+            "filename": "LICENSE",
+            "sha256": hashlib.sha256(license_payload).hexdigest(),
+            "source_url": license_url,
+        },
         "files": files,
     }
     (output_dir / "PROVENANCE.json").write_text(

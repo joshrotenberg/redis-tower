@@ -5,6 +5,13 @@
     "docs_revision": "ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0",
     "source_url": "https://github.com/redis/docs/tree/ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0/data",
     "normalization": "strip trailing spaces and tabs from every line",
+    "license": {
+      "filename": "conformance/redis-8.8/LICENSE",
+      "notice": "conformance/redis-8.8/NOTICE.md",
+      "spdx": "CC-BY-NC-SA-4.0",
+      "sha256": "598d5d2100d48f8f7838c60cdd3b813268c9df38de65353df61edb5125828099",
+      "source_url": "https://github.com/redis/docs/blob/ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0/LICENSE"
+    },
     "metadata_files": [
       {
         "filename": "commands_core.json",
@@ -20371,6 +20378,7 @@
       },
       "evidence": [
         "command.pipeline-transaction",
+        "command.binary-and-scalar",
         "topology.cluster-core-routing"
       ]
     },
@@ -23113,7 +23121,7 @@
     {
       "id": "command.binary-and-scalar",
       "anchor": "behavior-command-binary-and-scalar",
-      "description": "Core typed commands preserve invalid UTF-8 keys/payloads and normalize scalar, nil, empty and numeric replies against redis-rs.",
+      "description": "Raw RESP2/RESP3 scalar, nil, empty, binary and numeric replies are compared with redis-rs. Separate typed live tests verify byte-preserving builders and public GET/MGET decoding, including ordered nil-versus-empty results, under forced RESP2 and RESP3.",
       "dimensions": [
         "typed-semantics",
         "external-differential"
@@ -23137,9 +23145,29 @@
         {
           "path": "crates/redis-tower-commands/tests/binary_inputs.rs",
           "symbol": "strings_preserve_invalid_utf8_and_protocol_looking_payloads"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp2"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp3"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "get_nonexistent"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "mget"
         }
       ],
       "ci": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "symbol": "test-unit:"
+        },
         {
           "path": ".github/workflows/ci.yml",
           "symbol": "test-integration:"
@@ -23147,8 +23175,8 @@
       ],
       "last_observed_pass": {
         "date": "2026-09-25",
-        "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478",
-        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"
+        "commit": "6077899be7386a62790c41e22e6f026f3e98e8bf",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395"
       }
     },
     {
@@ -23195,19 +23223,23 @@
       "ci": [
         {
           "path": ".github/workflows/ci.yml",
+          "symbol": "test-unit:"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
           "symbol": "test-integration:"
         }
       ],
       "last_observed_pass": {
         "date": "2026-09-25",
-        "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478",
-        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"
+        "commit": "6077899be7386a62790c41e22e6f026f3e98e8bf",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395"
       }
     },
     {
       "id": "command.collection-stream-shapes",
       "anchor": "behavior-command-collection-stream-shapes",
-      "description": "Hash, collection and Stream response shapes are compared with redis-rs using independent keys and controlled normalization.",
+      "description": "Raw hash, collection and Stream replies are compared with redis-rs using independent keys and controlled normalization. Separate typed live and parser tests verify HGETALL's public pair-vector shape, empty response and RESP3 map normalization.",
       "dimensions": [
         "typed-semantics",
         "external-differential"
@@ -23227,9 +23259,33 @@
         {
           "path": "crates/redis-tower/tests/differential_redis_rs.rs",
           "symbol": "diff_mcp_hash_collection_and_stream_shapes"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp2"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "typed_binary_inputs_roundtrip_resp3"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "hgetall"
+        },
+        {
+          "path": "crates/redis-tower/tests/integration.rs",
+          "symbol": "hgetall_empty"
+        },
+        {
+          "path": "crates/redis-tower-commands/tests/parse_response.rs",
+          "symbol": "resp3_hgetall_map"
         }
       ],
       "ci": [
+        {
+          "path": ".github/workflows/ci.yml",
+          "symbol": "test-unit:"
+        },
         {
           "path": ".github/workflows/ci.yml",
           "symbol": "test-integration:"
@@ -23237,8 +23293,8 @@
       ],
       "last_observed_pass": {
         "date": "2026-09-25",
-        "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478",
-        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"
+        "commit": "6077899be7386a62790c41e22e6f026f3e98e8bf",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395"
       }
     },
     {
@@ -23406,8 +23462,7 @@
       ],
       "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
       "protocols": [
-        "RESP2",
-        "RESP3"
+        "default Auto negotiation (RESP3 on the tested versions)"
       ],
       "features": [
         "core commands"
@@ -23471,6 +23526,10 @@
         {
           "path": "crates/redis-tower-modules/tests/differential_module_replies.rs",
           "symbol": "differential_json_raw_replies_match_redis_rs"
+        },
+        {
+          "path": "crates/redis-tower-modules/tests/json_integration.rs",
+          "symbol": "json_binary_key_roundtrip"
         },
         {
           "path": "crates/redis-tower-modules/tests/search_integration.rs",

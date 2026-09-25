@@ -289,6 +289,30 @@ def validate_details(
         "normalization"
     ].strip():
         raise ValueError("provenance.normalization must be a non-empty string")
+    license_info = provenance.get("license")
+    if not isinstance(license_info, dict):
+        raise ValueError("provenance.license must be an object")
+    for field in ("filename", "notice", "spdx", "sha256", "source_url"):
+        if not isinstance(license_info.get(field), str) or not license_info[
+            field
+        ].strip():
+            raise ValueError(f"provenance.license.{field} must be a non-empty string")
+    if license_info["spdx"] != "CC-BY-NC-SA-4.0":
+        raise ValueError("provenance.license.spdx must be CC-BY-NC-SA-4.0")
+    if not re.fullmatch(r"[0-9a-f]{64}", license_info["sha256"]):
+        raise ValueError(
+            "provenance.license.sha256 must be 64 lowercase hex characters"
+        )
+    if not license_info["source_url"].startswith("https://"):
+        raise ValueError("provenance.license.source_url must be an https URL")
+    license_path = repo_root / license_info["filename"]
+    notice_path = repo_root / license_info["notice"]
+    if not license_path.is_file():
+        raise ValueError(f"pinned metadata license is missing: {license_path}")
+    if not notice_path.is_file():
+        raise ValueError(f"pinned metadata notice is missing: {notice_path}")
+    if file_digest(license_path) != license_info["sha256"]:
+        raise ValueError("pinned metadata license digest mismatch")
     files = provenance.get("metadata_files")
     if not isinstance(files, list):
         raise ValueError("provenance.metadata_files must be a list")
@@ -626,6 +650,10 @@ def render_report(ledger: dict[str, Any]) -> str:
         f"[`{provenance['docs_revision'][:12]}`]({provenance['source_url']})",
         f"- Pinned metadata entries: **{provenance['entry_count']}**",
         f"- Scoped command names: **{provenance['scoped_count']}**",
+        "- Redis documentation metadata license: "
+        f"[`{provenance['license']['spdx']}`]"
+        f"(../{provenance['license']['notice']}) (separate from the Rust crates' "
+        "MIT/Apache-2.0 license)",
         "- Ordinary generation and CI are offline; each vendored metadata file is "
         "SHA-256 verified from the detail manifest. The manifest records both the "
         "upstream byte digest and the digest after documented trailing-whitespace "

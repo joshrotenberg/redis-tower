@@ -12,6 +12,7 @@ The machine-readable source is [`conformance/command-capabilities.json`](../conf
 - Redis documentation revision: [`ad12d9cd6d10`](https://github.com/redis/docs/tree/ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0/data)
 - Pinned metadata entries: **554**
 - Scoped command names: **506**
+- Redis documentation metadata license: [`CC-BY-NC-SA-4.0`](../conformance/redis-8.8/NOTICE.md) (separate from the Rust crates' MIT/Apache-2.0 license)
 - Ordinary generation and CI are offline; each vendored metadata file is SHA-256 verified from the detail manifest. The manifest records both the upstream byte digest and the digest after documented trailing-whitespace normalization.
 
 ## Availability dispositions
@@ -72,7 +73,7 @@ These counts describe availability only. They are not combined with semantic, wi
 | `SET` | `partial` | `verified` | EX/PX, NX/XX and GET are typed; EXAT/PXAT/KEEPTTL and Redis 8.4 IFEQ/IFNE/IFDEQ/IFDNE are unimplemented; Option&lt;Bytes&gt;; current API cannot distinguish OK from a null NX/XX rejection without GET; Differential coverage exercises NX+GET and XX+GET, not expiry combinations. A richer conditional outcome is tracked by issue #729. | single key slot; stateless command; Non-idempotent option combinations are not replayed by typed retry policy. | [`command.set-options`](#behavior-command-set-options)<br>[`command.binary-and-scalar`](#behavior-command-binary-and-scalar)<br>[`topology.cluster-core-routing`](#behavior-topology-cluster-core-routing) |
 | `SSUBSCRIBE` | `verified` | `verified` | one or more shard channels in one slot; subscription confirmations and message stream; Messages during a disconnect before server-side resubscription are not recovered. | standalone server or current Cluster owner of the shared slot; dedicated standalone or sharded Cluster Pub/Sub connection; Cluster cross-slot subscription sets are rejected before dispatch. | [`session.pubsub-reconnect`](#behavior-session-pubsub-reconnect) |
 | `SUBSCRIBE` | `verified` | `verified` | one or more channels; subscription confirmations and message stream; Confirmed subscriptions can be replayed, but disconnected-gap messages are lost. | explicit standalone or Cluster node; dedicated Pub/Sub connection; Not a stateless multiplexed command. | [`session.pubsub-reconnect`](#behavior-session-pubsub-reconnect) |
-| `WATCH` | `verified` | `verified` | one or more keys; status before EXEC commit/abort outcome; Use the Transaction abstraction for an already-built atomic exchange. | same Cluster slot; dedicated connection for read/compute/write retry loops; A pool has no multi-call connection lease. | [`command.pipeline-transaction`](#behavior-command-pipeline-transaction)<br>[`topology.cluster-core-routing`](#behavior-topology-cluster-core-routing) |
+| `WATCH` | `verified` | `verified` | one or more keys; status before EXEC commit/abort outcome; Use the Transaction abstraction for an already-built atomic exchange. | same Cluster slot; dedicated connection for read/compute/write retry loops; A pool has no multi-call connection lease. | [`command.pipeline-transaction`](#behavior-command-pipeline-transaction)<br>[`command.binary-and-scalar`](#behavior-command-binary-and-scalar)<br>[`topology.cluster-core-routing`](#behavior-topology-cluster-core-routing) |
 | `XREADGROUP` | `partial` | `partial` | group, consumer, streams, IDs, COUNT and BLOCK; NOACK is not exposed by the builder; typed stream/entry vector for the tested non-blocking consumer-group lifecycle; The builder accepts byte-preserving CommandArg inputs, but the live XREADGROUP evidence uses text identifiers. Blocking timeout shape is not command-specifically verified here. | same slot in Cluster; exclusive connection recommended when BLOCK is used; Standalone consumer-group behavior is verified; blocking isolation and Cluster routing remain unaudited here. | [`command.stream-consumer-group`](#behavior-command-stream-consumer-group) |
 
 ## Wire protocol contracts
@@ -94,13 +95,13 @@ A source test, a configured workflow selector, and a dated successful run are se
 
 Logical ID: `command.binary-and-scalar`.
 
-Core typed commands preserve invalid UTF-8 keys/payloads and normalize scalar, nil, empty and numeric replies against redis-rs.
+Raw RESP2/RESP3 scalar, nil, empty, binary and numeric replies are compared with redis-rs. Separate typed live tests verify byte-preserving builders and public GET/MGET decoding, including ordered nil-versus-empty results, under forced RESP2 and RESP3.
 
 - Dimensions: `typed-semantics`, `external-differential`
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
-- Source tests: [`diff_mcp_scalar_nil_binary_and_numeric_boundaries`](../crates/redis-tower/tests/differential_redis_rs.rs), [`strings_preserve_invalid_utf8_and_protocol_looking_payloads`](../crates/redis-tower-commands/tests/binary_inputs.rs)
-- Configured CI: [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: [2026-09-25 at `7338c15d8442`](https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627)
+- Source tests: [`diff_mcp_scalar_nil_binary_and_numeric_boundaries`](../crates/redis-tower/tests/differential_redis_rs.rs), [`strings_preserve_invalid_utf8_and_protocol_looking_payloads`](../crates/redis-tower-commands/tests/binary_inputs.rs), [`typed_binary_inputs_roundtrip_resp2`](../crates/redis-tower/tests/integration.rs), [`typed_binary_inputs_roundtrip_resp3`](../crates/redis-tower/tests/integration.rs), [`get_nonexistent`](../crates/redis-tower/tests/integration.rs), [`mget`](../crates/redis-tower/tests/integration.rs)
+- Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
+- Last observed pass: [2026-09-25 at `6077899be738`](https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395)
 
 ### Behavior command blocking dedicated
 
@@ -111,20 +112,20 @@ Typed BLPOP returns a key/value pair when data is available and None after a Red
 - Dimensions: `typed-semantics`, `session-ownership`
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
 - Source tests: [`blpop_with_data`](../crates/redis-tower/tests/integration.rs), [`blpop_timeout`](../crates/redis-tower/tests/integration.rs), [`multiplexed_response_timeout_trips_on_slow_command`](../crates/redis-tower/tests/integration.rs), [`diff_mcp_blocking_command_uses_dedicated_sessions`](../crates/redis-tower/tests/differential_redis_rs.rs), [`lifecycle_blocking_scan_and_routing_arguments_are_byte_exact`](../crates/redis-tower-commands/tests/binary_inputs.rs)
-- Configured CI: [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: [2026-09-25 at `7338c15d8442`](https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627)
+- Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
+- Last observed pass: [2026-09-25 at `6077899be738`](https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395)
 
 ### Behavior command collection stream shapes
 
 Logical ID: `command.collection-stream-shapes`.
 
-Hash, collection and Stream response shapes are compared with redis-rs using independent keys and controlled normalization.
+Raw hash, collection and Stream replies are compared with redis-rs using independent keys and controlled normalization. Separate typed live and parser tests verify HGETALL's public pair-vector shape, empty response and RESP3 map normalization.
 
 - Dimensions: `typed-semantics`, `external-differential`
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
-- Source tests: [`diff_mcp_hash_collection_and_stream_shapes`](../crates/redis-tower/tests/differential_redis_rs.rs)
-- Configured CI: [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: [2026-09-25 at `7338c15d8442`](https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627)
+- Source tests: [`diff_mcp_hash_collection_and_stream_shapes`](../crates/redis-tower/tests/differential_redis_rs.rs), [`typed_binary_inputs_roundtrip_resp2`](../crates/redis-tower/tests/integration.rs), [`typed_binary_inputs_roundtrip_resp3`](../crates/redis-tower/tests/integration.rs), [`hgetall`](../crates/redis-tower/tests/integration.rs), [`hgetall_empty`](../crates/redis-tower/tests/integration.rs), [`resp3_hgetall_map`](../crates/redis-tower-commands/tests/parse_response.rs)
+- Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
+- Last observed pass: [2026-09-25 at `6077899be738`](https://github.com/joshrotenberg/redis-tower/actions/runs/36122581395)
 
 ### Behavior command eval declared keys
 
@@ -181,7 +182,7 @@ Logical ID: `command.stream-consumer-group`.
 A typed XREADGROUP call reads new entries in a standalone consumer-group lifecycle, after which typed pending, acknowledgement, claim and autoclaim operations verify ownership transitions.
 
 - Dimensions: `typed-semantics`, `session-ownership`
-- Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
+- Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `default Auto negotiation (RESP3 on the tested versions)`; features `core commands`; topologies `standalone`
 - Source tests: [`stream_consumer_group_lifecycle`](../crates/redis-tower/tests/test_streams.rs), [`streams_consumer_groups`](../crates/redis-tower/tests/integration.rs)
 - Configured CI: [`test-integration:`](../.github/workflows/ci.yml)
 - Last observed pass: [2026-09-25 at `7338c15d8442`](https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627)
@@ -194,7 +195,7 @@ Module capability preflight is followed by RedisJSON/Search/TimeSeries/probabili
 
 - Dimensions: `typed-semantics`, `server-capability`, `external-differential`
 - Matrix: server `Redis 8 module image; actual version discovered at runtime`; protocols `RESP2/RESP3 for JSON differential, default negotiated protocol for other module assertions`; features `json, search, bloom, sketch, tdigest, timeseries, vector-sets`; topologies `standalone`
-- Source tests: [`required_server_version_and_commands_are_present`](../crates/redis-tower-modules/tests/capabilities.rs), [`differential_json_raw_replies_match_redis_rs`](../crates/redis-tower-modules/tests/differential_module_replies.rs), [`search_create_index_and_query`](../crates/redis-tower-modules/tests/search_integration.rs), [`timeseries_add_and_range`](../crates/redis-tower-modules/tests/timeseries_integration.rs), [`bloom_filter_add_and_exists`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`cuckoo_filter_add_exists_del`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`count_min_sketch_incrby_and_query`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`topk_reserve_add_and_query`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`tdigest_create_add_and_quantile`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`vector_set_basic_lifecycle`](../crates/redis-tower-modules/tests/vector_integration.rs)
+- Source tests: [`required_server_version_and_commands_are_present`](../crates/redis-tower-modules/tests/capabilities.rs), [`differential_json_raw_replies_match_redis_rs`](../crates/redis-tower-modules/tests/differential_module_replies.rs), [`json_binary_key_roundtrip`](../crates/redis-tower-modules/tests/json_integration.rs), [`search_create_index_and_query`](../crates/redis-tower-modules/tests/search_integration.rs), [`timeseries_add_and_range`](../crates/redis-tower-modules/tests/timeseries_integration.rs), [`bloom_filter_add_and_exists`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`cuckoo_filter_add_exists_del`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`count_min_sketch_incrby_and_query`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`topk_reserve_add_and_query`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`tdigest_create_add_and_quantile`](../crates/redis-tower-modules/tests/probabilistic_integration.rs), [`vector_set_basic_lifecycle`](../crates/redis-tower-modules/tests/vector_integration.rs)
 - Configured CI: [`modules:`](../.github/workflows/module-gate.yml)
 - Last observed pass: [2026-09-25 at `7338c15d8442`](https://github.com/joshrotenberg/redis-tower/actions/runs/36117325348/job/108014375327)
 

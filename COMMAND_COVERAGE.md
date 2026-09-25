@@ -2,7 +2,7 @@
 
 # Redis command coverage
 
-`redis-tower` provides literal typed builder names for **488/506 (96.4%)** of the scoped Redis 8.8 command surface. **23/27 groups** have complete typed-builder name coverage.
+`redis-tower` provides resolved typed-builder name coverage for **488/506 (96.4%)** of the scoped Redis 8.8 command surface. **23/27 groups** have complete typed-builder name coverage.
 
 This is a name-inventory report, not a protocol-completeness score. It does not prove option coverage, response decoding, RESP wire forms, routing, session behavior, or execution. See the [capability ledger](docs/COMMAND-CAPABILITIES.md) for those separate dimensions and the individual disposition of every name without a builder.
 

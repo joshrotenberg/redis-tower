@@ -171,7 +171,7 @@ def render_report(
         "",
         "# Redis command coverage",
         "",
-        f"`redis-tower` provides literal typed builder names for "
+        f"`redis-tower` provides resolved typed-builder name coverage for "
         f"**{len(implemented)}/{len(included)} "
         f"({percent(len(implemented), len(included))})** of the scoped Redis "
         f"{REDIS_VERSION} command surface. **{complete_groups}/{len(groups)} groups** "

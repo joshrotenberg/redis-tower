@@ -494,3 +494,8 @@ Licensed under either the
 or the
 [Apache License, Version 2.0](https://github.com/joshrotenberg/redis-tower/blob/main/LICENSE-APACHE),
 at your option.
+
+The vendored Redis documentation metadata used by the repository's conformance
+reports is licensed separately. See its
+[license and attribution notice](https://github.com/joshrotenberg/redis-tower/blob/main/conformance/redis-8.8/NOTICE.md);
+that metadata is not included in the released Rust crates.
