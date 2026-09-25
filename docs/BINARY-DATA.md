@@ -9,15 +9,24 @@ and stream families.
 use bytes::Bytes;
 use redis_tower::commands::{Get, HSet, Set, XAdd};
 
-let key = b"user:\xff".as_slice();
-client.execute(Set::new(key, vec![0x00, 0xfe, 0xff])).await?;
-let value: Option<Bytes> = client.execute(Get::new(key)).await?;
+let string_key = b"user:\xff".as_slice();
+let hash_key = b"profile:\xff".as_slice();
+let stream_key = b"events:\xff".as_slice();
 
 client
-    .execute(HSet::new(key, b"embedding".as_slice(), vector_bytes))
+    .execute(Set::new(string_key, vec![0x00, 0xfe, 0xff]))
+    .await?;
+let value: Option<Bytes> = client.execute(Get::new(string_key)).await?;
+
+client
+    .execute(HSet::new(
+        hash_key,
+        b"embedding".as_slice(),
+        vector_bytes,
+    ))
     .await?;
 client
-    .execute(XAdd::new(b"events:\xff").field(b"payload", payload))
+    .execute(XAdd::new(stream_key).field(b"payload", payload))
     .await?;
 ```
 
@@ -42,10 +51,14 @@ old `impl Into<String>` API, avoid an unnecessary `.into()` on a literal at the
 call site because an `impl Trait` parameter gives the conversion no unique
 target; pass the literal directly or use `CommandArg::from(...)`.
 
-A downstream newtype that only implemented `Into<String>` is the one direct
-source-compatibility exception: either convert it to `String` before calling the
-builder or implement `From<YourType> for CommandArg`. This explicit pre-1.0 API
-change avoids maintaining parallel text-only and byte-only command types.
+The standard inputs accepted through `Into<String>` remain accepted directly,
+including `Box<str>`, `char`, and `&mut str`. A downstream newtype that only
+implemented `Into<String>` is the direct source-compatibility exception: either
+convert it to `String` before calling the builder or implement
+`From<YourType> for CommandArg`. This intentional break must not ship in a
+`0.1.x` patch release. It requires `redis-tower-commands` 0.2.0 and
+`redis-tower` 0.2.0, with workspace and downstream dependency requirements
+updated when that release is prepared.
 
 Stream field names and stream names in
 `XREAD`/`XREADGROUP` results are now `Bytes`, as are `StreamMessage.stream` and

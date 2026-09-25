@@ -106,11 +106,19 @@ fn string_ergonomics_and_existing_generic_wrappers_still_compile() {
 
     let owned = String::from("owned");
     let shared = Bytes::from_static(b"shared");
+    let boxed: Box<str> = "boxed".into();
+    let mut mutable = String::from("mutable");
 
     assert_eq!(wire_args(&Get::new("literal"))[1], b"literal"[..]);
     assert_eq!(wire_args(&Get::new(&owned))[1], b"owned"[..]);
     assert_eq!(wire_args(&Get::new(owned))[1], b"owned"[..]);
     assert_eq!(wire_args(&Get::new(&shared))[1], b"shared"[..]);
     assert_eq!(wire_args(&Get::new(shared))[1], b"shared"[..]);
+    assert_eq!(wire_args(&Get::new(boxed))[1], b"boxed"[..]);
+    assert_eq!(wire_args(&Get::new('λ'))[1], "λ".as_bytes()[..]);
+    assert_eq!(
+        wire_args(&Get::new(mutable.as_mut_str()))[1],
+        b"mutable"[..]
+    );
     assert_eq!(wire_args(&old_style_wrapper("generic"))[1], b"generic"[..]);
 }

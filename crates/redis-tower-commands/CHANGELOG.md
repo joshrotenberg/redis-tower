@@ -14,9 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Breaking (pre-1.0):** common command constructors now use
+- **Breaking (next minor, 0.2.0):** common command constructors now use
   `Into<CommandArg>` instead of `Into<String>`, and opaque stream/group/consumer
-  names in typed responses use `Bytes` instead of lossy `String` values
+  names in typed responses use `Bytes` instead of lossy `String` values. This
+  change must not ship in a `0.1.x` patch release; dependent workspace version
+  requirements must move to `redis-tower-commands` 0.2.0 for release.
 
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.1...redis-tower-commands-v0.1.2) - 2026-09-24
 

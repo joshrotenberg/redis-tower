@@ -119,9 +119,28 @@ impl From<String> for CommandArg {
     }
 }
 
+impl From<Box<str>> for CommandArg {
+    fn from(value: Box<str>) -> Self {
+        Self::from(String::from(value))
+    }
+}
+
+impl From<char> for CommandArg {
+    fn from(value: char) -> Self {
+        let mut encoded = [0; 4];
+        Self::from(value.encode_utf8(&mut encoded))
+    }
+}
+
 impl From<&str> for CommandArg {
     fn from(value: &str) -> Self {
         Self::copy_from_slice(value.as_bytes())
+    }
+}
+
+impl From<&mut str> for CommandArg {
+    fn from(value: &mut str) -> Self {
+        Self::from(&*value)
     }
 }
 
