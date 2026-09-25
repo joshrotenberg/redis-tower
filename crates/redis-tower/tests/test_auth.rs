@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::SinkExt;
 use redis_server_wrapper::RedisServer;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
 use redis_tower::commands::*;
@@ -38,11 +39,13 @@ use redis_tower::pool::{ConnectionPool, PoolConfig};
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
     BinaryPubSubConnection, ConnectionConfig, Frame, MonitorStream, MultiplexedClient,
-    ProtocolVersion, RedisConnection, ResilientConnection,
+    ProtocolVersion, RedisConnection, RedisStream, ResilientConnection, RespCodec,
 };
 use redis_tower_core::RedisError;
+use tokio::net::TcpListener;
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
+use tokio_util::codec::Framed;
 
 /// Password the dedicated auth server requires (`requirepass`).
 const PASSWORD: &str = "s3cr3t";
@@ -196,6 +199,49 @@ impl CredentialProvider for LeakyFailingCredentialProvider {
     }
 }
 
+#[derive(Clone)]
+struct RefreshFailingCredentialProvider {
+    get_calls: Arc<AtomicUsize>,
+    refresh_calls: Arc<AtomicUsize>,
+}
+
+impl RefreshFailingCredentialProvider {
+    fn new() -> Self {
+        Self {
+            get_calls: Arc::new(AtomicUsize::new(0)),
+            refresh_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn get_calls(&self) -> usize {
+        self.get_calls.load(Ordering::SeqCst)
+    }
+
+    fn refresh_calls(&self) -> usize {
+        self.refresh_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl CredentialProvider for RefreshFailingCredentialProvider {
+    fn get_credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        self.get_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(Credentials::password("provider-refresh-stale")) })
+    }
+
+    fn force_refresh(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {
+            Err(RedisError::Redis(
+                "provider leaked refresh-super-secret-token".into(),
+            ))
+        })
+    }
+}
+
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0")
         .expect("bind an ephemeral port for an auth integration server");
@@ -218,6 +264,29 @@ fn hello_protocol(frame: &Frame) -> Option<i64> {
             .and_then(|pair| pair[1].as_integer()),
         _ => None,
     }
+}
+
+fn command_words(frame: &Frame) -> Vec<String> {
+    let Frame::Array(Some(items)) = frame else {
+        panic!("expected a command array, got {frame:?}");
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            Frame::BulkString(Some(bytes)) | Frame::SimpleString(bytes) => {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+            other => panic!("expected a command string, got {other:?}"),
+        })
+        .collect()
+}
+
+async fn receive_setup_command(connection: &mut Framed<RedisStream, RespCodec>) -> Frame {
+    tokio::time::timeout(Duration::from_secs(2), connection.next())
+        .await
+        .expect("timed out waiting for a setup command")
+        .expect("client closed before sending the expected setup command")
+        .expect("client sent an invalid setup command")
 }
 
 /// Address (`host:port`) of the shared password-protected server, started once.
@@ -584,6 +653,74 @@ async fn provider_factory_refreshes_then_negotiates_protected_resp3() {
         1,
         "WRONGPASS should trigger exactly one explicit refresh"
     );
+}
+
+/// A provider error after Redis rejects stale credentials must end setup at
+/// that boundary: no SELECT, HELLO, or application command may reach the
+/// socket, and provider-owned error text must not escape.
+#[tokio::test]
+async fn provider_forced_refresh_failure_is_redacted_and_stops_setup() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted auth server");
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept setup connection");
+        let mut connection = Framed::new(RedisStream::Tcp(stream), RespCodec::new());
+
+        let library_name = receive_setup_command(&mut connection).await;
+        assert_eq!(
+            command_words(&library_name),
+            vec!["CLIENT", "SETINFO", "LIB-NAME", "redis-tower"]
+        );
+        connection
+            .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+            .await
+            .expect("reply to CLIENT SETINFO LIB-NAME");
+
+        let library_version = receive_setup_command(&mut connection).await;
+        let library_version = command_words(&library_version);
+        assert_eq!(&library_version[..3], ["CLIENT", "SETINFO", "LIB-VER"]);
+        assert_eq!(library_version.len(), 4);
+        connection
+            .send(Frame::SimpleString(Bytes::from_static(b"OK")))
+            .await
+            .expect("reply to CLIENT SETINFO LIB-VER");
+
+        let auth = receive_setup_command(&mut connection).await;
+        assert_eq!(command_words(&auth), vec!["AUTH", "provider-refresh-stale"]);
+        connection
+            .send(Frame::Error(Bytes::from_static(
+                b"WRONGPASS invalid username-password pair",
+            )))
+            .await
+            .expect("reject stale AUTH");
+
+        match tokio::time::timeout(Duration::from_secs(2), connection.next()).await {
+            Ok(None) => {}
+            Ok(Some(Ok(command))) => panic!(
+                "refresh failure must close setup before SELECT, HELLO, or application traffic; got {:?}",
+                command_words(&command)
+            ),
+            Ok(Some(Err(error))) => panic!("scripted server decode failed: {error}"),
+            Err(_) => panic!("failed setup socket remained open after provider refresh failure"),
+        }
+    });
+
+    let provider = RefreshFailingCredentialProvider::new();
+    let url = format!("redis://static:ignored@{addr}/3?protocol=resp3");
+    let factory = CredentialConnectionFactory::from_url(&url, provider.clone());
+    let Err(error) = ConnectionFactory::connect(&factory).await else {
+        panic!("forced refresh failure must not return a usable connection");
+    };
+    let rendered = error.to_string();
+
+    assert!(is_authentication_error(&error));
+    assert!(rendered.contains("AUTH_PROVIDER forced refresh failed"));
+    assert!(!rendered.contains("refresh-super-secret-token"));
+    assert_eq!(provider.get_calls(), 1);
+    assert_eq!(provider.refresh_calls(), 1);
+    server.await.expect("scripted auth server task panicked");
 }
 
 #[tokio::test]

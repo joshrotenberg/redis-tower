@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - redact third-party credential-provider errors at setup and in refresh-task
-  tracing while retaining `AUTH_PROVIDER` classification
+  tracing while retaining `AUTH_PROVIDER` classification; forced-refresh
+  failure stops setup before database/protocol negotiation, and each retained
+  connection owner documents its fail-open versus fail-closed rotation state
 - raise the declared Tokio dependency floor from 1.42 to 1.47 for the
   auto-pipeline shutdown notification API
 - make live Redis 8 and TLS conformance tests discover and verify the actual

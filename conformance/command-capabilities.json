@@ -23796,7 +23796,7 @@
     {
       "id": "session.credential-provider",
       "anchor": "behavior-session-credential-provider",
-      "description": "One shared credential provider backs fresh standalone and Cluster sockets plus dedicated Pub/Sub and MONITOR construction. Provider URL setup preserves transport, selected database and RESP negotiation; lookup, forced-refresh, transport and session setup can share one deadline. Established ordinary clients can reauthenticate through owned tasks, while Pub/Sub reconnects with confirmed binary subscriptions and MONITOR terminates/reopens rather than accepting unsafe generic in-band AUTH. Provider errors and refresh-task tracing omit third-party error text and retain authentication classification.",
+      "description": "One shared credential provider backs fresh standalone and Cluster sockets plus dedicated Pub/Sub and MONITOR construction. Provider URL setup preserves transport, selected database and RESP negotiation; lookup, forced-refresh, transport and session setup can share one deadline. A forced-refresh failure is redacted and stops setup before SELECT, HELLO or application traffic. Established ordinary clients can reauthenticate through owned tasks with explicitly documented owner-specific failure retirement, while Pub/Sub reconnects with confirmed binary subscriptions and MONITOR terminates/reopens rather than accepting unsafe generic in-band AUTH. Provider errors and refresh-task tracing omit third-party error text and retain authentication classification.",
       "dimensions": [
         "session-ownership",
         "reconnect",
@@ -23836,6 +23836,10 @@
         {
           "path": "crates/redis-tower/tests/test_auth.rs",
           "symbol": "provider_url_factory_preserves_database_and_protocol_but_overrides_static_auth"
+        },
+        {
+          "path": "crates/redis-tower/tests/test_auth.rs",
+          "symbol": "provider_forced_refresh_failure_is_redacted_and_stops_setup"
         },
         {
           "path": "crates/redis-tower/tests/test_auth.rs",
@@ -23879,12 +23883,7 @@
           "path": ".github/workflows/ci.yml",
           "symbol": "Run cluster integration tests"
         }
-      ],
-      "last_observed_pass": {
-        "date": "2026-09-25",
-        "commit": "38db4052e91052823d0ba2e4dbc024c801f594a0",
-        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36132327040/job/108062222677"
-      }
+      ]
     },
     {
       "id": "session.monitor-dedicated",

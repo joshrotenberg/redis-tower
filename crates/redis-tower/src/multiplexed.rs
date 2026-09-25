@@ -182,6 +182,13 @@ impl MultiplexedClient<AutoPipelineService> {
     ///
     /// Dropping the returned handle stops listening without shutting down the
     /// client.
+    ///
+    /// A rejected replacement `AUTH` does not evict this worker's socket:
+    /// Redis normally leaves the previous identity active, and the update task
+    /// logs a redacted warning before consuming later updates. Applications
+    /// that require fail-closed rotation must stop admission through
+    /// [`Self::shutdown_handle`], shut the client down, and build a replacement
+    /// through the provider-backed factory before resuming traffic.
     pub fn spawn_credential_reauthentication(
         &self,
         provider: Arc<dyn StreamingCredentialProvider>,

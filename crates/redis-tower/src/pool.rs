@@ -1904,6 +1904,11 @@ impl ConnectionPool<RedisConnection> {
     /// update progresses. A connection created concurrently through a
     /// provider-backed factory fetches the provider's current credentials and
     /// therefore does not need to be revisited by this pass.
+    ///
+    /// If a slot rejects the replacement, this method returns the first error
+    /// after attempting every active slot but leaves failed slots installed
+    /// with their previous Redis identity. Call [`Self::close`] and rebuild the
+    /// pool through its provider-backed factory when rotation must fail closed.
     pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
         let mut first_error = None;
         for slot in &self.inner.connections {
@@ -1935,6 +1940,10 @@ impl ConnectionPool<RedisConnection> {
     /// pool. Use the same provider in the pool's
     /// [`CredentialConnectionFactory`](crate::CredentialConnectionFactory) so
     /// replacement and newly grown slots authenticate with current material.
+    /// Rejected updates are logged without their error text and later updates
+    /// are still consumed; failed slots are not automatically removed. A
+    /// fail-closed owner must close and rebuild the pool before routing more
+    /// application traffic.
     pub fn spawn_credential_reauthentication(
         &self,
         provider: Arc<dyn StreamingCredentialProvider>,

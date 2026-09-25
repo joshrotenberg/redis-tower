@@ -69,12 +69,23 @@ single-flight behavior.
 Credential lookup during connection setup and credential changes after setup
 are different contracts:
 
-| Owner | On provider update | Why |
+| Owner | On provider update | Rejected replacement `AUTH` |
 |---|---|---|
-| Multiplexed client, retained pool, Cluster/Sentinel data clients | Use the owner's `spawn_credential_reauthentication` handle | These owners serialize `AUTH` with their normal request path and discard sockets that reject it. |
+| Standalone `MultiplexedClient` | Use `spawn_credential_reauthentication` to serialize `AUTH` through its worker | The worker stays installed with its previous Redis identity. The task logs a redacted warning and consumes later updates. For fail-closed rotation, stop admission, shut down the client, and rebuild it through the provider factory before resuming traffic. |
+| Retained `ConnectionPool` | Use `spawn_credential_reauthentication` to visit every active slot | Failed slots stay installed with their previous identity while the remaining slots are attempted. For fail-closed rotation, call `close`, drop all clones, and rebuild the pool through the provider factory. |
+| Direct or multiplexed Cluster client | Use the owner's `spawn_credential_reauthentication` handle | The failed node socket/worker is removed from routing and a later command reconnects through the provider. |
+| Direct `SentinelClient` | Use `spawn_credential_reauthentication` for current data sockets; discovery sockets are short-lived | A failed master is marked for rediscovery before the next command, and failed replicas are removed. |
+| `MultiplexedSentinelClient` | Use `spawn_credential_reauthentication` for current data workers | Failed workers stay routed with their previous identity. Stop routing, drop every client clone/update handle, and rebuild the client before resuming traffic when rotation must fail closed. |
 | Fresh blocking or transaction connection | Finish/cancel the operation, then reconnect through the provider factory | Inserting `AUTH` into connection-local operation state is not a generic safe boundary. An ambiguous operation is never replayed. |
 | Pub/Sub | Reconnect through the provider factory; confirmed subscriptions are replayed | Subscription mode is stateful, and an arbitrary callback must not inject `AUTH`. Messages during the gap are lost. |
 | MONITOR | Terminate and create a new `MonitorStream` through the provider factory | MONITOR owns a one-way event stream, has no resume cursor, and loses events during the gap. |
+
+The generic update task is deliberately best-effort: it does not expose an
+error channel, renders neither provider nor callback errors, and continues
+after a failure. Where an owner exposes `reauthenticate_all`, call it directly
+when the result is needed synchronously. The table above is the authoritative
+retirement policy; do not assume that every owner evicts a socket after a
+rejected update.
 
 `PubSubConnection::connect_with`, `BinaryPubSubConnection::connect_with`, and
 `MonitorStream::connect_with` open their dedicated sockets through any
@@ -205,12 +216,16 @@ let auth_handle = client.spawn_credential_reauthentication(updates);
 identity and service-principal credentials use the same cache and push stream.
 `with_scope` is available for sovereign-cloud or compatibility deployments.
 
-For `redis-database-mcp-rs`, keep Azure SDK dependencies behind the server's
-optional Entra feature. Construct one `EntraIdProvider` in the server layer,
-wrap or clone it into every `DirectRedis*` connection factory, and keep static
-URL authentication as the no-feature/default path. Tool schemas and results
-should receive only `is_authentication_error` classification, never provider
-errors or credential values.
+The downstream
+[`redis-database-mcp-rs#92`](https://github.com/redis-developer/redis-database-mcp-rs/issues/92)
+contract keeps Azure SDK dependencies behind the server's optional Entra
+feature. Construct one `EntraIdProvider` in the server layer, wrap or clone it
+into every `DirectRedis*` connection factory, and keep static URL
+authentication as the no-feature/default path. Its acceptance test injects a
+unique token into a failing provider, invokes a real MCP tool, and proves the
+serialized tool result or JSON-RPC error, returned metadata, and captured
+tracing/log output omit the token while retaining `is_authentication_error`
+classification. MCP policy and that tool-boundary evidence stay downstream.
 
 ## Pools, Cluster, and Sentinel
 
@@ -241,10 +256,12 @@ let auth_handle = sentinel.spawn_credential_reauthentication(Arc::new(provider))
 ```
 
 Direct `ClusterClient`, `SentinelClient`, `MultiplexedClusterClient`, and
-`MultiplexedSentinelClient` expose the same owned update mechanism. A failed
-Cluster node reauthentication removes that socket from routing so its normal
-provider-backed reconnect path can rebuild it. Sentinel master failures force
-rediscovery; failed replica sockets are removed.
+`MultiplexedSentinelClient` expose the same owned update mechanism, but their
+failure retirement differs. Both Cluster owners remove a failed node from
+routing so its normal provider-backed reconnect path can rebuild it. Direct
+`SentinelClient` forces rediscovery after a master failure and removes failed
+replicas. `MultiplexedSentinelClient` retains a worker that rejects `AUTH` with
+its previous identity; stop routing and rebuild that owner to fail closed.
 
 ## Secret handling and failure behavior
 
