@@ -173,7 +173,7 @@ SET outcome mode distinguishes applied and rejected NX/XX writes independently f
 - Matrix: server `Redis 7.4.3 and 8.0.6 per-PR matrix`; protocols `RESP2, RESP3`; features `core commands`; topologies `standalone`
 - Source tests: [`set_outcome_get_maps_nx_and_xx_semantics`](../crates/redis-tower-commands/tests/parse_response.rs), [`typed_binary_inputs_roundtrip_resp2`](../crates/redis-tower/tests/integration.rs), [`typed_binary_inputs_roundtrip_resp3`](../crates/redis-tower/tests/integration.rs), [`diff_mcp_typed_set_builder_options`](../crates/redis-tower/tests/differential_redis_rs.rs)
 - Configured CI: [`test-unit:`](../.github/workflows/ci.yml), [`test-integration:`](../.github/workflows/ci.yml)
-- Last observed pass: **unverified**
+- Last observed pass: [2026-09-25 at `bdbcdf38471b`](https://github.com/joshrotenberg/redis-tower/actions/runs/36127105812)
 
 ### Behavior command stream consumer group
 

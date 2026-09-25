@@ -23466,7 +23466,12 @@
           "path": ".github/workflows/ci.yml",
           "symbol": "test-integration:"
         }
-      ]
+      ],
+      "last_observed_pass": {
+        "date": "2026-09-25",
+        "commit": "bdbcdf38471b3f6da4c137f37251419573e5139c",
+        "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36127105812"
+      }
     },
     {
       "id": "command.stream-consumer-group",
