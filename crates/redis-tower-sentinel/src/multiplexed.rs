@@ -489,7 +489,11 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
     ///
     /// Updates are serialized through each worker, preserving RESP framing and
     /// atomic pipeline boundaries. All workers are attempted before the first
-    /// error is returned.
+    /// error is returned. A worker that rejects `AUTH` remains installed with
+    /// its previous Redis identity; unlike [`SentinelClient`](crate::SentinelClient),
+    /// this multiplexed owner does not force master rediscovery or remove a
+    /// failed replica. Stop routing through and rebuild the client when
+    /// rotation must fail closed.
     pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
         let mut first_error =
             execute_with_deadline(self.inner.clone(), credentials.auth_command(), None)
@@ -515,7 +519,9 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
     ///
     /// Short-lived Sentinel discovery sockets fetch credentials during each
     /// query and are not retained. Dropping the returned handle stops future
-    /// master/replica updates.
+    /// master/replica updates. Rejected updates are logged without their error
+    /// text and later updates are still consumed; failed workers remain routed,
+    /// so a fail-closed owner must replace this client before resuming traffic.
     pub fn spawn_credential_reauthentication(
         &self,
         provider: Arc<dyn StreamingCredentialProvider>,

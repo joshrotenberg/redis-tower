@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- staged Redis URL connections for provider authentication before preserved
+  database selection and RESP negotiation
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.1...redis-tower-core-v0.1.2) - 2026-09-24
 
 ### Added

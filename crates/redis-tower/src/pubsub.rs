@@ -147,6 +147,19 @@ impl From<NamedPubSubConnection<String>> for PubSubConnection {
     }
 }
 impl PubSubConnection {
+    /// Open a fresh dedicated connection through `factory`.
+    ///
+    /// A [`CredentialConnectionFactory`](crate::CredentialConnectionFactory)
+    /// therefore applies the same shared provider, URL session settings, and
+    /// setup deadline used by ordinary clients. Credential updates must not
+    /// issue in-place `AUTH` after subscription mode begins; reconnect through
+    /// the same factory and confirmed subscriptions will be replayed.
+    pub async fn connect_with(factory: &dyn ConnectionFactory) -> Result<Self, RedisError> {
+        NamedPubSubConnection::connect_with(factory)
+            .await
+            .map(Self::from)
+    }
+
     /// Consume a dedicated connection, retaining its decode limits.
     pub fn from_connection(connection: RedisConnection) -> Result<Self, RedisError> {
         NamedPubSubConnection::from_connection(connection).map(Self::from)
@@ -458,6 +471,14 @@ pub struct NamedPubSubConnection<N> {
 }
 
 impl<N: PubSubName> NamedPubSubConnection<N> {
+    /// Open a fresh dedicated connection through `factory`.
+    ///
+    /// This supports both text and binary subscription owners and keeps all
+    /// connection setup in the supplied factory.
+    pub async fn connect_with(factory: &dyn ConnectionFactory) -> Result<Self, RedisError> {
+        Self::from_connection(factory.connect().await?)
+    }
+
     /// Convert a `RedisConnection` into a pub/sub connection.
     ///
     /// The connection must not be shared (no outstanding clones of the

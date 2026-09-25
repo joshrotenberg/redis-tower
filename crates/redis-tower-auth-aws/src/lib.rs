@@ -308,8 +308,11 @@ fn validate_component(name: &str, value: &str) -> Result<(), RedisError> {
     }
 }
 
-fn provider_error(context: &str, error: impl fmt::Display) -> RedisError {
-    RedisError::Redis(format!("{context} failed: {error}"))
+fn provider_error(context: &str, _error: impl fmt::Display) -> RedisError {
+    // AWS SDK/signing errors can include request details. Keep the operation
+    // context and authentication classification without forwarding possible
+    // credential material.
+    RedisError::Redis(format!("AUTH_PROVIDER {context} failed"))
 }
 
 #[cfg(test)]
@@ -371,5 +374,16 @@ mod tests {
         assert!(debug.contains("redis-user"));
         assert!(!debug.contains("AKIDEXAMPLE"));
         assert!(!debug.contains("EXAMPLEKEY"));
+    }
+
+    #[test]
+    fn provider_errors_do_not_expose_sdk_details() {
+        let error = provider_error("ElastiCache IAM signing", "secret-signing-value");
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "redis error: AUTH_PROVIDER ElastiCache IAM signing failed"
+        );
+        assert!(!display.contains("secret-signing-value"));
     }
 }

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- redact AWS SDK and signing error details behind stable `AUTH_PROVIDER`
+  classification
+
 ## [0.1.1](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-auth-aws-v0.1.0...redis-tower-auth-aws-v0.1.1) - 2026-09-24
 
 ### Other

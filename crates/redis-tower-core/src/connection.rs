@@ -337,6 +337,46 @@ impl ConnectionConfig {
     }
 }
 
+/// A Redis URL connection whose transport is open but whose caller-defined
+/// authentication and URL session setup are not yet complete.
+///
+/// This staged form exists for credential providers that must authenticate a
+/// fresh socket before Redis applies the URL's selected database and RESP
+/// protocol. Call [`connection_mut`](Self::connection_mut), authenticate the
+/// connection, then call [`finish`](Self::finish). URL-embedded credentials
+/// are deliberately not sent by `finish`; callers that want static URL
+/// authentication should use [`RedisConnection::connect_url_with_config`].
+///
+/// Dropping this value before `finish` closes the partially configured socket.
+#[must_use = "a staged URL connection must be authenticated and finished"]
+pub struct PendingRedisConnection {
+    connection: RedisConnection,
+    url: RedisUrl,
+    protocol: ProtocolVersion,
+}
+
+impl PendingRedisConnection {
+    /// Borrow the fresh RESP2 connection for caller-defined authentication.
+    ///
+    /// Do not issue application commands at this stage. Only connection setup
+    /// such as `AUTH` belongs before [`finish`](Self::finish).
+    pub fn connection_mut(&mut self) -> &mut RedisConnection {
+        &mut self.connection
+    }
+
+    /// Apply URL database selection and negotiate the resolved RESP protocol.
+    ///
+    /// Authentication must already be complete when the server requires it.
+    /// The URL's static username and password are ignored on this staged path.
+    pub async fn finish(mut self) -> Result<RedisConnection, RedisError> {
+        self.connection
+            .post_connect_database(self.url.database)
+            .await?;
+        self.connection.negotiate_protocol(self.protocol).await?;
+        Ok(self.connection)
+    }
+}
+
 fn resolve_url_protocol(
     url_protocol: Option<ProtocolVersion>,
     configured: ProtocolVersion,
@@ -611,9 +651,33 @@ impl RedisConnection {
         url: &str,
         config: &ConnectionConfig,
     ) -> Result<Self, RedisError> {
+        let mut pending = Self::begin_url_connection_with_config(url, config).await?;
+        pending
+            .connection
+            .post_connect_authentication(&pending.url)
+            .await?;
+        pending.finish().await
+    }
+
+    /// Open the transport described by a Redis URL without applying its static
+    /// credentials, selected database, or RESP protocol yet.
+    ///
+    /// This is the provider-authentication seam used by higher-level
+    /// connection factories. The returned connection starts in RESP2, while
+    /// preserving the URL's TCP, TLS, or Unix transport, database, and
+    /// protocol settings. Authenticate it through
+    /// [`PendingRedisConnection::connection_mut`], then call
+    /// [`PendingRedisConnection::finish`].
+    ///
+    /// The URL's username and password are intentionally ignored on this path;
+    /// they remain active on [`connect_url_with_config`](Self::connect_url_with_config).
+    pub async fn begin_url_connection_with_config(
+        url: &str,
+        config: &ConnectionConfig,
+    ) -> Result<PendingRedisConnection, RedisError> {
         let parsed = parse_connection_url(url)?;
 
-        let mut conn = if parsed.url.unix {
+        let connection = if parsed.url.unix {
             #[cfg(unix)]
             {
                 use std::os::unix::ffi::OsStrExt;
@@ -677,10 +741,11 @@ impl RedisConnection {
             Self::connect_raw(&parsed.url.tcp_addr(), config).await?
         };
 
-        conn.post_connect_setup(&parsed.url).await?;
-        conn.negotiate_protocol(resolve_url_protocol(parsed.protocol, config.protocol))
-            .await?;
-        Ok(conn)
+        Ok(PendingRedisConnection {
+            connection,
+            url: parsed.url,
+            protocol: resolve_url_protocol(parsed.protocol, config.protocol),
+        })
     }
 
     /// Connect from a Redis URL, performing the TLS handshake with an explicit
@@ -739,6 +804,32 @@ impl RedisConnection {
         tls_config: &crate::tls::TlsConfig,
         config: &ConnectionConfig,
     ) -> Result<Self, RedisError> {
+        let mut pending =
+            Self::begin_url_connection_with_tls_and_config(url, tls_config, config).await?;
+        pending
+            .connection
+            .post_connect_authentication(&pending.url)
+            .await?;
+        pending.finish().await
+    }
+
+    /// Open a staged URL connection using explicit TLS configuration.
+    ///
+    /// This is the custom-CA/mTLS counterpart to
+    /// [`begin_url_connection_with_config`](Self::begin_url_connection_with_config).
+    /// The URL must describe a TCP endpoint; Unix URLs are rejected. Static
+    /// URL credentials are ignored so the caller can authenticate through a
+    /// dynamic provider before database selection and protocol negotiation.
+    #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(any(feature = "tls-native-tls", feature = "tls-rustls")))
+    )]
+    pub async fn begin_url_connection_with_tls_and_config(
+        url: &str,
+        tls_config: &crate::tls::TlsConfig,
+        config: &ConnectionConfig,
+    ) -> Result<PendingRedisConnection, RedisError> {
         let parsed = parse_connection_url(url)?;
         if parsed.url.unix {
             return Err(RedisError::InvalidUrl(
@@ -746,12 +837,13 @@ impl RedisConnection {
             ));
         }
         let addr = parsed.url.tcp_addr();
-        let mut conn =
+        let connection =
             Self::connect_tls_raw(&addr, parsed.url.tls_server_name(), tls_config, config).await?;
-        conn.post_connect_setup(&parsed.url).await?;
-        conn.negotiate_protocol(resolve_url_protocol(parsed.protocol, config.protocol))
-            .await?;
-        Ok(conn)
+        Ok(PendingRedisConnection {
+            connection,
+            url: parsed.url,
+            protocol: resolve_url_protocol(parsed.protocol, config.protocol),
+        })
     }
 
     /// Connect to a Redis server and negotiate RESP3 protocol.
@@ -1209,8 +1301,8 @@ impl RedisConnection {
         Ok(())
     }
 
-    /// Run post-connection setup (AUTH, SELECT) based on URL parameters.
-    async fn post_connect_setup(&mut self, url: &RedisUrl) -> Result<(), RedisError> {
+    /// Apply static URL authentication before the remaining URL setup.
+    async fn post_connect_authentication(&mut self, url: &RedisUrl) -> Result<(), RedisError> {
         let framed = self.framed.as_mut().expect("connection not in flight");
 
         if let Some(ref password) = url.password {
@@ -1232,7 +1324,13 @@ impl RedisConnection {
             }
         }
 
-        if let Some(db) = url.database {
+        Ok(())
+    }
+
+    /// Select the URL database after authentication and before negotiation.
+    async fn post_connect_database(&mut self, database: Option<u16>) -> Result<(), RedisError> {
+        if let Some(db) = database {
+            let framed = self.framed.as_mut().expect("connection not in flight");
             framed
                 .send(array(vec![bulk("SELECT"), bulk(db.to_string())]))
                 .await
@@ -1791,6 +1889,88 @@ mod tests {
         .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
         drop(connection);
         server.await.expect("join test server");
+    }
+
+    #[tokio::test]
+    async fn staged_url_connection_orders_provider_auth_before_database_and_protocol() {
+        struct ProviderAuth;
+        impl Command for ProviderAuth {
+            type Response = ();
+
+            fn to_frame(&self) -> Frame {
+                array(vec![bulk("AUTH"), bulk("provider-secret")])
+            }
+
+            fn parse_response(&self, frame: Frame) -> Result<(), RedisError> {
+                match frame {
+                    Frame::SimpleString(value) if value == b"OK"[..] => Ok(()),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "OK",
+                        actual: format!("{other:?}"),
+                    }),
+                }
+            }
+
+            fn name(&self) -> &str {
+                "AUTH"
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind staged URL test listener");
+        let address = listener.local_addr().expect("read staged URL address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept staged URL client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            let expected = [
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-NAME"),
+                    bulk("redis-tower"),
+                ]),
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-VER"),
+                    bulk(env!("CARGO_PKG_VERSION")),
+                ]),
+                array(vec![bulk("AUTH"), bulk("provider-secret")]),
+                array(vec![bulk("SELECT"), bulk("2")]),
+                array(vec![bulk("HELLO"), bulk("3")]),
+            ];
+            for expected_command in expected {
+                let actual = framed
+                    .next()
+                    .await
+                    .expect("client closed during staged URL setup")
+                    .expect("decode staged URL setup command");
+                assert_eq!(actual, expected_command);
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to staged URL setup command");
+            }
+        });
+
+        let url = format!(
+            "redis://static:ignored@127.0.0.1:{}/2?protocol=resp3",
+            address.port()
+        );
+        let mut pending =
+            RedisConnection::begin_url_connection_with_config(&url, &ConnectionConfig::default())
+                .await
+                .expect("open staged URL transport");
+        pending
+            .connection_mut()
+            .execute(ProviderAuth)
+            .await
+            .expect("authenticate staged URL connection");
+        let connection = pending.finish().await.expect("finish staged URL setup");
+        assert!(connection.is_resp3());
+        drop(connection);
+        server.await.expect("join staged URL server");
     }
 
     #[cfg(unix)]
