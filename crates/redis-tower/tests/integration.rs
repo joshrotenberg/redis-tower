@@ -649,8 +649,8 @@ async fn pipeline_with_errors() {
     // First result should be an error.
     assert!(results.get::<i64>(0).is_err());
     // Second result should succeed.
-    let pong: &String = results.get(1).unwrap();
-    assert_eq!(pong, "PONG");
+    let pong: &Bytes = results.get(1).unwrap();
+    assert_eq!(pong, b"PONG".as_slice());
 
     conn.execute(Del::new(&k)).await.unwrap();
 }
@@ -1674,8 +1674,8 @@ async fn transaction_with_redis_error() {
             // Incr on a non-number returns error inside the transaction results.
             assert!(results.get::<i64>(0).is_err());
             // Ping still succeeds.
-            let pong: &String = results.get(1).unwrap();
-            assert_eq!(pong, "PONG");
+            let pong: &Bytes = results.get(1).unwrap();
+            assert_eq!(pong, b"PONG".as_slice());
         }
         TransactionResult::Aborted => panic!("should not abort"),
     }
@@ -2803,11 +2803,11 @@ async fn pipeline_with_redis_error_partial() {
         .unwrap();
 
     // First and third succeed
-    assert!(results.get::<String>(0).is_ok());
+    assert!(results.get::<Bytes>(0).is_ok());
     // Second is a Redis error
     assert!(results.get::<i64>(1).is_err());
     // Third still succeeds
-    assert!(results.get::<String>(2).is_ok());
+    assert!(results.get::<Bytes>(2).is_ok());
 
     conn.execute(Del::new(&k)).await.unwrap();
 }
