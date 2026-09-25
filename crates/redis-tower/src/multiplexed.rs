@@ -47,7 +47,10 @@ use redis_tower_core::{
 use redis_tower_protocol::helpers::{array, bulk};
 use tower_service::Service;
 
-use crate::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService};
+use crate::auto_pipeline::{
+    AutoPipelineConfig, AutoPipelineReconnectConfig, AutoPipelineService,
+    AutoPipelineShutdownHandle,
+};
 use crate::cache_layer::CacheService;
 use crate::cache_state::CacheStatistics;
 use crate::caching::{CachedClientConfig, connect_resp3, force_resp3};
@@ -503,6 +506,29 @@ impl MultiplexedClient<AutoPipelineService> {
     /// when their concrete inner service remains [`AutoPipelineService`].
     pub fn queue_depth(&self) -> usize {
         self.inner.inner().queue_depth()
+    }
+
+    /// Return an owned controller for the shared auto-pipeline worker.
+    ///
+    /// Retain this before cloning the client into a router or erasing its type.
+    /// Calling [`AutoPipelineShutdownHandle::shutdown`] stops admission across
+    /// every clone, drains accepted work, and joins the worker without needing
+    /// to recover and consume the final concrete client value.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower::MultiplexedClient;
+    ///
+    /// let client = MultiplexedClient::connect("127.0.0.1:6379").await?;
+    /// let shutdown = client.shutdown_handle();
+    /// let router_client = client.clone();
+    /// # let _ = router_client;
+    /// shutdown.shutdown().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn shutdown_handle(&self) -> AutoPipelineShutdownHandle {
+        self.inner.inner().shutdown_handle()
     }
 
     /// Gracefully shut down the multiplexed client.

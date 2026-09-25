@@ -728,7 +728,8 @@ Shutdown ordering prevents accepted work from disappearing in background
 queues:
 
 1. stop accepting new application requests and stop background producers;
-2. await tasks that own client clones;
+2. await tasks that own client clones, or retain a
+   `MultiplexedClient::shutdown_handle()` before placing clones in a router;
 3. stop queue/pool metrics exporters that retain client clones;
 4. call `ConnectionPool::close()` to reject new pool work and drain accepted
    operations;
@@ -739,7 +740,12 @@ queues:
 Calling `shutdown()` while another multiplexed clone remains alive returns
 without stopping the shared worker. Make ownership explicit in the application's
 shutdown coordinator, and test SIGTERM behavior while commands are queued and
-in flight.
+in flight. For clone-heavy or trait-erased hosts, call the retained
+`AutoPipelineShutdownHandle::shutdown().await` instead. It atomically stops new
+admission across all clones, drains already accepted work while the connection
+is usable, cancels reconnect/backoff work, and joins the worker. Surviving
+client clones then return `ConnectionClosed` and can be dropped without the
+unfinished-worker warning.
 
 ## A repeatable tuning loop
 

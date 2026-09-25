@@ -17,6 +17,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     let auto = AutoPipelineService::new(conn, config);
+    // Retain a lifecycle handle before cloning or type-erasing the service.
+    let shutdown = auto.shutdown_handle();
 
     // Spawn concurrent tasks -- their commands are batched automatically.
     let mut handles = Vec::new();
@@ -34,6 +36,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for h in handles {
         h.await?;
     }
+
+    // This stops the shared worker even though `auto` is still a live handle.
+    shutdown.shutdown().await;
 
     Ok(())
 }
