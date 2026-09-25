@@ -270,41 +270,62 @@ fn split_query(input: &str) -> (&str, Option<&str>) {
 }
 
 fn parse_query(query: Option<&str>, unix: bool) -> Result<UrlQuery, RedisError> {
-    let mut parsed = UrlQuery::default();
+    let mut database = None;
+    let mut username = None;
+    let mut password = None;
+    let mut protocol = None;
     for pair in query.into_iter().flat_map(|query| query.split('&')) {
         if pair.is_empty() {
             continue;
         }
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let key = form_decode(key)?;
-        let value = form_decode(value)?;
-        match key.as_str() {
-            "db" if unix => {
-                parsed.database =
-                    Some(value.parse::<u16>().map_err(|_| {
-                        RedisError::InvalidUrl(format!("invalid database: {value}"))
-                    })?);
-            }
-            "user" if unix => parsed.username = Some(value),
-            "pass" if unix => parsed.password = Some(value),
-            "protocol" => {
-                parsed.protocol = Some(match value.as_str() {
-                    "2" | "resp2" => ProtocolVersion::Resp2,
-                    "3" | "resp3" => ProtocolVersion::Resp3,
-                    _ => {
-                        return Err(RedisError::InvalidUrl(format!(
-                            "invalid protocol version: {value}"
-                        )));
-                    }
-                });
-            }
+        match form_decode_bytes(key).as_slice() {
+            b"db" if unix => database = Some(value),
+            b"user" if unix => username = Some(value),
+            b"pass" if unix => password = Some(value),
+            b"protocol" => protocol = Some(value),
             _ => {}
         }
     }
-    Ok(parsed)
+
+    let database = database
+        .map(|value| {
+            let value = form_decode(value)?;
+            value
+                .parse::<u16>()
+                .map_err(|_| RedisError::InvalidUrl(format!("invalid database: {value}")))
+        })
+        .transpose()?;
+    let username = username.map(form_decode).transpose()?;
+    let password = password.map(form_decode).transpose()?;
+    let protocol = protocol
+        .map(|value| {
+            let value = form_decode(value)?;
+            match value.as_str() {
+                "2" | "resp2" => Ok(ProtocolVersion::Resp2),
+                "3" | "resp3" => Ok(ProtocolVersion::Resp3),
+                _ => Err(RedisError::InvalidUrl(format!(
+                    "invalid protocol version: {value}"
+                ))),
+            }
+        })
+        .transpose()?;
+
+    Ok(UrlQuery {
+        database,
+        username,
+        password,
+        protocol,
+    })
 }
 
 fn form_decode(input: &str) -> Result<String, RedisError> {
+    String::from_utf8(form_decode_bytes(input)).map_err(|_| {
+        RedisError::InvalidUrl("percent-decoded URL query is not valid UTF-8".to_string())
+    })
+}
+
+fn form_decode_bytes(input: &str) -> Vec<u8> {
     let replaced;
     let input = if input.contains('+') {
         replaced = input.replace('+', " ");
@@ -312,9 +333,7 @@ fn form_decode(input: &str) -> Result<String, RedisError> {
     } else {
         input
     };
-    String::from_utf8(percent_decode_bytes(input)).map_err(|_| {
-        RedisError::InvalidUrl("percent-decoded URL query is not valid UTF-8".to_string())
-    })
+    percent_decode_bytes(input)
 }
 
 fn parse_host_port(host_port: &str) -> Result<(String, u16), RedisError> {
@@ -591,6 +610,30 @@ mod tests {
                 .unwrap();
         assert_eq!(parsed.url.database, Some(2));
         assert_eq!(parsed.protocol, Some(ProtocolVersion::Resp3));
+    }
+
+    #[test]
+    fn query_validation_applies_only_to_the_final_recognized_value() {
+        let unix = parse_connection_url(
+            "unix:///tmp/redis.sock?db=bad&%64b=2&user=%FF&user=agent&pass=secret&unknown=%FF&%FF=%FF",
+        )
+        .unwrap();
+        assert_eq!(unix.url.database, Some(2));
+        assert_eq!(unix.url.username.as_deref(), Some("agent"));
+        assert_eq!(unix.url.password.as_deref(), Some("secret"));
+
+        let tcp =
+            parse_connection_url("redis://localhost/?protocol=bad&prot%6Fcol=resp3&unknown=%FF")
+                .unwrap();
+        assert_eq!(tcp.protocol, Some(ProtocolVersion::Resp3));
+
+        for input in [
+            "unix:///tmp/redis.sock?db=2&db=bad",
+            "unix:///tmp/redis.sock?user=agent&pass=secret&pass=%FF",
+            "redis://localhost/?protocol=resp3&protocol=bad",
+        ] {
+            assert!(parse_connection_url(input).is_err(), "accepted {input}");
+        }
     }
 
     #[test]
