@@ -1709,6 +1709,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn plaintext_url_preserves_an_ipv6_scope_id() {
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping scoped IPv6 URL test: IPv6 loopback is unavailable");
+                return;
+            }
+            Err(error) => panic!("bind IPv6 loopback: {error}"),
+        };
+        let address = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            for _ in 0..2 {
+                framed
+                    .next()
+                    .await
+                    .expect("client closed during setup")
+                    .expect("decode CLIENT SETINFO");
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to CLIENT SETINFO");
+            }
+        });
+
+        let url = format!("redis://[::1%0]:{}/", address.port());
+        let connection = RedisConnection::connect_url_with_config(
+            &url,
+            &ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
+        drop(connection);
+        server.await.expect("join test server");
+    }
+
     #[cfg(feature = "tls-rustls")]
     #[tokio::test]
     async fn tls_urls_complete_an_ipv6_connection() {

@@ -71,10 +71,15 @@ impl RedisUrl {
 
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     pub(crate) fn tls_server_name(&self) -> &str {
-        self.host
+        let Some(ipv6) = self
+            .host
             .strip_prefix('[')
             .and_then(|host| host.strip_suffix(']'))
-            .unwrap_or(&self.host)
+        else {
+            return &self.host;
+        };
+        ipv6.split_once('%')
+            .map_or(ipv6, |(address, _scope)| address)
     }
 }
 
@@ -187,9 +192,11 @@ fn parse_host_port(host_port: &str) -> Result<(String, u16), RedisError> {
         if close == 0 {
             return Err(RedisError::InvalidUrl("empty IPv6 address".to_string()));
         }
-        ipv6[..close].parse::<std::net::Ipv6Addr>().map_err(|_| {
-            RedisError::InvalidUrl(format!("invalid IPv6 address: {}", &ipv6[..close]))
-        })?;
+        format!("[{}]:0", &ipv6[..close])
+            .parse::<std::net::SocketAddrV6>()
+            .map_err(|_| {
+                RedisError::InvalidUrl(format!("invalid IPv6 address: {}", &ipv6[..close]))
+            })?;
 
         // Keep brackets on the parsed host: `host:port` remains a valid
         // socket address, while `RedisUrl::tls_server_name` supplies the
@@ -350,6 +357,11 @@ mod tests {
                 "redis.example.com:6380",
             ),
             ("rediss://127.0.0.1:6380", "127.0.0.1", "127.0.0.1:6380"),
+            (
+                "rediss://redis%2Eexample:6380",
+                "redis%2Eexample",
+                "redis%2Eexample:6380",
+            ),
         ] {
             let url = parse_redis_url(input).unwrap();
             assert_eq!(url.host, host);
@@ -371,6 +383,15 @@ mod tests {
         ] {
             assert!(parse_redis_url(input).is_err(), "accepted {input}");
         }
+    }
+
+    #[test]
+    fn numeric_ipv6_scope_is_kept_for_tcp_and_removed_for_tls_identity() {
+        let url = parse_redis_url("rediss://[fe80::1%3]:6380/").unwrap();
+        assert_eq!(url.host, "[fe80::1%3]");
+        assert_eq!(url.tcp_addr(), "[fe80::1%3]:6380");
+        #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
+        assert_eq!(url.tls_server_name(), "fe80::1");
     }
 
     #[test]
