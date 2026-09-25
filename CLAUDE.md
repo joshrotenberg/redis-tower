@@ -1,6 +1,6 @@
 # redis-tower
 
-A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. The GitHub repo is public, but no current release is available: all published crates were yanked on 2026-06-11 and the Release workflow is manual-dispatch only. PR #690 is the pending re-launch. See Release State below.
+A Tower-based Redis client with strong typing, composable middleware, and resilience primitives. All 13 public crates have current, non-yanked releases; publishing remains a manual, staged operation. See Release State below.
 
 ## Architecture
 
@@ -324,10 +324,10 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 
 ## Current Status
 
-**The issue queue is empty: 0 open, 376 closed.** Every audit pass, the
-architecture/bug/feature queues, and the Go-Hard Backlog below have been worked
-to completion. There is no standing backlog to pull from; new work starts by
-filing an issue.
+The current follow-up backlog is tracked by issue #701. It covers findings from
+the first substantial external consumer, protocol completeness, conformance,
+comparative fault testing, retained performance evidence, and documentation.
+Check the live issue queue instead of copying its count into this file.
 
 The last major tranche (roughly #654-#689) added distributed primitives, cloud
 auth, adaptive replica routing, topology-aware client-side caching, reconnecting
@@ -356,22 +356,19 @@ integration tests remain `#[ignore]` and need Redis Stack (`-- --ignored`).
 
 ## Release State
 
-**Nothing is currently published.** crates.io holds only `redis-tower` 0.1.0 and
-siblings, all yanked on 2026-06-11. A yanked version can never be reused, so the
-re-launch must bump.
+The complete workspace is published and searchable on crates.io. These versions
+were verified against workspace manifests, crates.io search, and GitHub releases
+on 2026-09-25:
 
-**PR #690 is the release vehicle.** It is open, ready for review, and green
-(22/22 checks). It covers 73 files and:
-
-| Package group | Version |
+| Package group | Current version |
 |---|---:|
-| `redis-tower-protocol` | 0.1.2 |
-| `redis-tower-core`, `redis-tower-commands`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.1 |
-| `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives`, `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.0, first publication |
+| `redis-tower-protocol`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.3 |
+| `redis-tower-core`, `redis-tower-commands`, `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives` | 0.1.2 |
+| `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.1 |
 
-It also adds changelogs for all 13 publishable crates and enforces them in
-release hygiene, rewrites the README, removes `roba.toml`, and makes release-plz
-manual, operation-specific, serialized, and unavailable in forks.
+The Release workflow remains manual and separates release-PR preparation from
+publication. Follow `docs/RELEASING.md`; do not treat this status snapshot as an
+instruction to publish.
 
 **Publication order** (each tier must be on crates.io before the next resolves):
 
@@ -382,16 +379,14 @@ manual, operation-specific, serialized, and unavailable in forks.
 5. cluster, sentinel, modules, primitives, sync, cloud-auth
 6. `redis-tower-client`
 
-**Known limit on #690's evidence.** release-plz cannot dry-run the downstream
-crates until each upstream tier is actually published, so the whole-workspace
-dry-run stops at `redis-tower-core` by design. The remaining tiers are covered by
-the staged-publication procedure and the partial-release recovery steps in the
-release guide, not by a full rehearsal. Treat that as a documented constraint,
-not a missing check.
+Because registry versions are immutable, release-plz cannot dry-run a downstream
+package against a new unpublished workspace dependency. Dry-run the first tier,
+use the complete local gates for the workspace, then publish in dependency order
+and verify each tier before the next.
 
 **Release workflow is manual-dispatch only** (PR #410): the `push: main` trigger
-was removed so merges never auto-publish. Dispatch with
-`gh workflow run Release --ref main`. Do not restore the `push: main` trigger
+was removed so merges never auto-publish. Dispatch preparation or publication
+with the commands in `docs/RELEASING.md`. Do not restore the `push: main` trigger
 without an explicit decision to resume auto-publish.
 
 `CARGO_REGISTRY_TOKEN` must be set in repo secrets; `GITHUB_TOKEN` comes from

@@ -29,6 +29,16 @@ are application-built. In particular, the re-exported enum can serialize
 attributes and streamed variants that this decoder rejects. Do not infer
 receive support from the variants exposed by `resp-rs`.
 
+## Allocation and ownership
+
+The codec preflights the first reply without materializing a frame. Once that
+reply is complete and within its configured size/depth limits, decoding copies
+exactly that bounded first frame into immutable `Bytes` for `resp-rs`; it does
+not clone or copy the entire unread receive batch. Aggregate elements still
+have decoded representation overhead, so `max_frame_size` is a wire-size bound,
+not an exact heap budget. This is a bounded-copy path, not an end-to-end
+zero-copy claim.
+
 The declared-cardinality regression uses a test-only scan observer: an array
 or map declaring ten million entries visits exactly its one available header
 and never spills the inline nesting stack. This deterministically verifies

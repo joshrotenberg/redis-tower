@@ -26,8 +26,8 @@ If you are evaluating or adopting the project, start here:
 - [Distributed primitives](PRIMITIVES.md) covers fenced locks, leader election,
   expirable semaphores, countdown latches, delayed queues, block-allocated IDs,
   Redis-time GCRA rate limiting, cluster keys, and failure behavior.
-- The [feature matrix](FEATURE-MATRIX.md) is the canonical, evidence-linked
-  comparison with other Redis clients.
+- The [client comparison](FEATURE-MATRIX.md) records pinned, primary-source
+  contracts for Rust and cross-language Redis clients.
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test
   inventory, topology and server matrices, and destructive fault coverage to
   their source and CI evidence.
