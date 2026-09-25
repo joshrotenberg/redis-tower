@@ -3,43 +3,75 @@ use redis_tower::commands::*;
 use redis_tower::{Frame, RedisConnection};
 use std::time::Duration;
 
-fn configured_version() -> Option<(u32, u32, u32)> {
-    let Ok(version) = std::env::var("REDIS_8X_VERSION") else {
-        eprintln!("REDIS_8X_VERSION is unset; skipping Redis 8.x command tests");
-        return None;
-    };
-
+fn parse_version(version: &str, source: &str) -> (u32, u32, u32) {
     let mut components = version.split('.');
     let major = components
         .next()
         .and_then(|value| value.parse().ok())
-        .expect("REDIS_8X_VERSION major must be an integer");
+        .unwrap_or_else(|| panic!("{source} major must be an integer"));
     let minor = components
         .next()
         .and_then(|value| value.parse().ok())
-        .expect("REDIS_8X_VERSION minor must be an integer");
+        .unwrap_or_else(|| panic!("{source} minor must be an integer"));
     let patch = components
         .next()
         .map(|value| {
             value
                 .parse()
-                .expect("REDIS_8X_VERSION patch must be an integer")
+                .unwrap_or_else(|_| panic!("{source} patch must be an integer"))
         })
         .unwrap_or(0);
     assert!(
         components.next().is_none(),
-        "REDIS_8X_VERSION must use major.minor or major.minor.patch format"
+        "{source} must use major.minor or major.minor.patch format"
     );
-    assert_eq!(major, 8, "Redis 8.x command tests require a Redis 8 server");
-    Some((major, minor, patch))
+    (major, minor, patch)
 }
 
-async fn connection() -> RedisConnection {
-    let url = std::env::var("REDIS_URL")
-        .expect("REDIS_URL must be set when REDIS_8X_VERSION is configured");
-    RedisConnection::connect_url(&url)
+async fn discovered_server() -> Option<((u32, u32, u32), RedisConnection)> {
+    let required = std::env::var_os("REDIS_8X_REQUIRED").is_some()
+        || std::env::var_os("REDIS_8X_VERSION").is_some();
+    let Ok(url) = std::env::var("REDIS_URL") else {
+        if required {
+            panic!("REDIS_URL must be set when Redis 8.x assertions are required");
+        }
+        eprintln!(
+            "REDIS_URL is unset; Redis 8.x command assertions were not requested. \
+             Set REDIS_8X_REQUIRED=1 to make missing infrastructure fail."
+        );
+        return None;
+    };
+    let mut connection = RedisConnection::connect_url(&url)
         .await
-        .expect("failed to connect to the configured Redis 8.x server")
+        .expect("failed to connect to the required Redis 8.x server");
+    let info = connection
+        .execute(Info::new().section("server"))
+        .await
+        .expect("INFO server failed while discovering the actual Redis version");
+    let version_text = info
+        .lines()
+        .find_map(|line| line.trim_end().strip_prefix("redis_version:"))
+        .expect("INFO server omitted redis_version");
+    let actual = parse_version(version_text, "INFO redis_version");
+    assert_eq!(
+        actual.0, 8,
+        "Redis 8.x command tests require an actual Redis 8 server, found {version_text}"
+    );
+
+    if let Ok(expected_text) = std::env::var("REDIS_8X_VERSION") {
+        let expected = parse_version(&expected_text, "REDIS_8X_VERSION");
+        assert_eq!(
+            (actual.0, actual.1),
+            (expected.0, expected.1),
+            "configured Redis minor line did not match INFO server; hard-coded inputs cannot certify a moving image"
+        );
+        assert!(
+            actual >= expected,
+            "INFO redis_version {version_text} is older than the configured minimum {expected_text}"
+        );
+    }
+    eprintln!("Redis 8.x assertion evidence: INFO redis_version={version_text}");
+    Some((actual, connection))
 }
 
 fn key(name: &str) -> String {
@@ -56,14 +88,13 @@ fn vector_blob(values: &[f32]) -> Bytes {
 
 #[tokio::test]
 async fn redis_8_0_vector_membership_and_search_diagnostics() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 0, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let vector_set = key("vector-membership");
     conn.execute(Del::new(&vector_set)).await.unwrap();
     assert!(
@@ -132,14 +163,13 @@ async fn redis_8_0_vector_membership_and_search_diagnostics() {
 
 #[tokio::test]
 async fn redis_8_4_string_commands() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 4, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let first = key("strings:first");
     let second = key("strings:second");
     conn.execute(Del::keys([&first, &second])).await.unwrap();
@@ -180,14 +210,13 @@ async fn redis_8_4_string_commands() {
 
 #[tokio::test]
 async fn redis_8_4_vector_range_and_hybrid_search() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 4, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let vector_set = key("vector-range");
     conn.execute(Del::new(&vector_set)).await.unwrap();
     for (element, vector) in [
@@ -320,14 +349,13 @@ async fn redis_8_4_vector_range_and_hybrid_search() {
 
 #[tokio::test]
 async fn redis_8_6_stream_and_hotkeys_commands() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 6, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let stream = key("xcfgset");
     conn.execute(Del::new(&stream)).await.unwrap();
     conn.execute(XAdd::new(&stream).id("1-0").field("field", "value"))
@@ -387,14 +415,13 @@ async fn redis_8_6_stream_and_hotkeys_commands() {
 
 #[tokio::test]
 async fn redis_8_8_increx_and_stream_delivery_commands() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 8, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let counter = key("increx");
     let float_counter = key("increx-float");
     conn.execute(Del::keys([&counter, &float_counter]))
@@ -472,14 +499,13 @@ async fn redis_8_8_increx_and_stream_delivery_commands() {
 
 #[tokio::test]
 async fn redis_8_8_array_commands() {
-    let Some(version) = configured_version() else {
+    let Some((version, mut conn)) = discovered_server().await else {
         return;
     };
     if version < (8, 8, 0) {
         return;
     }
 
-    let mut conn = connection().await;
     let array_key = key("array");
     let ring_key = key("array-ring");
     let array_arg = Bytes::from(array_key.clone());

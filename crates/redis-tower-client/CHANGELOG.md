@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- live public-entry conformance coverage for authenticated Cluster URLs and
+  Sentinel failover recovery through an already-created `UniversalClient`
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-client-v0.1.1...redis-tower-client-v0.1.2) - 2026-09-24
 
 ### Other

@@ -1,8 +1,8 @@
 //! RedisJSON reply comparison with the pinned redis-rs test oracle.
 //!
-//! This remains on the existing module-enabled nightly gate: ordinary Redis
-//! builds cannot execute JSON commands, so pretending this belongs in the
-//! standalone per-PR matrix would turn a real assertion into a skip.
+//! This runs on the path-filtered module gate and the broader module-enabled
+//! nightly matrix. Ordinary Redis builds cannot execute JSON commands, so it
+//! remains separate from the standalone process matrix.
 
 #![cfg(feature = "json")]
 

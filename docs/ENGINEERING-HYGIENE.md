@@ -55,6 +55,23 @@ deterministic round-robin shards for suites that exceed one runner's budget or
 need smaller retry units, then requires every shard before producing each
 package artifact and all 13 package reports before the workspace headline score.
 
+### Mutation failure and recovery
+
+Treat three outcomes differently:
+
+| Outcome | Meaning | Recovery |
+|---|---|---|
+| A mutant is missed or times out | Valid test-quality evidence for that package | Inspect the retained shard outcome and add a focused assertion when the mutation is behaviorally meaningful. Do not relabel it as infrastructure failure. |
+| A shard process or runner fails | The package result is incomplete | Keep the uploaded successful shard artifacts for diagnosis, then rerun the workflow on the same source SHA. Do not combine shards from different workflow runs. |
+| A package or headline aggregation rejects missing reports | The fail-closed completeness guard worked | Find the absent shard/package in the job graph, inspect its logs, and rerun the workflow. Never lower `--expected-reports` to manufacture a score. |
+
+Use the workflow's **Run workflow** action for a clean recovery run. Record the
+source SHA and the replacement run URL in any issue or release evidence. The
+package and headline jobs intentionally aggregate only artifacts from their own
+run; partial results remain downloadable for 90 days but cannot silently enter
+a later score. The 70% target remains informational: a complete low score, an
+incomplete campaign, and a failing product test are three distinct states.
+
 ## Protocol fuzzing
 
 The RESP decoder has a separate weekly and manually dispatchable fuzz workflow.

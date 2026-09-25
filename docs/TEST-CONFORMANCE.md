@@ -20,16 +20,16 @@ matches the current source tree.
 
 ### Compiled integration inventory
 
-The scoreboard-scoped packages compile **717 integration tests** across **40 test binaries**. **204** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
+The scoreboard-scoped packages compile **719 integration tests** across **41 test binaries**. **205** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
 
 | Surface | Package | Binaries | Compiled | `#[ignore]` | Pull request | Scheduled | No workflow selector |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Standalone | `redis-tower` | 30 | 497 | 0 | 497 | 229 | 0 |
 | Cluster | `redis-tower-cluster` | 1 | 104 | 104 | 104 | 0 | 0 |
 | Sentinel | `redis-tower-sentinel` | 2 | 88 | 88 | 88 | 0 | 0 |
-| Modules | `redis-tower-modules` | 6 | 12 | 12 | 0 | 12 | 0 |
+| Modules | `redis-tower-modules` | 7 | 14 | 13 | 14 | 13 | 0 |
 | Distributed primitives | `redis-tower-primitives` | 1 | 16 | 0 | 16 | 0 | 0 |
-| **Total** |  | **40** | **717** | **204** | **705** | **241** | **0** |
+| **Total** |  | **41** | **719** | **205** | **719** | **242** | **0** |
 
 Counts are unique compiled tests. A test selected by both pull-request and scheduled workflows appears in both cadence columns, but only once in the compiled total.
 
@@ -102,9 +102,10 @@ The inventory describes what Cargo discovers under the generator's documented
 feature set. It does not claim that every test runs in a normal `cargo test`,
 because infrastructure-backed suites are deliberately `#[ignore]`-gated and
 invoked by the workflows described below. It also cannot infer a runtime early
-return: for example, the Redis 8.x command binary is compiled per PR but only
-executes its version-specific assertions when `REDIS_8X_VERSION` is set by the
-nightly matrix.
+return. The Redis 8.x command binary now discovers `redis_version` from `INFO`
+and fails when `REDIS_8X_REQUIRED=1` cannot reach a suitable server; an optional
+`REDIS_8X_VERSION` is cross-checked against that discovery rather than treated
+as proof by itself.
 
 ## Independent-client differential corpus
 
@@ -117,8 +118,8 @@ The standalone corpus runs on every per-PR Redis 7.4.3 and 8.0.6 leg under
 both RESP2 and RESP3. Mutations use equivalent fresh namespaces, failures
 retain the case/protocol/live server/client version and deterministic seed,
 and normalization is limited to documented unordered or pair-shaped replies.
-The module comparison remains `#[ignore]`-gated and runs on the existing
-module-enabled nightly job. See the reviewed
+The module comparison remains `#[ignore]`-gated. It runs in the path-filtered
+per-PR module gate and the broader module-enabled nightly matrix. See the reviewed
 [case ledger and lifecycle contract](DIFFERENTIAL-TESTING.md) for exact inputs,
 dispositions, negative controls, and reproduction commands.
 
@@ -168,12 +169,14 @@ composed by applications, but they are not part of this conformance matrix.
 |---|---|---|---|
 | Unit and rustdoc | All-feature library tests on stable and beta Rust | Every pull request and push to `main` | [CI workflow](../.github/workflows/ci.yml) |
 | Standalone | Every `redis-tower` integration binary and the standalone `UniversalClient` path against source-built Redis 7.4.3 and 8.0.6 | Every pull request and push to `main` | [CI workflow](../.github/workflows/ci.yml), [standalone suite](../crates/redis-tower/tests/integration.rs), [universal-client suite](../crates/redis-tower-client/tests/standalone.rs) |
-| Independent differential | MCP-derived semantic cases through redis-tower and pinned redis-rs adapters, including RESP2/RESP3, binary/null/error, pipeline, transaction, blocking-session, topology, cancellation, and lost-reply contracts | Standalone, Cluster, and Sentinel per PR; RedisJSON nightly | [case ledger](DIFFERENTIAL-TESTING.md), [standalone corpus](../crates/redis-tower/tests/differential_redis_rs.rs), [module corpus](../crates/redis-tower-modules/tests/differential_module_replies.rs) |
+| Universal topology entry points | Standalone URL auth, authenticated Cluster URL selection, Sentinel URL selection, command execution, and recovery after a real Sentinel failover | Standalone on both standard per-PR Redis legs; dedicated Cluster/Sentinel fixture in the transport gate | [CI workflow](../.github/workflows/ci.yml), [transport gate](../.github/workflows/transport-gate.yml), [UniversalClient topology suite](../crates/redis-tower-client/tests/topologies.rs) |
+| Independent differential | MCP-derived semantic cases through redis-tower and pinned redis-rs adapters, including RESP2/RESP3, binary/null/error, pipeline, transaction, blocking-session, topology, cancellation, and lost-reply contracts | Standalone, Cluster, and Sentinel per PR; module replies in the path-filtered module gate and nightly | [case ledger](DIFFERENTIAL-TESTING.md), [standalone corpus](../crates/redis-tower/tests/differential_redis_rs.rs), [module corpus](../crates/redis-tower-modules/tests/differential_module_replies.rs) |
 | Cluster | Shared command corpus plus routing, redirect, caching, reshard, TLS, pool, and failover scenarios against Redis 7.4.3 and 8.0.6 | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [cluster suite](../crates/redis-tower-cluster/tests/cluster_integration.rs) |
-| Sentinel | Shared command corpus, discovery, routing, TLS, pool, and isolated destructive failover scenarios against Redis 7.4.3 and 8.0.6 | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [healthy suite](../crates/redis-tower-sentinel/tests/sentinel_integration.rs), [failover suite](../crates/redis-tower-sentinel/tests/sentinel_failover.rs) |
+| Sentinel | Shared command corpus, discovery, routing, pool, reconnect, and isolated destructive failover scenarios against Redis 7.4.3 and 8.0.6 | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [healthy suite](../crates/redis-tower-sentinel/tests/sentinel_integration.rs), [failover suite](../crates/redis-tower-sentinel/tests/sentinel_failover.rs) |
 | Cluster fixture lifecycle | Partial-start cleanup, promotion/reshard/kill cleanup, and hard deadlines while nodes are frozen | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [fixture tests](../crates/redis-test-harness/src/cluster.rs) |
 | Server compatibility | Focused `integration.rs` suite across supported Redis minor lines and Valkey; Redis 8 command tests on each Redis 8 leg | Nightly and manual dispatch | [nightly compatibility workflow](../.github/workflows/nightly.yml) |
-| Redis modules | JSON, Search, TimeSeries, probabilistic structures, and Vector Sets on module-enabled Redis images | Nightly and manual dispatch | [nightly modules workflow](../.github/workflows/nightly-modules.yml), [module suites](../crates/redis-tower-modules/tests) |
+| Verified TLS transports | Private-CA trust and hostname verification, percent-encoded password auth, RESP3/database setup, rejection of a wrong hostname and untrusted CA, Cluster roundtrips, and bracketed IPv6 URL transport | Isolated rustls-only and native-TLS-only live legs per PR; bracketed IPv6 required in the same transport gate | [transport gate](../.github/workflows/transport-gate.yml), [standalone TLS suite](../crates/redis-tower/tests/test_infrastructure.rs), [Cluster TLS suite](../crates/redis-tower-cluster/tests/cluster_integration.rs) |
+| Redis modules | A fail-closed actual-version/`COMMAND INFO` preflight followed by JSON, Search, TimeSeries, probabilistic, Vector Set, and redis-rs differential assertions | Path-filtered per PR on Redis 8; broader Redis 8 and Redis Stack 7.x matrix nightly/manual | [module gate](../.github/workflows/module-gate.yml), [nightly modules workflow](../.github/workflows/nightly-modules.yml), [capability preflight](../crates/redis-tower-modules/tests/capabilities.rs) |
 | Soak fault smoke | Short standalone SIGKILL/restart and cluster master-kill/promotion runs, including JSONL contract checks | Pull requests touching the harness/client paths, and manual dispatch | [soak workflow](../.github/workflows/soak-smoke.yml), [soak harness](../crates/soak-bench/README.md) |
 | RESP property and fuzz | Generated mixed RESP2/RESP3 frames, independent wire fixtures, whole-versus-fragmented semantic comparison, and arbitrary malformed input | Property and ten-second fuzz smoke per PR; bounded weekly/manual campaigns | [protocol contract](PROTOCOL-TESTING.md), [fuzz targets](../fuzz), [scheduled workflow](../.github/workflows/fuzz.yml) |
 
@@ -213,16 +216,39 @@ redirects, topology refresh, and reconnect, with focused coverage in
 does not yet expose equivalent explicit protocol selection, so its rows above
 must not be read as RESP2/RESP3 parity.
 
-`UniversalClient` has a focused standalone selection and round-trip test. It
-does not replay the shared corpus over all three topology variants, so this
-report does not claim full universal-client topology parity.
+`UniversalClient` has focused public-entry tests for all three variants. The
+Cluster case proves percent-decoded authentication; the Sentinel case kills the
+original master and requires the already-created client to resume commands
+after election. These are topology/lifecycle probes, not a replay of the full
+shared command corpus, so this report does not claim full universal-client
+command parity.
+
+On Unix CI, the live
+[`test_unix_url` suite](../crates/redis-tower/tests/test_unix_url.rs) opens a
+percent-encoded socket path through every supported Unix URL alias, applies
+percent-decoded ACL credentials, selects a non-default database, negotiates
+RESP3, and repeats setup through a fresh factory connection. Unix sockets are
+not available on Windows, and the matrix does not claim otherwise.
+
+Exclusive-session behavior is exercised through the constructors users call:
+transactions and blocking commands own a `RedisConnection`, while Pub/Sub
+converts an owned connection with `PubSubConnection::from_connection` and
+explicitly replays subscriptions through `reconnect_with`. Those session types
+do not promise transparent reconnect on their own; factory-backed multiplexed,
+Cluster, and Sentinel handles provide that lifecycle. The corresponding live
+tests run in the standalone, Cluster, and Sentinel per-PR suites, including
+transaction abort/commit, bounded blocking, subscription replay, and topology
+rediscovery. See the
+[standalone integration suite](../crates/redis-tower/tests/integration.rs) and
+[Cluster integration suite](../crates/redis-tower-cluster/tests/cluster_integration.rs).
 
 ## Server version matrix
 
 | Server | Standalone | Cluster | Sentinel | Version-gated Redis 8 commands | Modules |
 |---|---|---|---|---|---|
 | Redis 7.4.3 | Per PR | Per PR | Per PR | Not applicable | No |
-| Redis 8.0.6 | Per PR | Per PR | Per PR | Compiled but not activated in the per-PR job, where `REDIS_8X_VERSION` is unset | No |
+| Redis 8.0.6 source build | Per PR | Per PR | Per PR | Not activated on the module-free source build | No |
+| Redis 8 module image | Focused Redis 8 command binary in the path-filtered gate | Not covered by this image leg | Not covered by this image leg | Per PR when relevant; actual version discovered from `INFO` | Per-PR capability preflight plus all module suites |
 | Redis 7.2 and 7.4 container tags | Nightly | Not in the nightly matrix | Not in the nightly matrix | Not applicable | No |
 | Redis 8.0, 8.2, 8.4, 8.6, and 8.8 container tags | Nightly | Not in the nightly matrix | Not in the nightly matrix | Nightly, with the corresponding version input | Redis 8 module image in the separate nightly module workflow |
 | Valkey 8.1 container tag | Nightly | Not covered | Not covered | Not applicable | No |
@@ -231,9 +257,11 @@ report does not claim full universal-client topology parity.
 The exact per-PR patch versions and nightly image tags are defined in
 [`ci.yml`](../.github/workflows/ci.yml),
 [`nightly.yml`](../.github/workflows/nightly.yml), and
+[`module-gate.yml`](../.github/workflows/module-gate.yml), and
 [`nightly-modules.yml`](../.github/workflows/nightly-modules.yml). Moving
 container tags intentionally test the current patch in their minor line; the
-workflow log and image digest are the evidence for a particular run.
+capability log records the actual `INFO redis_version` and required command set,
+while the workflow log and image digest identify the image for a particular run.
 The nightly compatibility legs run the focused `integration.rs` suite, not
 every standalone test binary in the generated inventory.
 
@@ -273,7 +301,8 @@ execution paths:
 
 The mapping is visible in the [CI](../.github/workflows/ci.yml),
 [compatibility](../.github/workflows/nightly.yml),
-[module](../.github/workflows/nightly-modules.yml), and
+[per-PR module](../.github/workflows/module-gate.yml),
+[nightly module](../.github/workflows/nightly-modules.yml), and
 [soak](../.github/workflows/soak-smoke.yml) workflows. A normal workspace test
 will therefore report ignored tests; that is expected. The conformance goal is
 no silently abandoned ignored tests, not a false claim that every environment
@@ -297,6 +326,8 @@ cargo test -p redis-tower --test '*' --all-features -- --test-threads=1
 cargo test -p redis-tower-client --test '*' --all-features -- --test-threads=1
 
 # Infrastructure-gated per-PR suites
+cargo test -p redis-tower-client --test topologies --all-features -- \
+  --ignored --test-threads=1
 cargo test -p redis-tower-cluster --test cluster_integration \
   --all-features -- --ignored --test-threads=1
 cargo test -p redis-tower-sentinel --test 'sentinel_*' \
@@ -311,15 +342,18 @@ cargo test -p redis-tower --test test_resilience_integration \
 REDIS_TEST_IMAGE=redis:8.8-alpine \
   cargo test -p redis-chaos-tests --test docker_smoke -- --ignored
 
-# Module suites; point REDIS_URL at a compatible module-enabled server
-REDIS_URL=redis://127.0.0.1:6399 \
+# Module suites; preflight the actual server before behavior
+REDIS_URL=redis://127.0.0.1:6399 REDIS_8X_REQUIRED=1 \
+  cargo test -p redis-tower-modules --all-features --test capabilities \
+  required_server_version_and_commands_are_present -- --ignored --exact --nocapture
+REDIS_URL=redis://127.0.0.1:6399 REDIS_8X_REQUIRED=1 \
   cargo test -p redis-tower-modules --all-features -- --ignored
 ```
 
 The exact short soak commands and the publication-grade long-run requirements
 live in the [soak harness guide](../crates/soak-bench/README.md). Reproduce a
-nightly version leg by using the image, `REDIS_URL`, and optional
-`REDIS_8X_VERSION` shown in
+nightly version leg by using the image, `REDIS_URL`, `REDIS_8X_REQUIRED=1`, and
+the expected `REDIS_8X_VERSION` shown in
 [`nightly.yml`](../.github/workflows/nightly.yml); that workflow is the
 canonical matrix definition.
 
@@ -338,11 +372,12 @@ canonical matrix definition.
   coverage is limited to the two pinned Redis patch versions in CI.
 - Sentinel uses its default connection protocol path but does not expose the
   explicit protocol policy available to standalone and cluster builders.
-- Module suites are nightly, not per PR, because the normal CI Redis builds do
-  not include those modules.
+- The per-PR module gate is path-filtered and uses one Redis 8 image. The
+  Redis Stack 7.x feature subset and broader image cadence remain nightly.
 - The short soak workflow proves harness and recovery behavior, not long-run
   performance, memory stability, or a publication result. Those claims require
   the sealed publication protocol and its retained artifacts.
-- CI currently runs on Linux. Managed Redis services and platform-specific
-  behavior need separate validation; protocol compatibility alone is not a
-  provider certification.
+- Live Redis integration, module, and transport handshakes currently run on
+  Linux. Publishable all-feature library tests also run on macOS arm64, Windows
+  x64, and Linux arm64. Managed services still need separate validation;
+  protocol compatibility alone is not provider certification.

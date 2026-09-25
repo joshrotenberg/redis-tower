@@ -1,0 +1,86 @@
+name: Module Assertion Gate
+
+# Keep the per-PR cost bounded to changes that can alter command encoding,
+# protocol behavior, module wrappers, or connection setup. The broader image
+# and feature matrix remains in nightly-modules.yml.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/module-gate.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/redis-tower-modules/**"
+      - "crates/redis-tower-commands/**"
+      - "crates/redis-tower-protocol/**"
+      - "crates/redis-tower-core/**"
+      - "crates/redis-tower/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/module-gate.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/redis-tower-modules/**"
+      - "crates/redis-tower-commands/**"
+      - "crates/redis-tower-protocol/**"
+      - "crates/redis-tower-core/**"
+      - "crates/redis-tower/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  REDIS_URL: redis://127.0.0.1:6399
+  REDIS_8X_REQUIRED: "1"
+
+jobs:
+  modules:
+    name: Required module assertions (Redis 8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6399:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: module-assertion-gate
+
+      - name: Test capability contract
+        run: >-
+          cargo test -p redis-tower-modules --all-features
+          --test capabilities version_parser_accepts_release_and_prerelease_forms --
+          --exact
+
+      - name: Prove server version and required commands
+        run: >-
+          cargo test -p redis-tower-modules --all-features
+          --test capabilities required_server_version_and_commands_are_present --
+          --ignored --exact --nocapture
+
+      - name: Run version-discovered Redis 8 command assertions
+        run: >-
+          cargo test -p redis-tower --all-features
+          --test redis_8x_commands -- --test-threads=1 --nocapture
+
+      - name: Run module behavioral and redis-rs differential assertions
+        run: >-
+          cargo test -p redis-tower-modules --all-features --tests --
+          --ignored --test-threads=1 --nocapture

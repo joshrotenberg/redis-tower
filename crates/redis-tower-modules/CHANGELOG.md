@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- run module behavior and redis-rs differential assertions in a path-filtered
+  pull-request gate after verifying the actual server version and commands
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-modules-v0.1.1...redis-tower-modules-v0.1.2) - 2026-09-24
 
 ### Other
