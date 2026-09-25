@@ -7,6 +7,13 @@ to its test code and workflow. A compiled test is not automatically a passing
 test, and a scheduled job is not evidence that a particular run was green;
 use the checks attached to the commit for that conclusion.
 
+This page inventories compiled tests, configured workflow expansion, and
+observed execution evidence. Those are distinct from the logical client
+behaviors they exercise. The generated [command capability
+ledger](COMMAND-CAPABILITIES.md) records those behaviors and separately tracks
+command-name availability, typed semantics, RESP wire support, and
+session/topology claims; neither page treats one dimension as proof of another.
+
 ## Compiled inventory
 
 The generated block is the only place this page records test counts. Keeping

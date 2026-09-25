@@ -1,0 +1,572 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "redis_version": "8.8",
+    "docs_revision": "ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0",
+    "source_url": "https://github.com/redis/docs/tree/ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0/data",
+    "metadata_files": [
+      {
+        "filename": "commands_core.json",
+        "sha256": "481da5f4238e73b88caef01333eeb535c24de15b8c3810df707d86690e9c491f"
+      },
+      {
+        "filename": "commands_redisbloom.json",
+        "sha256": "48a2a7f56e6e1d7bd520a92ef9257c7b1fe78dca73c9c41565ce25d145fbd52f"
+      },
+      {
+        "filename": "commands_redisearch.json",
+        "sha256": "fc92a861511b1c0513e0909f747fdb531bcf15dcd40780605fb601e51978f87d"
+      },
+      {
+        "filename": "commands_redisjson.json",
+        "sha256": "10b950616b8b8de9095559cc778e2333327e9468a1fa9afcdf83c7202229b72b"
+      },
+      {
+        "filename": "commands_redistimeseries.json",
+        "sha256": "8b1199dea1ad9c3849ac97125fa937f9f51e0dd172fe662205bba4a2106fe80c"
+      }
+    ]
+  },
+  "non_builder_commands": [
+    {
+      "name": "ASKING",
+      "disposition": "internal_protocol",
+      "api": ["redis_tower_cluster::ClusterConnection", "redis_tower_cluster::MultiplexedClusterClient"],
+      "rationale": "Cluster redirect handling sends ASKING and the redirected command as one connection-local exchange; a standalone builder would make unsafe separation easy.",
+      "source_refs": [
+        {"path": "crates/redis-tower-cluster/src/connection.rs", "symbol": "ASKING"},
+        {"path": "crates/redis-tower-cluster/src/multiplexed.rs", "symbol": "ASKING"}
+      ]
+    },
+    {
+      "name": "CLUSTER COUNT-FAILURE-REPORTS",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "Node-local cluster administration remains an explicitly routed raw operation.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "CLUSTER MIGRATION",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "Redis 8 cluster migration administration is not part of automatic client routing and must target a deliberate node.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "CLUSTER MYSHARDID",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "This node-local topology inspection command requires an explicitly selected cluster node.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "CLUSTER SLOT-STATS",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "This node-local Redis 8.2 administration command is available through a deliberately routed raw request.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "CLUSTER SYNCSLOTS",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "Cluster slot synchronization mutates node-local state and is intentionally not exposed as an ordinary routed builder.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "JSON.DEBUG HELP",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "JSON.DEBUG MEMORY has a typed builder; the module help variant is an operator-facing raw reply and remains raw-only.",
+      "source_refs": [
+        {"path": "crates/redis-tower-commands/src/json.rs", "symbol": "JsonDebugMemory"},
+        {"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}
+      ]
+    },
+    {
+      "name": "PSUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "rationale": "Pattern subscription changes a dedicated socket into Pub/Sub mode and is owned by the streaming session API.",
+      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "psubscribe_bytes"}]
+    },
+    {
+      "name": "PSYNC",
+      "disposition": "intentionally_unsupported",
+      "api": [],
+      "rationale": "Replication handshakes and replication-stream consumption are outside the request/response client contract.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "PUNSUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "rationale": "Pattern unsubscription is part of the stateful Pub/Sub session and its acknowledgement stream.",
+      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "punsubscribe_bytes"}]
+    },
+    {
+      "name": "READONLY",
+      "disposition": "internal_protocol",
+      "api": ["redis_tower_cluster::MultiplexedClusterClientBuilder"],
+      "rationale": "Replica-read connections issue READONLY during connection setup so reconnects restore the state before routing reads.",
+      "source_refs": [{"path": "crates/redis-tower-cluster/src/connection.rs", "symbol": "READONLY"}]
+    },
+    {
+      "name": "READWRITE",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "The public cluster clients own their read-routing mode; ad hoc connection-state reversal is only available on an explicitly owned raw session.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "SSUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
+      "rationale": "Sharded Pub/Sub requires a dedicated slot-aware session that follows the channel slot's owner.",
+      "source_refs": [{"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "ssubscribe_bytes"}]
+    },
+    {
+      "name": "SUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "rationale": "Subscription changes the connection protocol mode and is exposed through a dedicated streaming session rather than a stateless command builder.",
+      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "subscribe_bytes"}]
+    },
+    {
+      "name": "SUNSUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower_cluster::ShardedClusterPubSubConnection", "redis_tower_cluster::BinaryShardedClusterPubSubConnection"],
+      "rationale": "Sharded unsubscription is owned by the slot-aware Pub/Sub session and its confirmation handling.",
+      "source_refs": [{"path": "crates/redis-tower-cluster/src/pubsub.rs", "symbol": "sunsubscribe_bytes"}]
+    },
+    {
+      "name": "SYNC",
+      "disposition": "intentionally_unsupported",
+      "api": [],
+      "rationale": "Legacy replication handshakes and replication-stream consumption are outside the request/response client contract.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "TRIMSLOTS",
+      "disposition": "raw_only",
+      "api": ["redis_tower_commands::RawCommand"],
+      "rationale": "This node-local cluster maintenance operation is deliberately excluded from automatic key routing.",
+      "source_refs": [{"path": "crates/redis-tower-commands/src/raw.rs", "symbol": "RawCommand"}]
+    },
+    {
+      "name": "UNSUBSCRIBE",
+      "disposition": "dedicated_api",
+      "api": ["redis_tower::PubSubConnection", "redis_tower::BinaryPubSubConnection"],
+      "rationale": "Unsubscription and its confirmations are part of the stateful Pub/Sub session.",
+      "source_refs": [{"path": "crates/redis-tower/src/pubsub.rs", "symbol": "unsubscribe_bytes"}]
+    }
+  ],
+  "command_details": [
+    {
+      "name": "ASKING",
+      "semantics": {"status": "not_applicable", "notes": "Owned by redirect machinery rather than an application command."},
+      "operations": {"status": "verified", "keys": "none", "routing": "ASK target node", "session": "same connection and immediately followed by redirected command", "notes": "One-shot connection state must not be separated from the redirected command."},
+      "evidence": ["topology.cluster-redirect"]
+    },
+    {
+      "name": "AUTH",
+      "semantics": {"status": "verified", "binary_inputs": "partial", "options": "password or username/password", "response": "status", "notes": "Prefer constructor credential configuration so reconnect restores authentication."},
+      "operations": {"status": "verified", "keys": "none", "routing": "connection-local", "session": "connection setup", "notes": "Ad hoc AUTH does not mutate a connection factory."},
+      "evidence": ["session.connection-setup"]
+    },
+    {
+      "name": "BLPOP",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more keys plus timeout", "response": "optional key/value pair; None on Redis timeout", "notes": "Caller cancellation after write cannot prove that no element was delivered."},
+      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "dedicated connection or independently dispatched pool member", "notes": "Dedicated-session behavior is verified; Cluster key routing is not linked to a command-specific live test here."},
+      "evidence": ["command.blocking-dedicated", "command.binary-and-scalar"]
+    },
+    {
+      "name": "CLIENT TRACKING",
+      "semantics": {"status": "partial", "binary_inputs": "not_applicable", "options": "owned by caching clients; raw ad hoc variants are not replayed", "response": "status", "notes": "Caching clients enforce their own tracking configuration and invalidation lifecycle."},
+      "operations": {"status": "verified", "keys": "none", "routing": "per data connection", "session": "connection-local tracking state", "notes": "Tracking state is restored only by the caching client that owns it."},
+      "evidence": ["session.client-tracking"]
+    },
+    {
+      "name": "EVAL",
+      "semantics": {"status": "partial", "binary_inputs": "verified", "options": "keys must be declared separately from arguments", "response": "raw Frame", "notes": "The script defines the reply shape; applications must decode deliberately."},
+      "operations": {"status": "partial", "keys": "dynamic declared list", "routing": "all declared keys in one Cluster slot", "session": "stateless command", "notes": "Declared-key encoding is verified in standalone differential tests; Cluster routing remains unaudited here."},
+      "evidence": ["command.eval-declared-keys"]
+    },
+    {
+      "name": "FT.SEARCH",
+      "semantics": {"status": "partial", "binary_inputs": "partial", "options": "typed query builder covers documented Search options at the pinned baseline", "response": "typed Search result with protocol-aware normalization", "notes": "Requires the search Cargo feature and Redis Search server capability."},
+      "operations": {"status": "partial", "keys": "index name", "routing": "module/topology dependent", "session": "stateless command", "notes": "Module availability is proven separately from compilation."},
+      "evidence": ["module.behavior-differential"]
+    },
+    {
+      "name": "GET",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "none", "response": "Option<Bytes>; nil and empty values remain distinct", "notes": "RESP2/RESP3 byte strings normalize to the same public shape."},
+      "operations": {"status": "verified", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Read-only and idempotent."},
+      "evidence": ["command.binary-and-scalar", "topology.cluster-core-routing"]
+    },
+    {
+      "name": "HGETALL",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "none", "response": "field/value map from RESP2 flat arrays or RESP3 maps", "notes": "Binary fields and values are preserved."},
+      "operations": {"status": "verified", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Large hashes can produce large replies."},
+      "evidence": ["command.collection-stream-shapes", "topology.cluster-core-routing"]
+    },
+    {
+      "name": "HELLO",
+      "semantics": {"status": "verified", "binary_inputs": "partial", "options": "RESP version, optional auth and client name", "response": "server capability map", "notes": "Prefer connection protocol configuration so reconnect repeats negotiation."},
+      "operations": {"status": "verified", "keys": "none", "routing": "connection-local", "session": "connection setup", "notes": "Protocol version is a socket property."},
+      "evidence": ["session.connection-setup"]
+    },
+    {
+      "name": "JSON.GET",
+      "semantics": {"status": "partial", "binary_inputs": "verified for keys", "options": "JSONPath and formatting grammar are textual", "response": "optional raw JSON bytes", "notes": "Requires the JSON Cargo feature and RedisJSON server capability."},
+      "operations": {"status": "partial", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Module capability and standalone behavior are verified; Cluster module routing is not audited here."},
+      "evidence": ["module.behavior-differential"]
+    },
+    {
+      "name": "MGET",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more keys", "response": "ordered Vec<Option<Bytes>> preserving nil and empty entries", "notes": "The result position corresponds to the input key position."},
+      "operations": {"status": "partial", "keys": "multi", "routing": "same slot for atomic server command; explicit split helpers are non-atomic", "session": "stateless command", "notes": "Standalone response order is verified; cross-slot split-helper order is verified separately, but same-slot Cluster MGET remains unaudited here."},
+      "evidence": ["command.binary-and-scalar", "topology.cluster-core-routing"]
+    },
+    {
+      "name": "MONITOR",
+      "semantics": {"status": "verified", "binary_inputs": "not_applicable", "options": "none", "response": "stream of monitor lines", "notes": "MONITOR permanently changes the socket mode until it is dropped."},
+      "operations": {"status": "verified", "keys": "none", "routing": "explicit server node", "session": "dedicated MonitorStream", "notes": "No reconnect resume cursor; commands during a gap are lost."},
+      "evidence": ["session.monitor-dedicated"]
+    },
+    {
+      "name": "SCAN",
+      "semantics": {"status": "verified", "binary_inputs": "partial", "options": "cursor, MATCH, COUNT, TYPE", "response": "cursor plus a possibly empty page of binary keys", "notes": "Continue until cursor zero; changing keyspaces can repeat elements."},
+      "operations": {"status": "verified", "keys": "none", "routing": "one selected node; use ClusterScan for all nodes", "session": "cursor sequence without connection affinity", "notes": "A normal Cluster SCAN is not cluster-wide."},
+      "evidence": ["command.scan-cursor"]
+    },
+    {
+      "name": "SELECT",
+      "semantics": {"status": "verified", "binary_inputs": "not_applicable", "options": "database index", "response": "status", "notes": "Cluster does not support multiple logical databases."},
+      "operations": {"status": "verified", "keys": "none", "routing": "connection-local", "session": "connection setup", "notes": "Configure the database in the connection factory for reconnect replay."},
+      "evidence": ["session.connection-setup"]
+    },
+    {
+      "name": "SET",
+      "semantics": {"status": "partial", "binary_inputs": "verified", "options": "EX/PX/EXAT/PXAT/KEEPTTL, NX/XX and GET are typed; Redis 8.4 IFEQ/IFNE/IFDEQ/IFDNE are unverified/unimplemented", "response": "Option<Bytes>; current API cannot distinguish OK from a null NX/XX rejection without GET", "notes": "A richer conditional outcome is tracked by issue #729."},
+      "operations": {"status": "verified", "keys": "single", "routing": "single key slot", "session": "stateless command", "notes": "Non-idempotent option combinations are not replayed by typed retry policy."},
+      "evidence": ["command.set-options", "command.binary-and-scalar", "topology.cluster-core-routing"]
+    },
+    {
+      "name": "SSUBSCRIBE",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more shard channels in one slot", "response": "subscription confirmations and message stream", "notes": "Messages during a disconnect before server-side resubscription are not recovered."},
+      "operations": {"status": "verified", "keys": "channel hash slots", "routing": "current owner of the shared slot", "session": "dedicated sharded Cluster Pub/Sub connection", "notes": "Cross-slot subscription sets are rejected before dispatch."},
+      "evidence": ["session.pubsub-reconnect"]
+    },
+    {
+      "name": "SUBSCRIBE",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more channels", "response": "subscription confirmations and message stream", "notes": "Confirmed subscriptions can be replayed, but disconnected-gap messages are lost."},
+      "operations": {"status": "verified", "keys": "none", "routing": "explicit standalone or Cluster node", "session": "dedicated Pub/Sub connection", "notes": "Not a stateless multiplexed command."},
+      "evidence": ["session.pubsub-reconnect"]
+    },
+    {
+      "name": "WATCH",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "one or more keys", "response": "status before EXEC commit/abort outcome", "notes": "Use the Transaction abstraction for an already-built atomic exchange."},
+      "operations": {"status": "verified", "keys": "multi", "routing": "same Cluster slot", "session": "dedicated connection for read/compute/write retry loops", "notes": "A pool has no multi-call connection lease."},
+      "evidence": ["command.pipeline-transaction", "topology.cluster-core-routing"]
+    },
+    {
+      "name": "XREADGROUP",
+      "semantics": {"status": "verified", "binary_inputs": "verified", "options": "group, consumer, streams, IDs, COUNT, BLOCK, NOACK", "response": "stream/entry structures; empty vector on blocking timeout", "notes": "The application owns processing and acknowledgement order."},
+      "operations": {"status": "partial", "keys": "multi", "routing": "same slot in Cluster", "session": "dedicated connection when BLOCK is used", "notes": "Standalone response and blocking isolation are verified; Cluster routing remains unaudited here."},
+      "evidence": ["command.collection-stream-shapes", "command.blocking-dedicated"]
+    }
+  ],
+  "wire_contracts": [
+    {
+      "id": "resp2-frames",
+      "status": "supported",
+      "description": "RESP2 scalars, nulls and aggregates are decoded within configured size/depth limits.",
+      "implementation": [{"path": "crates/redis-tower-protocol/src/codec.rs", "symbol": "RespCodec"}],
+      "evidence": ["protocol.boundaries", "protocol.fragmentation"]
+    },
+    {
+      "id": "resp3-core-frames",
+      "status": "supported",
+      "description": "Supported RESP3 scalar and fixed aggregate forms are decoded and normalized by typed response parsers.",
+      "implementation": [{"path": "crates/redis-tower-protocol/src/codec.rs", "symbol": "resp3::parse_frame"}],
+      "evidence": ["protocol.boundaries", "command.collection-stream-shapes"]
+    },
+    {
+      "id": "resp3-fixed-attributes",
+      "status": "rejected",
+      "description": "Fixed attributes fail closed without consuming bytes; attachment to the following value remains planned in issue #705.",
+      "implementation": [{"path": "crates/redis-tower-protocol/src/preflight.rs", "symbol": "Attributes"}],
+      "evidence": ["protocol.boundaries"]
+    },
+    {
+      "id": "resp3-streamed-forms",
+      "status": "rejected",
+      "description": "Streamed string/aggregate headers, chunks and terminators fail closed rather than becoming independent replies; bounded assembly remains planned in issue #705.",
+      "implementation": [{"path": "crates/redis-tower-protocol/tests/frame_boundaries.rs", "symbol": "all_streaming_tokens_fail_closed_at_top_level_and_inside_aggregates"}],
+      "evidence": ["protocol.boundaries", "protocol.fragmentation"]
+    },
+    {
+      "id": "fragmentation-equivalence",
+      "status": "supported",
+      "description": "Whole-buffer and arbitrarily fragmented decoding have the same semantic outcome and error category for the tested corpus.",
+      "implementation": [{"path": "fuzz/src/lib.rs", "symbol": "decode_fragmented"}],
+      "evidence": ["protocol.fragmentation"]
+    },
+    {
+      "id": "configured-resource-limits",
+      "status": "supported",
+      "description": "Frame wire size, aggregate cardinality and nesting depth are preflighted before recursive frame materialization, independently of fragmentation.",
+      "implementation": [{"path": "crates/redis-tower-protocol/src/preflight.rs", "symbol": "frame_len"}],
+      "evidence": ["protocol.boundaries", "protocol.fragmentation"]
+    }
+  ],
+  "behaviors": [
+    {
+      "id": "command.binary-and-scalar",
+      "anchor": "behavior-command-binary-and-scalar",
+      "description": "Core typed commands preserve invalid UTF-8 keys/payloads and normalize scalar, nil, empty and numeric replies against redis-rs.",
+      "dimensions": ["typed-semantics", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_scalar_nil_binary_and_numeric_boundaries"},
+        {"path": "crates/redis-tower-commands/tests/binary_inputs.rs", "symbol": "strings_preserve_invalid_utf8_and_protocol_looking_payloads"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.blocking-dedicated",
+      "anchor": "behavior-command-blocking-dedicated",
+      "description": "Blocking commands use isolated sessions, preserve timeout reply shapes and do not stall the shared multiplexed worker in the tested workflow.",
+      "dimensions": ["typed-semantics", "session-ownership"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_blocking_command_uses_dedicated_sessions"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.collection-stream-shapes",
+      "anchor": "behavior-command-collection-stream-shapes",
+      "description": "Hash, collection and Stream response shapes are compared with redis-rs using independent keys and controlled normalization.",
+      "dimensions": ["typed-semantics", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_hash_collection_and_stream_shapes"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.eval-declared-keys",
+      "anchor": "behavior-command-eval-declared-keys",
+      "description": "Typed EVAL preserves binary declared keys and arguments and matches redis-rs for the tested nested reply.",
+      "dimensions": ["typed-semantics", "routing", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_typed_remaining_families_preserve_opaque_bytes"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.pipeline-transaction",
+      "anchor": "behavior-command-pipeline-transaction",
+      "description": "Pipeline ordering and transaction commit/abort outcomes are compared with redis-rs without reusing mutating datasets.",
+      "dimensions": ["typed-semantics", "session-ownership", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_pipeline_and_transaction_outcomes"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.set-options",
+      "anchor": "behavior-command-set-options",
+      "description": "SET expiry, condition and GET builder combinations are compared with redis-rs; the current ambiguous conditional null outcome remains recorded as partial.",
+      "dimensions": ["typed-semantics", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["core commands"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/differential_redis_rs.rs", "symbol": "diff_mcp_typed_set_builder_options"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "command.scan-cursor",
+      "anchor": "behavior-command-scan-cursor",
+      "description": "Standalone SCAN cursor iteration exercises MATCH and COUNT until cursor zero; Cluster tests prove a plain keyless SCAN reaches one node while ClusterScan covers the full keyspace.",
+      "dimensions": ["typed-semantics", "cursor-lifecycle", "routing"],
+      "server": "Redis 7.4.3 and 8.0.6 standalone and Cluster per-PR matrix",
+      "protocols": ["default Auto negotiation"],
+      "features": ["core commands"],
+      "topologies": ["standalone", "cluster"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "scan_basic"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "mux_cluster_scan_stream_covers_the_whole_keyspace"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "module.behavior-differential",
+      "anchor": "behavior-module-behavior-differential",
+      "description": "Module capability preflight is followed by RedisJSON/Search/TimeSeries/probabilistic/Vector behavior and selected redis-rs reply comparisons.",
+      "dimensions": ["typed-semantics", "server-capability", "external-differential"],
+      "server": "Redis 8 module image; actual version discovered at runtime",
+      "protocols": ["RESP2/RESP3 for JSON differential", "default negotiated protocol for other module assertions"],
+      "features": ["json", "search", "bloom", "sketch", "tdigest", "timeseries", "vector-sets"],
+      "topologies": ["standalone"],
+      "tests": [
+        {"path": "crates/redis-tower-modules/tests/capabilities.rs", "symbol": "required_server_version_and_commands_are_present"},
+        {"path": "crates/redis-tower-modules/tests/differential_module_replies.rs", "symbol": "differential_json_raw_replies_match_redis_rs"},
+        {"path": "crates/redis-tower-modules/tests/search_integration.rs", "symbol": "search_create_index_and_query"}
+      ],
+      "ci": [{"path": ".github/workflows/module-gate.yml", "symbol": "modules:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325348/job/108014375327"}
+    },
+    {
+      "id": "protocol.boundaries",
+      "anchor": "behavior-protocol-boundaries",
+      "description": "Independent wire fixtures prove frame limits, aggregate preflight, nesting limits and fail-closed handling for fixed attributes and streamed forms.",
+      "dimensions": ["wire-protocol", "resource-limits"],
+      "server": "no server; independent wire fixtures",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["protocol"],
+      "topologies": ["not applicable"],
+      "tests": [
+        {"path": "crates/redis-tower-protocol/tests/frame_boundaries.rs", "symbol": "complete_oversized_frames_are_rejected_without_consuming_bytes"},
+        {"path": "crates/redis-tower-protocol/tests/frame_boundaries.rs", "symbol": "fixed_attributes_remain_unsupported_even_when_nested"},
+        {"path": "crates/redis-tower-protocol/tests/frame_boundaries.rs", "symbol": "all_streaming_tokens_fail_closed_at_top_level_and_inside_aggregates"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "Run protocol boundary regressions"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375692"}
+    },
+    {
+      "id": "protocol.fragmentation",
+      "anchor": "behavior-protocol-fragmentation",
+      "description": "Property and fuzz oracles compare whole-buffer decoding with arbitrary fragmentation plans and stable error categories.",
+      "dimensions": ["wire-protocol", "fragmentation", "fuzzing"],
+      "server": "no server; generated wire data",
+      "protocols": ["RESP2", "RESP3"],
+      "features": ["protocol", "fuzz"],
+      "topologies": ["not applicable"],
+      "tests": [
+        {"path": "fuzz/src/lib.rs", "symbol": "pipelines_match_under_varied_fragmentation"},
+        {"path": "fuzz/fuzz_targets/decode_chunked.rs", "symbol": "decode_fragmented"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "Smoke-test fuzz targets"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375696"}
+    },
+    {
+      "id": "session.connection-setup",
+      "anchor": "behavior-session-connection-setup",
+      "description": "Authentication, RESP negotiation and selected database state are exercised through connection setup and reconnect-aware paths.",
+      "dimensions": ["session-ownership", "reconnect"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["default Auto negotiation", "focused RESP3 HELLO path"],
+      "features": ["core", "URL/auth"],
+      "topologies": ["standalone"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/test_auth.rs", "symbol": "reconnect_replays_auth"},
+        {"path": "crates/redis-tower/tests/test_server.rs", "symbol": "cover_hello_proto3"},
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "select_db"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "session.client-tracking",
+      "anchor": "behavior-session-client-tracking",
+      "description": "Managed caching clients install tracking, invalidate external writes, reject unsafe connection-state commands and restore a lost redirect connection.",
+      "dimensions": ["session-ownership", "reconnect", "server-capability"],
+      "server": "isolated live Redis process in the per-PR standalone suite",
+      "protocols": ["RESP3"],
+      "features": ["client-side caching"],
+      "topologies": ["standalone"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/client_side_caching_v2.rs", "symbol": "default_tracking_caches_reads_and_observes_external_invalidation"},
+        {"path": "crates/redis-tower/tests/client_side_caching_v2.rs", "symbol": "managed_connection_state_commands_are_rejected_without_losing_tracking"},
+        {"path": "crates/redis-tower/tests/client_side_caching_v2.rs", "symbol": "tracking_receiver_loss_fails_closed_and_reinstalls_redirect"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "session.monitor-dedicated",
+      "anchor": "behavior-session-monitor-dedicated",
+      "description": "A dedicated MONITOR session parses streamed events and preserves binary command arguments while another connection executes the command.",
+      "dimensions": ["typed-semantics", "session-ownership"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["default negotiated protocol"],
+      "features": ["core"],
+      "topologies": ["standalone"],
+      "tests": [{"path": "crates/redis-tower/tests/test_monitor.rs", "symbol": "monitor_stream_preserves_binary_command_arguments"}],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "session.pubsub-reconnect",
+      "anchor": "behavior-session-pubsub-reconnect",
+      "description": "Dedicated regular and sharded Pub/Sub sessions preserve binary names, replay confirmed subscriptions and follow tested Cluster ownership changes.",
+      "dimensions": ["session-ownership", "routing", "reconnect"],
+      "server": "Redis 7.4.3 and 8.0.6 per-PR matrix",
+      "protocols": ["default Auto negotiation", "focused standalone RESP3 push path"],
+      "features": ["core", "cluster"],
+      "topologies": ["standalone", "cluster"],
+      "tests": [
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "pubsub_resubscribes_after_reconnect"},
+        {"path": "crates/redis-tower/tests/integration.rs", "symbol": "pubsub_resp3_push"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "binary_pubsub_names_round_trip_in_regular_and_sharded_sessions"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "sharded_pubsub_follows_topology_owner_change_and_resubscribes"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "test-integration:"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "topology.cluster-core-routing",
+      "anchor": "behavior-topology-cluster-core-routing",
+      "description": "Cluster live tests route binary single-key GET/SET, HGETALL, ordered non-atomic split MGET helpers and slot-pinned WATCH transactions through public APIs.",
+      "dimensions": ["routing", "typed-semantics", "session-ownership", "external-differential"],
+      "server": "Redis 7.4.3 and 8.0.6 Cluster per-PR matrix",
+      "protocols": ["Auto (RESP3 on the tested Redis versions)"],
+      "features": ["cluster", "core commands"],
+      "topologies": ["cluster"],
+      "tests": [
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "diff_redis_rs_cluster_public_entry_point"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "cluster_large_hgetall"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "mux_cluster_pipeline_and_split_helpers_preserve_order"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "cluster_transactions_are_slot_pinned_and_watch_safe"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "Run cluster integration tests"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    },
+    {
+      "id": "topology.cluster-redirect",
+      "anchor": "behavior-topology-cluster-redirect",
+      "description": "Cluster clients keep ASKING with the redirected command, follow ASK then MOVED, and update slot ownership during a live reshard.",
+      "dimensions": ["routing", "session-ownership", "topology"],
+      "server": "Redis 7.4.3 and 8.0.6 Cluster per-PR matrix",
+      "protocols": ["Auto (RESP3 on the tested Redis versions)"],
+      "features": ["cluster"],
+      "topologies": ["cluster"],
+      "tests": [
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "mux_cluster_handles_ask_then_moved_during_live_reshard"},
+        {"path": "crates/redis-tower-cluster/tests/cluster_integration.rs", "symbol": "cached_cluster_opt_in_follows_live_ask_without_conflicting_one_shot_flags"}
+      ],
+      "ci": [{"path": ".github/workflows/ci.yml", "symbol": "Run cluster integration tests"}],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "7338c15d8442f186f93c697d4a18151f8bbeb478", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36117325301/job/108014375627"}
+    }
+  ]
+}

@@ -7,10 +7,7 @@ import argparse
 import difflib
 import json
 import re
-import subprocess
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +17,7 @@ REDIS_DOCS_REF = "ad12d9cd6d10b53da2533ec3d7d7b2dae88bb2e0"
 REDIS_VERSION = "8.8"
 DEFAULT_OUTPUT = Path("COMMAND_COVERAGE.md")
 DEFAULT_SOURCE_DIR = Path("crates/redis-tower-commands/src")
+DEFAULT_METADATA_DIR = Path("conformance/redis-8.8")
 
 
 @dataclass(frozen=True)
@@ -71,43 +69,11 @@ def normalize_name(name: str) -> str:
     return " ".join(name.upper().split())
 
 
-def fetch_json(source: Source) -> dict[str, Any]:
-    url = (
-        "https://raw.githubusercontent.com/redis/docs/"
-        f"{REDIS_DOCS_REF}/data/{source.filename}"
-    )
-    request = urllib.request.Request(
-        url, headers={"User-Agent": "redis-tower-command-coverage"}
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except urllib.error.URLError as urllib_error:
-        # The macOS system Python can lack a usable CA bundle. curl uses the
-        # platform trust store and is also available on GitHub-hosted runners.
-        try:
-            result = subprocess.run(
-                ["curl", "--fail", "--silent", "--show-error", "--location", url],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-        except (OSError, subprocess.CalledProcessError) as curl_error:
-            raise OSError(
-                f"could not fetch {source.filename}: {urllib_error}; "
-                f"curl fallback failed: {curl_error}"
-            ) from curl_error
-        return json.loads(result.stdout)
-
-
-def load_metadata(metadata_dir: Path | None = None) -> dict[str, CommandMetadata]:
+def load_metadata(metadata_dir: Path = DEFAULT_METADATA_DIR) -> dict[str, CommandMetadata]:
     commands: dict[str, CommandMetadata] = {}
     for source in SOURCES:
-        if metadata_dir is None:
-            raw_commands = fetch_json(source)
-        else:
-            with (metadata_dir / source.filename).open(encoding="utf-8") as handle:
-                raw_commands = json.load(handle)
+        with (metadata_dir / source.filename).open(encoding="utf-8") as handle:
+            raw_commands = json.load(handle)
 
         for raw_name, metadata in raw_commands.items():
             name = normalize_name(raw_name)
@@ -205,11 +171,17 @@ def render_report(
         "",
         "# Redis command coverage",
         "",
-        f"`redis-tower` provides typed builders for **{len(implemented)}/{len(included)} "
+        f"`redis-tower` provides literal typed builder names for "
+        f"**{len(implemented)}/{len(included)} "
         f"({percent(len(implemented), len(included))})** of the scoped Redis "
         f"{REDIS_VERSION} command surface. **{complete_groups}/{len(groups)} groups** "
-        "have complete typed coverage. Commands without a dedicated builder remain "
-        "available through `RawCommand` and `RawCommand::query`.",
+        "have complete typed-builder name coverage.",
+        "",
+        "This is a name-inventory report, not a protocol-completeness score. It does "
+        "not prove option coverage, response decoding, RESP wire forms, routing, "
+        "session behavior, or execution. See the "
+        "[capability ledger](docs/COMMAND-CAPABILITIES.md) for those separate "
+        "dimensions and the individual disposition of every name without a builder.",
         "",
         "The issue that introduced this report recorded a June 2026 baseline of "
         "**393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. "
@@ -272,7 +244,7 @@ def render_report(
     lines.extend(
         [
             "",
-            "Regenerate after adding or removing command builders:",
+            "Regenerate offline after adding or removing command builders:",
             "",
             "```bash",
             "python3 scripts/generate_command_coverage.py",
@@ -294,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--metadata-dir",
         type=Path,
-        help="Read metadata files locally instead of fetching the pinned revision",
+        default=DEFAULT_METADATA_DIR,
+        help="Pinned local Redis metadata directory (default: conformance/redis-8.8)",
     )
     args = parser.parse_args(argv)
 

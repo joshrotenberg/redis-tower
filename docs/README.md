@@ -29,6 +29,9 @@ If you are evaluating or adopting the project, start here:
 - The [command cookbook](COMMAND-COOKBOOK.md) maps typed command categories to
   response shapes, binary data, pipelines and transactions, stream ownership,
   raw/module replies, dedicated sessions, and topology entry points.
+- The [command capability ledger](COMMAND-CAPABILITIES.md) separates command-name
+  availability, typed semantics, wire support, and routing/session evidence at
+  a pinned Redis documentation revision.
 - The [client comparison](FEATURE-MATRIX.md) records pinned, primary-source
   contracts for Rust and cross-language Redis clients.
 - The [test conformance report](TEST-CONFORMANCE.md) maps generated test

@@ -2,7 +2,9 @@
 
 # Redis command coverage
 
-`redis-tower` provides typed builders for **488/506 (96.4%)** of the scoped Redis 8.8 command surface. **23/27 groups** have complete typed coverage. Commands without a dedicated builder remain available through `RawCommand` and `RawCommand::query`.
+`redis-tower` provides literal typed builder names for **488/506 (96.4%)** of the scoped Redis 8.8 command surface. **23/27 groups** have complete typed-builder name coverage.
+
+This is a name-inventory report, not a protocol-completeness score. It does not prove option coverage, response decoding, RESP wire forms, routing, session behavior, or execution. See the [capability ledger](docs/COMMAND-CAPABILITIES.md) for those separate dimensions and the individual disposition of every name without a builder.
 
 The issue that introduced this report recorded a June 2026 baseline of **393/506 (77.7%)**, with 83.6% coverage of its Redis 8.6 comparison set. The headline above is regenerated from the current source tree.
 
@@ -69,7 +71,7 @@ The pinned metadata contains 554 entries. This report excludes 27 deprecated ent
 - `ZREVRANGEBYLEX`
 - `ZREVRANGEBYSCORE`
 
-Regenerate after adding or removing command builders:
+Regenerate offline after adding or removing command builders:
 
 ```bash
 python3 scripts/generate_command_coverage.py
