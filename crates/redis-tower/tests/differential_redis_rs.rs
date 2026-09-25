@@ -1,0 +1,965 @@
+//! Consumer-derived semantic comparisons with redis-rs.
+//!
+//! This suite deliberately uses independent key namespaces for mutations. It
+//! compares public results rather than wire frames, with normalization limited
+//! to Redis collections whose order or RESP2/RESP3 shape is not contractual.
+
+mod common;
+
+use std::fmt;
+
+use common::redis_addr;
+use redis_tower::commands::RawCommand;
+use redis_tower::{
+    Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
+    TransactionResult,
+};
+
+const CORPUS_SEED: u64 = 0x5245_4449_535f_4d43;
+const REDIS_RS_VERSION: &str = "1.7.0";
+
+#[derive(Clone, Copy, Debug)]
+enum Protocol {
+    Resp2,
+    Resp3,
+}
+
+impl Protocol {
+    const ALL: [Self; 2] = [Self::Resp2, Self::Resp3];
+
+    fn tower(self) -> ProtocolVersion {
+        match self {
+            Self::Resp2 => ProtocolVersion::Resp2,
+            Self::Resp3 => ProtocolVersion::Resp3,
+        }
+    }
+
+    fn query(self) -> &'static str {
+        match self {
+            Self::Resp2 => "resp2",
+            Self::Resp3 => "resp3",
+        }
+    }
+}
+
+impl fmt::Display for Protocol {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.query())
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum SemanticValue {
+    Null,
+    Bytes(Vec<u8>),
+    Integer(i64),
+    Double(String),
+    Boolean(bool),
+    Array(Vec<Self>),
+    Map(Vec<(Self, Self)>),
+    Error(String),
+    Unsupported(String),
+}
+
+fn float_text(value: f64) -> String {
+    if value.is_nan() {
+        "nan".to_owned()
+    } else if value == f64::INFINITY {
+        "inf".to_owned()
+    } else if value == f64::NEG_INFINITY {
+        "-inf".to_owned()
+    } else {
+        value.to_string()
+    }
+}
+
+fn error_code(message: &[u8]) -> String {
+    String::from_utf8_lossy(message)
+        .split_ascii_whitespace()
+        .next()
+        .unwrap_or("ERR")
+        .to_ascii_uppercase()
+}
+
+fn displayed_error_code(rendered: &str) -> String {
+    rendered
+        .split_ascii_whitespace()
+        .map(|word| word.trim_matches(|character: char| !character.is_ascii_alphanumeric()))
+        .find(|word| {
+            word.len() > 1
+                && word.chars().all(|character| {
+                    !character.is_ascii_alphabetic() || character.is_ascii_uppercase()
+                })
+        })
+        .unwrap_or("CLIENT")
+        .to_owned()
+}
+
+fn tower_value(frame: Frame) -> SemanticValue {
+    match frame {
+        Frame::SimpleString(value) => SemanticValue::Bytes(value.to_vec()),
+        Frame::Error(value) | Frame::BlobError(value) => SemanticValue::Error(error_code(&value)),
+        Frame::Integer(value) => SemanticValue::Integer(value),
+        Frame::BulkString(Some(value)) => SemanticValue::Bytes(value.to_vec()),
+        Frame::BulkString(None) | Frame::Array(None) | Frame::Null => SemanticValue::Null,
+        Frame::Double(value) => SemanticValue::Double(float_text(value)),
+        Frame::SpecialFloat(value) => {
+            SemanticValue::Double(String::from_utf8_lossy(&value).to_ascii_lowercase())
+        }
+        Frame::Boolean(value) => SemanticValue::Boolean(value),
+        Frame::BigNumber(value) => SemanticValue::Bytes(value.to_vec()),
+        Frame::VerbatimString(_format, value) => SemanticValue::Bytes(value.to_vec()),
+        Frame::Array(Some(values))
+        | Frame::Set(values)
+        | Frame::Push(values)
+        | Frame::StreamedArray(values)
+        | Frame::StreamedSet(values)
+        | Frame::StreamedPush(values) => {
+            SemanticValue::Array(values.into_iter().map(tower_value).collect())
+        }
+        Frame::Map(values) | Frame::StreamedMap(values) => SemanticValue::Map(
+            values
+                .into_iter()
+                .map(|(key, value)| (tower_value(key), tower_value(value)))
+                .collect(),
+        ),
+        Frame::Attribute(values) | Frame::StreamedAttribute(values) => {
+            SemanticValue::Unsupported(format!("attribute:{values:?}"))
+        }
+        Frame::StreamedString(values) => SemanticValue::Bytes(
+            values
+                .into_iter()
+                .flat_map(|value| value.to_vec())
+                .collect(),
+        ),
+        Frame::StreamedStringChunk(value) => SemanticValue::Bytes(value.to_vec()),
+        other => SemanticValue::Unsupported(format!("{other:?}")),
+    }
+}
+
+fn redis_rs_value(value: redis::Value) -> SemanticValue {
+    match value {
+        redis::Value::Nil => SemanticValue::Null,
+        redis::Value::Int(value) => SemanticValue::Integer(value),
+        redis::Value::BulkString(value) => SemanticValue::Bytes(value),
+        redis::Value::Array(values) | redis::Value::Set(values) => {
+            SemanticValue::Array(values.into_iter().map(redis_rs_value).collect())
+        }
+        redis::Value::SimpleString(value) => SemanticValue::Bytes(value.into_bytes()),
+        redis::Value::Okay => SemanticValue::Bytes(b"OK".to_vec()),
+        redis::Value::Map(values) => SemanticValue::Map(
+            values
+                .into_iter()
+                .map(|(key, value)| (redis_rs_value(key), redis_rs_value(value)))
+                .collect(),
+        ),
+        redis::Value::Attribute { data, .. } => redis_rs_value(*data),
+        redis::Value::Double(value) => SemanticValue::Double(float_text(value)),
+        redis::Value::Boolean(value) => SemanticValue::Boolean(value),
+        redis::Value::VerbatimString { text, .. } => SemanticValue::Bytes(text.into_bytes()),
+        redis::Value::BigNumber(value) => SemanticValue::Bytes(value),
+        redis::Value::Push { data, .. } => {
+            SemanticValue::Array(data.into_iter().map(redis_rs_value).collect())
+        }
+        redis::Value::ServerError(error) => SemanticValue::Error(error.code().to_owned()),
+        other => SemanticValue::Unsupported(format!("{other:?}")),
+    }
+}
+
+fn unordered(value: SemanticValue) -> SemanticValue {
+    match value {
+        SemanticValue::Array(mut values) => {
+            values.sort();
+            SemanticValue::Array(values)
+        }
+        other => other,
+    }
+}
+
+fn pairs(value: SemanticValue) -> SemanticValue {
+    match value {
+        SemanticValue::Map(mut values) => {
+            values.sort();
+            SemanticValue::Map(values)
+        }
+        SemanticValue::Array(values) => {
+            let mut result = Vec::new();
+            if values
+                .iter()
+                .all(|value| matches!(value, SemanticValue::Array(pair) if pair.len() == 2))
+            {
+                for value in values {
+                    let SemanticValue::Array(mut pair) = value else {
+                        unreachable!("pair shape checked")
+                    };
+                    let second = pair.pop().expect("two elements");
+                    let first = pair.pop().expect("two elements");
+                    result.push((first, second));
+                }
+            } else {
+                assert!(
+                    values.len().is_multiple_of(2),
+                    "pair normalization requires an even response"
+                );
+                let mut values = values.into_iter();
+                while let Some(first) = values.next() {
+                    result.push((first, values.next().expect("even length checked")));
+                }
+            }
+            result.sort();
+            SemanticValue::Map(result)
+        }
+        other => other,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ObservedError {
+    code: String,
+    server: bool,
+}
+
+fn tower_error(error: RedisError) -> ObservedError {
+    let rendered = error.to_string();
+    let prefix = error.server_error_prefix();
+    let code = match prefix {
+        Some(prefix)
+            if prefix
+                .chars()
+                .all(|character| !character.is_ascii_lowercase()) =>
+        {
+            prefix.to_owned()
+        }
+        _ => displayed_error_code(&rendered),
+    };
+    ObservedError {
+        server: error.server_error_prefix().is_some(),
+        code,
+    }
+}
+
+fn redis_rs_error(error: redis::RedisError) -> ObservedError {
+    ObservedError {
+        code: error.code().unwrap_or("CLIENT").to_owned(),
+        server: error.code().is_some(),
+    }
+}
+
+struct TowerAdapter {
+    connection: RedisConnection,
+}
+
+impl TowerAdapter {
+    async fn connect(addr: &str, protocol: Protocol) -> Self {
+        Self {
+            connection: RedisConnection::connect_with_protocol(addr, protocol.tower())
+                .await
+                .unwrap_or_else(|error| panic!("redis-tower {protocol} connect failed: {error}")),
+        }
+    }
+
+    async fn raw(&mut self, command: &str, args: &[&[u8]]) -> Result<SemanticValue, ObservedError> {
+        let command = args
+            .iter()
+            .fold(RawCommand::new(command), |command, arg| command.arg(arg));
+        self.connection
+            .execute(command)
+            .await
+            .map(tower_value)
+            .map_err(tower_error)
+    }
+
+    async fn u64(&mut self, command: &str, args: &[&[u8]]) -> Result<u64, ObservedError> {
+        let command = args
+            .iter()
+            .fold(RawCommand::new(command), |command, arg| command.arg(arg))
+            .query::<u64>();
+        self.connection.execute(command).await.map_err(tower_error)
+    }
+
+    async fn string(&mut self, command: &str, args: &[&[u8]]) -> Result<String, ObservedError> {
+        let command = args
+            .iter()
+            .fold(RawCommand::new(command), |command, arg| command.arg(arg))
+            .query::<String>();
+        self.connection.execute(command).await.map_err(tower_error)
+    }
+}
+
+struct RedisRsAdapter {
+    connection: redis::aio::MultiplexedConnection,
+}
+
+impl RedisRsAdapter {
+    async fn connect(addr: &str, protocol: Protocol) -> Self {
+        let url = format!("redis://{addr}/?protocol={}", protocol.query());
+        let client = redis::Client::open(url).expect("valid redis-rs URL");
+        Self {
+            connection: client
+                .get_multiplexed_async_connection()
+                .await
+                .unwrap_or_else(|error| panic!("redis-rs {protocol} connect failed: {error}")),
+        }
+    }
+
+    async fn raw(&mut self, command: &str, args: &[&[u8]]) -> Result<SemanticValue, ObservedError> {
+        let mut command = redis::cmd(command);
+        for arg in args {
+            command.arg(arg);
+        }
+        command
+            .query_async::<redis::Value>(&mut self.connection)
+            .await
+            .map(redis_rs_value)
+            .map_err(redis_rs_error)
+    }
+
+    async fn u64(&mut self, command: &str, args: &[&[u8]]) -> Result<u64, ObservedError> {
+        let mut command = redis::cmd(command);
+        for arg in args {
+            command.arg(arg);
+        }
+        command
+            .query_async::<u64>(&mut self.connection)
+            .await
+            .map_err(redis_rs_error)
+    }
+
+    async fn string(&mut self, command: &str, args: &[&[u8]]) -> Result<String, ObservedError> {
+        let mut command = redis::cmd(command);
+        for arg in args {
+            command.arg(arg);
+        }
+        command
+            .query_async::<String>(&mut self.connection)
+            .await
+            .map_err(redis_rs_error)
+    }
+}
+
+struct Pair {
+    tower: TowerAdapter,
+    redis_rs: RedisRsAdapter,
+    case: &'static str,
+    protocol: Protocol,
+    server_version: String,
+}
+
+impl Pair {
+    async fn connect(case: &'static str, protocol: Protocol) -> Self {
+        let addr = redis_addr().await;
+        let mut tower = TowerAdapter::connect(addr, protocol).await;
+        let redis_rs = RedisRsAdapter::connect(addr, protocol).await;
+        let info = tower
+            .raw("INFO", &[b"server"])
+            .await
+            .expect("INFO server should succeed");
+        let SemanticValue::Bytes(info) = info else {
+            panic!("INFO server returned an unexpected shape")
+        };
+        let info = String::from_utf8_lossy(&info);
+        let server_version = info
+            .lines()
+            .find_map(|line| line.strip_prefix("redis_version:"))
+            .unwrap_or("unknown")
+            .trim()
+            .to_owned();
+        Self {
+            tower,
+            redis_rs,
+            case,
+            protocol,
+            server_version,
+        }
+    }
+
+    fn key(&self, side: &str, suffix: &str) -> Vec<u8> {
+        format!(
+            "redis_tower:diff:{CORPUS_SEED:016x}:{}:{}:{side}:{suffix}",
+            self.protocol, self.case
+        )
+        .into_bytes()
+    }
+
+    fn binary_key(&self, side: &str, suffix: &str) -> Vec<u8> {
+        let mut key = self.key(side, suffix);
+        key.extend_from_slice(&[b':', 0xff, 0, 0x80]);
+        key
+    }
+
+    fn same(&self, step: &str, tower: SemanticValue, redis_rs: SemanticValue) {
+        assert_eq!(
+            tower, redis_rs,
+            "case={} step={step} protocol={} server={} redis-rs={} seed={CORPUS_SEED:#x}",
+            self.case, self.protocol, self.server_version, REDIS_RS_VERSION
+        );
+    }
+
+    fn same_error(&self, step: &str, tower: ObservedError, redis_rs: ObservedError) {
+        assert_eq!(
+            tower, redis_rs,
+            "case={} step={step} protocol={} server={} redis-rs={} seed={CORPUS_SEED:#x}",
+            self.case, self.protocol, self.server_version, REDIS_RS_VERSION
+        );
+    }
+
+    async fn reset(&mut self, tower_key: &[u8], redis_key: &[u8]) {
+        self.tower
+            .raw("DEL", &[tower_key])
+            .await
+            .expect("redis-tower namespace reset");
+        self.redis_rs
+            .raw("DEL", &[redis_key])
+            .await
+            .expect("redis-rs namespace reset");
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_scalar_nil_binary_and_numeric_boundaries() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("scalar-binary", protocol).await;
+        let tower_missing = pair.key("tower", "missing");
+        let redis_missing = pair.key("redis-rs", "missing");
+        pair.reset(&tower_missing, &redis_missing).await;
+        let tower = pair.tower.raw("GET", &[&tower_missing]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_missing]).await.unwrap();
+        pair.same("null", tower, redis_rs);
+
+        let tower_key = pair.binary_key("tower", "payload");
+        let redis_key = pair.binary_key("redis-rs", "payload");
+        pair.reset(&tower_key, &redis_key).await;
+        let payload = [0, 0xff, 0x80, b'a', 0];
+        let tower = pair
+            .tower
+            .raw("SET", &[&tower_key, &payload])
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("SET", &[&redis_key, &payload])
+            .await
+            .unwrap();
+        pair.same("binary-set", tower, redis_rs);
+        let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
+        pair.same("binary-get", tower, redis_rs);
+
+        let tower_empty = pair.key("tower", "empty");
+        let redis_empty = pair.key("redis-rs", "empty");
+        pair.reset(&tower_empty, &redis_empty).await;
+        pair.tower.raw("SET", &[&tower_empty, b""]).await.unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_empty, b""])
+            .await
+            .unwrap();
+        let tower = pair
+            .tower
+            .raw("MGET", &[&tower_key, &tower_missing, &tower_empty])
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("MGET", &[&redis_key, &redis_missing, &redis_empty])
+            .await
+            .unwrap();
+        pair.same("null-versus-empty", tower, redis_rs);
+
+        let tower = pair.tower.raw("ECHO", &[&payload]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("ECHO", &[&payload]).await.unwrap();
+        pair.same("binary-echo", tower, redis_rs);
+
+        let tower_number = pair.key("tower", "u64-max");
+        let redis_number = pair.key("redis-rs", "u64-max");
+        pair.reset(&tower_number, &redis_number).await;
+        let max = u64::MAX.to_string();
+        pair.tower
+            .raw("SET", &[&tower_number, max.as_bytes()])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_number, max.as_bytes()])
+            .await
+            .unwrap();
+        assert_eq!(
+            pair.tower.u64("GET", &[&tower_number]).await.unwrap(),
+            pair.redis_rs.u64("GET", &[&redis_number]).await.unwrap(),
+            "u64 boundary diverged for {} on {}",
+            pair.protocol,
+            pair.server_version
+        );
+
+        pair.tower
+            .raw("SET", &[&tower_number, b"-1"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_number, b"-1"])
+            .await
+            .unwrap();
+        assert!(pair.tower.u64("GET", &[&tower_number]).await.is_err());
+        assert!(pair.redis_rs.u64("GET", &[&redis_number]).await.is_err());
+
+        assert!(pair.tower.string("ECHO", &[&payload]).await.is_err());
+        assert!(pair.redis_rs.string("ECHO", &[&payload]).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_hash_collection_and_stream_shapes() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("collections-streams", protocol).await;
+        let tower_hash = pair.key("tower", "hash");
+        let redis_hash = pair.key("redis-rs", "hash");
+        pair.reset(&tower_hash, &redis_hash).await;
+        let binary = [0xff, 0, 0x80];
+        pair.tower
+            .raw(
+                "HSET",
+                &[&tower_hash, b"field-b", &binary, b"field-a", b"one"],
+            )
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw(
+                "HSET",
+                &[&redis_hash, b"field-b", &binary, b"field-a", b"one"],
+            )
+            .await
+            .unwrap();
+        let tower = pairs(pair.tower.raw("HGETALL", &[&tower_hash]).await.unwrap());
+        let redis_rs = pairs(pair.redis_rs.raw("HGETALL", &[&redis_hash]).await.unwrap());
+        pair.same("hash-map", tower, redis_rs);
+
+        let tower_list = pair.key("tower", "list");
+        let redis_list = pair.key("redis-rs", "list");
+        pair.reset(&tower_list, &redis_list).await;
+        pair.tower
+            .raw("RPUSH", &[&tower_list, b"first", &binary, b"third"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("RPUSH", &[&redis_list, b"first", &binary, b"third"])
+            .await
+            .unwrap();
+        let tower = pair
+            .tower
+            .raw("LRANGE", &[&tower_list, b"0", b"-1"])
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("LRANGE", &[&redis_list, b"0", b"-1"])
+            .await
+            .unwrap();
+        pair.same("ordered-list", tower, redis_rs);
+
+        let tower_set = pair.key("tower", "set");
+        let redis_set = pair.key("redis-rs", "set");
+        pair.reset(&tower_set, &redis_set).await;
+        pair.tower
+            .raw("SADD", &[&tower_set, b"beta", b"alpha", &binary])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SADD", &[&redis_set, b"beta", b"alpha", &binary])
+            .await
+            .unwrap();
+        let tower = unordered(pair.tower.raw("SMEMBERS", &[&tower_set]).await.unwrap());
+        let redis_rs = unordered(pair.redis_rs.raw("SMEMBERS", &[&redis_set]).await.unwrap());
+        pair.same("unordered-set", tower, redis_rs);
+
+        let tower_zset = pair.key("tower", "zset");
+        let redis_zset = pair.key("redis-rs", "zset");
+        pair.reset(&tower_zset, &redis_zset).await;
+        pair.tower
+            .raw("ZADD", &[&tower_zset, b"2.5", b"beta", b"1", b"alpha"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("ZADD", &[&redis_zset, b"2.5", b"beta", b"1", b"alpha"])
+            .await
+            .unwrap();
+        let tower = pairs(
+            pair.tower
+                .raw("ZRANGE", &[&tower_zset, b"0", b"-1", b"WITHSCORES"])
+                .await
+                .unwrap(),
+        );
+        let redis_rs = pairs(
+            pair.redis_rs
+                .raw("ZRANGE", &[&redis_zset, b"0", b"-1", b"WITHSCORES"])
+                .await
+                .unwrap(),
+        );
+        pair.same("zset-pairs", tower, redis_rs);
+
+        let tower_stream = pair.key("tower", "stream");
+        let redis_stream = pair.key("redis-rs", "stream");
+        pair.reset(&tower_stream, &redis_stream).await;
+        pair.tower
+            .raw("XADD", &[&tower_stream, b"1-0", b"field", &binary])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("XADD", &[&redis_stream, b"1-0", b"field", &binary])
+            .await
+            .unwrap();
+        let tower = pair
+            .tower
+            .raw("XRANGE", &[&tower_stream, b"-", b"+"])
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("XRANGE", &[&redis_stream, b"-", b"+"])
+            .await
+            .unwrap();
+        pair.same("nested-stream", tower, redis_rs);
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_errors_raw_and_administrative_replies() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("errors-admin", protocol).await;
+        let tower_wrongtype = pair.key("tower", "wrongtype");
+        let redis_wrongtype = pair.key("redis-rs", "wrongtype");
+        pair.reset(&tower_wrongtype, &redis_wrongtype).await;
+        pair.tower
+            .raw("RPUSH", &[&tower_wrongtype, b"value"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("RPUSH", &[&redis_wrongtype, b"value"])
+            .await
+            .unwrap();
+        let tower = pair
+            .tower
+            .raw("GET", &[&tower_wrongtype])
+            .await
+            .unwrap_err();
+        let redis_rs = pair
+            .redis_rs
+            .raw("GET", &[&redis_wrongtype])
+            .await
+            .unwrap_err();
+        pair.same_error("wrongtype", tower, redis_rs);
+
+        let tower_counter = pair.key("tower", "overflow");
+        let redis_counter = pair.key("redis-rs", "overflow");
+        pair.reset(&tower_counter, &redis_counter).await;
+        let max = i64::MAX.to_string();
+        pair.tower
+            .raw("SET", &[&tower_counter, max.as_bytes()])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_counter, max.as_bytes()])
+            .await
+            .unwrap();
+        let tower = pair.tower.raw("INCR", &[&tower_counter]).await.unwrap_err();
+        let redis_rs = pair
+            .redis_rs
+            .raw("INCR", &[&redis_counter])
+            .await
+            .unwrap_err();
+        pair.same_error("integer-overflow", tower, redis_rs);
+
+        let script = b"return {false, {}, 'OK', 42, ARGV[1]}";
+        let binary = [0xff, 0, 0x80];
+        let tower = pair
+            .tower
+            .raw("EVAL", &[script, b"0", &binary])
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("EVAL", &[script, b"0", &binary])
+            .await
+            .unwrap();
+        pair.same("raw-nested-module-shape", tower, redis_rs);
+
+        let tower = pair.tower.raw("COMMAND", &[b"INFO", b"GET"]).await.unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("COMMAND", &[b"INFO", b"GET"])
+            .await
+            .unwrap();
+        pair.same("administrative-command-info", tower, redis_rs);
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_blocking_command_uses_dedicated_sessions() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("blocking-dedicated", protocol).await;
+        let tower_source = pair.key("tower", "source");
+        let redis_source = pair.key("redis-rs", "source");
+        let tower_destination = pair.key("tower", "destination");
+        let redis_destination = pair.key("redis-rs", "destination");
+        pair.reset(&tower_source, &redis_source).await;
+        pair.reset(&tower_destination, &redis_destination).await;
+
+        let binary = [0xff, 0, 0x80];
+        pair.tower
+            .raw("RPUSH", &[&tower_source, &binary])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("RPUSH", &[&redis_source, &binary])
+            .await
+            .unwrap();
+
+        // Each adapter owns this connection exclusively. BLMOVE would stall a
+        // shared multiplexed worker if the source were empty, which is why the
+        // lifecycle contract requires a dedicated session for blocking work.
+        let tower = pair
+            .tower
+            .raw(
+                "BLMOVE",
+                &[&tower_source, &tower_destination, b"LEFT", b"RIGHT", b"1"],
+            )
+            .await
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw(
+                "BLMOVE",
+                &[&redis_source, &redis_destination, b"LEFT", b"RIGHT", b"1"],
+            )
+            .await
+            .unwrap();
+        pair.same("blocking-binary-move", tower, redis_rs);
+    }
+}
+
+#[tokio::test]
+async fn diff_mcp_pipeline_and_transaction_outcomes() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("pipeline-transaction", protocol).await;
+        let tower_key = pair.key("tower", "pipeline");
+        let redis_key = pair.key("redis-rs", "pipeline");
+        pair.reset(&tower_key, &redis_key).await;
+
+        let tower_results = Pipeline::new()
+            .push(RawCommand::new("SET").arg(&tower_key).arg("value"))
+            .push(
+                RawCommand::new("HSET")
+                    .arg(&tower_key)
+                    .arg("field")
+                    .arg("x"),
+            )
+            .push(RawCommand::new("GET").arg(&tower_key))
+            .execute(&mut pair.tower.connection)
+            .await
+            .unwrap();
+        let tower = [
+            tower_results.get::<Frame>(0).cloned().map(tower_value),
+            tower_results.get::<Frame>(1).cloned().map(tower_value),
+            tower_results.get::<Frame>(2).cloned().map(tower_value),
+        ];
+        assert!(
+            tower[1].is_err(),
+            "tower pipeline did not preserve WRONGTYPE"
+        );
+
+        let mut redis_pipeline = redis::pipe();
+        redis_pipeline
+            .cmd("SET")
+            .arg(&redis_key)
+            .arg("value")
+            .cmd("HSET")
+            .arg(&redis_key)
+            .arg("field")
+            .arg("x")
+            .cmd("GET")
+            .arg(&redis_key)
+            .ignore_errors();
+        let redis_results: Vec<redis::RedisResult<redis::Value>> = redis_pipeline
+            .query_async(&mut pair.redis_rs.connection)
+            .await
+            .unwrap();
+        let redis_rs: Vec<Result<SemanticValue, RedisError>> = redis_results
+            .into_iter()
+            .map(|result| {
+                result
+                    .map(redis_rs_value)
+                    .map_err(|error| RedisError::Redis(error.code().unwrap_or("CLIENT").to_owned()))
+            })
+            .collect();
+        assert_eq!(tower.len(), redis_rs.len());
+        for index in [0, 2] {
+            pair.same(
+                "pipeline-alignment",
+                tower[index].as_ref().unwrap().clone(),
+                redis_rs[index].as_ref().unwrap().clone(),
+            );
+        }
+        assert_eq!(
+            displayed_error_code(&tower[1].as_ref().unwrap_err().to_string()),
+            displayed_error_code(&redis_rs[1].as_ref().unwrap_err().to_string())
+        );
+        let tower_ping = pair.tower.raw("PING", &[]).await.unwrap();
+        let redis_ping = pair.redis_rs.raw("PING", &[]).await.unwrap();
+        pair.same("post-pipeline-alignment", tower_ping, redis_ping);
+
+        let tower_tx_key = pair.key("tower", "transaction");
+        let redis_tx_key = pair.key("redis-rs", "transaction");
+        pair.reset(&tower_tx_key, &redis_tx_key).await;
+        let tower_transaction = Transaction::new()
+            .push(RawCommand::new("SET").arg(&tower_tx_key).arg("40"))
+            .push(RawCommand::new("INCR").arg(&tower_tx_key))
+            .push(RawCommand::new("GET").arg(&tower_tx_key))
+            .execute(&mut pair.tower.connection)
+            .await
+            .unwrap();
+        let TransactionResult::Committed(tower_transaction) = tower_transaction else {
+            panic!("unwatched transaction unexpectedly aborted")
+        };
+        let tower = vec![
+            tower_value(tower_transaction.get::<Frame>(0).unwrap().clone()),
+            tower_value(tower_transaction.get::<Frame>(1).unwrap().clone()),
+            tower_value(tower_transaction.get::<Frame>(2).unwrap().clone()),
+        ];
+
+        let mut redis_transaction = redis::pipe();
+        redis_transaction
+            .atomic()
+            .cmd("SET")
+            .arg(&redis_tx_key)
+            .arg("40")
+            .cmd("INCR")
+            .arg(&redis_tx_key)
+            .cmd("GET")
+            .arg(&redis_tx_key)
+            .ignore_errors();
+        let redis_results: Vec<redis::RedisResult<redis::Value>> = redis_transaction
+            .query_async(&mut pair.redis_rs.connection)
+            .await
+            .unwrap();
+        let redis_rs: Vec<_> = redis_results
+            .into_iter()
+            .map(|result| redis_rs_value(result.unwrap()))
+            .collect();
+        assert_eq!(tower, redis_rs, "transaction results diverged");
+
+        let tower_watch = pair.key("tower", "watch-abort");
+        let redis_watch = pair.key("redis-rs", "watch-abort");
+        pair.reset(&tower_watch, &redis_watch).await;
+        pair.tower
+            .raw("SET", &[&tower_watch, b"before"])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_watch, b"before"])
+            .await
+            .unwrap();
+        pair.tower.raw("WATCH", &[&tower_watch]).await.unwrap();
+        pair.redis_rs.raw("WATCH", &[&redis_watch]).await.unwrap();
+
+        let addr = redis_addr().await;
+        let mut tower_mutator = TowerAdapter::connect(addr, protocol).await;
+        let mut redis_mutator = RedisRsAdapter::connect(addr, protocol).await;
+        tower_mutator
+            .raw("SET", &[&tower_watch, b"changed"])
+            .await
+            .unwrap();
+        redis_mutator
+            .raw("SET", &[&redis_watch, b"changed"])
+            .await
+            .unwrap();
+
+        let tower_aborted = pair
+            .tower
+            .connection
+            .execute_transaction(
+                Vec::new(),
+                vec![
+                    RawCommand::new("SET")
+                        .arg(&tower_watch)
+                        .arg("committed")
+                        .to_frame(),
+                ],
+            )
+            .await
+            .unwrap()
+            .is_none();
+        let mut redis_abort = redis::pipe();
+        redis_abort
+            .atomic()
+            .cmd("SET")
+            .arg(&redis_watch)
+            .arg("committed");
+        let redis_aborted = matches!(
+            redis_abort
+                .query_async::<redis::Value>(&mut pair.redis_rs.connection)
+                .await
+                .unwrap(),
+            redis::Value::Nil
+        );
+        assert!(
+            tower_aborted && redis_aborted,
+            "WATCH abort semantics diverged"
+        );
+    }
+}
+
+fn mismatch(left: SemanticValue, right: SemanticValue) -> Result<(), String> {
+    if left == right {
+        Ok(())
+    } else {
+        Err(format!("semantic mismatch: {left:?} != {right:?}"))
+    }
+}
+
+fn require_single_execution(observed: usize) -> Result<(), String> {
+    if observed == 1 {
+        Ok(())
+    } else {
+        Err(format!("non-idempotent command executed {observed} times"))
+    }
+}
+
+#[tokio::test]
+async fn differential_negative_controls_detect_wrong_conversion_option_and_replay() {
+    assert!(
+        mismatch(
+            SemanticValue::Bytes(vec![0xff]),
+            SemanticValue::Bytes(String::from_utf8_lossy(&[0xff]).into_owned().into_bytes())
+        )
+        .is_err(),
+        "lossy UTF-8 conversion was not detected"
+    );
+    assert!(
+        require_single_execution(2).is_err(),
+        "accidental replay was not detected"
+    );
+
+    let mut pair = Pair::connect("negative-option-control", Protocol::Resp3).await;
+    let tower_key = pair.key("tower", "set-option");
+    let redis_key = pair.key("redis-rs", "set-option");
+    pair.reset(&tower_key, &redis_key).await;
+    pair.tower
+        .raw("SET", &[&tower_key, b"existing"])
+        .await
+        .unwrap();
+    pair.redis_rs
+        .raw("SET", &[&redis_key, b"existing"])
+        .await
+        .unwrap();
+    let tower = pair
+        .tower
+        .raw("SET", &[&tower_key, b"replacement", b"NX"])
+        .await
+        .unwrap();
+    let redis_rs = pair
+        .redis_rs
+        .raw("SET", &[&redis_key, b"replacement"])
+        .await
+        .unwrap();
+    assert!(
+        mismatch(tower, redis_rs).is_err(),
+        "a changed SET option was not detected"
+    );
+}

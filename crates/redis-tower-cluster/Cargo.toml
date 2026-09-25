@@ -42,6 +42,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+redis = { workspace = true, features = ["cluster-async"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 redis-tower-commands = { workspace = true, default-features = false, features = ["vector-sets"] }
 redis-tower-test = { path = "../redis-test-harness" }

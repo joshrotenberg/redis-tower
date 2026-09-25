@@ -339,6 +339,9 @@ jobs:
         with:
           shared-key: integration-redis-${{ matrix.redis }}
 
+      - name: Record differential oracle version
+        run: cargo tree -p redis-tower --edges dev --invert redis@1.7.0
+
       - name: Run standalone integration tests
         run: cargo test -p redis-tower --test '*' --all-features -- --test-threads=1
 

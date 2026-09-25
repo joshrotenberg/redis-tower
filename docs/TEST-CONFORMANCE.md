@@ -20,16 +20,16 @@ matches the current source tree.
 
 ### Compiled integration inventory
 
-The scoreboard-scoped packages compile **704 integration tests** across **38 test binaries**. **201** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
+The scoreboard-scoped packages compile **713 integration tests** across **40 test binaries**. **204** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
 
 | Surface | Package | Binaries | Compiled | `#[ignore]` | Pull request | Scheduled | No workflow selector |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Standalone | `redis-tower` | 29 | 487 | 0 | 487 | 227 | 0 |
-| Cluster | `redis-tower-cluster` | 1 | 103 | 103 | 103 | 0 | 0 |
-| Sentinel | `redis-tower-sentinel` | 2 | 87 | 87 | 87 | 0 | 0 |
-| Modules | `redis-tower-modules` | 5 | 11 | 11 | 0 | 11 | 0 |
+| Standalone | `redis-tower` | 30 | 493 | 0 | 493 | 227 | 0 |
+| Cluster | `redis-tower-cluster` | 1 | 104 | 104 | 104 | 0 | 0 |
+| Sentinel | `redis-tower-sentinel` | 2 | 88 | 88 | 88 | 0 | 0 |
+| Modules | `redis-tower-modules` | 6 | 12 | 12 | 0 | 12 | 0 |
 | Distributed primitives | `redis-tower-primitives` | 1 | 16 | 0 | 16 | 0 | 0 |
-| **Total** |  | **38** | **704** | **201** | **693** | **238** | **0** |
+| **Total** |  | **40** | **713** | **204** | **701** | **239** | **0** |
 
 Counts are unique compiled tests. A test selected by both pull-request and scheduled workflows appears in both cadence columns, but only once in the compiled total.
 
@@ -45,6 +45,17 @@ The shared command corpus produces **210 compiled parity tests**: **35 test case
 | Cluster | `cluster_integration / root expansion` | 35 |
 | Sentinel | `sentinel_integration / multiplexed` | 35 |
 | Sentinel | `sentinel_integration / root expansion` | 35 |
+
+### Independent-client differential coverage
+
+The independent redis-rs corpus contains **9 compiled test entry points**. These are counted separately from shared-client topology expansions.
+
+| Surface | Test binary | Compiled tests | Default |
+|---|---|---:|---|
+| Standalone | `differential_redis_rs` | 6 | normal |
+| Cluster | `cluster_integration` | 1 | ignored |
+| Sentinel | `sentinel_integration` | 1 | ignored |
+| Modules | `differential_module_replies` | 1 | ignored |
 
 ### Server compatibility matrix
 
@@ -95,6 +106,22 @@ return: for example, the Redis 8.x command binary is compiled per PR but only
 executes its version-specific assertions when `REDIS_8X_VERSION` is set by the
 nightly matrix.
 
+## Independent-client differential corpus
+
+The compiled differential entry points compare redis-tower with a test-only,
+exactly pinned redis-rs 1.7.0 adapter. They are independent-client evidence,
+not additional expansions of the shared redis-tower command macro, and their
+generated count is therefore reported separately above.
+
+The standalone corpus runs on every per-PR Redis 7.4.3 and 8.0.6 leg under
+both RESP2 and RESP3. Mutations use equivalent fresh namespaces, failures
+retain the case/protocol/live server/client version and deterministic seed,
+and normalization is limited to documented unordered or pair-shaped replies.
+The module comparison remains `#[ignore]`-gated and runs on the existing
+module-enabled nightly job. See the reviewed
+[case ledger and lifecycle contract](DIFFERENTIAL-TESTING.md) for exact inputs,
+dispositions, negative controls, and reproduction commands.
+
 ## What superseded the original fault comparison
 
 [Issue #416](https://github.com/joshrotenberg/redis-tower/issues/416) proposed
@@ -141,6 +168,7 @@ composed by applications, but they are not part of this conformance matrix.
 |---|---|---|---|
 | Unit and rustdoc | All-feature library tests on stable and beta Rust | Every pull request and push to `main` | [CI workflow](../.github/workflows/ci.yml) |
 | Standalone | Every `redis-tower` integration binary and the standalone `UniversalClient` path against source-built Redis 7.4.3 and 8.0.6 | Every pull request and push to `main` | [CI workflow](../.github/workflows/ci.yml), [standalone suite](../crates/redis-tower/tests/integration.rs), [universal-client suite](../crates/redis-tower-client/tests/standalone.rs) |
+| Independent differential | MCP-derived semantic cases through redis-tower and pinned redis-rs adapters, including RESP2/RESP3, binary/null/error, pipeline, transaction, blocking-session, topology, cancellation, and lost-reply contracts | Standalone, Cluster, and Sentinel per PR; RedisJSON nightly | [case ledger](DIFFERENTIAL-TESTING.md), [standalone corpus](../crates/redis-tower/tests/differential_redis_rs.rs), [module corpus](../crates/redis-tower-modules/tests/differential_module_replies.rs) |
 | Cluster | Shared command corpus plus routing, redirect, caching, reshard, TLS, pool, and failover scenarios against Redis 7.4.3 and 8.0.6 | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [cluster suite](../crates/redis-tower-cluster/tests/cluster_integration.rs) |
 | Sentinel | Shared command corpus, discovery, routing, TLS, pool, and isolated destructive failover scenarios against Redis 7.4.3 and 8.0.6 | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [healthy suite](../crates/redis-tower-sentinel/tests/sentinel_integration.rs), [failover suite](../crates/redis-tower-sentinel/tests/sentinel_failover.rs) |
 | Cluster fixture lifecycle | Partial-start cleanup, promotion/reshard/kill cleanup, and hard deadlines while nodes are frozen | Every pull request and push to `main`; invoked explicitly with `--ignored` | [CI workflow](../.github/workflows/ci.yml), [fixture tests](../crates/redis-test-harness/src/cluster.rs) |

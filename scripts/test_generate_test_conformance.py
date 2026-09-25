@@ -16,6 +16,7 @@ from generate_test_conformance import (
     collect_compatibility,
     command_selects_binary,
     derive_parity_variants,
+    differential_tests,
     extract_run_blocks,
     fault_tests,
     main,
@@ -33,6 +34,12 @@ def fixture_inventory() -> Inventory:
                 "redis-tower",
                 "integration",
                 ("cmd_get", "cmd_set", "resp3::cmd_get", "resp3::cmd_set"),
+                (),
+            ),
+            TestBinary(
+                "redis-tower",
+                "differential_redis_rs",
+                ("diff_mcp_scalar",),
                 (),
             ),
             TestBinary(
@@ -154,9 +161,31 @@ jobs:
         self.assertIn("**12 compiled parity tests**", report)
         self.assertIn("**2 test cases × 6 client/topology expansions**", report)
 
+    def test_differential_inventory_is_separate_from_topology_parity(self) -> None:
+        selected = differential_tests(fixture_inventory().binaries)
+        self.assertEqual(
+            [(binary.target, test) for binary, test in selected],
+            [("differential_redis_rs", "diff_mcp_scalar")],
+        )
+        report = render_report(fixture_inventory())
+        self.assertIn("**1 compiled test entry points**", report)
+        self.assertIn("counted separately from shared-client topology expansions", report)
+
+    def test_differential_inventory_includes_named_cases_in_shared_targets(self) -> None:
+        binary = TestBinary(
+            "redis-tower-cluster",
+            "cluster_integration",
+            ("cmd_get", "diff_redis_rs_cluster_public_entry_point"),
+            ("diff_redis_rs_cluster_public_entry_point",),
+        )
+        self.assertEqual(
+            [(item.target, test) for item, test in differential_tests((binary,))],
+            [("cluster_integration", "diff_redis_rs_cluster_public_entry_point")],
+        )
+
     def test_report_exposes_unscheduled_tests_instead_of_claiming_zero(self) -> None:
         report = render_report(fixture_inventory())
-        self.assertIn("| **Total** |  | **3** | **13** | **9** | **13** | **0** | **0** |", report)
+        self.assertIn("| **Total** |  | **4** | **14** | **9** | **14** | **0** | **0** |", report)
         self.assertIn("cluster_master_failover_recovers", report)
         self.assertIn("partition_recovers", report)
 
