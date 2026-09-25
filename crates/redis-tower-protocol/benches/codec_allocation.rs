@@ -796,7 +796,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "iterations_per_sample": options.iterations,
             "warmup_iterations": 3,
             "allocator": "instrumented std::alloc::System; requested bytes, not resident memory",
-            "timing": "single-process raw samples; directional mechanism evidence, not client throughput",
+            "timing": "single-process raw samples with allocation instrumentation active; directional mechanism evidence, not client throughput",
             "copied_wire_bytes": "deterministic bytes copied solely to create parser input",
         },
         "scenarios": scenario_records,
