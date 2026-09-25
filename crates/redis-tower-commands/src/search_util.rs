@@ -8,10 +8,10 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Adds a suggestion string to an auto-complete dictionary. Returns the
 /// current size of the dictionary.
 ///
-/// Arguments are serialized byte-for-byte. Redis Search itself treats an
-/// embedded NUL in a suggestion string as a terminator, so such strings do not
-/// roundtrip intact; dictionary keys and payloads are not subject to that
-/// suggestion-string limitation.
+/// Arguments are serialized byte-for-byte. Redis Search treats suggestion
+/// strings as text: an embedded NUL is a terminator and malformed UTF-8 can be
+/// normalized by the server. Dictionary keys and payloads are not subject to
+/// that suggestion-string limitation.
 #[derive(Clone)]
 pub struct FtSugAdd {
     key: CommandArg,

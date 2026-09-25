@@ -94,7 +94,7 @@ means Redis compares, stores, hashes, or routes the exact bytes.
 | Redis 8.8 arrays | keys, values, predicates | indexes and option grammar | already binary-safe |
 | Bloom/Cuckoo, sketches, t-digest | keys and item payloads | capacities, probabilities and numeric observations | opaque positions use `CommandArg` throughout |
 | JSON | keys | JSONPath and serialized JSON syntax | keys use `CommandArg`; structured JSON interfaces stay text/serde-oriented |
-| Search | document keys, suggestion strings/payloads, tag values and vector blobs | index/schema/query syntax | opaque inputs and outputs preserve bytes; names and query DSL stay text-oriented; Redis Search treats NUL inside a suggestion string as a terminator |
+| Search | document keys, suggestion payloads, tag values and vector blobs | index/schema/query syntax and autocomplete suggestion text | opaque inputs and outputs preserve bytes; Redis Search can terminate NUL-containing suggestions and normalize malformed UTF-8 |
 | Time series | keys and label names/values | timestamps, reducers and retention/configuration | opaque inputs and returned keys/labels preserve bytes |
 | Vector sets | keys and element names; vector bytes | JSON attributes and filter/query expression grammar | keys/elements use `CommandArg`; returned elements are `Bytes` |
 
@@ -122,9 +122,10 @@ application key/value payloads. In contrast, ACL passwords and `ACL DRYRUN`
 arguments, and the key accepted by `CLUSTER KEYSLOT`, preserve exact bytes.
 
 The client serializes Search suggestion strings as exact bulk-string bytes, but
-the Redis Search autocomplete implementation treats an embedded NUL as a
-string terminator. Suggestion keys and payloads remain binary-safe, and other
-suggestion bytes round-trip subject to the server's autocomplete semantics.
+Redis Search implements them as text: an embedded NUL is a terminator and
+malformed UTF-8 can be normalized. Suggestion dictionary keys and payloads
+remain binary-safe. Suggestion responses preserve the exact bytes returned by
+the server rather than applying another client-side conversion.
 
 ## Cluster routing
 

@@ -107,10 +107,10 @@ async fn autocomplete_binary_dictionary_suggestion_and_payload_roundtrip() {
     let mut conn = connect().await;
     let mut dictionary = format!("test:suggest:binary:{}:", unique_suffix()).into_bytes();
     dictionary.extend_from_slice(b"\0\xff");
-    // Redis Search treats NUL as a suggestion-string terminator. The low-level
-    // serialization test covers NUL; use the remaining binary edge cases for
-    // the server roundtrip itself.
-    let suggestion = b"pre\xff\r\nfix";
+    // Redis Search treats suggestion strings as text: NUL terminates them and
+    // malformed UTF-8 can be normalized. Low-level serialization tests cover
+    // those inputs; use embedded protocol delimiters for the live roundtrip.
+    let suggestion = b"pre\r\nfix";
     let payload = b"$5\r\nvalue\xff";
 
     conn.execute(FtSugAdd::new(&dictionary, suggestion, 1.0).payload(payload))

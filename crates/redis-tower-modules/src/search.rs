@@ -480,9 +480,10 @@ impl<'a, C: RedisExecutor> SearchClient<'a, C> {
 
     /// Add a suggestion string to an auto-complete dictionary.
     ///
-    /// Returns the current size of the dictionary. Redis Search treats an
-    /// embedded NUL in the suggestion string as a terminator even though the
-    /// client serializes it exactly; payloads and dictionary keys preserve all
+    /// Returns the current size of the dictionary. Redis Search treats
+    /// suggestion strings as text: an embedded NUL is a terminator and
+    /// malformed UTF-8 can be normalized by the server. The client still
+    /// serializes the input exactly; payloads and dictionary keys preserve all
     /// bytes.
     pub async fn sug_add(
         &mut self,
