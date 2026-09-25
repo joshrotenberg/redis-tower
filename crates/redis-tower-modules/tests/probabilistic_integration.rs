@@ -3,9 +3,9 @@
 //! [`TDigest`]).
 //!
 //! These exercise the Bloom/Cuckoo/CMS/TopK/T-Digest commands against a real
-//! server, so they require a Redis Stack build. CI does not run them -- its
-//! Redis is built without modules -- so they are `#[ignore]`d by default and
-//! only run when explicitly requested:
+//! server, so they require a module-enabled build. They are `#[ignore]`d by
+//! default and run by the path-filtered module gate plus the broader nightly
+//! matrix:
 //!
 //! ```sh
 //! cargo test -p redis-tower-modules --test probabilistic_integration --features probabilistic -- --ignored

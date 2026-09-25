@@ -3,8 +3,8 @@ name: Nightly Module Tests
 # Runs the `#[ignore]`d redis-tower-modules integration suites (JSON, Search,
 # TimeSeries, probabilistic, Vector, and the redis-rs differential) against real
 # Redis servers that ship the modules. The main CI Redis is built without
-# modules, so these suites never run there; this nightly job is the only place
-# they execute.
+# modules. A bounded Redis 8 module gate now runs for relevant pull requests;
+# this nightly job retains the broader Redis 8 / Redis Stack 7.x matrix.
 #
 # Two legs:
 #   - redis:8           bundles all former Stack modules natively, and Vector
@@ -36,6 +36,9 @@ jobs:
           - name: redis-8
             image: redis:8
             test-args: "--all-features"
+            capability-test-args: "--all-features"
+            minimum-version: "8.0.0"
+            required-commands: "JSON.SET,FT.CREATE,TS.CREATE,BF.ADD,VADD"
           - name: redis-stack-7.x
             image: redis/redis-stack-server:7.4.0-v3
             test-args: >-
@@ -44,6 +47,9 @@ jobs:
               --test search_integration
               --test timeseries_integration
               --test probabilistic_integration
+            capability-test-args: "--features json,search,timeseries,probabilistic"
+            minimum-version: "7.4.0"
+            required-commands: "JSON.SET,FT.CREATE,TS.CREATE,BF.ADD"
     services:
       redis:
         image: ${{ matrix.image }}
@@ -64,6 +70,16 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: nightly-modules
+
+      - name: Prove server version and required commands
+        env:
+          REDIS_MODULE_MIN_VERSION: ${{ matrix.minimum-version }}
+          REDIS_MODULE_COMMANDS: ${{ matrix.required-commands }}
+        run: >-
+          cargo test -p redis-tower-modules
+          ${{ matrix.capability-test-args }} --test capabilities
+          required_server_version_and_commands_are_present --
+          --ignored --exact --nocapture
 
       - name: Run module integration tests
         run: cargo test -p redis-tower-modules ${{ matrix.test-args }} -- --ignored

@@ -1924,6 +1924,9 @@ mod tests {
                 let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
                     Ok(listener) => listener,
                     Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                        if std::env::var_os("REDIS_TEST_REQUIRE_IPV6").is_some() {
+                            panic!("required IPv6 loopback is unavailable: {error}");
+                        }
                         eprintln!("skipping TLS URL IPv6 test: IPv6 loopback is unavailable");
                         return;
                     }

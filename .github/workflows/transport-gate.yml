@@ -1,0 +1,111 @@
+name: Transport and Topology Assertion Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/transport-gate.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/redis-tower-core/**"
+      - "crates/redis-tower/**"
+      - "crates/redis-tower-cluster/**"
+      - "crates/redis-tower-sentinel/**"
+      - "crates/redis-tower-client/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/transport-gate.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/redis-tower-core/**"
+      - "crates/redis-tower/**"
+      - "crates/redis-tower-cluster/**"
+      - "crates/redis-tower-sentinel/**"
+      - "crates/redis-tower-client/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  REDIS_TEST_REQUIRE_TLS: "1"
+  REDIS_TEST_REQUIRE_IPV6: "1"
+
+jobs:
+  live-contracts:
+    name: Verified transports and public topology entry points
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OpenSSL dev headers
+        run: |
+          if ! dpkg-query -W -f='${Status}' libssl-dev 2>/dev/null | grep -q 'ok installed'; then
+            sudo apt-get update
+            sudo apt-get install -y libssl-dev
+          fi
+
+      - name: Cache Redis TLS build
+        uses: actions/cache@v4
+        with:
+          path: ~/redis
+          key: redis-tls-8.0.6-${{ runner.os }}
+
+      - name: Build TLS-capable Redis 8.0.6
+        run: |
+          if [ ! -f ~/redis/bin/redis-server ]; then
+            cd /tmp
+            curl -fsSL https://github.com/redis/redis/archive/refs/tags/8.0.6.tar.gz | tar xz
+            cd redis-8.0.6
+            make -j$(nproc) BUILD_TLS=yes
+            mkdir -p ~/redis/bin
+            cp src/redis-server src/redis-cli ~/redis/bin/
+          fi
+          echo "$HOME/redis/bin" >> "$GITHUB_PATH"
+          ~/redis/bin/redis-server --version
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: transport-assertion-gate
+
+      - name: Run rustls-only verified standalone assertions
+        run: >-
+          cargo test -p redis-tower --no-default-features
+          --features tls-rustls --test test_infrastructure --
+          --test-threads=1 --nocapture
+
+      - name: Run rustls-only verified Cluster assertions
+        run: >-
+          cargo test -p redis-tower-cluster --no-default-features
+          --features tls-rustls --test cluster_integration
+          tls_connect_and_roundtrip -- --ignored --test-threads=1 --nocapture
+
+      - name: Run native-TLS-only verified standalone assertions
+        run: >-
+          cargo test -p redis-tower --no-default-features
+          --features tls-native-tls --test test_infrastructure --
+          --test-threads=1 --nocapture
+
+      - name: Run native-TLS-only verified Cluster assertions
+        run: >-
+          cargo test -p redis-tower-cluster --no-default-features
+          --features tls-native-tls --test cluster_integration
+          tls_connect_and_roundtrip -- --ignored --test-threads=1 --nocapture
+
+      - name: Require bracketed IPv6 TLS URL transport
+        run: >-
+          cargo test -p redis-tower-core --all-features
+          tls_urls_complete_an_ipv6_connection -- --nocapture
+
+      - name: Run UniversalClient Cluster and Sentinel public-entry assertions
+        run: >-
+          cargo test -p redis-tower-client --test topologies --all-features --
+          --ignored --test-threads=1 --nocapture

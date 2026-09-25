@@ -103,6 +103,7 @@ jobs:
         if: matrix.redis_8x_version != ''
         env:
           REDIS_URL: redis://127.0.0.1:6399
+          REDIS_8X_REQUIRED: "1"
           REDIS_8X_VERSION: ${{ matrix.redis_8x_version }}
         run: >-
           cargo test -p redis-tower --test redis_8x_commands --all-features --

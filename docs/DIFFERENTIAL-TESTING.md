@@ -33,7 +33,7 @@ captured panic message.
 | Transaction commit and abort | Atomic `SET`/`INCR`/`GET`; separate clients mutate a watched key before `EXEC` | Commit results agree; WATCH conflict returns an aborted transaction and does not apply its body | RESP2 and RESP3 | `Transaction` / exclusive connection | atomic `Pipeline` / exclusive connection |
 | Blocking command ownership | Seed independent lists, then `BLMOVE` binary data with a finite timeout | Results agree while each blocking operation owns a dedicated, unshared session | Redis 6.2+; RESP2 and RESP3 | dedicated `RedisConnection` | unshared async connection |
 | Public topology entry points | Binary `SET`/`GET` through live Cluster and Sentinel fixtures, with an independent redis-rs Cluster connection or direct connection to the Sentinel-discovered master | Routing/discovery does not change the binary result; mutations remain in independent namespaces | Per-PR Redis 7.4.3 and 8.0.6 Cluster/Sentinel fixture legs | `ClusterConnection` / `SentinelConnection` | async Cluster connection / direct async master connection |
-| RedisJSON module replies | Independent JSON documents; compare `JSON.GET` and unordered `JSON.OBJKEYS` | JSON bytes agree and object-key order is the only normalization | Module-enabled nightly Redis 8; RESP2 and RESP3 | `RawCommand` | `Cmd` |
+| RedisJSON module replies | Independent JSON documents; compare `JSON.GET` and unordered `JSON.OBJKEYS` | JSON bytes agree and object-key order is the only normalization | Path-filtered per-PR and nightly module-enabled Redis 8; RESP2 and RESP3 | `RawCommand` | `Cmd` |
 | Queued cancellation | Cancel single and multi requests before the configured batch window closes | Cancelled queue entries never reach the socket | Deterministic in-memory/TCP fixture; no Redis process | `AutoPipelineService` | Not applicable: redis-tower lifecycle contract |
 | Lost non-idempotent reply | Fake server records an INCR-like request, applies it once, then closes before replying; replacement socket receives a probe | Caller gets an error, execution remains unknown, and reconnect never silently replays the write | Deterministic TCP fixture; no Redis process | factory-backed `AutoPipelineService` | Not applicable: redis-tower lifecycle contract |
 
@@ -41,7 +41,7 @@ The executable standalone cases live in
 [`differential_redis_rs.rs`](../crates/redis-tower/tests/differential_redis_rs.rs).
 The RedisJSON case lives in
 [`differential_module_replies.rs`](../crates/redis-tower-modules/tests/differential_module_replies.rs)
-and is selected by the existing module-enabled nightly job.
+and is selected by the per-PR module gate and module-enabled nightly job.
 
 ## Normalization policy
 

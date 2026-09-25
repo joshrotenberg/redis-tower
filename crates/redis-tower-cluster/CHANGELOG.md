@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- make Cluster TLS conformance use a real TLS-only three-node cluster with
+  trusted test certificates and fail-closed CI activation for both TLS backends
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.2...redis-tower-cluster-v0.1.3) - 2026-09-24
 
 ### Fixed
