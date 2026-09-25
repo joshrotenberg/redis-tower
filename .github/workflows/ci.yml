@@ -145,10 +145,19 @@ jobs:
       - name: Build fuzz targets
         run: cargo fuzz build --target "$FUZZ_TARGET"
 
+      - name: Test fuzz oracle
+        run: |
+          python3 scripts/test_fuzz_campaign.py -v
+          cargo test --manifest-path fuzz/Cargo.toml --lib
+
       - name: Smoke-test fuzz targets
         run: |
-          cargo fuzz run decode --target "$FUZZ_TARGET" -- -max_total_time=10 -verbosity=0
-          cargo fuzz run decode_chunked --target "$FUZZ_TARGET" -- -max_total_time=10 -verbosity=0
+          for target in decode decode_chunked; do
+            python3 scripts/prepare_fuzz_corpus.py \
+              "fuzz/corpus-seeds/$target" "fuzz/corpus/$target"
+            cargo fuzz run --target "$FUZZ_TARGET" \
+              "$target" "fuzz/corpus/$target" -- -max_total_time=10 -verbosity=0
+          done
 
       - name: Upload fuzzing artifacts
         if: failure()

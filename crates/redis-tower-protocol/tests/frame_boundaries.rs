@@ -312,3 +312,61 @@ fn malformed_frames_preserve_buffer_and_parse_error_class() {
         assert_eq!(&input[..], wire);
     }
 }
+
+#[test]
+fn nested_maps_consume_the_same_depth_budget_as_other_aggregates() {
+    let wire = b"%1\r\n+outer\r\n%1\r\n+inner\r\n+value\r\n";
+    let mut input = BytesMut::from(&wire[..]);
+    assert!(matches!(
+        codec(wire.len(), 1).decode(&mut input),
+        Err(ProtocolError::NestingTooDeep { max: 1 })
+    ));
+    assert_eq!(&input[..], wire);
+
+    let mut input = BytesMut::from(&wire[..]);
+    assert!(codec(wire.len(), 2).decode(&mut input).unwrap().is_some());
+    assert!(input.is_empty());
+}
+
+#[test]
+fn independent_mixed_wire_fixtures_are_partition_invariant() {
+    let fixtures: &[&[u8]] = &[
+        b"+OK\r\n-ERR nope\r\n:42\r\n$-1\r\n",
+        b"%2\r\n+map\r\n~2\r\n+a\r\n+b\r\n+push\r\n>2\r\n+invalidate\r\n$1\r\nk\r\n",
+        b"*6\r\n!4\r\noops\r\n,inf\r\n,-inf\r\n,nan\r\n(12345678901234567890\r\n=7\r\ntxt:abc\r\n",
+        b"$25\r\n*?\r\n|1\r\n+looks\r\n+framed\r\n\r\n+LATER\r\n",
+    ];
+
+    for &wire in fixtures {
+        let expected = decode_pipeline(wire, &[wire.len().max(1)]);
+        for split in 0..=wire.len() {
+            let first = split.max(1);
+            let second = wire.len().saturating_sub(split).max(1);
+            assert_eq!(
+                decode_pipeline(wire, &[first, second]),
+                expected,
+                "partition {split} changed fixture {wire:?}"
+            );
+        }
+    }
+}
+
+fn decode_pipeline(wire: &[u8], plan: &[usize]) -> (Vec<Frame>, Vec<u8>) {
+    let mut decoder = codec(4096, 16);
+    let mut input = BytesMut::new();
+    let mut frames = Vec::new();
+    let mut offset = 0;
+    let mut plan_index = 0;
+    while offset < wire.len() {
+        let end = offset
+            .saturating_add(plan[plan_index % plan.len()])
+            .min(wire.len());
+        plan_index += 1;
+        input.extend_from_slice(&wire[offset..end]);
+        offset = end;
+        while let Some(frame) = decoder.decode(&mut input).unwrap() {
+            frames.push(frame);
+        }
+    }
+    (frames, input.to_vec())
+}

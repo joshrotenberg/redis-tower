@@ -1,0 +1,78 @@
+name: Scheduled Fuzzing
+
+on:
+  schedule:
+    - cron: "0 11 * * 0"
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Seconds to fuzz each target (1-3600)
+        required: false
+        default: "900"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scheduled-fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  campaign:
+    name: ${{ matrix.target }} campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [decode, decode_chunked]
+    env:
+      FUZZ_DURATION_SECONDS: ${{ inputs.duration_seconds || '900' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: scheduled-fuzz-${{ matrix.target }}
+
+      - name: Build fuzz targets and resolve dependencies
+        run: cargo fuzz build
+
+      - name: Record toolchain provenance
+        run: |
+          mkdir -p "fuzz-results/${{ matrix.target }}"
+          rustc -Vv > "fuzz-results/${{ matrix.target }}/rust-version.txt"
+          cargo fuzz --version > "fuzz-results/${{ matrix.target }}/cargo-fuzz-version.txt"
+
+      - name: Run bounded campaign
+        run: |
+          python3 scripts/fuzz_campaign.py \
+            --target "${{ matrix.target }}" \
+            --duration-seconds "$FUZZ_DURATION_SECONDS" \
+            --source-sha "$GITHUB_SHA" \
+            --seed-dir "fuzz/corpus-seeds/${{ matrix.target }}" \
+            --corpus-dir "fuzz/corpus/${{ matrix.target }}" \
+            --artifact-dir "fuzz/artifacts/${{ matrix.target }}" \
+            --output-dir "fuzz-results/${{ matrix.target }}"
+
+      - name: Upload campaign evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            fuzz-results/${{ matrix.target }}
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 90

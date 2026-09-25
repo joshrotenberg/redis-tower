@@ -13,6 +13,9 @@ libfuzzer-sys = "0.4"
 redis-tower-protocol = { path = "../crates/redis-tower-protocol" }
 tokio-util = { version = "0.7", features = ["codec"] }
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"

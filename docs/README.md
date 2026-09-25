@@ -36,6 +36,9 @@ If you are evaluating or adopting the project, start here:
 - [Binary data and typed arguments](BINARY-DATA.md) explains byte ownership,
   exact Cluster routing, response types, and the per-family compatibility
   inventory.
+- [RESP codec support and validation](PROTOCOL-TESTING.md) defines accepted and
+  rejected wire forms, the fragmentation oracle, reviewed fuzz seeds, and
+  mutation triage.
 - The [release process](RELEASING.md) records the manual prepare/publish split,
   workspace publish order, validation gates, and post-publish verification.
 
