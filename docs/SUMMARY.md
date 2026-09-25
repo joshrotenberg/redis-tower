@@ -22,6 +22,7 @@
 - [Command capability ledger](COMMAND-CAPABILITIES.md)
 - [Binary data and typed arguments](BINARY-DATA.md)
 - [RESP codec support and validation](PROTOCOL-TESTING.md)
+- [RESP decode ownership and copy evidence](CODEC-DECODE-PERFORMANCE.md)
 - [Client comparison](FEATURE-MATRIX.md)
 - [Test conformance](TEST-CONFORMANCE.md)
 - [Differential testing](DIFFERENTIAL-TESTING.md)

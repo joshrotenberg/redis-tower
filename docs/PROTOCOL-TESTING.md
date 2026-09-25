@@ -37,15 +37,20 @@ exactly that bounded first frame into immutable `Bytes` for `resp-rs`; it does
 not clone or copy the entire unread receive batch. Aggregate elements still
 have decoded representation overhead, so `max_frame_size` is a wire-size bound,
 not an exact heap budget. This is a bounded-copy path, not an end-to-end
-zero-copy claim.
+zero-copy claim. The [decode ownership and copy evidence](CODEC-DECODE-PERFORMANCE.md)
+compares the historical whole-buffer clone, the production first-frame copy,
+and a split/shared alternative, including retained-frame lifetime behavior.
 
 The declared-cardinality regression uses a test-only scan observer: an array
 or map declaring ten million entries visits exactly its one available header
 and never spills the inline nesting stack. This deterministically verifies
 constant scan work without attempting a dangerous allocation. A separate
-test-only materialization counter wraps the public `RespCodec::decode` path:
-modest incomplete array and map declarations leave it at zero, while a complete
-array is the positive control that increments it.
+test-only materialization counters wrap the public `RespCodec::decode` path:
+modest incomplete array and map declarations leave both frame and byte counts
+at zero, while a complete array is the positive control. A retained mixed
+pipeline proves the byte count is exactly the sum of completed frame extents,
+and byte-at-a-time delivery proves incomplete fragments are never copied for
+parser input.
 
 ## Fragmentation oracle
 
