@@ -231,6 +231,7 @@ fn geo_hll_bitmap_and_diagnostics_are_byte_exact() {
 fn module_keys_items_labels_and_elements_are_byte_exact() {
     let key = b"module:{\xff}\0".as_slice();
     let item = b"item\xff\r\n".as_slice();
+    let suggestion = b"suggestion\0\xff\r\n".as_slice();
     let payload = b"payload\0\x80".as_slice();
     let label = b"label\xff".as_slice();
 
@@ -251,8 +252,8 @@ fn module_keys_items_labels_and_elements_are_byte_exact() {
         bytes(&[b"JSON.GET", key, b"$"])
     );
     assert_eq!(
-        wire_args(&FtSugAdd::new(key, item, 1.5).payload(payload)),
-        bytes(&[b"FT.SUGADD", key, item, b"1.5", b"PAYLOAD", payload])
+        wire_args(&FtSugAdd::new(key, suggestion, 1.5).payload(payload)),
+        bytes(&[b"FT.SUGADD", key, suggestion, b"1.5", b"PAYLOAD", payload])
     );
     assert_eq!(
         wire_args(&TsCreate::new(key).label(label, payload)),
