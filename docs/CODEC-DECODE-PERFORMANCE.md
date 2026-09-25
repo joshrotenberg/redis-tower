@@ -36,7 +36,7 @@ a claim that this evidence round alone produced an end-to-end client speedup.
 ## Retained evidence
 
 The checked [raw evidence](../conformance/codec-copy-evidence.json) was recorded
-on macOS arm64 at source `f9d07f10c742e4c3d7e53355068a2e6043fd67a3`
+on macOS arm64 at source `b7256ba04acda830368632af1f2450f746029c81`
 with Rust 1.98.1, Cargo 1.98.1, `bytes` 1.12.1, `resp-rs` 0.1.8,
 `tokio-util` 0.7.19, and Criterion 0.5.1. The source tree was clean when the
 run began. Allocation values are requested layout bytes observed through an
@@ -55,12 +55,12 @@ storage, `Frame` values, and aggregate vectors.
 
 | Scenario and strategy | Copied wire | Allocated through decode | Live after decode | Median time |
 |---|---:|---:|---:|---:|
-| 512 five-byte replies; historical whole-buffer copy | 656,640 B | 708,352 B | 708,352 B | 53,549 ns |
-| 512 five-byte replies; production first-frame copy | 2,560 B | 54,272 B | 54,272 B | 36,169 ns |
-| 512 five-byte replies; split/shared comparison | 0 B | 39,464 B | 39,464 B | 11,323 ns |
-| 128 mixed replies (71,296 wire bytes); historical whole-buffer copy | 4,630,640 B | 4,718,832 B | 3,576,560 B | 94,233 ns |
-| 128 mixed replies; production first-frame copy | 71,296 B | 158,720 B | 158,544 B | 16,201 ns |
-| 128 mixed replies; split/shared comparison | 0 B | 85,160 B | 85,160 B | 6,250 ns |
+| 512 five-byte replies; historical whole-buffer copy | 656,640 B | 708,352 B | 708,352 B | 54,307 ns |
+| 512 five-byte replies; production first-frame copy | 2,560 B | 54,272 B | 54,272 B | 39,685 ns |
+| 512 five-byte replies; split/shared comparison | 0 B | 39,464 B | 39,464 B | 12,722 ns |
+| 128 mixed replies (71,296 wire bytes); historical whole-buffer copy | 4,630,640 B | 4,718,832 B | 3,576,560 B | 99,510 ns |
+| 128 mixed replies; production first-frame copy | 71,296 B | 158,720 B | 158,544 B | 16,425 ns |
+| 128 mixed replies; split/shared comparison | 0 B | 85,160 B | 85,160 B | 6,389 ns |
 
 The lifetime counterexample is the reason the fastest microbenchmark strategy
 is not the production default. The input contains a 23-byte first frame and a
@@ -69,9 +69,9 @@ frame remains alive:
 
 | Strategy | Copied wire | Bytes pinned by the retained head | Median time |
 |---|---:|---:|---:|
-| Historical whole-buffer copy | 262,178 B | 262,202 B | 8,105 ns |
-| Production first-frame copy | 23 B | 47 B | 2,920 ns |
-| Split/shared comparison | 0 B | 262,218 B | 3,353 ns |
+| Historical whole-buffer copy | 262,178 B | 262,202 B | 8,819 ns |
+| Production first-frame copy | 23 B | 47 B | 3,275 ns |
+| Split/shared comparison | 0 B | 262,218 B | 3,637 ns |
 
 These numbers should not be extrapolated to a complete Redis workload. The
 production path also performs the bounded preflight scan, while the comparison
@@ -105,10 +105,10 @@ wire bytes per completed materialization.
 
 | Delivery chunk | Copied wire | Allocated through decode | Buffer reallocations | Median time |
 |---:|---:|---:|---:|---:|
-| 1 B | 5,616 B | 20,720 B | 6 | 75,838 ns |
-| 7 B | 5,616 B | 20,720 B | 6 | 21,730 ns |
-| 64 B | 5,616 B | 20,720 B | 3 | 12,513 ns |
-| 1,024 B | 5,616 B | 22,256 B | 1 | 10,633 ns |
+| 1 B | 5,616 B | 20,720 B | 6 | 86,262 ns |
+| 7 B | 5,616 B | 20,720 B | 6 | 24,997 ns |
+| 64 B | 5,616 B | 20,720 B | 3 | 12,590 ns |
+| 1,024 B | 5,616 B | 22,256 B | 1 | 11,136 ns |
 
 To reproduce the checked allocation/copy artifact from a clean checkout, use
 an absolute output path because Cargo runs the custom benchmark from the
