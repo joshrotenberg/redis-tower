@@ -624,14 +624,14 @@ impl RedisConnection {
             #[cfg(feature = "tls-rustls")]
             {
                 let tls_config = crate::tls::TlsConfig::default_rustls();
-                let addr = format!("{}:{}", parsed.host, parsed.port);
-                Self::connect_tls_raw(&addr, &parsed.host, &tls_config, config).await?
+                let addr = parsed.tcp_addr();
+                Self::connect_tls_raw(&addr, parsed.tls_server_name(), &tls_config, config).await?
             }
             #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
             {
                 let tls_config = crate::tls::TlsConfig::default_native_tls();
-                let addr = format!("{}:{}", parsed.host, parsed.port);
-                Self::connect_tls_raw(&addr, &parsed.host, &tls_config, config).await?
+                let addr = parsed.tcp_addr();
+                Self::connect_tls_raw(&addr, parsed.tls_server_name(), &tls_config, config).await?
             }
             #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
             {
@@ -640,7 +640,7 @@ impl RedisConnection {
                 ));
             }
         } else {
-            Self::connect_raw(&format!("{}:{}", parsed.host, parsed.port), config).await?
+            Self::connect_raw(&parsed.tcp_addr(), config).await?
         };
 
         conn.post_connect_setup(&parsed).await?;
@@ -710,8 +710,9 @@ impl RedisConnection {
                 "unix socket URLs cannot use TLS".into(),
             ));
         }
-        let addr = format!("{}:{}", parsed.host, parsed.port);
-        let mut conn = Self::connect_tls_raw(&addr, &parsed.host, tls_config, config).await?;
+        let addr = parsed.tcp_addr();
+        let mut conn =
+            Self::connect_tls_raw(&addr, parsed.tls_server_name(), tls_config, config).await?;
         conn.post_connect_setup(&parsed).await?;
         conn.negotiate_protocol(config.protocol).await?;
         Ok(conn)
@@ -1705,6 +1706,109 @@ mod tests {
             Err(RedisError::ConnectTimeout) => {}
             Err(err) => assert_eq!(err.connection_addr(), Some(addr), "got: {err:?}"),
             Ok(_) => panic!("connecting to a reserved port should fail"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plaintext_url_preserves_an_ipv6_scope_id() {
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                eprintln!("skipping scoped IPv6 URL test: IPv6 loopback is unavailable");
+                return;
+            }
+            Err(error) => panic!("bind IPv6 loopback: {error}"),
+        };
+        let address = listener.local_addr().expect("read listener address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            for _ in 0..2 {
+                framed
+                    .next()
+                    .await
+                    .expect("client closed during setup")
+                    .expect("decode CLIENT SETINFO");
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to CLIENT SETINFO");
+            }
+        });
+
+        let url = format!("redis://[::1%0]:{}/", address.port());
+        let connection = RedisConnection::connect_url_with_config(
+            &url,
+            &ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
+        drop(connection);
+        server.await.expect("join test server");
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[tokio::test]
+    async fn tls_urls_complete_an_ipv6_connection() {
+        let rustls = (
+            "rustls",
+            crate::tls::TlsConfig::default_rustls()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true),
+        );
+        #[cfg(feature = "tls-native-tls")]
+        let backends = [
+            rustls,
+            (
+                "native-tls",
+                crate::tls::TlsConfig::default_native_tls()
+                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_hostnames(true),
+            ),
+        ];
+        #[cfg(not(feature = "tls-native-tls"))]
+        let backends = [rustls];
+
+        for (backend, tls) in backends {
+            for scheme in ["rediss", "valkeys"] {
+                let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+                    Ok(listener) => listener,
+                    Err(error) if error.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                        eprintln!("skipping TLS URL IPv6 test: IPv6 loopback is unavailable");
+                        return;
+                    }
+                    Err(error) => panic!("bind IPv6 loopback: {error}"),
+                };
+                let address = listener.local_addr().expect("read listener address");
+                let acceptor = tokio_rustls::TlsAcceptor::from(crate::tls::tests::server_config());
+                let server = tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.expect("accept TLS client");
+                    let stream = acceptor.accept(stream).await.expect("accept TLS handshake");
+                    let mut framed = Framed::new(stream, RespCodec::new());
+                    for _ in 0..2 {
+                        framed
+                            .next()
+                            .await
+                            .expect("client closed during setup")
+                            .expect("decode CLIENT SETINFO");
+                        framed
+                            .send(Frame::SimpleString(b"OK"[..].into()))
+                            .await
+                            .expect("reply to CLIENT SETINFO");
+                    }
+                });
+
+                let url = format!("{scheme}://[::1]:{}/", address.port());
+                let connection = RedisConnection::connect_url_with_tls_and_config(
+                    &url,
+                    &tls,
+                    &ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("connect to {url} with {backend}: {error}"));
+                drop(connection);
+                server.await.expect("join test TLS server");
+            }
         }
     }
 
