@@ -12,6 +12,9 @@ NIGHTLY_MODULES = ROOT / ".github" / "workflows" / "nightly-modules.yml"
 README = ROOT / "README.md"
 REDIS_8X_TEST = ROOT / "crates" / "redis-tower" / "tests" / "redis_8x_commands.rs"
 TLS_TEST = ROOT / "crates" / "redis-tower" / "tests" / "test_infrastructure.rs"
+CAPABILITY_TEST = ROOT / "crates" / "redis-tower-modules" / "tests" / "capabilities.rs"
+CLUSTER_TEST = ROOT / "crates" / "redis-tower-cluster" / "tests" / "cluster_integration.rs"
+TOPOLOGY_TEST = ROOT / "crates" / "redis-tower-client" / "tests" / "topologies.rs"
 
 
 def coverage_job() -> str:
@@ -53,11 +56,15 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("image: redis:8", workflow)
         self.assertIn('REDIS_8X_REQUIRED: "1"', workflow)
         self.assertIn("--test capabilities", workflow)
-        self.assertIn("version_parser_accepts_release_and_prerelease_forms", workflow)
         self.assertIn("required_server_version_and_commands_are_present", workflow)
         self.assertIn("--test redis_8x_commands", workflow)
         self.assertIn("redis-tower-modules --all-features --tests", workflow)
         self.assertIn("--ignored --test-threads=1 --nocapture", workflow)
+
+        capability_test = CAPABILITY_TEST.read_text()
+        self.assertIn("version_parser_accepts_release_and_prerelease_forms", capability_test)
+        self.assertIn("command_info_parser_rejects_resp2_and_resp3_nulls", capability_test)
+        self.assertIn("Frame::BulkString(None)", capability_test)
 
     def test_nightly_modules_preflight_capabilities_before_behavior(self) -> None:
         workflow = NIGHTLY_MODULES.read_text()
@@ -81,6 +88,11 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("rejects_wrong_hostname_and_untrusted_ca", tls_test)
         self.assertIn("TLS_PASSWORD_ENCODED", tls_test)
         self.assertNotIn("danger_accept_invalid", tls_test)
+        self.assertNotIn("SHUTDOWN", tls_test)
+
+        cluster_test = CLUSTER_TEST.read_text()
+        self.assertIn("allocate_tls_cluster_ports", cluster_test)
+        self.assertNotIn("SHUTDOWN", cluster_test)
 
     def test_redis_8_and_universal_topology_assertions_are_activated(self) -> None:
         workflow = TRANSPORT_GATE.read_text()
@@ -90,6 +102,9 @@ class CiWorkflowTests(unittest.TestCase):
             workflow,
         )
         self.assertIn("--test topologies --all-features", workflow)
+
+        topology_test = TOPOLOGY_TEST.read_text()
+        self.assertGreaterEqual(topology_test.count("tokio::time::timeout"), 2)
 
         redis_8x = REDIS_8X_TEST.read_text()
         self.assertIn('Info::new().section("server")', redis_8x)

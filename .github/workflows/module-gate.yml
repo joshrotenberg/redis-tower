@@ -66,8 +66,7 @@ jobs:
       - name: Test capability contract
         run: >-
           cargo test -p redis-tower-modules --all-features
-          --test capabilities version_parser_accepts_release_and_prerelease_forms --
-          --exact
+          --test capabilities -- --test-threads=1
 
       - name: Prove server version and required commands
         run: >-

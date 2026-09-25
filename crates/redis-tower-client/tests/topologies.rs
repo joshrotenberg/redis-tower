@@ -5,7 +5,7 @@
 
 #![cfg(unix)]
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bytes::Bytes;
 use redis_server_wrapper::{RedisCluster, RedisSentinel};
@@ -88,39 +88,38 @@ async fn sentinel_url_selects_topology_executes_and_recovers_after_failover() {
         "kill did not terminate the original master"
     );
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        if let Ok(info) = sentinel.poke().await {
-            let flags = info.get("flags").map(String::as_str).unwrap_or_default();
-            let current_master = sentinel_master_addr(&info);
-            if flags == "master" && current_master != initial_master {
-                break;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Ok(info) = sentinel.poke().await {
+                let flags = info.get("flags").map(String::as_str).unwrap_or_default();
+                let current_master = sentinel_master_addr(&info);
+                if flags == "master" && current_master != initial_master {
+                    break;
+                }
             }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(
-            Instant::now() < deadline,
-            "Sentinel did not elect a replacement master within 30 seconds"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
+    })
+    .await
+    .expect("Sentinel did not elect a replacement master within 30 seconds");
 
-    let reconnect_deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let result = client
-            .execute(Set::new("universal:sentinel:after", "after"))
-            .await;
-        if result.is_ok() {
-            break;
+    let value: Option<Bytes> = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if client
+                .execute(Set::new("universal:sentinel:after", "after"))
+                .await
+                .is_ok()
+            {
+                let result: Result<Option<Bytes>, _> =
+                    client.execute(Get::new("universal:sentinel:after")).await;
+                if let Ok(value) = result {
+                    break value;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
         }
-        assert!(
-            Instant::now() < reconnect_deadline,
-            "UniversalClient did not reconnect through Sentinel: {result:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    let value: Option<Bytes> = client
-        .execute(Get::new("universal:sentinel:after"))
-        .await
-        .unwrap();
+    })
+    .await
+    .expect("UniversalClient did not reconnect through Sentinel within 30 seconds");
     assert_eq!(value, Some(Bytes::from_static(b"after")));
 }

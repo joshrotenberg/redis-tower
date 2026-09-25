@@ -1828,35 +1828,78 @@ async fn cluster_connection_credentials_and_connect_url() {
 //       --test cluster_integration -- --ignored --test-threads=1
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+struct TlsClusterRunDir(std::path::PathBuf);
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+impl TlsClusterRunDir {
+    fn create() -> Result<Self, String> {
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("system clock is before the Unix epoch: {error}"))?
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("redis-cluster-tls-{}-{run_id}", std::process::id()));
+        std::fs::create_dir_all(&path)
+            .map_err(|error| format!("failed to create TLS cluster directory: {error}"))?;
+        Ok(Self(path))
+    }
+}
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+impl Drop for TlsClusterRunDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 struct TlsClusterFixture {
     _nodes: Vec<RedisServerHandle>,
     seed_addr: String,
+    ca_pem: Vec<u8>,
+    // Declared after the server handles so they release their files before
+    // the unique run directory is removed.
+    _run_dir: TlsClusterRunDir,
+}
+
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+fn allocate_tls_cluster_ports() -> Result<Vec<u16>, String> {
+    let mut listeners = Vec::with_capacity(6);
+    for _ in 0..6 {
+        listeners.push(
+            std::net::TcpListener::bind("127.0.0.1:0")
+                .map_err(|error| format!("failed to reserve a TLS cluster port: {error}"))?,
+        );
+    }
+    listeners
+        .iter()
+        .map(|listener| {
+            listener
+                .local_addr()
+                .map(|address| address.port())
+                .map_err(|error| format!("failed to inspect a TLS cluster port: {error}"))
+        })
+        .collect()
 }
 
 /// Try to start a TLS cluster. Returns `None` if redis-server was not
 /// compiled with TLS support (e.g. missing `BUILD_TLS=yes`).
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 async fn ensure_tls_cluster() -> Option<TlsClusterFixture> {
-    // A killed test process can leave its fixed test ports occupied. Reclaim
-    // only this fixture's ports before replacing its private CA files.
-    for port in 17400..17403 {
-        let _ = std::process::Command::new("redis-cli")
-            .args([
-                "--tls",
-                "--insecure",
-                "-h",
-                "127.0.0.1",
-                "-p",
-                &port.to_string(),
-                "SHUTDOWN",
-                "NOSAVE",
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-    }
-
-    let certs_dir = std::path::PathBuf::from("/tmp/redis-cluster-tls-integration/certs");
+    let run_dir = match TlsClusterRunDir::create() {
+        Ok(run_dir) => run_dir,
+        Err(error) if std::env::var_os("REDIS_TEST_REQUIRE_TLS").is_some() => {
+            panic!("required TLS cluster directory could not be created: {error}")
+        }
+        Err(error) => {
+            eprintln!(
+                "skipping TLS tests: failed to create isolated run directory: {error}; \
+                 set REDIS_TEST_REQUIRE_TLS=1 to fail instead"
+            );
+            return None;
+        }
+    };
+    let certs_dir = run_dir.0.join("certs");
     let certs = match redis_server_wrapper::tls::generate_test_certs(&certs_dir) {
         Ok(c) => c,
         Err(e) => {
@@ -1870,23 +1913,40 @@ async fn ensure_tls_cluster() -> Option<TlsClusterFixture> {
             return None;
         }
     };
+    let ca_pem = match std::fs::read(&certs.ca_cert_file) {
+        Ok(ca_pem) => ca_pem,
+        Err(error) if std::env::var_os("REDIS_TEST_REQUIRE_TLS").is_some() => {
+            panic!("required TLS cluster CA could not be read: {error}")
+        }
+        Err(error) => {
+            eprintln!(
+                "skipping TLS tests: failed to read generated CA: {error}; \
+                 set REDIS_TEST_REQUIRE_TLS=1 to fail instead"
+            );
+            return None;
+        }
+    };
+    let ports = match allocate_tls_cluster_ports() {
+        Ok(ports) => ports,
+        Err(error) if std::env::var_os("REDIS_TEST_REQUIRE_TLS").is_some() => {
+            panic!("required TLS cluster ports could not be allocated: {error}")
+        }
+        Err(error) => {
+            eprintln!(
+                "skipping TLS tests: failed to allocate isolated ports: {error}; \
+                 set REDIS_TEST_REQUIRE_TLS=1 to fail instead"
+            );
+            return None;
+        }
+    };
 
     // RedisCluster currently assumes the plaintext and TLS ports are the
     // same when forming a TLS topology. Build three TLS-only nodes directly so
     // the fixture itself proves there is no plaintext fallback.
-    let run_id = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_nanos();
     let mut nodes = Vec::new();
     let mut addrs = Vec::new();
-    for index in 0..3_u16 {
-        let port = 17400 + index;
-        let cluster_port = 27400 + index;
-        let dir = std::path::PathBuf::from(format!(
-            "/tmp/redis-cluster-tls-integration/run-{}-{run_id}/node-{port}",
-            std::process::id(),
-        ));
+    for (index, (&port, &cluster_port)) in ports[..3].iter().zip(&ports[3..]).enumerate() {
+        let dir = run_dir.0.join(format!("node-{index}-{port}"));
         let server = RedisServer::new()
             .port(0)
             .tls_port(port)
@@ -1937,19 +1997,19 @@ async fn ensure_tls_cluster() -> Option<TlsClusterFixture> {
     Some(TlsClusterFixture {
         _nodes: nodes,
         seed_addr: addrs[0].clone(),
+        ca_pem,
+        _run_dir: run_dir,
     })
 }
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-fn tls_config_for_test() -> redis_tower_core::tls::TlsConfig {
-    let ca_pem = std::fs::read("/tmp/redis-cluster-tls-integration/certs/ca.crt")
-        .expect("read generated cluster TLS CA");
+fn tls_config_for_test(fixture: &TlsClusterFixture) -> redis_tower_core::tls::TlsConfig {
     #[cfg(feature = "tls-rustls")]
     let tls = redis_tower_core::tls::TlsConfig::default_rustls();
     #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
     let tls = redis_tower_core::tls::TlsConfig::default_native_tls();
 
-    tls.with_root_ca_pem(ca_pem)
+    tls.with_root_ca_pem(fixture.ca_pem.clone())
 }
 
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -1962,7 +2022,7 @@ async fn mux_cluster_tls_connect_and_roundtrip() {
     let addr = cluster.seed_addr.clone();
 
     let client = MultiplexedClusterClient::builder(&addr)
-        .tls(tls_config_for_test())
+        .tls(tls_config_for_test(&cluster))
         .connect()
         .await
         .expect("TLS connect should succeed");
@@ -1992,7 +2052,7 @@ async fn cluster_connection_tls_connect_and_roundtrip() {
     let addr = cluster.seed_addr.clone();
 
     let mut conn = ClusterConnection::builder(&addr)
-        .tls(tls_config_for_test())
+        .tls(tls_config_for_test(&cluster))
         .connect()
         .await
         .expect("TLS connect should succeed");

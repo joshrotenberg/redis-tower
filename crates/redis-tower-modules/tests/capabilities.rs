@@ -29,6 +29,10 @@ fn parse_version(value: &str) -> (u32, u32, u32) {
     (major, minor, patch)
 }
 
+fn command_info_entry_is_present(entry: &Frame) -> bool {
+    matches!(entry, Frame::Array(Some(fields)) if !fields.is_empty())
+}
+
 #[tokio::test]
 #[ignore = "requires the module-enabled CI service"]
 async fn required_server_version_and_commands_are_present() {
@@ -85,8 +89,8 @@ async fn required_server_version_and_commands_are_present() {
     );
     for (name, entry) in required_commands.iter().zip(entries) {
         assert!(
-            !matches!(entry, Frame::Null | Frame::Array(None)),
-            "required module command {name} is unavailable"
+            command_info_entry_is_present(&entry),
+            "required module command {name} is unavailable or malformed: {entry:?}"
         );
     }
 
@@ -100,4 +104,19 @@ async fn required_server_version_and_commands_are_present() {
 fn version_parser_accepts_release_and_prerelease_forms() {
     assert_eq!(parse_version("8.0.6"), (8, 0, 6));
     assert_eq!(parse_version("8.4.0-rc1"), (8, 4, 0));
+}
+
+#[test]
+fn command_info_parser_rejects_resp2_and_resp3_nulls() {
+    for missing in [
+        Frame::BulkString(None),
+        Frame::Null,
+        Frame::Array(None),
+        Frame::Array(Some(Vec::new())),
+    ] {
+        assert!(!command_info_entry_is_present(&missing), "{missing:?}");
+    }
+    assert!(command_info_entry_is_present(&Frame::Array(Some(vec![
+        Frame::Integer(1),
+    ]))));
 }
