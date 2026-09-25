@@ -24,7 +24,21 @@ def coverage_job() -> str:
     return workflow[start:end]
 
 
+def documentation_job() -> str:
+    workflow = WORKFLOW.read_text()
+    start = workflow.index("  docs:\n")
+    end = workflow.index("\n  command-coverage:\n", start)
+    return workflow[start:end]
+
+
 class CiWorkflowTests(unittest.TestCase):
+    def test_published_migration_examples_are_compiled(self) -> None:
+        job = documentation_job()
+        self.assertIn("cargo check --locked", job)
+        self.assertIn(
+            "--manifest-path release-tests/redis-rs-migration/Cargo.toml", job
+        )
+
     def test_coverage_job_does_not_depend_on_unconfigured_codecov(self) -> None:
         job = coverage_job()
         self.assertIn("    permissions:\n      contents: read\n", job)

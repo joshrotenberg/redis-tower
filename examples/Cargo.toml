@@ -23,7 +23,6 @@ redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true, features = ["stack"] }
 redis-tower-cluster = { workspace = true }
 redis-tower-sentinel = { workspace = true }
-redis = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tokio-stream = { workspace = true }
 tower = { workspace = true }
@@ -38,10 +37,6 @@ opentelemetry-stdout = { version = "0.32", default-features = false, features = 
 [[example]]
 name = "basic"
 path = "basic.rs"
-
-[[example]]
-name = "migration_redis_rs"
-path = "migration_redis_rs.rs"
 
 [[example]]
 name = "pipeline"

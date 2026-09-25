@@ -23,9 +23,8 @@ response contracts, not replacing an "untyped" client with a typed one.
 
 ## Dependencies
 
-The redis-rs side below is pinned to the version used by this repository's
-differential oracle. Choose only the redis-tower topology crates the application
-needs:
+The versions below are the released APIs used by this guide. Choose only the
+redis-tower topology crates the application needs:
 
 ```toml
 [dependencies]
@@ -40,15 +39,16 @@ bytes = "1"
 tokio-stream = "0.1"           # only for stream APIs such as pub/sub
 ```
 
-For TLS, enable `tls-rustls` (recommended) or `tls-native-tls`; neither TLS
-backend is enabled by the facade's default feature set. Redis Stack command
-groups can be selected individually or through the facade's default
-`commands-stack` feature.
+For TLS, enable `tls-rustls` (recommended) or `tls-native-tls` on the facade and
+on each topology crate that opens TLS connections; neither backend is enabled
+by the facade's default feature set. Redis Stack command groups can be selected
+individually or through the facade's default `commands-stack` feature.
 
-The side-by-side example in [`examples/migration_redis_rs.rs`](../examples/migration_redis_rs.rs)
-is compiled in the workspace against redis-rs 1.7.0 and the current local
-redis-tower crates. The larger live oracle is documented in
-[Differential testing](DIFFERENTIAL-TESTING.md).
+The standalone
+[registry compatibility harness](https://github.com/joshrotenberg/redis-tower/tree/main/release-tests/redis-rs-migration)
+is compiled in CI against these exact crates.io versions. It is an independent
+workspace, so local path crates cannot mask a published-API mismatch. The larger
+live oracle is documented in [Differential testing](DIFFERENTIAL-TESTING.md).
 
 ## Connect and share
 
@@ -84,19 +84,19 @@ available. If wire shape matters during a migration, pin both clients instead
 of comparing different protocols:
 
 ```rust,ignore
-// RESP2 on both clients
+// redis-rs RESP2
 let redis_rs = redis::Client::open("redis://127.0.0.1:6379/?protocol=resp2")?;
-let tower = MultiplexedClient::connect_url(
-    "redis://127.0.0.1:6379/?protocol=resp2",
-).await?;
 
-// Or force RESP3 without fallback on redis-tower.
+// redis-tower RESP2. The released URL parser does not consume `protocol=`;
+// select the protocol with ConnectionConfig.
 use redis_tower::{ConnectionConfig, MultiplexedClient, ProtocolVersion};
-let config = ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3);
+let config = ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2);
 let tower = MultiplexedClient::connect_url_with_connection_config(
     "redis://127.0.0.1:6379/",
     &config,
 ).await?;
+
+// Use ProtocolVersion::Resp3 to force RESP3 without fallback.
 ```
 
 `redis://user:password@host/db` and `rediss://...` carry ACL credentials,
@@ -104,12 +104,17 @@ database selection, and TLS. Percent-encode URL-special bytes in usernames and
 passwords. redis-tower authenticates and selects the database as part of setup;
 a reconnecting URL factory repeats those steps on every new socket.
 
-Unix sockets use the redis-rs-compatible query form. redis-tower also accepts
-`redis+unix` and `valkey+unix` aliases:
+The released redis-tower URL parser accepts Unix sockets with an optional
+database query:
 
 ```text
-redis+unix:///run/redis.sock?user=app&pass=secret&db=1&protocol=resp3
+unix:///run/redis.sock?db=1
 ```
+
+The 0.1.3 Unix URL grammar has no authentication or protocol query keys.
+`ConnectionConfig` can select the protocol for an unauthenticated Unix socket;
+an authenticated Unix/RESP3 setup needs an explicit custom setup sequence.
+Do not copy redis-rs Unix query parameters into this released URL unchanged.
 
 For rotating tokens, replace static URL credentials with redis-tower's
 `CredentialProvider`; see [Cloud and rotating credentials](CLOUD-AUTH.md).
@@ -122,7 +127,7 @@ caller. redis-tower command values have one public response type:
 ```rust,ignore
 // redis-rs
 use redis::AsyncCommands;
-connection.set("key", "value").await?;
+let _: () = connection.set("key", "value").await?;
 let value: Option<String> = connection.get("key").await?;
 
 // redis-tower
@@ -148,22 +153,27 @@ or protocol-dependent.
 
 ### Binary arguments
 
-Opaque typed arguments implement `CommandArg`, so byte slices, `Vec<u8>`, and
-`Bytes` do not need a raw-command fallback:
+The published 0.1.3 facade depends on `redis-tower-commands` 0.1.2, where many
+common typed builders—including `Get` and `Set`—accept UTF-8 strings. Use the
+binary-safe `RawCommand::arg` escape hatch for opaque keys and values:
 
 ```rust,ignore
+use redis_tower::commands::RawCommand;
+
 let key = b"binary:\xff".as_slice();
 let payload = vec![0x00, 0xfe, 0xff];
-client.execute(Set::new(key, payload)).await?;
-let value: Option<bytes::Bytes> = client.execute(Get::new(key)).await?;
+client
+    .execute(RawCommand::new("SET").arg(key).arg(payload))
+    .await?;
+let value: Option<bytes::Bytes> = client
+    .execute(RawCommand::new("GET").arg(key).query())
+    .await?;
 ```
 
-Grammar such as JSONPath and Search query syntax remains textual. The complete
-ownership and command-family inventory is in
-[Binary data and typed arguments](BINARY-DATA.md).
-If an application-specific extension or a still-textual builder must carry
-opaque bytes, use `RawCommand::arg` with a byte slice and validate the raw
-response rather than forcing the input through UTF-8.
+Do not force opaque data through UTF-8. The evolving per-family inventory and
+ownership rules are tracked in
+[Binary data and typed arguments](BINARY-DATA.md); check the rustdoc for the
+exact published command version before replacing a raw path with a typed one.
 
 ### Raw commands
 
@@ -302,23 +312,20 @@ stable request boundary. The built-in layers are documented on the
 per-command deadline, Redis's own blocking timeout, and an end-to-end request
 deadline are separate controls; preserve that distinction during migration.
 
-## Lessons from the first MCP integration
+## Lessons from an MCP integration
 
-[`redis-database-mcp-rs`](https://github.com/redis-developer/redis-database-mcp-rs)
-is the first substantial external implementation built on redis-tower. Its
-[pinned executor design](https://github.com/redis-developer/redis-database-mcp-rs/blob/75efd4b4209684005bfc7ba8f5394f7cbc5d9ae9/crates/redis-mcp/src/executor.rs)
-provides useful migration lessons:
+A downstream MCP integration motivated the public
+[differential corpus](DIFFERENTIAL-TESTING.md). The reusable lessons are backed
+by that repository-local case ledger and executable tests:
 
-- production traffic uses a reconnecting `MultiplexedClient`, while redis-rs
-  remains an independent test oracle;
-- the application defines its own `RedisValue` boundary instead of leaking
-  either client's protocol enum through MCP schemas;
-- raw top-level server errors and nested per-entry errors are different
-  contracts;
-- the test suite exercises both RESP2 and RESP3 rather than assuming one shape;
-- Cluster routing, blocking sessions, pub/sub, MONITOR, output budgets, and
-  application deadlines remain explicit application concerns.
+- keep redis-rs as an independent oracle instead of sharing redis-tower's
+  serializers or response conversion;
+- define an application response boundary instead of leaking either client's
+  raw protocol enum through a public schema;
+- distinguish top-level server errors from nested per-entry errors;
+- exercise RESP2 and RESP3 rather than assuming one public response shape;
+- test Cluster routing, blocking sessions, binary/null/error values,
+  cancellation, and lost replies as separate contracts.
 
-The repository's [MCP-derived differential corpus](DIFFERENTIAL-TESTING.md)
-turns those lessons into repeatable binary/null/error, pipeline, transaction,
-blocking, topology, cancellation, and lost-reply cases against redis-rs 1.7.0.
+The corpus pins redis-rs 1.7.0 and records the intentionally narrow
+normalizations used for each case.
