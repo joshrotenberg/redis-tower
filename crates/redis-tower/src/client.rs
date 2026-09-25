@@ -74,7 +74,8 @@ impl RedisClient {
         Ok(Self::from_connection(conn))
     }
 
-    /// Connect using a Redis URL (`redis://`, `rediss://`, `unix://`).
+    /// Connect using a Redis or Valkey TCP/TLS URL, or a `unix://`,
+    /// `redis+unix://`, or `valkey+unix://` socket URL.
     pub async fn connect_url(url: &str) -> Result<Self, RedisError> {
         let conn = RedisConnection::connect_url(url).await?;
         Ok(Self::from_connection(conn))

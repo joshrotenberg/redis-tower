@@ -17,7 +17,7 @@ use redis_tower_protocol::{Frame, RespCodec, RespLimits};
 use crate::command::Command;
 use crate::error::RedisError;
 use crate::stream::RedisStream;
-use crate::url::{RedisUrl, parse_redis_url};
+use crate::url::{RedisUrl, parse_connection_url};
 
 /// Configuration for TCP keepalive probes.
 ///
@@ -337,6 +337,16 @@ impl ConnectionConfig {
     }
 }
 
+fn resolve_url_protocol(
+    url_protocol: Option<ProtocolVersion>,
+    configured: ProtocolVersion,
+) -> ProtocolVersion {
+    match configured {
+        ProtocolVersion::Auto => url_protocol.unwrap_or(ProtocolVersion::Auto),
+        explicit => explicit,
+    }
+}
+
 impl RedisConnection {
     /// Create a connection from a framed stream.
     fn from_framed_inner(framed: Framed<RedisStream, RespCodec>) -> Self {
@@ -574,7 +584,14 @@ impl RedisConnection {
 
     /// Connect using a Redis URL.
     ///
-    /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
+    /// Supports `redis://`, `rediss://` (TLS), their Valkey aliases, and
+    /// `unix://`, `redis+unix://`, and `valkey+unix://` Unix-socket URLs.
+    ///
+    /// Unix URLs accept `user`, `pass`, `db`, and `protocol` query parameters:
+    ///
+    /// ```text
+    /// redis+unix:///run/redis%20server.sock?user=app&pass=secret&db=1&protocol=resp3
+    /// ```
     ///
     /// For `rediss://` URLs, a TLS backend feature must be enabled.
     /// The `tls-rustls` backend is preferred if both are enabled.
@@ -584,35 +601,50 @@ impl RedisConnection {
 
     /// Connect using a Redis URL with explicit connection settings.
     ///
-    /// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes. URL
-    /// authentication and database selection run before the configured RESP
-    /// negotiation. Decode limits are active for every setup response.
+    /// URL authentication and database selection run before RESP negotiation.
+    /// `?protocol=2|resp2|3|resp3` selects a protocol when the connection
+    /// config uses [`ProtocolVersion::Auto`]. An explicit protocol in
+    /// [`ConnectionConfig`] takes precedence, which lets RESP3-only clients
+    /// enforce their invariant. Decode limits are active for every setup
+    /// response.
     pub async fn connect_url_with_config(
         url: &str,
         config: &ConnectionConfig,
     ) -> Result<Self, RedisError> {
-        let parsed = parse_redis_url(url)?;
+        let parsed = parse_connection_url(url)?;
 
-        let mut conn = if parsed.unix {
+        let mut conn = if parsed.url.unix {
             #[cfg(unix)]
             {
-                let path = parsed
-                    .path
+                use std::os::unix::ffi::OsStrExt;
+
+                let path_bytes = parsed
+                    .unix_path
                     .as_deref()
                     .ok_or_else(|| RedisError::InvalidUrl("unix URL missing path".into()))?;
+                let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path_bytes));
+                let error_address = parsed
+                    .url
+                    .path
+                    .as_deref()
+                    .unwrap_or("<non-UTF-8 Unix socket>");
                 let stream = if let Some(timeout) = config.connect_timeout {
                     match tokio::time::timeout(timeout, tokio::net::UnixStream::connect(path)).await
                     {
                         Ok(Ok(stream)) => stream,
-                        Ok(Err(error)) => return Err(RedisError::connection(path, error)),
+                        Ok(Err(error)) => {
+                            return Err(RedisError::connection(error_address, error));
+                        }
                         Err(_elapsed) => return Err(RedisError::ConnectTimeout),
                     }
                 } else {
                     tokio::net::UnixStream::connect(path)
                         .await
-                        .map_err(|error| RedisError::connection(path, error))?
+                        .map_err(|error| RedisError::connection(error_address, error))?
                 };
-                Self::from_stream_inner(RedisStream::Unix(stream), config)
+                let mut conn = Self::from_stream_inner(RedisStream::Unix(stream), config);
+                conn.identify_client().await?;
+                conn
             }
             #[cfg(not(unix))]
             {
@@ -620,18 +652,20 @@ impl RedisConnection {
                     "unix sockets not supported on this platform".into(),
                 ));
             }
-        } else if parsed.tls {
+        } else if parsed.url.tls {
             #[cfg(feature = "tls-rustls")]
             {
                 let tls_config = crate::tls::TlsConfig::default_rustls();
-                let addr = parsed.tcp_addr();
-                Self::connect_tls_raw(&addr, parsed.tls_server_name(), &tls_config, config).await?
+                let addr = parsed.url.tcp_addr();
+                Self::connect_tls_raw(&addr, parsed.url.tls_server_name(), &tls_config, config)
+                    .await?
             }
             #[cfg(all(feature = "tls-native-tls", not(feature = "tls-rustls")))]
             {
                 let tls_config = crate::tls::TlsConfig::default_native_tls();
-                let addr = parsed.tcp_addr();
-                Self::connect_tls_raw(&addr, parsed.tls_server_name(), &tls_config, config).await?
+                let addr = parsed.url.tcp_addr();
+                Self::connect_tls_raw(&addr, parsed.url.tls_server_name(), &tls_config, config)
+                    .await?
             }
             #[cfg(not(any(feature = "tls-native-tls", feature = "tls-rustls")))]
             {
@@ -640,11 +674,12 @@ impl RedisConnection {
                 ));
             }
         } else {
-            Self::connect_raw(&parsed.tcp_addr(), config).await?
+            Self::connect_raw(&parsed.url.tcp_addr(), config).await?
         };
 
-        conn.post_connect_setup(&parsed).await?;
-        conn.negotiate_protocol(config.protocol).await?;
+        conn.post_connect_setup(&parsed.url).await?;
+        conn.negotiate_protocol(resolve_url_protocol(parsed.protocol, config.protocol))
+            .await?;
         Ok(conn)
     }
 
@@ -704,17 +739,18 @@ impl RedisConnection {
         tls_config: &crate::tls::TlsConfig,
         config: &ConnectionConfig,
     ) -> Result<Self, RedisError> {
-        let parsed = parse_redis_url(url)?;
-        if parsed.unix {
+        let parsed = parse_connection_url(url)?;
+        if parsed.url.unix {
             return Err(RedisError::InvalidUrl(
                 "unix socket URLs cannot use TLS".into(),
             ));
         }
-        let addr = parsed.tcp_addr();
+        let addr = parsed.url.tcp_addr();
         let mut conn =
-            Self::connect_tls_raw(&addr, parsed.tls_server_name(), tls_config, config).await?;
-        conn.post_connect_setup(&parsed).await?;
-        conn.negotiate_protocol(config.protocol).await?;
+            Self::connect_tls_raw(&addr, parsed.url.tls_server_name(), tls_config, config).await?;
+        conn.post_connect_setup(&parsed.url).await?;
+        conn.negotiate_protocol(resolve_url_protocol(parsed.protocol, config.protocol))
+            .await?;
         Ok(conn)
     }
 
@@ -1487,6 +1523,16 @@ mod tests {
             config.clone().with_connect_timeout(None).connect_timeout(),
             None
         );
+
+        assert_eq!(
+            resolve_url_protocol(Some(ProtocolVersion::Resp3), ProtocolVersion::Auto),
+            ProtocolVersion::Resp3
+        );
+        assert_eq!(
+            resolve_url_protocol(Some(ProtocolVersion::Resp2), ProtocolVersion::Resp3),
+            ProtocolVersion::Resp3,
+            "an explicit connection config must preserve RESP3-only client invariants"
+        );
     }
 
     #[tokio::test]
@@ -1745,6 +1791,110 @@ mod tests {
         .unwrap_or_else(|error| panic!("connect to {url}: {error}"));
         drop(connection);
         server.await.expect("join test server");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_url_runs_the_complete_connection_setup_in_order() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::path::PathBuf::from(format!(
+            "/tmp/redis tower setup-{}-{nonce}.sock",
+            std::process::id()
+        ));
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind Unix setup socket");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept Unix client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            let expected = [
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-NAME"),
+                    bulk("redis-tower"),
+                ]),
+                array(vec![
+                    bulk("CLIENT"),
+                    bulk("SETINFO"),
+                    bulk("LIB-VER"),
+                    bulk(env!("CARGO_PKG_VERSION")),
+                ]),
+                array(vec![bulk("AUTH"), bulk("agent"), bulk("secret+value")]),
+                array(vec![bulk("SELECT"), bulk("1")]),
+                array(vec![bulk("HELLO"), bulk("3")]),
+            ];
+            for expected_command in expected {
+                let actual = framed
+                    .next()
+                    .await
+                    .expect("client closed during Unix setup")
+                    .expect("decode Unix setup command");
+                assert_eq!(actual, expected_command);
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to Unix setup command");
+            }
+        });
+
+        let encoded_path = path.to_str().unwrap().replace(' ', "%20");
+        let url = format!(
+            "redis+unix://{encoded_path}?user=agent&pass=secret%2Bvalue&db=1&protocol=resp3"
+        );
+        let connection = RedisConnection::connect_url(&url)
+            .await
+            .unwrap_or_else(|error| panic!("complete Unix URL setup: {error}"));
+        assert!(connection.is_resp3());
+        drop(connection);
+        server.await.expect("join Unix setup server");
+        std::fs::remove_file(path).expect("remove Unix setup socket");
+    }
+
+    // Linux permits arbitrary non-NUL bytes in a Unix socket pathname. macOS
+    // rejects non-UTF-8 socket names with EILSEQ, so the byte-preserving
+    // connector path is exercised where such a path can actually be bound.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unix_url_connects_without_lossy_path_conversion() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let stem = format!("/tmp/redis-tower-{}-{nonce}", std::process::id());
+        let mut path_bytes = format!("{stem}-").into_bytes();
+        path_bytes.push(0xff);
+        path_bytes.extend_from_slice(b".sock");
+        let path = std::path::PathBuf::from(OsString::from_vec(path_bytes));
+        let listener = tokio::net::UnixListener::bind(&path).expect("bind non-UTF-8 Unix path");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept Unix client");
+            let mut framed = Framed::new(stream, RespCodec::new());
+            for _ in 0..2 {
+                framed
+                    .next()
+                    .await
+                    .expect("client closed during setup")
+                    .expect("decode CLIENT SETINFO");
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .expect("reply to CLIENT SETINFO");
+            }
+        });
+
+        let url = format!("unix://{stem}-%FF.sock?protocol=resp2");
+        let connection = RedisConnection::connect_url(&url)
+            .await
+            .unwrap_or_else(|error| panic!("connect to non-UTF-8 Unix path: {error}"));
+        assert!(!connection.is_resp3());
+        drop(connection);
+        server.await.expect("join Unix test server");
+        std::fs::remove_file(path).expect("remove Unix test socket");
     }
 
     #[cfg(feature = "tls-rustls")]

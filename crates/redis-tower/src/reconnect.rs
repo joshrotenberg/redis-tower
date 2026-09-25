@@ -10,16 +10,17 @@
 //! Different factories determine what negotiation happens on each reconnect:
 //!
 //! - [`AddrConnectionFactory`] -- plain TCP, automatic RESP3 negotiation, no auth
-//! - [`UrlConnectionFactory`] -- AUTH + SELECT from URL parameters, automatic
-//!   RESP3 negotiation
+//! - [`UrlConnectionFactory`] -- URL-driven AUTH, SELECT, and optional RESP
+//!   protocol selection across TCP, TLS, and Unix sockets
 //! - [`Resp3AddrConnectionFactory`] -- plain TCP, RESP3 via `HELLO 3`, no auth
 //! - [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory)
 //!   -- dynamic credentials fetched on every connection, with AUTH before the
 //!   requested protocol negotiation
 //!
 //! For static URL credentials, configure [`UrlConnectionFactory`] with a
-//! [`ConnectionConfig`] whose protocol is [`ProtocolVersion::Resp3`]. For a
-//! rotating provider, use
+//! [`ConnectionConfig`] whose protocol is [`ProtocolVersion::Resp3`], or add
+//! `?protocol=resp3` to the URL. An explicit `ConnectionConfig` protocol wins;
+//! a URL protocol replaces the default automatic negotiation. For a rotating provider, use
 //! [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory)
 //! with the same protocol setting.
 //!
@@ -363,11 +364,13 @@ impl ConnectionFactory for Arc<dyn ConnectionFactory> {
 
 /// A [`ConnectionFactory`] that connects via a Redis URL string.
 ///
-/// Supports `redis://`, `rediss://` (TLS), and `unix://` schemes.
+/// Supports TCP/TLS Redis and Valkey URLs plus `unix://`, `redis+unix://`, and
+/// `valkey+unix://`. Unix URLs accept `user`, `pass`, `db`, and `protocol`
+/// query parameters.
 ///
 /// This factory uses the [`RedisConnection`] URL connection path, including
-/// its configured variant. AUTH and SELECT are therefore replayed on every
-/// reconnection based on the URL parameters. Use this factory (not
+/// its configured variant. AUTH, SELECT, and URL protocol selection are
+/// therefore replayed on every reconnection. Use this factory (not
 /// [`AddrConnectionFactory`]) when your Redis server requires authentication
 /// or a non-default database.
 pub struct UrlConnectionFactory {
@@ -733,7 +736,7 @@ pub(crate) enum ConnState {
 /// | Factory | AUTH | SELECT | Protocol |
 /// |---------|------|--------|----------|
 /// | [`AddrConnectionFactory`] | No | No | Auto (RESP3 with RESP2 fallback) |
-/// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | Auto (RESP3 with RESP2 fallback) |
+/// | [`UrlConnectionFactory`] | Yes (from URL) | Yes (from URL) | From URL, otherwise configurable (Auto by default) |
 /// | [`Resp3AddrConnectionFactory`] | No | No | Forced RESP3 |
 /// | [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory) | Yes (from provider) | No | Configurable after AUTH |
 ///

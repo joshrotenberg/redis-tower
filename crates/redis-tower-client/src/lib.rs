@@ -59,8 +59,8 @@ pub enum UniversalClient {
 }
 
 impl UniversalClient {
-    /// Connect to a standalone server from a `redis://`, `rediss://`, or
-    /// `unix://` URL.
+    /// Connect to a standalone server from a Redis/Valkey TCP, TLS, or Unix
+    /// socket URL.
     pub async fn standalone(url: &str) -> Result<Self, RedisError> {
         Ok(Self::Standalone(MultiplexedClient::connect_url(url).await?))
     }
@@ -89,7 +89,8 @@ impl UniversalClient {
 
     /// Connect, selecting the topology from the URL scheme:
     ///
-    /// - `redis://`, `rediss://`, `unix://` -> [`Standalone`](Self::Standalone)
+    /// - `redis://`, `rediss://`, `valkey://`, `valkeys://`, `unix://`,
+    ///   `redis+unix://`, `valkey+unix://` -> [`Standalone`](Self::Standalone)
     /// - `redis+cluster://[user:pass@]host:port` / `rediss+cluster://...` ->
     ///   [`Cluster`](Self::Cluster) (the host is the seed node)
     /// - `redis+sentinel://[user:pass@]h1:p1,h2:p2/master-name` /
@@ -152,7 +153,7 @@ impl UniversalClient {
             ));
         }
 
-        // Default: standalone (redis://, rediss://, unix://).
+        // Default: standalone Redis/Valkey TCP, TLS, or Unix-socket URL.
         Self::standalone(url).await
     }
 

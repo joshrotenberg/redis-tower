@@ -74,6 +74,20 @@ let client = MultiplexedClient::connect_url(
 # }
 ```
 
+Unix URLs use the redis-rs-compatible query form. Socket paths are
+percent-decoded, and the `redis+unix` and `valkey+unix` aliases are accepted:
+
+```rust
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+# use redis_tower::MultiplexedClient;
+let client = MultiplexedClient::connect_url(
+    "redis+unix:///run/redis%20server.sock?user=app&pass=secret&db=1&protocol=resp3",
+).await?;
+# let _ = client;
+# Ok(())
+# }
+```
+
 ## Choose a client
 
 | Client | Use it for |
