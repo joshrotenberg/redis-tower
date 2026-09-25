@@ -23442,7 +23442,19 @@
       "tests": [
         {
           "path": "crates/redis-tower-commands/tests/parse_response.rs",
+          "symbol": "set_outcome_without_get_distinguishes_condition_status"
+        },
+        {
+          "path": "crates/redis-tower-commands/tests/parse_response.rs",
           "symbol": "set_outcome_get_maps_nx_and_xx_semantics"
+        },
+        {
+          "path": "crates/redis-test-harness/src/command_tests.rs",
+          "symbol": "cmd_set_nx"
+        },
+        {
+          "path": "crates/redis-test-harness/src/command_tests.rs",
+          "symbol": "cmd_set_xx"
         },
         {
           "path": "crates/redis-tower/tests/integration.rs",
