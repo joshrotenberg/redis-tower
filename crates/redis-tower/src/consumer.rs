@@ -29,18 +29,18 @@
 //! ```
 
 use bytes::Bytes;
-use redis_tower_commands::{XAck, XAutoClaim, XGroupCreate, XReadGroup};
+use redis_tower_commands::{CommandArg, XAck, XAutoClaim, XGroupCreate, XReadGroup};
 use redis_tower_core::{RedisConnection, RedisError};
 
 /// A message received from a Redis stream.
 #[derive(Debug, Clone)]
 pub struct StreamMessage {
     /// The stream key this message came from.
-    pub stream: String,
+    pub stream: Bytes,
     /// The message ID (e.g., "1234567890-0").
     pub id: String,
     /// Field-value pairs in the message.
-    pub fields: Vec<(String, Bytes)>,
+    pub fields: Vec<(Bytes, Bytes)>,
 }
 
 /// Configuration for the [`StreamConsumer`].
@@ -85,18 +85,18 @@ impl Default for ConsumerConfig {
 /// (id `">"`). When `auto_ack` is enabled each message is acknowledged
 /// immediately after being yielded.
 pub struct StreamConsumer {
-    group: String,
-    consumer: String,
-    streams: Vec<String>,
+    group: CommandArg,
+    consumer: CommandArg,
+    streams: Vec<CommandArg>,
     config: ConsumerConfig,
 }
 
 impl StreamConsumer {
     /// Create a new consumer for the given group, consumer name, and stream keys.
     pub fn new(
-        group: impl Into<String>,
-        consumer: impl Into<String>,
-        streams: impl IntoIterator<Item = impl Into<String>>,
+        group: impl Into<CommandArg>,
+        consumer: impl Into<CommandArg>,
+        streams: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             group: group.into(),
@@ -165,7 +165,7 @@ impl StreamConsumer {
 
                         for entry in result.entries {
                             let msg = StreamMessage {
-                                stream: stream_key.clone(),
+                                stream: stream_key.clone().into_bytes(),
                                 id: entry.id.clone(),
                                 fields: entry.fields,
                             };
@@ -245,9 +245,9 @@ impl StreamConsumer {
 
 /// Build an XREADGROUP command for one or more streams with the given ID.
 fn build_xreadgroup(
-    group: &str,
-    consumer: &str,
-    streams: &[String],
+    group: &CommandArg,
+    consumer: &CommandArg,
+    streams: &[CommandArg],
     id: &str,
     count: u64,
     block_ms: Option<u64>,

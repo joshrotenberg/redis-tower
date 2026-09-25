@@ -53,6 +53,29 @@
 //! ```
 //!
 //! All command structs are re-exported at the crate root for convenience.
+//!
+//! # Binary-safe inputs
+//!
+//! Redis keys and stored data are arbitrary bytes. The high-use string, hash,
+//! list, set, sorted-set, and stream builders accept strings or bytes through
+//! [`CommandArg`]:
+//!
+//! ```
+//! use redis_tower_commands::{Get, HSet, Set};
+//! use redis_tower_core::Command;
+//!
+//! let key = b"user:\xff".as_slice();
+//! let set = Set::new(key, vec![0x00, 0xfe, 0xff]);
+//! let get = Get::new(key);
+//! let hash = HSet::new(key, b"field".as_slice(), b"value\xff".as_slice());
+//!
+//! // Builders preserve exact bytes in their RESP frames.
+//! let _ = (set.to_frame(), get.to_frame(), hash.to_frame());
+//! ```
+//!
+//! Owned strings and vectors move into the command, [`bytes::Bytes`] shares
+//! storage, and borrowed inputs are copied once. [`RawCommand`] remains the
+//! byte-oriented escape hatch for typed families not yet using `CommandArg`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -60,6 +83,7 @@
 
 // -- Core Redis commands (always available) --
 mod acl;
+mod arg;
 mod array;
 mod bitmap;
 mod blocking;
@@ -83,6 +107,7 @@ mod strings;
 mod transaction;
 
 pub use acl::*;
+pub use arg::*;
 pub use array::*;
 pub use bitmap::*;
 pub use blocking::*;

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- binary-safe `CommandArg` inputs across typed strings, hashes, lists, sets,
+  sorted sets, and streams, including exact-byte stream response names
+
+### Changed
+
+- **Breaking (pre-1.0):** common command constructors now use
+  `Into<CommandArg>` instead of `Into<String>`, and opaque stream/group/consumer
+  names in typed responses use `Bytes` instead of lossy `String` values
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.1...redis-tower-commands-v0.1.2) - 2026-09-24
 
 ### Added

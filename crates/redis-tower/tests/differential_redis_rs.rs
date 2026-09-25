@@ -9,7 +9,7 @@ mod common;
 use std::fmt;
 
 use common::redis_addr;
-use redis_tower::commands::{RawCommand, Set};
+use redis_tower::commands::{HSet, RPush, RawCommand, SAdd, Set, XAdd, ZAdd};
 use redis_tower::{
     Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
     TransactionResult,
@@ -742,15 +742,13 @@ async fn diff_mcp_typed_set_builder_options() {
 async fn diff_mcp_hash_collection_and_stream_shapes() {
     for protocol in Protocol::ALL {
         let mut pair = Pair::connect("collections-streams", protocol).await;
-        let tower_hash = pair.key("tower", "hash");
-        let redis_hash = pair.key("redis-rs", "hash");
+        let tower_hash = pair.binary_key("tower", "hash");
+        let redis_hash = pair.binary_key("redis-rs", "hash");
         pair.reset(&tower_hash, &redis_hash).await;
         let binary = [0xff, 0, 0x80];
         pair.tower
-            .raw(
-                "HSET",
-                &[&tower_hash, b"field-b", &binary, b"field-a", b"one"],
-            )
+            .connection
+            .execute(HSet::new(&tower_hash, b"field-b", binary).field(b"field-a", b"one"))
             .await
             .unwrap();
         pair.redis_rs
@@ -764,11 +762,15 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         let redis_rs = pairs(pair.redis_rs.raw("HGETALL", &[&redis_hash]).await.unwrap());
         pair.same("hash-map", tower, redis_rs);
 
-        let tower_list = pair.key("tower", "list");
-        let redis_list = pair.key("redis-rs", "list");
+        let tower_list = pair.binary_key("tower", "list");
+        let redis_list = pair.binary_key("redis-rs", "list");
         pair.reset(&tower_list, &redis_list).await;
         pair.tower
-            .raw("RPUSH", &[&tower_list, b"first", &binary, b"third"])
+            .connection
+            .execute(RPush::elements(
+                &tower_list,
+                [b"first".as_slice(), &binary, b"third".as_slice()],
+            ))
             .await
             .unwrap();
         pair.redis_rs
@@ -787,11 +789,15 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
             .unwrap();
         pair.same("ordered-list", tower, redis_rs);
 
-        let tower_set = pair.key("tower", "set");
-        let redis_set = pair.key("redis-rs", "set");
+        let tower_set = pair.binary_key("tower", "set");
+        let redis_set = pair.binary_key("redis-rs", "set");
         pair.reset(&tower_set, &redis_set).await;
         pair.tower
-            .raw("SADD", &[&tower_set, b"beta", b"alpha", &binary])
+            .connection
+            .execute(SAdd::members(
+                &tower_set,
+                [b"beta".as_slice(), b"alpha".as_slice(), &binary],
+            ))
             .await
             .unwrap();
         pair.redis_rs
@@ -802,11 +808,16 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         let redis_rs = unordered(pair.redis_rs.raw("SMEMBERS", &[&redis_set]).await.unwrap());
         pair.same("unordered-set", tower, redis_rs);
 
-        let tower_zset = pair.key("tower", "zset");
-        let redis_zset = pair.key("redis-rs", "zset");
+        let tower_zset = pair.binary_key("tower", "zset");
+        let redis_zset = pair.binary_key("redis-rs", "zset");
         pair.reset(&tower_zset, &redis_zset).await;
         pair.tower
-            .raw("ZADD", &[&tower_zset, b"1", b"beta", b"2.5", b"alpha"])
+            .connection
+            .execute(
+                ZAdd::new(&tower_zset)
+                    .member(1.0, b"beta")
+                    .member(2.5, b"alpha"),
+            )
             .await
             .unwrap();
         pair.redis_rs
@@ -827,11 +838,12 @@ async fn diff_mcp_hash_collection_and_stream_shapes() {
         );
         pair.same("zset-pairs", tower, redis_rs);
 
-        let tower_stream = pair.key("tower", "stream");
-        let redis_stream = pair.key("redis-rs", "stream");
+        let tower_stream = pair.binary_key("tower", "stream");
+        let redis_stream = pair.binary_key("redis-rs", "stream");
         pair.reset(&tower_stream, &redis_stream).await;
         pair.tower
-            .raw("XADD", &[&tower_stream, b"1-0", b"field", &binary])
+            .connection
+            .execute(XAdd::new(&tower_stream).id("1-0").field(b"field", binary))
             .await
             .unwrap();
         pair.redis_rs

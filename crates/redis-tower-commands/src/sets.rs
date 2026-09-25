@@ -2,19 +2,21 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// SADD key member \[member ...\]
 ///
 /// Adds the specified members to the set stored at `key`. Returns the number
 /// of members that were added (excluding members already present).
 #[derive(Clone)]
 pub struct SAdd {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl SAdd {
     /// Create a new [`SAdd`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -23,8 +25,8 @@ impl SAdd {
 
     /// Create the [`SAdd`] command for the supplied members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -37,9 +39,9 @@ impl Command for SAdd {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SADD"), bulk(self.key.as_bytes())];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -65,13 +67,13 @@ impl Command for SAdd {
 /// number of members that were removed.
 #[derive(Clone)]
 pub struct SRem {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl SRem {
     /// Create a new [`SRem`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -80,8 +82,8 @@ impl SRem {
 
     /// Create the [`SRem`] command for the supplied members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -94,9 +96,9 @@ impl Command for SRem {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SREM"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SREM"), bulk(self.key.as_bytes())];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -121,12 +123,12 @@ impl Command for SRem {
 /// Returns all the members of the set stored at `key`.
 #[derive(Clone)]
 pub struct SMembers {
-    key: String,
+    key: CommandArg,
 }
 
 impl SMembers {
     /// Create a new [`SMembers`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -135,7 +137,7 @@ impl Command for SMembers {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("SMEMBERS"), bulk(self.key.as_str())])
+        array(vec![bulk("SMEMBERS"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -181,13 +183,13 @@ impl Command for SMembers {
 /// Returns whether `member` is a member of the set stored at `key`.
 #[derive(Clone)]
 pub struct SIsMember {
-    key: String,
-    member: String,
+    key: CommandArg,
+    member: CommandArg,
 }
 
 impl SIsMember {
     /// Create a new [`SIsMember`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             member: member.into(),
@@ -201,8 +203,8 @@ impl Command for SIsMember {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SISMEMBER"),
-            bulk(self.key.as_str()),
-            bulk(self.member.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -231,12 +233,12 @@ impl Command for SIsMember {
 /// Returns the number of members in the set stored at `key`.
 #[derive(Clone)]
 pub struct SCard {
-    key: String,
+    key: CommandArg,
 }
 
 impl SCard {
     /// Create a new [`SCard`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -245,7 +247,7 @@ impl Command for SCard {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("SCARD"), bulk(self.key.as_str())])
+        array(vec![bulk("SCARD"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -273,19 +275,19 @@ impl Command for SCard {
 /// the given sets.
 #[derive(Clone)]
 pub struct SInter {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl SInter {
     /// Create a new [`SInter`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`SInter`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -298,7 +300,7 @@ impl Command for SInter {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("SINTER")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -348,13 +350,13 @@ impl Command for SInter {
 /// up to that many members. A negative count allows duplicates.
 #[derive(Clone)]
 pub struct SRandMember {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl SRandMember {
     /// Create a new [`SRandMember`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -372,9 +374,9 @@ impl Command for SRandMember {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SRANDMEMBER"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SRANDMEMBER"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
-            args.push(bulk(count.to_string().as_str()));
+            args.push(bulk(count.to_string().as_bytes()));
         }
         array(args)
     }
@@ -417,13 +419,13 @@ impl Command for SRandMember {
 /// and returns up to that many members.
 #[derive(Clone)]
 pub struct SPop {
-    key: String,
+    key: CommandArg,
     count: Option<u64>,
 }
 
 impl SPop {
     /// Create a new [`SPop`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -441,9 +443,9 @@ impl Command for SPop {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SPOP"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SPOP"), bulk(self.key.as_bytes())];
         if let Some(count) = self.count {
-            args.push(bulk(count.to_string().as_str()));
+            args.push(bulk(count.to_string().as_bytes()));
         }
         array(args)
     }
@@ -481,19 +483,19 @@ impl Command for SPop {
 /// first set and all the successive sets.
 #[derive(Clone)]
 pub struct SDiff {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl SDiff {
     /// Create a new [`SDiff`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`SDiff`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -506,7 +508,7 @@ impl Command for SDiff {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("SDIFF")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -556,15 +558,15 @@ impl Command for SDiff {
 /// of elements in the resulting set.
 #[derive(Clone)]
 pub struct SDiffStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
 }
 
 impl SDiffStore {
     /// Create a new [`SDiffStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -577,9 +579,9 @@ impl Command for SDiffStore {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SDIFFSTORE"), bulk(self.destination.as_str())];
+        let mut args = vec![bulk("SDIFFSTORE"), bulk(self.destination.as_bytes())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -605,19 +607,19 @@ impl Command for SDiffStore {
 /// sets.
 #[derive(Clone)]
 pub struct SUnion {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl SUnion {
     /// Create a new [`SUnion`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`SUnion`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -630,7 +632,7 @@ impl Command for SUnion {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("SUNION")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -679,15 +681,15 @@ impl Command for SUnion {
 /// sets into `destination`. Returns the number of elements in the resulting set.
 #[derive(Clone)]
 pub struct SUnionStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
 }
 
 impl SUnionStore {
     /// Create a new [`SUnionStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -700,9 +702,9 @@ impl Command for SUnionStore {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SUNIONSTORE"), bulk(self.destination.as_str())];
+        let mut args = vec![bulk("SUNIONSTORE"), bulk(self.destination.as_bytes())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -729,17 +731,17 @@ impl Command for SUnionStore {
 /// the source set.
 #[derive(Clone)]
 pub struct SMove {
-    source: String,
-    destination: String,
-    member: String,
+    source: CommandArg,
+    destination: CommandArg,
+    member: CommandArg,
 }
 
 impl SMove {
     /// Create a new [`SMove`] command.
     pub fn new(
-        source: impl Into<String>,
-        destination: impl Into<String>,
-        member: impl Into<String>,
+        source: impl Into<CommandArg>,
+        destination: impl Into<CommandArg>,
+        member: impl Into<CommandArg>,
     ) -> Self {
         Self {
             source: source.into(),
@@ -755,9 +757,9 @@ impl Command for SMove {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SMOVE"),
-            bulk(self.source.as_str()),
-            bulk(self.destination.as_str()),
-            bulk(self.member.as_str()),
+            bulk(self.source.as_bytes()),
+            bulk(self.destination.as_bytes()),
+            bulk(self.member.as_bytes()),
         ])
     }
 
@@ -783,13 +785,13 @@ impl Command for SMove {
 /// each member, returns `true` if the member exists, `false` otherwise.
 #[derive(Clone)]
 pub struct SMisMember {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl SMisMember {
     /// Create a new [`SMisMember`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -798,8 +800,8 @@ impl SMisMember {
 
     /// Create the [`SMisMember`] command for the supplied members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -812,9 +814,9 @@ impl Command for SMisMember {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SMISMEMBER"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SMISMEMBER"), bulk(self.key.as_bytes())];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member.as_bytes()));
         }
         array(args)
     }
@@ -855,15 +857,15 @@ impl Command for SMisMember {
 /// resulting set.
 #[derive(Clone)]
 pub struct SInterStore {
-    destination: String,
-    keys: Vec<String>,
+    destination: CommandArg,
+    keys: Vec<CommandArg>,
 }
 
 impl SInterStore {
     /// Create a new [`SInterStore`] command.
     pub fn new(
-        destination: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -876,9 +878,9 @@ impl Command for SInterStore {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SINTERSTORE"), bulk(self.destination.as_str())];
+        let mut args = vec![bulk("SINTERSTORE"), bulk(self.destination.as_bytes())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -905,13 +907,13 @@ impl Command for SInterStore {
 /// work done when the cardinality reaches the specified value.
 #[derive(Clone)]
 pub struct SInterCard {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     limit: Option<u64>,
 }
 
 impl SInterCard {
     /// Create a new [`SInterCard`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             limit: None,
@@ -931,7 +933,7 @@ impl Command for SInterCard {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("SINTERCARD"), bulk(self.keys.len().to_string())];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         if let Some(limit) = self.limit {
             args.push(bulk("LIMIT"));

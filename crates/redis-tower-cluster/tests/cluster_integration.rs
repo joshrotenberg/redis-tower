@@ -9,7 +9,7 @@ use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::pool::ConnectionPool;
-use redis_tower::{CacheTrackingMode, CachedClientConfig, Frame, Transaction};
+use redis_tower::{CacheTrackingMode, CachedClientConfig, Transaction};
 use redis_tower_cluster::{
     CachedMultiplexedClusterClient, ClusterClient, ClusterConnection, ClusterPipeline, ClusterScan,
     ClusterScanItem, MultiplexedClusterClient, ReadPreference, ScanClusterStream, slot_for_key,
@@ -72,9 +72,12 @@ async fn diff_redis_rs_cluster_public_entry_point() {
         .await
         .expect("redis-rs cluster connection");
 
-    let tower_key = "redis_tower:diff:{cluster}:tower";
-    let redis_key = "redis_tower:diff:{cluster}:redis-rs";
-    tower.execute(Del::new(tower_key)).await.unwrap();
+    let tower_key = b"redis_tower:diff:{\xff\x00}:tower".as_slice();
+    let redis_key = b"redis_tower:diff:{\xff\x00}:redis-rs".as_slice();
+    tower
+        .execute(RawCommand::new("DEL").arg(tower_key))
+        .await
+        .unwrap();
     redis::cmd("DEL")
         .arg(redis_key)
         .query_async::<redis::Value>(&mut redis_rs)
@@ -82,20 +85,14 @@ async fn diff_redis_rs_cluster_public_entry_point() {
         .unwrap();
 
     let binary = [0xff, 0, 0x80];
-    tower
-        .execute(RawCommand::new("SET").arg(tower_key).arg(binary))
-        .await
-        .unwrap();
+    tower.execute(Set::new(tower_key, binary)).await.unwrap();
     redis::cmd("SET")
         .arg(redis_key)
         .arg(&binary)
         .query_async::<redis::Value>(&mut redis_rs)
         .await
         .unwrap();
-    let tower_value = tower
-        .execute(RawCommand::new("GET").arg(tower_key))
-        .await
-        .unwrap();
+    let tower_value = tower.execute(Get::new(tower_key)).await.unwrap();
     let redis_value = redis::cmd("GET")
         .arg(redis_key)
         .query_async::<Vec<u8>>(&mut redis_rs)
@@ -103,11 +100,19 @@ async fn diff_redis_rs_cluster_public_entry_point() {
         .unwrap();
     assert_eq!(
         tower_value,
-        Frame::BulkString(Some(Bytes::from(redis_value))),
-        "binary GET diverged through the public Cluster connection"
+        Some(Bytes::from(redis_value)),
+        "typed binary GET diverged through the public Cluster connection"
+    );
+    assert_eq!(
+        slot_for_key(tower_key),
+        slot_for_key(redis_key),
+        "the invalid-UTF-8 hash tag must route by its exact bytes"
     );
 
-    tower.execute(Del::new(tower_key)).await.unwrap();
+    tower
+        .execute(RawCommand::new("DEL").arg(tower_key))
+        .await
+        .unwrap();
     redis::cmd("DEL")
         .arg(redis_key)
         .query_async::<redis::Value>(&mut redis_rs)
@@ -1247,6 +1252,34 @@ async fn mux_cluster_pipeline_and_split_helpers_preserve_order() {
         .expect("timed out verifying split DEL cleanup")
         .expect("failed to verify split DEL cleanup"),
         vec![None, None, None]
+    );
+
+    let binary_key_a = b"redis-tower:split:{\xff\x00}:a".as_slice();
+    let binary_key_b = b"redis-tower:split:{\xfe\x00}:b".as_slice();
+    assert_ne!(slot_for_key(binary_key_a), slot_for_key(binary_key_b));
+    client
+        .mset_split([
+            (binary_key_a, b"value\xff".as_slice()),
+            (binary_key_b, b"value\xfe".as_slice()),
+        ])
+        .await
+        .expect("split MSET should preserve binary keys and values");
+    assert_eq!(
+        client
+            .mget_split([binary_key_b, binary_key_a])
+            .await
+            .expect("split MGET should preserve binary input order"),
+        vec![
+            Some(Bytes::from_static(b"value\xfe")),
+            Some(Bytes::from_static(b"value\xff")),
+        ]
+    );
+    assert_eq!(
+        client
+            .del_split([binary_key_a, binary_key_b])
+            .await
+            .expect("split DEL should accept binary keys"),
+        2
     );
 
     tokio::time::timeout(Duration::from_secs(5), client.shutdown())

@@ -71,6 +71,100 @@ async fn resp3_conn() -> RedisConnection {
         .expect("failed to connect with RESP3")
 }
 
+async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
+    let addr = redis_addr().await;
+    let mut conn = RedisConnection::connect_with_protocol(addr, protocol)
+        .await
+        .expect("connect binary roundtrip client");
+    let key = |family: &[u8]| {
+        [
+            b"redis-tower:typed-binary:".as_slice(),
+            namespace,
+            b":".as_slice(),
+            family,
+            b":\xff\x80".as_slice(),
+        ]
+        .concat()
+    };
+    let string_key = key(b"string");
+    let hash_key = key(b"hash");
+    let list_key = key(b"list");
+    let set_key = key(b"set");
+    let zset_key = key(b"zset");
+    let stream_key = key(b"stream");
+    let value = b"value\0\xff\r\n".as_slice();
+    let field = b"field\xff".as_slice();
+    let member = b"member\xf0\x28\x8c\x28".as_slice();
+
+    for redis_key in [
+        &string_key,
+        &hash_key,
+        &list_key,
+        &set_key,
+        &zset_key,
+        &stream_key,
+    ] {
+        conn.execute(RawCommand::new("DEL").arg(redis_key))
+            .await
+            .expect("clear binary fixture key");
+    }
+
+    conn.execute(Set::new(&string_key, value)).await.unwrap();
+    assert_eq!(
+        conn.execute(Get::new(&string_key)).await.unwrap(),
+        Some(Bytes::copy_from_slice(value))
+    );
+
+    conn.execute(HSet::new(&hash_key, field, value))
+        .await
+        .unwrap();
+    assert_eq!(
+        conn.execute(HGet::new(&hash_key, field)).await.unwrap(),
+        Some(Bytes::copy_from_slice(value))
+    );
+
+    conn.execute(LPush::new(&list_key, value)).await.unwrap();
+    assert_eq!(
+        conn.execute(LRange::new(&list_key, 0, -1)).await.unwrap(),
+        vec![Bytes::copy_from_slice(value)]
+    );
+
+    conn.execute(SAdd::new(&set_key, member)).await.unwrap();
+    assert_eq!(
+        conn.execute(SMembers::new(&set_key)).await.unwrap(),
+        vec![Bytes::copy_from_slice(member)]
+    );
+
+    conn.execute(ZAdd::new(&zset_key).member(2.5, member))
+        .await
+        .unwrap();
+    assert_eq!(
+        conn.execute(ZRange::new(&zset_key, 0, -1)).await.unwrap(),
+        vec![Bytes::copy_from_slice(member)]
+    );
+
+    conn.execute(XAdd::new(&stream_key).id("1-0").field(field, value))
+        .await
+        .unwrap();
+    let entries = conn.execute(XRange::all(&stream_key)).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].id, "1-0");
+    assert_eq!(
+        entries[0].fields,
+        vec![(Bytes::copy_from_slice(field), Bytes::copy_from_slice(value))]
+    );
+}
+
+#[tokio::test]
+async fn typed_binary_inputs_roundtrip_resp2() {
+    typed_binary_roundtrip(ProtocolVersion::Resp2, b"resp2").await;
+}
+
+#[tokio::test]
+async fn typed_binary_inputs_roundtrip_resp3() {
+    typed_binary_roundtrip(ProtocolVersion::Resp3, b"resp3").await;
+}
+
 // Generate shared command tests for RESP3 in a submodule to avoid name conflicts.
 mod resp3 {
     use super::*;
@@ -2218,9 +2312,9 @@ async fn streams_xinfo_groups() {
     let groups = conn.execute(XInfoGroups::new(k)).await.unwrap();
     assert_eq!(groups.len(), 2);
 
-    let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
-    assert!(names.contains(&"g1"));
-    assert!(names.contains(&"g2"));
+    let names: Vec<&[u8]> = groups.iter().map(|g| g.name.as_ref()).collect();
+    assert!(names.contains(&b"g1".as_slice()));
+    assert!(names.contains(&b"g2".as_slice()));
 
     conn.execute(XGroupDestroy::new(k, "g1")).await.unwrap();
     conn.execute(XGroupDestroy::new(k, "g2")).await.unwrap();

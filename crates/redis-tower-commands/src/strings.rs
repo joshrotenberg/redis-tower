@@ -2,17 +2,19 @@ use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
+use crate::CommandArg;
+
 /// GET key
 ///
 /// Returns the value of `key`, or `None` if the key does not exist.
 #[derive(Clone)]
 pub struct Get {
-    key: String,
+    key: CommandArg,
 }
 
 impl Get {
     /// Create a new [`Get`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -21,7 +23,7 @@ impl Command for Get {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("GET"), bulk(self.key.as_str())])
+        array(vec![bulk("GET"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -50,8 +52,8 @@ impl Command for Get {
 /// if `GET` is specified.
 #[derive(Clone)]
 pub struct Set {
-    key: String,
-    value: String,
+    key: CommandArg,
+    value: CommandArg,
     ex: Option<u64>,
     px: Option<u64>,
     condition: Option<SetCondition>,
@@ -69,7 +71,7 @@ pub enum SetCondition {
 
 impl Set {
     /// Create a new [`Set`] command.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -119,8 +121,8 @@ impl Command for Set {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("SET"),
-            bulk(self.key.as_str()),
-            bulk(self.value.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.value.as_bytes()),
         ];
 
         if let Some(ex) = self.ex {
@@ -165,12 +167,12 @@ impl Command for Set {
 /// Increments the integer value of `key` by one.
 #[derive(Clone)]
 pub struct Incr {
-    key: String,
+    key: CommandArg,
 }
 
 impl Incr {
     /// Create a new [`Incr`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -179,7 +181,7 @@ impl Command for Incr {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("INCR"), bulk(self.key.as_str())])
+        array(vec![bulk("INCR"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -289,7 +291,7 @@ enum IncrExIncrement {
 /// one of those expiration options.
 #[derive(Clone)]
 pub struct IncrEx {
-    key: String,
+    key: CommandArg,
     increment: IncrExIncrement,
     lower_bound: Option<IncrExBound>,
     upper_bound: Option<IncrExBound>,
@@ -304,7 +306,7 @@ pub struct IncrEx {
 
 impl IncrEx {
     /// Create an `INCREX` command in the default integer-by-one mode.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             increment: IncrExIncrement::Default,
@@ -421,7 +423,7 @@ impl Command for IncrEx {
     type Response = IncrExResult;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("INCREX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("INCREX"), bulk(self.key.as_bytes())];
 
         match self.increment {
             IncrExIncrement::Default => {}
@@ -553,12 +555,12 @@ fn parse_increx_float(frame: Frame) -> Result<f64, RedisError> {
 /// Returns the values of all specified keys.
 #[derive(Clone)]
 pub struct MGet {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl MGet {
     /// Create a new [`MGet`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -571,7 +573,7 @@ impl Command for MGet {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("MGET")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key.as_bytes()));
         }
         array(args)
     }
@@ -611,13 +613,13 @@ impl Command for MGet {
 /// of the string after the append.
 #[derive(Clone)]
 pub struct Append {
-    key: String,
-    value: String,
+    key: CommandArg,
+    value: CommandArg,
 }
 
 impl Append {
     /// Create a new [`Append`] command.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -631,8 +633,8 @@ impl Command for Append {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("APPEND"),
-            bulk(self.key.as_str()),
-            bulk(self.value.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -656,12 +658,14 @@ impl Command for Append {
 /// Sets multiple keys to their respective values atomically.
 #[derive(Clone)]
 pub struct MSet {
-    pairs: Vec<(String, String)>,
+    pairs: Vec<(CommandArg, CommandArg)>,
 }
 
 impl MSet {
     /// Create a new [`MSet`] command.
-    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+    pub fn new(
+        pairs: impl IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>,
+    ) -> Self {
         Self {
             pairs: pairs
                 .into_iter()
@@ -677,8 +681,8 @@ impl Command for MSet {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("MSET")];
         for (k, v) in &self.pairs {
-            args.push(bulk(k.as_str()));
-            args.push(bulk(v.as_str()));
+            args.push(bulk(k.as_bytes()));
+            args.push(bulk(v.as_bytes()));
         }
         array(args)
     }
@@ -712,7 +716,7 @@ enum MSetExCondition {
 /// configured `NX` or `XX` condition prevented the operation.
 #[derive(Clone)]
 pub struct MSetEx {
-    pairs: Vec<(String, String)>,
+    pairs: Vec<(CommandArg, CommandArg)>,
     condition: Option<MSetExCondition>,
     ex: Option<u64>,
     px: Option<u64>,
@@ -723,7 +727,9 @@ pub struct MSetEx {
 
 impl MSetEx {
     /// Create an `MSETEX` command from key/value pairs.
-    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+    pub fn new(
+        pairs: impl IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>,
+    ) -> Self {
         Self {
             pairs: pairs
                 .into_iter()
@@ -807,8 +813,8 @@ impl Command for MSetEx {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("MSETEX"), bulk(self.pairs.len().to_string())];
         for (key, value) in &self.pairs {
-            args.push(bulk(key.as_str()));
-            args.push(bulk(value.as_str()));
+            args.push(bulk(key.as_bytes()));
+            args.push(bulk(value.as_bytes()));
         }
         match self.condition {
             Some(MSetExCondition::Nx) => args.push(bulk("NX")),
@@ -852,7 +858,7 @@ impl Command for MSetEx {
 /// Returns `None` if the key does not exist.
 #[derive(Clone)]
 pub struct GetEx {
-    key: String,
+    key: CommandArg,
     ex: Option<u64>,
     px: Option<u64>,
     exat: Option<u64>,
@@ -862,7 +868,7 @@ pub struct GetEx {
 
 impl GetEx {
     /// Create a new [`GetEx`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             ex: None,
@@ -928,7 +934,7 @@ impl Command for GetEx {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("GETEX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("GETEX"), bulk(self.key.as_bytes())];
 
         if let Some(ex) = self.ex {
             args.push(bulk("EX"));
@@ -975,12 +981,12 @@ impl Command for GetEx {
 /// not exist.
 #[derive(Clone)]
 pub struct GetDel {
-    key: String,
+    key: CommandArg,
 }
 
 impl GetDel {
     /// Create a new [`GetDel`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -989,7 +995,7 @@ impl Command for GetDel {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("GETDEL"), bulk(self.key.as_str())])
+        array(vec![bulk("GETDEL"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1010,10 +1016,10 @@ impl Command for GetDel {
 
 #[derive(Clone)]
 enum DelExCondition {
-    Eq(String),
-    Ne(String),
-    DigestEq(String),
-    DigestNe(String),
+    Eq(CommandArg),
+    Ne(CommandArg),
+    DigestEq(CommandArg),
+    DigestNe(CommandArg),
 }
 
 /// DELEX key \[IFEQ value | IFNE value | IFDEQ digest | IFDNE digest\]
@@ -1023,13 +1029,13 @@ enum DelExCondition {
 /// the key regardless of its type. Returns `true` when the key was deleted.
 #[derive(Clone)]
 pub struct DelEx {
-    key: String,
+    key: CommandArg,
     condition: Option<DelExCondition>,
 }
 
 impl DelEx {
     /// Create an unconditional `DELEX` command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             condition: None,
@@ -1037,25 +1043,25 @@ impl DelEx {
     }
 
     /// Delete only when the current string value equals `value`.
-    pub fn if_eq(mut self, value: impl Into<String>) -> Self {
+    pub fn if_eq(mut self, value: impl Into<CommandArg>) -> Self {
         self.condition = Some(DelExCondition::Eq(value.into()));
         self
     }
 
     /// Delete only when the current string value does not equal `value`.
-    pub fn if_ne(mut self, value: impl Into<String>) -> Self {
+    pub fn if_ne(mut self, value: impl Into<CommandArg>) -> Self {
         self.condition = Some(DelExCondition::Ne(value.into()));
         self
     }
 
     /// Delete only when the current string digest equals `digest`.
-    pub fn if_digest_eq(mut self, digest: impl Into<String>) -> Self {
+    pub fn if_digest_eq(mut self, digest: impl Into<CommandArg>) -> Self {
         self.condition = Some(DelExCondition::DigestEq(digest.into()));
         self
     }
 
     /// Delete only when the current string digest does not equal `digest`.
-    pub fn if_digest_ne(mut self, digest: impl Into<String>) -> Self {
+    pub fn if_digest_ne(mut self, digest: impl Into<CommandArg>) -> Self {
         self.condition = Some(DelExCondition::DigestNe(digest.into()));
         self
     }
@@ -1065,23 +1071,23 @@ impl Command for DelEx {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("DELEX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("DELEX"), bulk(self.key.as_bytes())];
         match &self.condition {
             Some(DelExCondition::Eq(value)) => {
                 args.push(bulk("IFEQ"));
-                args.push(bulk(value.as_str()));
+                args.push(bulk(value.as_bytes()));
             }
             Some(DelExCondition::Ne(value)) => {
                 args.push(bulk("IFNE"));
-                args.push(bulk(value.as_str()));
+                args.push(bulk(value.as_bytes()));
             }
             Some(DelExCondition::DigestEq(digest)) => {
                 args.push(bulk("IFDEQ"));
-                args.push(bulk(digest.as_str()));
+                args.push(bulk(digest.as_bytes()));
             }
             Some(DelExCondition::DigestNe(digest)) => {
                 args.push(bulk("IFDNE"));
-                args.push(bulk(digest.as_str()));
+                args.push(bulk(digest.as_bytes()));
             }
             None => {}
         }
@@ -1103,12 +1109,12 @@ impl Command for DelEx {
 /// 8.4+), or `None` when `key` does not exist.
 #[derive(Clone)]
 pub struct Digest {
-    key: String,
+    key: CommandArg,
 }
 
 impl Digest {
     /// Create a `DIGEST` command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1117,7 +1123,7 @@ impl Command for Digest {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("DIGEST"), bulk(self.key.as_str())])
+        array(vec![bulk("DIGEST"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1156,14 +1162,14 @@ fn parse_zero_or_one(frame: Frame) -> Result<bool, RedisError> {
 /// Sets `key` to hold `value` with an expiration of `seconds`.
 #[derive(Clone)]
 pub struct SetEx {
-    key: String,
+    key: CommandArg,
     seconds: u64,
-    value: String,
+    value: CommandArg,
 }
 
 impl SetEx {
     /// Create a new [`SetEx`] command.
-    pub fn new(key: impl Into<String>, seconds: u64, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, seconds: u64, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             seconds,
@@ -1178,9 +1184,9 @@ impl Command for SetEx {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SETEX"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.seconds.to_string()),
-            bulk(self.value.as_str()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -1204,14 +1210,18 @@ impl Command for SetEx {
 /// Sets `key` to hold `value` with an expiration of `milliseconds`.
 #[derive(Clone)]
 pub struct PSetEx {
-    key: String,
+    key: CommandArg,
     milliseconds: u64,
-    value: String,
+    value: CommandArg,
 }
 
 impl PSetEx {
     /// Create a new [`PSetEx`] command.
-    pub fn new(key: impl Into<String>, milliseconds: u64, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        milliseconds: u64,
+        value: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             milliseconds,
@@ -1226,9 +1236,9 @@ impl Command for PSetEx {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("PSETEX"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.milliseconds.to_string()),
-            bulk(self.value.as_str()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -1253,13 +1263,13 @@ impl Command for PSetEx {
 /// the key was set, `false` if the key already existed.
 #[derive(Clone)]
 pub struct SetNx {
-    key: String,
-    value: String,
+    key: CommandArg,
+    value: CommandArg,
 }
 
 impl SetNx {
     /// Create a new [`SetNx`] command.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -1273,8 +1283,8 @@ impl Command for SetNx {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SETNX"),
-            bulk(self.key.as_str()),
-            bulk(self.value.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -1300,13 +1310,13 @@ impl Command for SetNx {
 /// new value.
 #[derive(Clone)]
 pub struct IncrByFloat {
-    key: String,
+    key: CommandArg,
     increment: f64,
 }
 
 impl IncrByFloat {
     /// Create a new [`IncrByFloat`] command.
-    pub fn new(key: impl Into<String>, increment: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, increment: f64) -> Self {
         Self {
             key: key.into(),
             increment,
@@ -1320,7 +1330,7 @@ impl Command for IncrByFloat {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("INCRBYFLOAT"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.increment.to_string()),
         ])
     }
@@ -1355,12 +1365,12 @@ impl Command for IncrByFloat {
 /// Decrements the integer value of `key` by one.
 #[derive(Clone)]
 pub struct Decr {
-    key: String,
+    key: CommandArg,
 }
 
 impl Decr {
     /// Create a new [`Decr`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1369,7 +1379,7 @@ impl Command for Decr {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("DECR"), bulk(self.key.as_str())])
+        array(vec![bulk("DECR"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1392,13 +1402,13 @@ impl Command for Decr {
 /// Decrements the integer value of `key` by `decrement`.
 #[derive(Clone)]
 pub struct DecrBy {
-    key: String,
+    key: CommandArg,
     decrement: i64,
 }
 
 impl DecrBy {
     /// Create a new [`DecrBy`] command.
-    pub fn new(key: impl Into<String>, decrement: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, decrement: i64) -> Self {
         Self {
             key: key.into(),
             decrement,
@@ -1412,7 +1422,7 @@ impl Command for DecrBy {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("DECRBY"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.decrement.to_string()),
         ])
     }
@@ -1438,14 +1448,14 @@ impl Command for DecrBy {
 /// by the offsets `start` and `end` (both inclusive).
 #[derive(Clone)]
 pub struct GetRange {
-    key: String,
+    key: CommandArg,
     start: i64,
     end: i64,
 }
 
 impl GetRange {
     /// Create a new [`GetRange`] command.
-    pub fn new(key: impl Into<String>, start: i64, end: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, start: i64, end: i64) -> Self {
         Self {
             key: key.into(),
             start,
@@ -1460,7 +1470,7 @@ impl Command for GetRange {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("GETRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.start.to_string()),
             bulk(self.end.to_string()),
         ])
@@ -1492,14 +1502,14 @@ impl Command for GetRange {
 /// modification.
 #[derive(Clone)]
 pub struct SetRange {
-    key: String,
+    key: CommandArg,
     offset: i64,
-    value: String,
+    value: CommandArg,
 }
 
 impl SetRange {
     /// Create a new [`SetRange`] command.
-    pub fn new(key: impl Into<String>, offset: i64, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, offset: i64, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             offset,
@@ -1514,9 +1524,9 @@ impl Command for SetRange {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SETRANGE"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.offset.to_string()),
-            bulk(self.value.as_str()),
+            bulk(self.value.as_bytes()),
         ])
     }
 
@@ -1541,12 +1551,12 @@ impl Command for SetRange {
 /// key does not exist.
 #[derive(Clone)]
 pub struct StrLen {
-    key: String,
+    key: CommandArg,
 }
 
 impl StrLen {
     /// Create a new [`StrLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1555,7 +1565,7 @@ impl Command for StrLen {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("STRLEN"), bulk(self.key.as_str())])
+        array(vec![bulk("STRLEN"), bulk(self.key.as_bytes())])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1583,13 +1593,13 @@ impl Command for StrLen {
 /// value after the increment.
 #[derive(Clone)]
 pub struct IncrBy {
-    key: String,
+    key: CommandArg,
     increment: i64,
 }
 
 impl IncrBy {
     /// Create a new [`IncrBy`] command.
-    pub fn new(key: impl Into<String>, increment: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, increment: i64) -> Self {
         Self {
             key: key.into(),
             increment,
@@ -1603,7 +1613,7 @@ impl Command for IncrBy {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("INCRBY"),
-            bulk(self.key.as_str()),
+            bulk(self.key.as_bytes()),
             bulk(self.increment.to_string()),
         ])
     }
@@ -1630,12 +1640,14 @@ impl Command for IncrBy {
 /// key was set (at least one already existed).
 #[derive(Clone)]
 pub struct MSetNx {
-    pairs: Vec<(String, String)>,
+    pairs: Vec<(CommandArg, CommandArg)>,
 }
 
 impl MSetNx {
     /// Create a new [`MSetNx`] command.
-    pub fn new(pairs: impl IntoIterator<Item = (impl Into<String>, impl Into<String>)>) -> Self {
+    pub fn new(
+        pairs: impl IntoIterator<Item = (impl Into<CommandArg>, impl Into<CommandArg>)>,
+    ) -> Self {
         Self {
             pairs: pairs
                 .into_iter()
@@ -1651,8 +1663,8 @@ impl Command for MSetNx {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("MSETNX")];
         for (k, v) in &self.pairs {
-            args.push(bulk(k.as_str()));
-            args.push(bulk(v.as_str()));
+            args.push(bulk(k.as_bytes()));
+            args.push(bulk(v.as_bytes()));
         }
         array(args)
     }
@@ -1698,14 +1710,14 @@ pub enum LcsMode {
 /// (which returns a complex nested structure).
 #[derive(Clone)]
 pub struct Lcs {
-    key1: String,
-    key2: String,
+    key1: CommandArg,
+    key2: CommandArg,
     mode: LcsMode,
 }
 
 impl Lcs {
     /// Create a new LCS command in default (string) mode.
-    pub fn new(key1: impl Into<String>, key2: impl Into<String>) -> Self {
+    pub fn new(key1: impl Into<CommandArg>, key2: impl Into<CommandArg>) -> Self {
         Self {
             key1: key1.into(),
             key2: key2.into(),
@@ -1766,8 +1778,8 @@ impl Command for Lcs {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("LCS"),
-            bulk(self.key1.as_str()),
-            bulk(self.key2.as_str()),
+            bulk(self.key1.as_bytes()),
+            bulk(self.key2.as_bytes()),
         ];
 
         match &self.mode {
@@ -1815,13 +1827,13 @@ impl Command for Lcs {
 /// widely used.
 #[derive(Clone)]
 pub struct GetSet {
-    key: String,
-    value: String,
+    key: CommandArg,
+    value: CommandArg,
 }
 
 impl GetSet {
     /// Create a new [`GetSet`] command.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             value: value.into(),
@@ -1835,8 +1847,8 @@ impl Command for GetSet {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("GETSET"),
-            bulk(self.key.as_str()),
-            bulk(self.value.as_str()),
+            bulk(self.key.as_bytes()),
+            bulk(self.value.as_bytes()),
         ])
     }
 

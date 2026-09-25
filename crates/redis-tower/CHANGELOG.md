@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- managed stream consumers now preserve stream keys and field names as exact
+  `Bytes` instead of applying lossy UTF-8 conversion
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.2...redis-tower-v0.1.3) - 2026-09-24
 
 ### Fixed

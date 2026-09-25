@@ -33,6 +33,9 @@ If you are evaluating or adopting the project, start here:
   their source and CI evidence.
 - [Differential testing](DIFFERENTIAL-TESTING.md) records the MCP-derived
   semantic corpus against a pinned redis-rs oracle and its normalization rules.
+- [Binary data and typed arguments](BINARY-DATA.md) explains byte ownership,
+  exact Cluster routing, response types, and the per-family compatibility
+  inventory.
 - The [release process](RELEASING.md) records the manual prepare/publish split,
   workspace publish order, validation gates, and post-publish verification.
 

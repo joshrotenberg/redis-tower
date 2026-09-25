@@ -18,6 +18,7 @@
 
 # Reference
 
+- [Binary data and typed arguments](BINARY-DATA.md)
 - [Feature matrix](FEATURE-MATRIX.md)
 - [Test conformance](TEST-CONFORMANCE.md)
 - [Differential testing](DIFFERENTIAL-TESTING.md)
