@@ -3618,14 +3618,45 @@ mod tests {
         let second_response = second.call(second_request);
 
         let mut pending_ready_service = first.clone();
-        let pending_ready = futures::future::poll_fn(|cx| pending_ready_service.poll_ready(cx));
-        tokio::pin!(pending_ready);
-        assert!(futures::poll!(&mut pending_ready).is_pending());
+        let (ready_pending_tx, ready_pending_rx) = oneshot::channel();
+        let pending_ready_task = tokio::spawn(async move {
+            let mut ready_pending_tx = Some(ready_pending_tx);
+            futures::future::poll_fn(|cx| {
+                let poll = pending_ready_service.poll_ready(cx);
+                if poll.is_pending()
+                    && let Some(ready_pending_tx) = ready_pending_tx.take()
+                {
+                    let _ = ready_pending_tx.send(());
+                }
+                poll
+            })
+            .await
+        });
 
         let mut pending_pipeline_service = first.clone();
-        let pending_pipeline = pending_pipeline_service.call_pipeline(vec![Frame::Integer(3)]);
-        tokio::pin!(pending_pipeline);
-        assert!(futures::poll!(&mut pending_pipeline).is_pending());
+        let (pipeline_pending_tx, pipeline_pending_rx) = oneshot::channel();
+        let pending_pipeline_task = tokio::spawn(async move {
+            let pending_pipeline = pending_pipeline_service.call_pipeline(vec![Frame::Integer(3)]);
+            tokio::pin!(pending_pipeline);
+            let mut pipeline_pending_tx = Some(pipeline_pending_tx);
+            futures::future::poll_fn(|cx| {
+                let poll = pending_pipeline.as_mut().poll(cx);
+                if poll.is_pending()
+                    && let Some(pipeline_pending_tx) = pipeline_pending_tx.take()
+                {
+                    let _ = pipeline_pending_tx.send(());
+                }
+                poll
+            })
+            .await
+        });
+
+        ready_pending_rx
+            .await
+            .expect("poll_ready completed before the queue was released");
+        pipeline_pending_rx
+            .await
+            .expect("call_pipeline completed before the queue was released");
 
         let shutdown_task = tokio::spawn({
             let shutdown = shutdown.clone();
@@ -3636,15 +3667,17 @@ mod tests {
         }
 
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), &mut pending_ready)
+            tokio::time::timeout(Duration::from_secs(1), pending_ready_task)
                 .await
-                .expect("pending poll_ready was not woken by shutdown"),
+                .expect("pending poll_ready was not woken by shutdown")
+                .unwrap(),
             Err(RedisError::ConnectionClosed)
         ));
         assert!(matches!(
-            tokio::time::timeout(Duration::from_secs(1), &mut pending_pipeline)
+            tokio::time::timeout(Duration::from_secs(1), pending_pipeline_task)
                 .await
-                .expect("pending call_pipeline was not woken by shutdown"),
+                .expect("pending call_pipeline was not woken by shutdown")
+                .unwrap(),
             Err(RedisError::ConnectionClosed)
         ));
 
