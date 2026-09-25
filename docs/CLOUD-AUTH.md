@@ -16,6 +16,101 @@ the requested protocol. If Redis rejects setup credentials with `NOAUTH` or
 This bounded retry applies only to connection setup. redis-tower never replays a
 user command after an authentication error.
 
+Use `CredentialConnectionFactory::from_url` when the deployment URL also owns
+transport, database, or protocol configuration. The provider replaces only the
+URL's username/password; TCP versus TLS versus Unix socket, `db`, and
+`protocol` remain part of every initial or replacement connection. Bound the
+whole sequence—not just the socket dial—with `with_setup_timeout`:
+
+```rust,ignore
+let factory = CredentialConnectionFactory::from_url(
+    "rediss://cache.example.net:6380/2?protocol=resp3",
+    provider.clone(),
+)
+.with_connection_config(connection_config)
+.with_setup_timeout(Duration::from_secs(5));
+```
+
+`ConnectionConfig::connect_timeout` covers the TCP or Unix connect operation.
+The factory setup timeout additionally covers provider lookup, TLS, the one
+allowed forced refresh, `SELECT`, and `HELLO`. A timeout drops the partial
+socket and returns `RedisError::ConnectTimeout`.
+
+## Shared provider ownership
+
+Concrete AWS and Entra providers are cheap clones backed by one internal cache.
+Type-erased hosts can use `SharedCredentialProvider` to retain the same property
+after converting a provider to `Arc<dyn CredentialProvider>` or
+`Arc<dyn StreamingCredentialProvider>`:
+
+```rust,ignore
+use std::sync::Arc;
+use redis_tower::{
+    CredentialConnectionFactory, CredentialProvider, SharedCredentialProvider,
+};
+
+let erased: Arc<dyn CredentialProvider> = build_provider();
+let shared = SharedCredentialProvider::from_arc(erased);
+
+let ordinary = CredentialConnectionFactory::from_url(redis_url, shared.clone());
+let dedicated = CredentialConnectionFactory::from_url(redis_url, shared.clone());
+let cluster = MultiplexedClusterClient::builder(cluster_seed)
+    .credentials(shared)
+    .connect()
+    .await?;
+```
+
+Every clone delegates to the same allocation, so concurrent ordinary,
+dedicated, and Cluster connection attempts share the provider's cache and
+single-flight behavior.
+
+## Established sockets and dedicated modes
+
+Credential lookup during connection setup and credential changes after setup
+are different contracts:
+
+| Owner | On provider update | Why |
+|---|---|---|
+| Multiplexed client, retained pool, Cluster/Sentinel data clients | Use the owner's `spawn_credential_reauthentication` handle | These owners serialize `AUTH` with their normal request path and discard sockets that reject it. |
+| Fresh blocking or transaction connection | Finish/cancel the operation, then reconnect through the provider factory | Inserting `AUTH` into connection-local operation state is not a generic safe boundary. An ambiguous operation is never replayed. |
+| Pub/Sub | Reconnect through the provider factory; confirmed subscriptions are replayed | Subscription mode is stateful, and an arbitrary callback must not inject `AUTH`. Messages during the gap are lost. |
+| MONITOR | Terminate and create a new `MonitorStream` through the provider factory | MONITOR owns a one-way event stream, has no resume cursor, and loses events during the gap. |
+
+`PubSubConnection::connect_with`, `BinaryPubSubConnection::connect_with`, and
+`MonitorStream::connect_with` open their dedicated sockets through any
+`ConnectionFactory`, including `CredentialConnectionFactory`. A streaming
+provider owner can select between its update stream and the session stream:
+
+```rust,ignore
+use std::sync::Arc;
+use redis_tower::{BinaryPubSubConnection, StreamingCredentialProvider};
+use tokio_stream::StreamExt;
+
+let mut pubsub = BinaryPubSubConnection::connect_with(&factory).await?;
+pubsub.subscribe_bytes(&[b"events"]).await?;
+let mut credential_updates = Arc::clone(&streaming_provider).subscribe();
+
+loop {
+    tokio::select! {
+        update = credential_updates.next() => {
+            update.ok_or("credential stream ended")??;
+            // The provider cache is current before it emits. Reconnect rather
+            // than sending AUTH in subscription mode.
+            pubsub.reconnect_with(&factory).await?;
+        }
+        message = pubsub.next() => {
+            let Some(message) = message else { break };
+            handle_message(message?);
+        }
+    }
+}
+```
+
+Dropping a `CredentialReauthenticationHandle` cancels and aborts its provider
+stream; `shutdown().await` performs the same cancellation and waits for task
+exit. Dedicated-session select loops are owned directly by the application and
+stop when that owner is dropped.
+
 ## AWS ElastiCache IAM
 
 `redis-tower-auth-aws` implements the ElastiCache IAM SigV4 flow for provisioned
@@ -110,6 +205,13 @@ let auth_handle = client.spawn_credential_reauthentication(updates);
 identity and service-principal credentials use the same cache and push stream.
 `with_scope` is available for sovereign-cloud or compatibility deployments.
 
+For `redis-database-mcp-rs`, keep Azure SDK dependencies behind the server's
+optional Entra feature. Construct one `EntraIdProvider` in the server layer,
+wrap or clone it into every `DirectRedis*` connection factory, and keep static
+URL authentication as the no-feature/default path. Tool schemas and results
+should receive only `is_authentication_error` classification, never provider
+errors or credential values.
+
 ## Pools, Cluster, and Sentinel
 
 Use one cloneable provider instance for both socket creation and streaming
@@ -153,8 +255,34 @@ token zeroizes that allocation. Avoid cloning or logging token strings in
 application provider implementations.
 
 Credential update streams are deliberately best-effort. Provider and `AUTH`
-errors are logged and later emissions are still consumed. Keep the owned handle
-alive for as long as the client should receive proactive updates, and call
-`shutdown().await` during graceful shutdown. A provider should delay after an
-emitted error; this prevents a broken credential source from creating a busy
-loop.
+errors are logged without rendering third-party error text, and later emissions
+are still consumed. Provider failures returned from setup are redacted to an
+`AUTH_PROVIDER ... failed` message and are recognized by
+`is_authentication_error`; Redis `NOAUTH` and `WRONGPASS` retain their server
+classification. Keep the owned handle alive for as long as the client should
+receive proactive updates, and call `shutdown().await` during graceful
+shutdown. A provider should delay after an emitted error; this prevents a
+broken credential source from creating a busy loop.
+
+## Manual Azure Managed Redis verification
+
+The normal suite uses deterministic fake providers; no cloud credential is
+required. Before shipping a downstream Entra integration, run this manual
+check against a disposable Azure Managed Redis database:
+
+1. Create a Redis data-access-policy assignment for the managed identity or
+   service principal and record its object ID. Start with the least-privilege
+   command/key policy required by the application.
+2. Configure `rediss://<host>:10000/0?protocol=resp3` without URL credentials.
+   Build `EntraIdProvider` from the host's Azure `TokenCredential`, then build a
+   URL-backed `CredentialConnectionFactory` with a finite setup timeout.
+3. Exercise an ordinary multiplexed command, one new dedicated connection, and
+   Cluster node discovery if the target exposes Cluster mode. Confirm no token
+   appears in logs, errors, traces, or MCP tool output.
+4. Leave the process running through one proactive refresh. Verify ordinary
+   sockets reauthenticate, a Pub/Sub owner reconnects and restores confirmed
+   subscriptions, and a MONITOR owner terminates/reopens with its documented
+   observation gap.
+5. Revoke or misconfigure the assignment and confirm the application reports a
+   redacted authentication-category failure without retrying an ambiguous
+   write, transaction, or blocking operation.

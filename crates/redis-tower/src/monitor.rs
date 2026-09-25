@@ -44,6 +44,8 @@ use redis_tower_protocol::RespCodec;
 use tokio_stream::Stream;
 use tokio_util::codec::Framed;
 
+use crate::reconnect::ConnectionFactory;
+
 /// One command observed by Redis `MONITOR`.
 ///
 /// Redis renders every command argument with its binary-safe quoted-string
@@ -130,6 +132,18 @@ pub struct MonitorStream {
 }
 
 impl MonitorStream {
+    /// Open a fresh dedicated connection through `factory` and enter monitor
+    /// mode.
+    ///
+    /// Provider-backed factories make initial MONITOR authentication share the
+    /// same cache and setup policy as ordinary clients. MONITOR has no resume
+    /// cursor and does not support safe in-place reauthentication through this
+    /// API. When credentials rotate, terminate this stream and construct a new
+    /// one; commands emitted during the gap are lost.
+    pub async fn connect_with(factory: &dyn ConnectionFactory) -> Result<Self, RedisError> {
+        Self::new(factory.connect().await?).await
+    }
+
     /// Enter monitor mode on `connection` and return its event stream.
     ///
     /// This waits for Redis's initial `OK` response before taking ownership of

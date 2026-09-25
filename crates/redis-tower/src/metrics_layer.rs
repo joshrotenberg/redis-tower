@@ -53,7 +53,8 @@ use crate::pool::{ConnectionPool, PoolStats};
 /// - `CircuitOpen` — circuit breaker is open; request rejected without
 ///   touching Redis.
 /// - `QueueFull` — the auto-pipeline channel is full; caller should shed load.
-/// - `Auth` — authentication failure (`NOAUTH`, `WRONGPASS`).
+/// - `Auth` — credential-provider or authentication failure (`AUTH_PROVIDER`,
+///   `NOAUTH`, `WRONGPASS`).
 /// - `Other` — all other errors (generic Redis errors, protocol errors, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
@@ -67,7 +68,7 @@ pub enum ErrorKind {
     CircuitOpen,
     /// Auto-pipeline queue is full.
     QueueFull,
-    /// Authentication error (`NOAUTH`, `WRONGPASS`).
+    /// Credential-provider or authentication error.
     Auth,
     /// All other errors.
     Other,
@@ -84,7 +85,10 @@ impl ErrorKind {
             RedisError::Redis(msg) => {
                 if msg.starts_with("WRONGTYPE") {
                     ErrorKind::WrongType
-                } else if msg.starts_with("NOAUTH") || msg.starts_with("WRONGPASS") {
+                } else if msg.starts_with("AUTH_PROVIDER")
+                    || msg.starts_with("NOAUTH")
+                    || msg.starts_with("WRONGPASS")
+                {
                     ErrorKind::Auth
                 } else {
                     ErrorKind::Other
@@ -1271,6 +1275,16 @@ mod tests {
         assert_eq!(
             ErrorKind::from_error(&RedisError::Redis(
                 "WRONGPASS invalid username-password pair".into()
+            )),
+            ErrorKind::Auth
+        );
+    }
+
+    #[test]
+    fn error_kind_from_error_auth_provider() {
+        assert_eq!(
+            ErrorKind::from_error(&RedisError::Redis(
+                "AUTH_PROVIDER current credential lookup failed".into()
             )),
             ErrorKind::Auth
         );

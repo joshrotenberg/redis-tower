@@ -32,16 +32,17 @@ use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig
 use redis_tower::commands::*;
 use redis_tower::credentials::{
     CredentialConnectionFactory, CredentialProvider, CredentialUpdateStream, Credentials,
-    StreamingCredentialProvider,
+    SharedCredentialProvider, StreamingCredentialProvider, is_authentication_error,
 };
 use redis_tower::pool::{ConnectionPool, PoolConfig};
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
-    ConnectionConfig, Frame, MultiplexedClient, ProtocolVersion, RedisConnection,
-    ResilientConnection,
+    BinaryPubSubConnection, ConnectionConfig, Frame, MonitorStream, MultiplexedClient,
+    ProtocolVersion, RedisConnection, ResilientConnection,
 };
 use redis_tower_core::RedisError;
 use tokio::sync::OnceCell;
+use tokio_stream::StreamExt;
 
 /// Password the dedicated auth server requires (`requirepass`).
 const PASSWORD: &str = "s3cr3t";
@@ -167,6 +168,30 @@ impl StreamingCredentialProvider for PushTestCredentialProvider {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+        })
+    }
+}
+
+struct StallingCredentialProvider;
+
+impl CredentialProvider for StallingCredentialProvider {
+    fn get_credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        Box::pin(std::future::pending())
+    }
+}
+
+struct LeakyFailingCredentialProvider;
+
+impl CredentialProvider for LeakyFailingCredentialProvider {
+    fn get_credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        Box::pin(async {
+            Err(RedisError::Redis(
+                "provider accidentally included super-secret-token".into(),
+            ))
         })
     }
 }
@@ -559,6 +584,226 @@ async fn provider_factory_refreshes_then_negotiates_protected_resp3() {
         1,
         "WRONGPASS should trigger exactly one explicit refresh"
     );
+}
+
+#[tokio::test]
+async fn provider_url_factory_preserves_database_and_protocol_but_overrides_static_auth() {
+    let addr = auth_addr().await;
+    let provider = TestCredentialProvider::password(PASSWORD);
+    let url = format!("redis://static:wrong@{addr}/3?protocol=resp3");
+    let factory = CredentialConnectionFactory::from_url(&url, provider.clone());
+    let mut connection = ConnectionFactory::connect(&factory)
+        .await
+        .expect("provider URL setup should ignore static auth and preserve session settings");
+
+    assert!(connection.is_resp3());
+    let hello = connection.execute(Hello::new()).await.unwrap();
+    assert_eq!(hello_protocol(&hello), Some(3));
+
+    let key = "test:auth:provider-url-db3";
+    connection.execute(Set::new(key, "db3")).await.unwrap();
+    let mut database_zero = RedisConnection::connect_url(&auth_url().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        database_zero.execute(Get::new(key)).await.unwrap(),
+        None,
+        "the provider-backed URL must replay SELECT before use"
+    );
+    connection.execute(Del::new(key)).await.unwrap();
+    assert_eq!(provider.get_calls(), 1);
+    assert_eq!(provider.refresh_calls(), 0);
+}
+
+#[tokio::test]
+async fn provider_factory_setup_timeout_bounds_a_stalled_provider() {
+    let factory = CredentialConnectionFactory::new(auth_addr().await, StallingCredentialProvider)
+        .with_setup_timeout(Duration::from_millis(50));
+    let started = tokio::time::Instant::now();
+    let result = ConnectionFactory::connect(&factory).await;
+
+    assert!(matches!(result, Err(RedisError::ConnectTimeout)));
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the full setup deadline must include provider lookup"
+    );
+}
+
+#[tokio::test]
+async fn provider_failure_is_redacted_and_authentication_classified() {
+    let factory =
+        CredentialConnectionFactory::new(auth_addr().await, LeakyFailingCredentialProvider);
+    let Err(error) = ConnectionFactory::connect(&factory).await else {
+        panic!("provider failure must stop connection setup");
+    };
+    let rendered = error.to_string();
+
+    assert!(is_authentication_error(&error));
+    assert!(rendered.contains("AUTH_PROVIDER"));
+    assert!(!rendered.contains("super-secret-token"));
+}
+
+#[tokio::test]
+async fn shared_provider_handle_spans_concurrent_dedicated_connection_attempts() {
+    let provider = TestCredentialProvider::password(PASSWORD);
+    let erased: Arc<dyn CredentialProvider> = Arc::new(provider.clone());
+    let shared = SharedCredentialProvider::from_arc(erased);
+    let first = CredentialConnectionFactory::new(auth_addr().await, shared.clone());
+    let second = CredentialConnectionFactory::new(auth_addr().await, shared);
+
+    let (first, second) = tokio::join!(
+        ConnectionFactory::connect(&first),
+        ConnectionFactory::connect(&second)
+    );
+    let mut first = first.unwrap();
+    let mut second = second.unwrap();
+    assert_eq!(first.execute(Ping::new()).await.unwrap(), "PONG");
+    assert_eq!(second.execute(Ping::new()).await.unwrap(), "PONG");
+    assert_eq!(
+        provider.get_calls(),
+        2,
+        "both concurrent dials must consult the same provider allocation"
+    );
+}
+
+#[tokio::test]
+async fn pubsub_rotation_reconnects_with_shared_provider_and_preserves_binary_subscriptions() {
+    let addr = auth_addr().await;
+    let username = "streaming-pubsub-user";
+    let password = "streaming-pubsub-password";
+    let channel = Bytes::from_static(b"credential:\xff:channel");
+    let payload = Bytes::from_static(b"\0\xffrotated");
+
+    let mut admin = RedisConnection::connect_url(&auth_url().await)
+        .await
+        .expect("connect auth admin");
+    admin
+        .execute(
+            AclSetUser::new(username)
+                .rule("on")
+                .rule(format!(">{password}"))
+                .rule("+@all")
+                .rule("~*")
+                .rule("&*"),
+        )
+        .await
+        .expect("create replacement Pub/Sub identity");
+
+    let provider = PushTestCredentialProvider::new(Credentials::new("default", PASSWORD));
+    let shared = SharedCredentialProvider::new(provider.clone());
+    let factory = CredentialConnectionFactory::new(addr, shared.clone());
+    let updates_provider: Arc<dyn StreamingCredentialProvider> = Arc::new(shared);
+    let mut updates = Arc::clone(&updates_provider).subscribe();
+    let mut pubsub = BinaryPubSubConnection::connect_with(&factory)
+        .await
+        .expect("connect provider-backed Pub/Sub session");
+    pubsub
+        .subscribe_bytes(&[channel.as_ref()])
+        .await
+        .expect("subscribe before credential rotation");
+
+    provider.push(Credentials::new(username, password));
+    let emitted = tokio::time::timeout(Duration::from_secs(1), updates.next())
+        .await
+        .expect("credential update was not delivered")
+        .expect("credential update stream ended")
+        .expect("credential update failed");
+    assert_eq!(emitted.username(), Some(username));
+
+    // Dedicated subscription mode cannot safely accept generic in-place AUTH.
+    // Reconnect through the same provider factory at the update boundary.
+    pubsub
+        .reconnect_with(&factory)
+        .await
+        .expect("reconnect and replay confirmed binary subscriptions");
+    assert!(pubsub.subscriptions().channels.contains(&channel));
+
+    assert_eq!(
+        admin
+            .execute(Publish::new(channel.clone(), payload.clone()))
+            .await
+            .unwrap(),
+        1
+    );
+    let message = tokio::time::timeout(Duration::from_secs(1), pubsub.next())
+        .await
+        .expect("reconnected subscriber did not receive the message")
+        .expect("reconnected Pub/Sub stream ended")
+        .expect("reconnected Pub/Sub stream failed");
+    assert_eq!(message.channel, channel);
+    assert_eq!(message.payload, payload);
+
+    drop(pubsub);
+    assert_eq!(admin.execute(AclDelUser::new(username)).await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn monitor_rotation_terminates_and_reopens_through_shared_provider() {
+    let addr = auth_addr().await;
+    let username = "streaming-monitor-user";
+    let password = "streaming-monitor-password";
+    let key = Bytes::from_static(b"test:auth:rotated-monitor");
+
+    let mut admin = RedisConnection::connect_url(&auth_url().await)
+        .await
+        .expect("connect auth admin");
+    admin
+        .execute(
+            AclSetUser::new(username)
+                .rule("on")
+                .rule(format!(">{password}"))
+                .rule("+@all")
+                .rule("~*")
+                .rule("&*"),
+        )
+        .await
+        .expect("create replacement MONITOR identity");
+
+    let provider = PushTestCredentialProvider::new(Credentials::new("default", PASSWORD));
+    let shared = SharedCredentialProvider::new(provider.clone());
+    let factory = CredentialConnectionFactory::new(addr, shared.clone());
+    let updates_provider: Arc<dyn StreamingCredentialProvider> = Arc::new(shared);
+    let mut updates = Arc::clone(&updates_provider).subscribe();
+
+    let original = MonitorStream::connect_with(&factory)
+        .await
+        .expect("connect initial provider-backed MONITOR session");
+    provider.push(Credentials::new(username, password));
+    tokio::time::timeout(Duration::from_secs(1), updates.next())
+        .await
+        .expect("MONITOR owner did not receive credential update")
+        .expect("credential stream ended")
+        .expect("credential update failed");
+
+    // MONITOR has no resume cursor or safe in-band AUTH path. Terminate the
+    // old stream and create a new authenticated stream; the gap is explicit.
+    drop(original);
+    let mut monitor = MonitorStream::connect_with(&factory)
+        .await
+        .expect("reopen MONITOR with rotated provider credential");
+    admin
+        .execute(Set::new(key.clone(), b"observed".as_slice()))
+        .await
+        .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let event = monitor
+                .next()
+                .await
+                .expect("MONITOR stream ended")
+                .expect("MONITOR event failed");
+            if event.command.eq_ignore_ascii_case(b"set") && event.arguments.first() == Some(&key) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("reopened MONITOR did not observe the command");
+
+    drop(monitor);
+    admin.execute(Del::new(key)).await.unwrap();
+    assert_eq!(admin.execute(AclDelUser::new(username)).await.unwrap(), 1);
 }
 
 /// `ResilientConnection` reconnects only when its Tower readiness state is

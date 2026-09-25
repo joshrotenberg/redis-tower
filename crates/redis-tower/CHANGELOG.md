@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- shared type-erased credential-provider ownership, URL-backed provider
+  factories with full setup deadlines, and provider-aware Pub/Sub/MONITOR
+  constructors with explicit reconnect-or-terminate rotation contracts
 - an additive structured `SET` outcome mode for conditional writes, while the
   original `Option<Bytes>` response remains available for compatibility
 - an owned, cloneable `AutoPipelineShutdownHandle` for router and trait-erased
@@ -17,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- redact third-party credential-provider errors at setup and in refresh-task
+  tracing while retaining `AUTH_PROVIDER` classification
 - raise the declared Tokio dependency floor from 1.42 to 1.47 for the
   auto-pipeline shutdown notification API
 - make live Redis 8 and TLS conformance tests discover and verify the actual

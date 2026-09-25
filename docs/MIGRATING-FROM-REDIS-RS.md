@@ -104,20 +104,26 @@ database selection, and TLS. Percent-encode URL-special bytes in usernames and
 passwords. redis-tower authenticates and selects the database as part of setup;
 a reconnecting URL factory repeats those steps on every new socket.
 
-The released redis-tower URL parser accepts Unix sockets with an optional
-database query:
+redis-tower's Unix URL parser accepts authentication, database, and protocol
+query keys:
 
 ```text
-unix:///run/redis.sock?db=1
+redis+unix:///run/redis.sock?user=app&pass=secret&db=1&protocol=resp3
 ```
 
-The 0.1.3 Unix URL grammar has no authentication or protocol query keys.
-`ConnectionConfig` can select the protocol for an unauthenticated Unix socket;
-an authenticated Unix/RESP3 setup needs an explicit custom setup sequence.
-Do not copy redis-rs Unix query parameters into this released URL unchanged.
-
 For rotating tokens, replace static URL credentials with redis-tower's
-`CredentialProvider`; see [Cloud and rotating credentials](CLOUD-AUTH.md).
+`CredentialProvider`. `CredentialConnectionFactory::from_url` preserves the
+URL transport, database, and protocol while taking authentication from the
+provider. Its `with_setup_timeout` covers provider lookup through final session
+setup. `SharedCredentialProvider` gives type-erased hosts one cloneable cache
+owner for ordinary, Cluster, and dedicated connections.
+
+redis-rs's streaming provider is not a signal to inject `AUTH` into every
+socket state. redis-tower owners expose proactive reauthentication only where
+they serialize it safely. Pub/Sub reconnects and replays confirmed
+subscriptions; MONITOR terminates and reopens with an explicit observation
+gap; transactions and blocking operations move to fresh credentials only at a
+new operation boundary. See [Cloud and rotating credentials](CLOUD-AUTH.md).
 
 ## Typed commands and response shapes
 

@@ -4,8 +4,18 @@
 //! e.g., from AWS IAM, Azure Entra ID, or a secrets manager. The
 //! [`CredentialConnectionFactory`] fetches credentials for every fresh
 //! connection and composes with reconnecting clients and connection pools.
+//! URL-backed factories preserve transport, database, and protocol setup, and
+//! [`SharedCredentialProvider`] lets type-erased clients share one provider
+//! cache across ordinary, Cluster, Pub/Sub, and MONITOR connection owners.
 //! [`AuthenticatedConnection`] remains available for direct, manually managed
 //! connections.
+//!
+//! In-place reauthentication is only appropriate for owners that explicitly
+//! serialize it, such as multiplexed clients and retained pools. Pub/Sub and
+//! MONITOR owners reconnect or terminate at credential-update boundaries; see
+//! the [cloud authentication guide] for the complete session matrix.
+//!
+//! [cloud authentication guide]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md
 //!
 //! # Example
 //!
@@ -46,6 +56,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::{Stream, StreamExt};
 use redis_tower_commands::Auth;
@@ -164,6 +175,105 @@ pub trait StreamingCredentialProvider: CredentialProvider {
     fn subscribe(self: Arc<Self>) -> CredentialUpdateStream;
 }
 
+/// Cloneable ownership handle for one shared credential-provider instance.
+///
+/// The wrapper delegates to an `Arc<P>` and itself implements
+/// [`CredentialProvider`]. When `P` also implements
+/// [`StreamingCredentialProvider`], the wrapper implements that trait too.
+/// This lets a type-erased host pass one provider cache to standalone,
+/// Cluster, pool, Pub/Sub, and MONITOR connection factories without requiring
+/// every builder to expose an `Arc<dyn ...>` overload.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use redis_tower::credentials::{
+///     CredentialProvider, Credentials, SharedCredentialProvider,
+/// };
+/// use redis_tower::RedisError;
+///
+/// let provider: Arc<dyn CredentialProvider> = Arc::new(|| async {
+///     Ok::<_, RedisError>(Credentials::password("short-lived-token"))
+/// });
+/// let shared = SharedCredentialProvider::from_arc(provider);
+/// let standalone = shared.clone();
+/// let dedicated_session = shared;
+/// # let _ = (standalone, dedicated_session);
+/// ```
+pub struct SharedCredentialProvider<P: ?Sized = dyn CredentialProvider> {
+    inner: Arc<P>,
+}
+
+impl<P: ?Sized> Clone for SharedCredentialProvider<P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<P: ?Sized> fmt::Debug for SharedCredentialProvider<P> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedCredentialProvider")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<P> SharedCredentialProvider<P> {
+    /// Wrap a concrete provider in shared ownership.
+    pub fn new(provider: P) -> Self {
+        Self {
+            inner: Arc::new(provider),
+        }
+    }
+}
+
+impl<P: ?Sized> SharedCredentialProvider<P> {
+    /// Wrap an existing shared, possibly type-erased provider.
+    pub fn from_arc(provider: Arc<P>) -> Self {
+        Self { inner: provider }
+    }
+
+    /// Borrow the shared provider allocation.
+    pub fn as_arc(&self) -> &Arc<P> {
+        &self.inner
+    }
+
+    /// Return a clone of the shared provider allocation.
+    pub fn clone_arc(&self) -> Arc<P> {
+        Arc::clone(&self.inner)
+    }
+
+    /// Consume the handle and return the shared provider allocation.
+    pub fn into_arc(self) -> Arc<P> {
+        self.inner
+    }
+}
+
+impl<P: CredentialProvider + ?Sized> CredentialProvider for SharedCredentialProvider<P> {
+    fn get_credentials(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        self.inner.get_credentials()
+    }
+
+    fn force_refresh(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+        self.inner.force_refresh()
+    }
+}
+
+impl<P: StreamingCredentialProvider + ?Sized> StreamingCredentialProvider
+    for SharedCredentialProvider<P>
+{
+    fn subscribe(self: Arc<Self>) -> CredentialUpdateStream {
+        Arc::clone(&self.inner).subscribe()
+    }
+}
+
 /// Owned task that applies credentials emitted by a streaming provider.
 ///
 /// Dropping the handle cancels the subscription. Call [`shutdown`](Self::shutdown)
@@ -204,9 +314,12 @@ impl Drop for CredentialReauthenticationHandle {
 
 /// Start applying pushed credentials with an asynchronous callback.
 ///
-/// The callback should send one `AUTH` command to every established connection
-/// represented by its target. It must not retry a user command after an
-/// authentication error.
+/// Use this only for a target that explicitly supports in-place `AUTH`, such as
+/// a normal multiplexed client or retained connection pool. Pub/Sub and
+/// MONITOR sockets are in dedicated protocol modes, while transactions and
+/// blocking calls can carry connection-local state; those owners should
+/// reconnect or terminate at a safe boundary instead. The callback must never
+/// retry a user command after an authentication error.
 pub fn spawn_credential_reauthentication<F, Fut>(
     provider: Arc<dyn StreamingCredentialProvider>,
     reauthenticate: F,
@@ -229,12 +342,17 @@ where
             };
             match update {
                 Ok(credentials) => {
-                    if let Err(error) = reauthenticate(credentials).await {
-                        tracing::warn!(error = %error, "credential reauthentication failed");
+                    if reauthenticate(credentials).await.is_err() {
+                        // The callback may wrap a provider or server error.
+                        // Never render it here: third-party errors are not
+                        // guaranteed to redact credential material.
+                        tracing::warn!("credential reauthentication failed");
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "credential refresh stream failed");
+                Err(_error) => {
+                    // Provider errors can contain SDK request details. Keep
+                    // tracing useful without risking token disclosure.
+                    tracing::warn!("credential refresh stream failed");
                 }
             }
         }
@@ -301,6 +419,9 @@ where
 /// [`ConnectionFactory`](crate::reconnect::ConnectionFactory) and
 /// [`PoolFactory`](crate::pool::PoolFactory), so the same setup is replayed by
 /// resilient, multiplexed, lazy, and replacement pool connections.
+/// [`from_url`](Self::from_url) additionally preserves URL transport, database,
+/// and protocol settings while replacing only URL-embedded authentication with
+/// the provider.
 ///
 /// # Example
 ///
@@ -320,19 +441,27 @@ where
 /// ```
 #[must_use = "a credential connection factory must be passed to a client or pool"]
 pub struct CredentialConnectionFactory {
-    addr: String,
+    target: CredentialTarget,
     provider: Arc<dyn CredentialProvider>,
     connection_config: ConnectionConfig,
+    setup_timeout: Option<Duration>,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<(String, Arc<redis_tower_core::tls::TlsConfig>)>,
+}
+
+#[derive(Clone)]
+enum CredentialTarget {
+    Address(String),
+    Url(String),
 }
 
 impl Clone for CredentialConnectionFactory {
     fn clone(&self) -> Self {
         Self {
-            addr: self.addr.clone(),
+            target: self.target.clone(),
             provider: Arc::clone(&self.provider),
             connection_config: self.connection_config.clone(),
+            setup_timeout: self.setup_timeout,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: self.tls.clone(),
         }
@@ -354,9 +483,36 @@ impl CredentialConnectionFactory {
         provider: Arc<dyn CredentialProvider>,
     ) -> Self {
         Self {
-            addr: addr.into(),
+            target: CredentialTarget::Address(addr.into()),
             provider,
             connection_config: ConnectionConfig::default(),
+            setup_timeout: None,
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            tls: None,
+        }
+    }
+
+    /// Create a URL-backed factory that authenticates with `provider`.
+    ///
+    /// TCP, TLS, Unix-socket, database, and `protocol` URL settings are
+    /// preserved. Any username or password embedded in the URL is ignored;
+    /// the provider is the single authentication source. Use
+    /// [`RedisConnection::connect_url`] when static URL credentials are
+    /// desired instead.
+    pub fn from_url(url: impl Into<String>, provider: impl CredentialProvider) -> Self {
+        Self::from_url_with_shared_provider(url, Arc::new(provider))
+    }
+
+    /// Create a URL-backed factory from a shared, type-erased provider.
+    pub fn from_url_with_shared_provider(
+        url: impl Into<String>,
+        provider: Arc<dyn CredentialProvider>,
+    ) -> Self {
+        Self {
+            target: CredentialTarget::Url(url.into()),
+            provider,
+            connection_config: ConnectionConfig::default(),
+            setup_timeout: None,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             tls: None,
         }
@@ -372,11 +528,23 @@ impl CredentialConnectionFactory {
         self
     }
 
+    /// Bound the complete provider-backed setup sequence.
+    ///
+    /// Unlike [`ConnectionConfig::connect_timeout`], which covers only the
+    /// socket connect operation, this deadline includes credential lookup,
+    /// transport and TLS establishment, bounded refresh-on-rejection, database
+    /// selection, and RESP negotiation. Expiry returns
+    /// [`RedisError::ConnectTimeout`] and drops the partial socket.
+    pub fn with_setup_timeout(mut self, timeout: Duration) -> Self {
+        self.setup_timeout = Some(timeout);
+        self
+    }
+
     /// Use explicit TLS settings for every connection made by this factory.
     ///
-    /// `hostname` is the server name used for certificate verification. This
-    /// explicit form avoids guessing from an address that may be an IPv6
-    /// literal or a proxy endpoint.
+    /// For address targets, `hostname` is the server name used for certificate
+    /// verification. URL targets use the URL host, matching
+    /// [`RedisConnection::connect_url_with_tls`].
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     pub fn with_tls(
         mut self,
@@ -392,7 +560,24 @@ impl CredentialConnectionFactory {
         self.provider.as_ref()
     }
 
+    /// Clone the shared provider allocation used by this factory.
+    ///
+    /// This is useful when one type-erased provider must also be passed to a
+    /// Cluster builder or a dedicated-session factory.
+    pub fn shared_provider(&self) -> Arc<dyn CredentialProvider> {
+        Arc::clone(&self.provider)
+    }
+
     async fn connect_inner(&self) -> Result<RedisConnection, RedisError> {
+        match self.setup_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, self.connect_unbounded())
+                .await
+                .map_err(|_elapsed| RedisError::ConnectTimeout)?,
+            None => self.connect_unbounded().await,
+        }
+    }
+
+    async fn connect_unbounded(&self) -> Result<RedisConnection, RedisError> {
         let requested_protocol = self.connection_config.protocol();
         let bootstrap_config = self
             .connection_config
@@ -400,24 +585,73 @@ impl CredentialConnectionFactory {
             .with_protocol(ProtocolVersion::Resp2);
 
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-        let mut conn = match &self.tls {
-            Some((hostname, tls)) => {
-                RedisConnection::connect_tls_with_config(
-                    &self.addr,
-                    hostname,
-                    tls.as_ref(),
-                    &bootstrap_config,
-                )
-                .await?
+        {
+            match &self.target {
+                CredentialTarget::Address(addr) => {
+                    let mut connection = match &self.tls {
+                        Some((hostname, tls)) => {
+                            RedisConnection::connect_tls_with_config(
+                                addr,
+                                hostname,
+                                tls.as_ref(),
+                                &bootstrap_config,
+                            )
+                            .await?
+                        }
+                        None => {
+                            RedisConnection::connect_with_config(addr, &bootstrap_config).await?
+                        }
+                    };
+                    authenticate_with_refresh(&mut connection, self.provider.as_ref()).await?;
+                    connection.negotiate_protocol(requested_protocol).await?;
+                    Ok(connection)
+                }
+                CredentialTarget::Url(url) => {
+                    let mut pending = match &self.tls {
+                        Some((_hostname, tls)) => {
+                            RedisConnection::begin_url_connection_with_tls_and_config(
+                                url,
+                                tls.as_ref(),
+                                &self.connection_config,
+                            )
+                            .await?
+                        }
+                        None => {
+                            RedisConnection::begin_url_connection_with_config(
+                                url,
+                                &self.connection_config,
+                            )
+                            .await?
+                        }
+                    };
+                    authenticate_with_refresh(pending.connection_mut(), self.provider.as_ref())
+                        .await?;
+                    pending.finish().await
+                }
             }
-            None => RedisConnection::connect_with_config(&self.addr, &bootstrap_config).await?,
-        };
+        }
         #[cfg(not(any(feature = "tls-rustls", feature = "tls-native-tls")))]
-        let mut conn = RedisConnection::connect_with_config(&self.addr, &bootstrap_config).await?;
-
-        authenticate_with_refresh(&mut conn, self.provider.as_ref()).await?;
-        conn.negotiate_protocol(requested_protocol).await?;
-        Ok(conn)
+        {
+            match &self.target {
+                CredentialTarget::Address(addr) => {
+                    let mut connection =
+                        RedisConnection::connect_with_config(addr, &bootstrap_config).await?;
+                    authenticate_with_refresh(&mut connection, self.provider.as_ref()).await?;
+                    connection.negotiate_protocol(requested_protocol).await?;
+                    Ok(connection)
+                }
+                CredentialTarget::Url(url) => {
+                    let mut pending = RedisConnection::begin_url_connection_with_config(
+                        url,
+                        &self.connection_config,
+                    )
+                    .await?;
+                    authenticate_with_refresh(pending.connection_mut(), self.provider.as_ref())
+                        .await?;
+                    pending.finish().await
+                }
+            }
+        }
     }
 }
 
@@ -446,14 +680,26 @@ pub async fn authenticate_with_refresh(
     conn: &mut RedisConnection,
     provider: &dyn CredentialProvider,
 ) -> Result<(), RedisError> {
-    let credentials = provider.get_credentials().await?;
+    let credentials = provider
+        .get_credentials()
+        .await
+        .map_err(|_error| credential_provider_failure("current credential lookup"))?;
     match conn.execute(credentials.auth_command()).await {
         Err(error) if is_auth_rejection(&error) => {
-            let credentials = provider.force_refresh().await?;
+            let credentials = provider
+                .force_refresh()
+                .await
+                .map_err(|_error| credential_provider_failure("forced refresh"))?;
             conn.execute(credentials.auth_command()).await
         }
         result => result,
     }
+}
+
+fn credential_provider_failure(operation: &'static str) -> RedisError {
+    // Never embed a third-party provider error. SDK errors can contain request
+    // details and custom providers may accidentally include token material.
+    RedisError::Redis(format!("AUTH_PROVIDER {operation} failed"))
 }
 
 /// Return whether Redis rejected authentication because credentials were
@@ -471,6 +717,18 @@ pub fn is_auth_rejection(error: &RedisError) -> bool {
         })
 }
 
+/// Return whether an error belongs to credential lookup or authentication.
+///
+/// This includes provider failures redacted by redis-tower as well as Redis
+/// `NOAUTH` and `WRONGPASS` replies. It is intended for downstream error
+/// classification without parsing full messages or exposing secret material.
+pub fn is_authentication_error(error: &RedisError) -> bool {
+    if is_auth_rejection(error) {
+        return true;
+    }
+    matches!(error, RedisError::Redis(message) if message.starts_with("AUTH_PROVIDER "))
+}
+
 /// A connection that authenticates using a [`CredentialProvider`].
 ///
 /// Fetches credentials from the provider and sends AUTH after connecting.
@@ -486,16 +744,21 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
     /// Connect and authenticate using the credential provider.
     pub async fn connect(addr: &str, provider: P) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(addr).await?;
-        let creds = provider.get_credentials().await?;
-        conn.execute(creds.auth_command()).await?;
+        authenticate_with_refresh(&mut conn, &provider).await?;
         Ok(Self { conn, provider })
     }
 
-    /// Connect via URL (ignoring URL credentials) and authenticate with the provider.
+    /// Connect via URL and authenticate with the provider.
+    ///
+    /// The URL transport, database, and protocol are preserved. URL-embedded
+    /// credentials are ignored so the provider remains the only credential
+    /// source.
     pub async fn connect_url(url: &str, provider: P) -> Result<Self, RedisError> {
-        let mut conn = RedisConnection::connect_url(url).await?;
-        let creds = provider.get_credentials().await?;
-        conn.execute(creds.auth_command()).await?;
+        let mut pending =
+            RedisConnection::begin_url_connection_with_config(url, &ConnectionConfig::default())
+                .await?;
+        authenticate_with_refresh(pending.connection_mut(), &provider).await?;
+        let conn = pending.finish().await?;
         Ok(Self { conn, provider })
     }
 
@@ -504,7 +767,11 @@ impl<P: CredentialProvider> AuthenticatedConnection<P> {
     /// Call this when you receive an auth error or proactively before
     /// token expiry.
     pub async fn reauthenticate(&mut self) -> Result<(), RedisError> {
-        let creds = self.provider.get_credentials().await?;
+        let creds = self
+            .provider
+            .get_credentials()
+            .await
+            .map_err(|_error| credential_provider_failure("reauthentication lookup"))?;
         self.conn.execute(creds.auth_command()).await
     }
 
@@ -570,8 +837,7 @@ impl<P: CredentialProvider> RotatingAuthClient<P> {
         refresh_interval: std::time::Duration,
     ) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(addr).await?;
-        let creds = provider.get_credentials().await?;
-        conn.execute(creds.auth_command()).await?;
+        authenticate_with_refresh(&mut conn, &provider).await?;
 
         let conn = std::sync::Arc::new(tokio::sync::Mutex::new(conn));
         let provider = std::sync::Arc::new(provider);
@@ -633,8 +899,7 @@ impl<P: StreamingCredentialProvider> RotatingAuthClient<P> {
     /// owned task stops when this client is dropped.
     pub async fn connect_streaming(addr: &str, provider: P) -> Result<Self, RedisError> {
         let mut conn = RedisConnection::connect(addr).await?;
-        let credentials = provider.get_credentials().await?;
-        conn.execute(credentials.auth_command()).await?;
+        authenticate_with_refresh(&mut conn, &provider).await?;
 
         let conn = Arc::new(tokio::sync::Mutex::new(conn));
         let provider = Arc::new(provider);
@@ -662,7 +927,10 @@ impl<P: StreamingCredentialProvider> RotatingAuthClient<P> {
 mod tests {
     use super::*;
     use redis_tower_protocol::helpers::{array, bulk};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
     use zeroize::Zeroize;
 
     struct RefreshAwareProvider {
@@ -671,6 +939,61 @@ mod tests {
     }
 
     struct OneShotStreamingProvider;
+
+    struct LeakyStreamingProvider;
+
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    struct FieldCollector(String);
+
+    impl tracing::field::Visit for FieldCollector {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.0.push_str(&format!(" {}={value:?}", field.name()));
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for EventCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+            let mut collector = FieldCollector(String::new());
+            event.record(&mut collector);
+            self.events.lock().unwrap().push(collector.0);
+        }
+    }
+
+    struct DropAwareStreamingProvider {
+        stream_created: Arc<tokio::sync::Notify>,
+        stream_dropped: Arc<AtomicBool>,
+    }
+
+    struct DropAwareStream {
+        created: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+        announced: bool,
+    }
+
+    impl Stream for DropAwareStream {
+        type Item = Result<Credentials, RedisError>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _context: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if !self.announced {
+                self.announced = true;
+                self.created.notify_one();
+            }
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for DropAwareStream {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
 
     #[test]
     fn credentials_zeroize_owned_material() {
@@ -693,6 +1016,43 @@ mod tests {
             Box::pin(futures::stream::once(async {
                 Ok(Credentials::password("pushed"))
             }))
+        }
+    }
+
+    impl CredentialProvider for DropAwareStreamingProvider {
+        fn get_credentials(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            Box::pin(async { Ok(Credentials::password("initial")) })
+        }
+    }
+
+    impl CredentialProvider for LeakyStreamingProvider {
+        fn get_credentials(
+            &self,
+        ) -> Pin<Box<dyn Future<Output = Result<Credentials, RedisError>> + Send>> {
+            Box::pin(async { Ok(Credentials::password("initial")) })
+        }
+    }
+
+    impl StreamingCredentialProvider for LeakyStreamingProvider {
+        fn subscribe(self: Arc<Self>) -> CredentialUpdateStream {
+            Box::pin(futures::stream::iter([
+                Err(RedisError::Redis(
+                    "provider-secret-must-not-be-traced".to_string(),
+                )),
+                Ok(Credentials::password("callback-input-secret")),
+            ]))
+        }
+    }
+
+    impl StreamingCredentialProvider for DropAwareStreamingProvider {
+        fn subscribe(self: Arc<Self>) -> CredentialUpdateStream {
+            Box::pin(DropAwareStream {
+                created: Arc::clone(&self.stream_created),
+                dropped: Arc::clone(&self.stream_dropped),
+                announced: false,
+            })
         }
     }
 
@@ -808,6 +1168,38 @@ mod tests {
     }
 
     #[test]
+    fn shared_provider_handle_preserves_one_type_erased_provider() {
+        let get_calls = Arc::new(AtomicUsize::new(0));
+        let refresh_calls = Arc::new(AtomicUsize::new(0));
+        let provider: Arc<dyn CredentialProvider> = Arc::new(RefreshAwareProvider {
+            get_calls: Arc::clone(&get_calls),
+            refresh_calls: Arc::clone(&refresh_calls),
+        });
+        let shared = SharedCredentialProvider::from_arc(provider);
+        let first = shared.clone();
+        let second = shared;
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            first.get_credentials().await.unwrap();
+            second.force_refresh().await.unwrap();
+        });
+
+        assert_eq!(get_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(refresh_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shared_streaming_provider_delegates_subscription() {
+        let shared = SharedCredentialProvider::new(OneShotStreamingProvider);
+        let shared: Arc<dyn StreamingCredentialProvider> = Arc::new(shared);
+        let mut updates = Arc::clone(&shared).subscribe();
+
+        let credentials = updates.next().await.unwrap().unwrap();
+        assert_eq!(credentials.password_value(), "pushed");
+    }
+
+    #[test]
     fn auth_rejection_classification_is_specific() {
         assert!(is_auth_rejection(&RedisError::Redis(
             "WRONGPASS invalid username-password pair".into()
@@ -822,6 +1214,15 @@ mod tests {
             "ERR invalid password policy".into()
         )));
         assert!(!is_auth_rejection(&RedisError::ConnectionClosed));
+    }
+
+    #[test]
+    fn provider_failure_is_authentication_classified_without_secret_material() {
+        let error = credential_provider_failure("current credential lookup");
+        let rendered = error.to_string();
+        assert!(is_authentication_error(&error));
+        assert!(rendered.contains("AUTH_PROVIDER"));
+        assert!(!rendered.contains("token"));
     }
 
     #[test]
@@ -859,6 +1260,59 @@ mod tests {
             .expect("pushed credential was not applied");
         assert_eq!(observed.lock().unwrap().as_deref(), Some("pushed"));
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn dropping_push_handle_drops_provider_stream() {
+        let stream_created = Arc::new(tokio::sync::Notify::new());
+        let stream_dropped = Arc::new(AtomicBool::new(false));
+        let provider: Arc<dyn StreamingCredentialProvider> = Arc::new(DropAwareStreamingProvider {
+            stream_created: Arc::clone(&stream_created),
+            stream_dropped: Arc::clone(&stream_dropped),
+        });
+        let handle = spawn_credential_reauthentication(provider, |_credentials| async { Ok(()) });
+
+        tokio::time::timeout(Duration::from_secs(1), stream_created.notified())
+            .await
+            .expect("provider stream was not polled");
+        drop(handle);
+        tokio::task::yield_now().await;
+        assert!(
+            stream_dropped.load(Ordering::SeqCst),
+            "dropping the owner must stop and drop its refresh stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn push_helper_tracing_does_not_render_provider_or_callback_errors() {
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let callback_reached = Arc::new(tokio::sync::Notify::new());
+        let provider: Arc<dyn StreamingCredentialProvider> = Arc::new(LeakyStreamingProvider);
+        let handle = spawn_credential_reauthentication(provider, {
+            let callback_reached = Arc::clone(&callback_reached);
+            move |_credentials| {
+                callback_reached.notify_one();
+                async {
+                    Err(RedisError::Redis(
+                        "callback-secret-must-not-be-traced".to_string(),
+                    ))
+                }
+            }
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), callback_reached.notified())
+            .await
+            .expect("credential callback was not reached");
+        handle.shutdown().await;
+
+        let events = capture.events.lock().unwrap().join("\n");
+        assert!(events.contains("credential refresh stream failed"));
+        assert!(events.contains("credential reauthentication failed"));
+        assert!(!events.contains("provider-secret-must-not-be-traced"));
+        assert!(!events.contains("callback-secret-must-not-be-traced"));
+        assert!(!events.contains("callback-input-secret"));
     }
 
     #[test]

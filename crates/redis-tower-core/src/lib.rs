@@ -86,7 +86,8 @@ pub mod value;
 
 pub use command::{Command, RequestDeadline, WithDeadline};
 pub use connection::{
-    ConnectionConfig, KeepaliveConfig, ProtocolVersion, ReceivedPushFrame, RedisConnection,
+    ConnectionConfig, KeepaliveConfig, PendingRedisConnection, ProtocolVersion, ReceivedPushFrame,
+    RedisConnection,
 };
 pub use error::RedisError;
 pub use frame_service::FrameService;

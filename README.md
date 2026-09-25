@@ -411,8 +411,9 @@ ElastiCache IAM and Microsoft Entra ID integrations:
 - `redis-tower-auth-azure`
 
 The [cloud authentication guide](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md)
-covers reconnect-time refresh, proactive reauthentication, TLS, and topology-
-specific configuration.
+covers URL-backed provider factories, setup deadlines, shared provider caches,
+reconnect-time refresh, and the reconnect/replay rules for dedicated Pub/Sub,
+MONITOR, blocking, and transactional sessions.
 
 Blocking applications can use `redis-tower-sync`:
 

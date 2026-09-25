@@ -275,8 +275,11 @@ fn refresh_after(lifetime: Duration) -> Duration {
         .unwrap_or(lifetime)
 }
 
-fn provider_error(context: &str, error: impl fmt::Display) -> RedisError {
-    RedisError::Redis(format!("{context} failed: {error}"))
+fn provider_error(context: &str, _error: impl fmt::Display) -> RedisError {
+    // Azure SDK errors can contain HTTP request details. Do not forward them
+    // into application errors where a custom credential implementation might
+    // have included token material.
+    RedisError::Redis(format!("AUTH_PROVIDER {context} failed"))
 }
 
 #[cfg(test)]
@@ -361,5 +364,16 @@ mod tests {
         let debug = format!("{:?}", provider().0);
         assert!(debug.contains("00000000-0000-0000-0000-000000000001"));
         assert!(!debug.contains("token-"));
+    }
+
+    #[test]
+    fn provider_errors_do_not_expose_sdk_details() {
+        let error = provider_error("Entra token acquisition", "secret-token-value");
+        let display = error.to_string();
+        assert_eq!(
+            display,
+            "redis error: AUTH_PROVIDER Entra token acquisition failed"
+        );
+        assert!(!display.contains("secret-token-value"));
     }
 }

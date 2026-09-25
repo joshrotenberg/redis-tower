@@ -468,7 +468,8 @@ pub use consumer::{ConsumerConfig, StreamConsumer, StreamMessage};
 pub use credentials::{
     AuthenticatedConnection, CredentialConnectionFactory, CredentialProvider,
     CredentialReauthenticationHandle, CredentialUpdateStream, Credentials, RotatingAuthClient,
-    StaticCredentials, StreamingCredentialProvider, authenticate_with_refresh, is_auth_rejection,
+    SharedCredentialProvider, StaticCredentials, StreamingCredentialProvider,
+    authenticate_with_refresh, is_auth_rejection, is_authentication_error,
     spawn_credential_reauthentication,
 };
 pub use executor::{ExecutorService, RedisExecutor};
@@ -527,8 +528,9 @@ pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 // Re-export core types.
 pub use redis_tower_core::{
     Command, ConnectionConfig, DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, Frame, FrameService,
-    FromRedisBytes, KeepaliveConfig, ProtocolVersion, RedisConnection, RedisConvert, RedisError,
-    RedisStream, RedisValueExt, RequestDeadline, RespCodec, RespLimits, WithDeadline,
+    FromRedisBytes, KeepaliveConfig, PendingRedisConnection, ProtocolVersion, RedisConnection,
+    RedisConvert, RedisError, RedisStream, RedisValueExt, RequestDeadline, RespCodec, RespLimits,
+    WithDeadline,
 };
 
 // Re-export TLS config when a TLS backend is enabled.

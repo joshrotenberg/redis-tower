@@ -314,6 +314,21 @@ let client = MultiplexedClient::from_factory(
 ).await?;
 ```
 
+For rotating cloud credentials, use
+`CredentialConnectionFactory::from_url` instead. It keeps the URL's transport,
+database, and RESP protocol settings while replacing static URL credentials with
+the provider, and its setup timeout covers credential lookup, transport setup,
+authentication, database selection, and protocol negotiation. Share one
+`SharedCredentialProvider` across ordinary and dedicated connections so they use
+the same refresh cache.
+
+Credential rotation is session-aware. Ordinary connections can reauthenticate
+in place when they are idle. Pub/Sub must reconnect and replay confirmed
+subscriptions, MONITOR must terminate and reopen with an observable gap, and
+blocking or transactional work should rotate at a fresh operation boundary.
+See the [cloud authentication guide](CLOUD-AUTH.md) for complete examples and
+owner-lifecycle rules.
+
 `ResilientRedisClient` is a simpler alternative with built-in reconnection,
 but it serializes all commands through one mutex. It is appropriate for modest
 traffic or control-plane work; prefer the factory-backed multiplexed form for
