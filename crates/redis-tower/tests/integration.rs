@@ -87,6 +87,8 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
         .concat()
     };
     let string_key = key(b"string");
+    let empty_string_key = key(b"empty-string");
+    let missing_string_key = key(b"missing-string");
     let hash_key = key(b"hash");
     let list_key = key(b"list");
     let set_key = key(b"set");
@@ -108,6 +110,8 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
 
     for redis_key in [
         &string_key,
+        &empty_string_key,
+        &missing_string_key,
         &hash_key,
         &list_key,
         &set_key,
@@ -133,6 +137,31 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
         conn.execute(Get::new(&string_key)).await.unwrap(),
         Some(Bytes::copy_from_slice(value))
     );
+    conn.execute(Set::new(&empty_string_key, b"".as_slice()))
+        .await
+        .unwrap();
+    assert_eq!(
+        conn.execute(Get::new(&empty_string_key)).await.unwrap(),
+        Some(Bytes::new())
+    );
+    assert_eq!(
+        conn.execute(Get::new(&missing_string_key)).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        conn.execute(MGet::new([
+            string_key.as_slice(),
+            missing_string_key.as_slice(),
+            empty_string_key.as_slice(),
+        ]))
+        .await
+        .unwrap(),
+        vec![
+            Some(Bytes::copy_from_slice(value)),
+            None,
+            Some(Bytes::new()),
+        ]
+    );
 
     conn.execute(HSet::new(&hash_key, field, value))
         .await
@@ -140,6 +169,10 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
     assert_eq!(
         conn.execute(HGet::new(&hash_key, field)).await.unwrap(),
         Some(Bytes::copy_from_slice(value))
+    );
+    assert_eq!(
+        conn.execute(HGetAll::new(&hash_key)).await.unwrap(),
+        vec![(Bytes::copy_from_slice(field), Bytes::copy_from_slice(value),)]
     );
 
     conn.execute(LPush::new(&list_key, value)).await.unwrap();

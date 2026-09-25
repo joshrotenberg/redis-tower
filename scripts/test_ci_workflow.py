@@ -31,7 +31,20 @@ def documentation_job() -> str:
     return workflow[start:end]
 
 
+def command_coverage_job() -> str:
+    workflow = WORKFLOW.read_text()
+    start = workflow.index("  command-coverage:\n")
+    end = workflow.index("\n  benchmark-evidence-contract:\n", start)
+    return workflow[start:end]
+
+
 class CiWorkflowTests(unittest.TestCase):
+    def test_command_capability_ledger_is_tested_and_checked_offline(self) -> None:
+        job = command_coverage_job()
+        self.assertIn("python3 scripts/test_generate_command_capabilities.py", job)
+        self.assertIn("python3 scripts/generate_command_capabilities.py --check", job)
+        self.assertIn("python3 scripts/generate_command_coverage.py --check", job)
+
     def test_published_migration_examples_are_compiled(self) -> None:
         job = documentation_job()
         self.assertIn("cargo check --locked", job)

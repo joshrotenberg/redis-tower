@@ -100,8 +100,14 @@ jobs:
       - name: Test coverage generator
         run: python3 scripts/test_generate_command_coverage.py
 
-      - name: Check generated report
+      - name: Test capability ledger generator
+        run: python3 scripts/test_generate_command_capabilities.py
+
+      - name: Check generated command-name report
         run: python3 scripts/generate_command_coverage.py --check
+
+      - name: Check generated capability ledger
+        run: python3 scripts/generate_command_capabilities.py --check
 
   benchmark-evidence-contract:
     name: Benchmark Evidence Contract

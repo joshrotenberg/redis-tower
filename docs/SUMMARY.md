@@ -19,6 +19,7 @@
 # Reference
 
 - [Command cookbook](COMMAND-COOKBOOK.md)
+- [Command capability ledger](COMMAND-CAPABILITIES.md)
 - [Binary data and typed arguments](BINARY-DATA.md)
 - [RESP codec support and validation](PROTOCOL-TESTING.md)
 - [Client comparison](FEATURE-MATRIX.md)
