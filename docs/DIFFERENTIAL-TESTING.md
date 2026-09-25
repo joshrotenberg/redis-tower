@@ -13,6 +13,9 @@ Standalone command and conversion failures report the case, command or step,
 adapter side, selected RESP protocol, live Redis version, both client versions,
 and deterministic seed (`0x52454449535f4d43`). Connection failures use
 `server=unavailable` because no server version can be queried safely.
+A synthetic user/password regression drives both adapters through connection
+failure and verifies that neither the target nor raw error text reaches the
+captured panic message.
 
 ## Initial MCP-derived case ledger
 

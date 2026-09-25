@@ -20,16 +20,16 @@ matches the current source tree.
 
 ### Compiled integration inventory
 
-The scoreboard-scoped packages compile **714 integration tests** across **40 test binaries**. **204** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
+The scoreboard-scoped packages compile **715 integration tests** across **40 test binaries**. **204** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
 
 | Surface | Package | Binaries | Compiled | `#[ignore]` | Pull request | Scheduled | No workflow selector |
 |---|---|---:|---:|---:|---:|---:|---:|
-| Standalone | `redis-tower` | 30 | 494 | 0 | 494 | 227 | 0 |
+| Standalone | `redis-tower` | 30 | 495 | 0 | 495 | 227 | 0 |
 | Cluster | `redis-tower-cluster` | 1 | 104 | 104 | 104 | 0 | 0 |
 | Sentinel | `redis-tower-sentinel` | 2 | 88 | 88 | 88 | 0 | 0 |
 | Modules | `redis-tower-modules` | 6 | 12 | 12 | 0 | 12 | 0 |
 | Distributed primitives | `redis-tower-primitives` | 1 | 16 | 0 | 16 | 0 | 0 |
-| **Total** |  | **40** | **714** | **204** | **702** | **239** | **0** |
+| **Total** |  | **40** | **715** | **204** | **703** | **239** | **0** |
 
 Counts are unique compiled tests. A test selected by both pull-request and scheduled workflows appears in both cadence columns, but only once in the compiled total.
 
@@ -48,11 +48,11 @@ The shared command corpus produces **210 compiled parity tests**: **35 test case
 
 ### Independent-client differential coverage
 
-The independent redis-rs corpus contains **10 compiled test entry points**. These are counted separately from shared-client topology expansions.
+The independent redis-rs corpus contains **11 compiled test entry points**. These are counted separately from shared-client topology expansions.
 
 | Surface | Test binary | Compiled tests | Default |
 |---|---|---:|---|
-| Standalone | `differential_redis_rs` | 7 | normal |
+| Standalone | `differential_redis_rs` | 8 | normal |
 | Cluster | `cluster_integration` | 1 | ignored |
 | Sentinel | `sentinel_integration` | 1 | ignored |
 | Modules | `differential_module_replies` | 1 | ignored |

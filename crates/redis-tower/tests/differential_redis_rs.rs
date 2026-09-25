@@ -281,7 +281,7 @@ impl TowerAdapter {
         Self {
             connection: RedisConnection::connect_with_protocol(addr, protocol.tower())
                 .await
-                .unwrap_or_else(|error| panic!("{context} error={error}")),
+                .unwrap_or_else(|_| panic!("{context} error=connection-failed")),
             case,
             protocol,
             server_version: "unavailable".to_owned(),
@@ -349,13 +349,14 @@ struct RedisRsAdapter {
 impl RedisRsAdapter {
     async fn connect(addr: &str, case: &'static str, protocol: Protocol) -> Self {
         let url = format!("redis://{addr}/?protocol={}", protocol.query());
-        let client = redis::Client::open(url).expect("valid redis-rs URL");
         let context = diagnostic(case, "CONNECT", "redis-rs", protocol, "unavailable");
+        let client = redis::Client::open(url)
+            .unwrap_or_else(|_| panic!("{context} error=invalid-connection-url"));
         Self {
             connection: client
                 .get_multiplexed_async_connection()
                 .await
-                .unwrap_or_else(|error| panic!("{context} error={error}")),
+                .unwrap_or_else(|_| panic!("{context} error=connection-failed")),
             case,
             protocol,
             server_version: "unavailable".to_owned(),
@@ -505,6 +506,60 @@ impl Pair {
     }
 }
 
+fn panic_message(error: tokio::task::JoinError) -> String {
+    let payload = error.into_panic();
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else {
+        "non-string panic".to_owned()
+    }
+}
+
+#[tokio::test]
+async fn differential_connection_diagnostics_do_not_expose_credentials() {
+    const USER: &str = "review-user";
+    const PASSWORD: &str = "REVIEW_SECRET_TOKEN";
+    const SENSITIVE_TARGET: &str = "review-user:REVIEW_SECRET_TOKEN@127.0.0.1:not-a-port";
+
+    let tower = tokio::spawn(async {
+        TowerAdapter::connect(SENSITIVE_TARGET, "credential-redaction", Protocol::Resp2).await
+    })
+    .await;
+    let tower_message = match tower {
+        Err(error) if error.is_panic() => panic_message(error),
+        _ => panic!("synthetic redis-tower connection unexpectedly succeeded"),
+    };
+
+    let redis_rs = tokio::spawn(async {
+        RedisRsAdapter::connect(SENSITIVE_TARGET, "credential-redaction", Protocol::Resp2).await
+    })
+    .await;
+    let redis_rs_message = match redis_rs {
+        Err(error) if error.is_panic() => panic_message(error),
+        _ => panic!("synthetic redis-rs connection unexpectedly succeeded"),
+    };
+
+    for (side, message) in [
+        ("redis-tower", tower_message),
+        ("redis-rs", redis_rs_message),
+    ] {
+        assert!(message.contains("case=credential-redaction"));
+        assert!(message.contains(&format!("side={side}")));
+        assert!(message.contains("error="));
+        assert!(!message.contains(USER), "username leaked through {side}");
+        assert!(
+            !message.contains(PASSWORD),
+            "password leaked through {side}"
+        );
+        assert!(
+            !message.contains(SENSITIVE_TARGET),
+            "connection target leaked through {side}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn diff_mcp_scalar_nil_binary_and_numeric_boundaries() {
     for protocol in Protocol::ALL {
@@ -634,7 +689,7 @@ async fn diff_mcp_typed_set_builder_options() {
             .connection
             .execute(Set::new(tower_typed_key.clone(), "replacement").nx().get())
             .await
-            .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+            .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
         let redis_context = pair.diagnostic("SET NX GET", "redis-rs");
         let redis_nx = redis::cmd("SET")
             .arg(&redis_key)
@@ -643,7 +698,7 @@ async fn diff_mcp_typed_set_builder_options() {
             .arg("GET")
             .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
             .await
-            .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+            .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
         assert_eq!(
             tower_nx.map(|value| value.to_vec()),
             redis_nx,
@@ -661,7 +716,7 @@ async fn diff_mcp_typed_set_builder_options() {
             .connection
             .execute(Set::new(tower_typed_key.clone(), "replacement").xx().get())
             .await
-            .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+            .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
         let redis_context = pair.diagnostic("SET XX GET", "redis-rs");
         let redis_xx = redis::cmd("SET")
             .arg(&redis_key)
@@ -670,7 +725,7 @@ async fn diff_mcp_typed_set_builder_options() {
             .arg("GET")
             .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
             .await
-            .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+            .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
         assert_eq!(
             tower_xx.map(|value| value.to_vec()),
             redis_xx,
@@ -1154,7 +1209,7 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
         .connection
         .execute(Set::new(tower_typed_key, "replacement").nx().get())
         .await
-        .unwrap_or_else(|error| panic!("{tower_context} error={error}"));
+        .unwrap_or_else(|_| panic!("{tower_context} error=command-failed"));
     let redis_context = pair.diagnostic("SET GET without NX negative control", "redis-rs");
     redis::cmd("SET")
         .arg(&redis_key)
@@ -1162,7 +1217,7 @@ async fn differential_negative_controls_detect_wrong_conversion_option_and_repla
         .arg("GET")
         .query_async::<Option<Vec<u8>>>(&mut pair.redis_rs.connection)
         .await
-        .unwrap_or_else(|error| panic!("{redis_context} error={error}"));
+        .unwrap_or_else(|_| panic!("{redis_context} error=command-failed"));
     let tower = pair.tower.raw("GET", &[&tower_key]).await.unwrap();
     let redis_rs = pair.redis_rs.raw("GET", &[&redis_key]).await.unwrap();
     assert!(
