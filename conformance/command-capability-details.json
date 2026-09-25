@@ -604,7 +604,8 @@
         {"path": ".github/workflows/ci.yml", "symbol": "test-unit:"},
         {"path": ".github/workflows/ci.yml", "symbol": "test-integration:"},
         {"path": ".github/workflows/ci.yml", "symbol": "Run cluster integration tests"}
-      ]
+      ],
+      "last_observed_pass": {"date": "2026-09-25", "commit": "38db4052e91052823d0ba2e4dbc024c801f594a0", "url": "https://github.com/joshrotenberg/redis-tower/actions/runs/36132327040/job/108062222677"}
     },
     {
       "id": "session.client-tracking",
