@@ -13,6 +13,7 @@
 //! blocking commands on a dedicated `RedisConnection` or a pooled connection
 //! instead. Each such command reports `is_blocking() == true`.
 
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -23,13 +24,13 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Returns `None` on timeout, `Some((key, value))` on success.
 #[derive(Clone)]
 pub struct BLPop {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     timeout: f64,
 }
 
 impl BLPop {
     /// Block on a single key. Timeout in seconds (0 = block indefinitely).
-    pub fn new(key: impl Into<String>, timeout: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
             timeout,
@@ -37,7 +38,7 @@ impl BLPop {
     }
 
     /// Block on multiple keys. Returns from the first key that has data.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             timeout,
@@ -51,7 +52,7 @@ impl Command for BLPop {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("BLPOP")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         args.push(bulk(self.timeout.to_string()));
         array(args)
@@ -75,13 +76,13 @@ impl Command for BLPop {
 /// Blocking right pop. Same as BLPOP but pops from the tail.
 #[derive(Clone)]
 pub struct BRPop {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     timeout: f64,
 }
 
 impl BRPop {
     /// Create a new [`BRPop`] command.
-    pub fn new(key: impl Into<String>, timeout: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
             timeout,
@@ -89,7 +90,7 @@ impl BRPop {
     }
 
     /// Create the [`BRPop`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             timeout,
@@ -103,7 +104,7 @@ impl Command for BRPop {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("BRPOP")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         args.push(bulk(self.timeout.to_string()));
         array(args)
@@ -127,8 +128,8 @@ impl Command for BRPop {
 /// Blocking version of LMOVE.
 #[derive(Clone)]
 pub struct BLMove {
-    source: String,
-    destination: String,
+    source: CommandArg,
+    destination: CommandArg,
     wherefrom: ListDir,
     whereto: ListDir,
     timeout: f64,
@@ -155,8 +156,8 @@ impl ListDir {
 impl BLMove {
     /// Create a new [`BLMove`] command.
     pub fn new(
-        source: impl Into<String>,
-        destination: impl Into<String>,
+        source: impl Into<CommandArg>,
+        destination: impl Into<CommandArg>,
         wherefrom: ListDir,
         whereto: ListDir,
         timeout: f64,
@@ -177,8 +178,8 @@ impl Command for BLMove {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("BLMOVE"),
-            bulk(self.source.as_str()),
-            bulk(self.destination.as_str()),
+            bulk(&self.source),
+            bulk(&self.destination),
             bulk(self.wherefrom.as_str()),
             bulk(self.whereto.as_str()),
             bulk(self.timeout.to_string()),
@@ -210,13 +211,13 @@ impl Command for BLMove {
 /// Blocking pop of the member with the lowest score from sorted sets.
 #[derive(Clone)]
 pub struct BZPopMin {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     timeout: f64,
 }
 
 impl BZPopMin {
     /// Create a new [`BZPopMin`] command.
-    pub fn new(key: impl Into<String>, timeout: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
             timeout,
@@ -224,7 +225,7 @@ impl BZPopMin {
     }
 
     /// Create the [`BZPopMin`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             timeout,
@@ -238,7 +239,7 @@ impl Command for BZPopMin {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("BZPOPMIN")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         args.push(bulk(self.timeout.to_string()));
         array(args)
@@ -262,13 +263,13 @@ impl Command for BZPopMin {
 /// Blocking pop of the member with the highest score from sorted sets.
 #[derive(Clone)]
 pub struct BZPopMax {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     timeout: f64,
 }
 
 impl BZPopMax {
     /// Create a new [`BZPopMax`] command.
-    pub fn new(key: impl Into<String>, timeout: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timeout: f64) -> Self {
         Self {
             keys: vec![key.into()],
             timeout,
@@ -276,7 +277,7 @@ impl BZPopMax {
     }
 
     /// Create the [`BZPopMax`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>, timeout: f64) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>, timeout: f64) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             timeout,
@@ -290,7 +291,7 @@ impl Command for BZPopMax {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("BZPOPMAX")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         args.push(bulk(self.timeout.to_string()));
         array(args)

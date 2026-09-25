@@ -30,11 +30,11 @@
 //! # }
 //! ```
 
-use redis_tower::RedisExecutor;
 use redis_tower::commands::{
     JsonArrAppend, JsonArrLen, JsonDel, JsonGet, JsonMGet, JsonMerge, JsonObjKeys, JsonSet,
     JsonStrLen, JsonType,
 };
+use redis_tower::{RedisExecutor, commands::CommandArg};
 use redis_tower_core::{Frame, RedisError};
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -107,7 +107,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn set<T: Serialize>(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
         value: &T,
     ) -> Result<(), RedisError> {
@@ -136,7 +136,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn get<T: DeserializeOwned>(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<Option<T>, RedisError> {
         let path = path.into();
@@ -166,7 +166,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn del(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<u64, RedisError> {
         let count = self
@@ -194,7 +194,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn mget<T: DeserializeOwned>(
         &mut self,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         path: impl Into<String>,
     ) -> Result<Vec<Option<T>>, RedisError> {
         let path = path.into();
@@ -231,7 +231,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn merge<T: Serialize>(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
         value: &T,
     ) -> Result<(), RedisError> {
@@ -258,7 +258,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn arr_append<T: Serialize>(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
         values: &[T],
     ) -> Result<Vec<Option<i64>>, RedisError> {
@@ -288,7 +288,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn arr_len(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<Option<i64>, RedisError> {
         let frame = self
@@ -314,7 +314,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn obj_keys(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<Vec<String>, RedisError> {
         let frame = self
@@ -339,7 +339,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn str_len(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<Option<i64>, RedisError> {
         let frame = self
@@ -365,7 +365,7 @@ impl<C: RedisExecutor> JsonClient<C> {
     /// ```
     pub async fn path_exists(
         &mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
     ) -> Result<bool, RedisError> {
         let result = self

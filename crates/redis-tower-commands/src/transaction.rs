@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -135,19 +136,19 @@ impl Command for Discard {
 /// transaction (optimistic locking).
 #[derive(Clone)]
 pub struct Watch {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl Watch {
     /// Create a new [`Watch`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`Watch`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -160,7 +161,7 @@ impl Command for Watch {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("WATCH")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }

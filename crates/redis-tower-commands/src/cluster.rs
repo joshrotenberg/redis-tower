@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -580,12 +581,12 @@ impl Command for ClusterGetKeysInSlot {
 /// Returns the hash slot number for the given key.
 #[derive(Clone)]
 pub struct ClusterKeySlot {
-    key: String,
+    key: CommandArg,
 }
 
 impl ClusterKeySlot {
     /// Create a new [`ClusterKeySlot`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -594,11 +595,7 @@ impl Command for ClusterKeySlot {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CLUSTER"),
-            bulk("KEYSLOT"),
-            bulk(self.key.as_str()),
-        ])
+        array(vec![bulk("CLUSTER"), bulk("KEYSLOT"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {

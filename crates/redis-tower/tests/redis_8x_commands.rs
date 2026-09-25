@@ -155,7 +155,7 @@ async fn redis_8_0_vector_membership_and_search_diagnostics() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(tag_values, vec!["database".to_string()]);
+    assert_eq!(tag_values, vec![Bytes::from_static(b"database")]);
 
     conn.execute(FtDropIndex::new(index).dd()).await.unwrap();
     conn.execute(Del::new(vector_set)).await.unwrap();

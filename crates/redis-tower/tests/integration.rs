@@ -4,8 +4,8 @@ use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig
 use redis_tower::commands::*;
 use redis_tower::reconnect::{AddrConnectionFactory, ReconnectConfig, UrlConnectionFactory};
 use redis_tower::{
-    MultiplexedClient, Pipeline, ProtocolVersion, PubSubConnection, RedisClient, RedisConnection,
-    ResilientConnection, ResilientRedisClient, Transaction, TransactionResult,
+    Frame, MultiplexedClient, Pipeline, ProtocolVersion, PubSubConnection, RedisClient,
+    RedisConnection, ResilientConnection, ResilientRedisClient, Transaction, TransactionResult,
 };
 use tokio::sync::OnceCell;
 use tokio_stream::StreamExt;
@@ -92,9 +92,19 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
     let set_key = key(b"set");
     let zset_key = key(b"zset");
     let stream_key = key(b"stream");
+    let lifecycle_key = key(b"lifecycle");
+    let renamed_key = key(b"renamed");
+    let blocking_key = key(b"blocking");
+    let scan_key = key(b"scan");
+    let script_key = key(b"script");
+    let geo_key = key(b"geo");
+    let hll_key = key(b"hll");
+    let bitmap_key = key(b"bitmap");
+    let watched_key = key(b"watched");
     let value = b"value\0\xff\r\n".as_slice();
     let field = b"field\xff".as_slice();
     let member = b"member\xf0\x28\x8c\x28".as_slice();
+    let pubsub_channel = key(b"channel");
 
     for redis_key in [
         &string_key,
@@ -103,6 +113,15 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
         &set_key,
         &zset_key,
         &stream_key,
+        &lifecycle_key,
+        &renamed_key,
+        &blocking_key,
+        &scan_key,
+        &script_key,
+        &geo_key,
+        &hll_key,
+        &bitmap_key,
+        &watched_key,
     ] {
         conn.execute(RawCommand::new("DEL").arg(redis_key))
             .await
@@ -152,6 +171,103 @@ async fn typed_binary_roundtrip(protocol: ProtocolVersion, namespace: &[u8]) {
     assert_eq!(
         entries[0].fields,
         vec![(Bytes::copy_from_slice(field), Bytes::copy_from_slice(value))]
+    );
+
+    conn.execute(Set::new(&lifecycle_key, value)).await.unwrap();
+    conn.execute(Rename::new(&lifecycle_key, &renamed_key))
+        .await
+        .unwrap();
+    assert_eq!(
+        conn.execute(Get::new(&renamed_key)).await.unwrap(),
+        Some(Bytes::copy_from_slice(value))
+    );
+
+    conn.execute(RPush::new(&blocking_key, value))
+        .await
+        .unwrap();
+    assert_eq!(
+        conn.execute(BLPop::new(&blocking_key, 1.0)).await.unwrap(),
+        Some((
+            Bytes::copy_from_slice(&blocking_key),
+            Bytes::copy_from_slice(value),
+        ))
+    );
+
+    conn.execute(Set::new(&scan_key, value)).await.unwrap();
+    let mut cursor = "0".to_owned();
+    let mut scanned = Vec::new();
+    loop {
+        let scan = conn
+            .execute(
+                Scan::new()
+                    .cursor(cursor)
+                    .match_pattern(&scan_key)
+                    .count(1_000),
+            )
+            .await
+            .unwrap();
+        let finished = scan.is_finished();
+        cursor = scan.cursor;
+        scanned.extend(scan.results);
+        if finished {
+            break;
+        }
+    }
+    assert_eq!(scanned, vec![Bytes::copy_from_slice(&scan_key)]);
+
+    let script_result = conn
+        .execute(
+            Eval::new("return {KEYS[1], ARGV[1]}")
+                .key(&script_key)
+                .arg(value),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        script_result,
+        Frame::Array(Some(vec![
+            Frame::BulkString(Some(Bytes::copy_from_slice(&script_key))),
+            Frame::BulkString(Some(Bytes::copy_from_slice(value))),
+        ]))
+    );
+
+    assert_eq!(
+        conn.execute(Publish::new(&pubsub_channel, value))
+            .await
+            .unwrap(),
+        0
+    );
+
+    assert_eq!(
+        conn.execute(GeoAdd::new(&geo_key).member(-122.4194, 37.7749, member))
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(
+        conn.execute(GeoPos::new(&geo_key, member)).await.unwrap()[0].is_some(),
+        "binary geo member must roundtrip"
+    );
+
+    assert!(conn.execute(PfAdd::new(&hll_key, member)).await.unwrap());
+    assert_eq!(conn.execute(PfCount::new(&hll_key)).await.unwrap(), 1);
+
+    assert_eq!(
+        conn.execute(SetBit::new(&bitmap_key, 3, 1)).await.unwrap(),
+        0
+    );
+    assert_eq!(conn.execute(GetBit::new(&bitmap_key, 3)).await.unwrap(), 1);
+
+    conn.execute(Watch::new(&watched_key)).await.unwrap();
+    conn.execute(Unwatch::new()).await.unwrap();
+
+    assert_eq!(
+        conn.execute(Echo::new(value)).await.unwrap(),
+        Bytes::copy_from_slice(value)
+    );
+    assert_eq!(
+        conn.execute(Ping::with_message(value)).await.unwrap(),
+        Bytes::copy_from_slice(value)
     );
 }
 

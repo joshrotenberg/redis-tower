@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -7,19 +8,19 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Removes the specified keys. Returns the number of keys removed.
 #[derive(Clone)]
 pub struct Del {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl Del {
     /// Create a new [`Del`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`Del`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -32,7 +33,7 @@ impl Command for Del {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("DEL")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -57,19 +58,19 @@ impl Command for Del {
 /// Returns the number of specified keys that exist.
 #[derive(Clone)]
 pub struct Exists {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl Exists {
     /// Create a new [`Exists`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`Exists`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -82,7 +83,7 @@ impl Command for Exists {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("EXISTS")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -135,14 +136,14 @@ impl ExpireCondition {
 /// Sets a timeout on `key`. Returns `true` if the timeout was set.
 #[derive(Clone)]
 pub struct Expire {
-    key: String,
+    key: CommandArg,
     seconds: u64,
     condition: Option<ExpireCondition>,
 }
 
 impl Expire {
     /// Create a new [`Expire`] command.
-    pub fn new(key: impl Into<String>, seconds: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, seconds: u64) -> Self {
         Self {
             key: key.into(),
             seconds,
@@ -163,7 +164,7 @@ impl Command for Expire {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("EXPIRE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.seconds.to_string()),
         ];
         if let Some(condition) = self.condition {
@@ -194,12 +195,12 @@ impl Command for Expire {
 /// Returns -2 if the key does not exist, -1 if no expiry is set.
 #[derive(Clone)]
 pub struct Ttl {
-    key: String,
+    key: CommandArg,
 }
 
 impl Ttl {
     /// Create a new [`Ttl`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -208,7 +209,7 @@ impl Command for Ttl {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TTL"), bulk(self.key.as_str())])
+        array(vec![bulk("TTL"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -235,13 +236,13 @@ impl Command for Ttl {
 /// Renames `key` to `newkey`. Errors if `key` does not exist.
 #[derive(Clone)]
 pub struct Rename {
-    key: String,
-    new_key: String,
+    key: CommandArg,
+    new_key: CommandArg,
 }
 
 impl Rename {
     /// Create a new [`Rename`] command.
-    pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, new_key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             new_key: new_key.into(),
@@ -253,11 +254,7 @@ impl Command for Rename {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("RENAME"),
-            bulk(self.key.as_str()),
-            bulk(self.new_key.as_str()),
-        ])
+        array(vec![bulk("RENAME"), bulk(&self.key), bulk(&self.new_key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -281,12 +278,12 @@ impl Command for Rename {
 /// (e.g., "string", "list", "set", "zset", "hash", "none").
 #[derive(Clone)]
 pub struct Type {
-    key: String,
+    key: CommandArg,
 }
 
 impl Type {
     /// Create a new [`Type`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -295,7 +292,7 @@ impl Command for Type {
     type Response = String;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TYPE"), bulk(self.key.as_str())])
+        array(vec![bulk("TYPE"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -323,19 +320,19 @@ impl Command for Type {
 /// Returns the number of keys removed.
 #[derive(Clone)]
 pub struct Unlink {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl Unlink {
     /// Create a new [`Unlink`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`Unlink`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -348,7 +345,7 @@ impl Command for Unlink {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("UNLINK")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -373,12 +370,12 @@ impl Command for Unlink {
 /// Removes the existing timeout on `key`. Returns `true` if the timeout was removed.
 #[derive(Clone)]
 pub struct Persist {
-    key: String,
+    key: CommandArg,
 }
 
 impl Persist {
     /// Create a new [`Persist`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -387,7 +384,7 @@ impl Command for Persist {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("PERSIST"), bulk(self.key.as_str())])
+        array(vec![bulk("PERSIST"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -415,14 +412,14 @@ impl Command for Persist {
 /// Sets a timeout on `key` in milliseconds. Returns `true` if the timeout was set.
 #[derive(Clone)]
 pub struct PExpire {
-    key: String,
+    key: CommandArg,
     milliseconds: u64,
     condition: Option<ExpireCondition>,
 }
 
 impl PExpire {
     /// Create a new [`PExpire`] command.
-    pub fn new(key: impl Into<String>, milliseconds: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, milliseconds: u64) -> Self {
         Self {
             key: key.into(),
             milliseconds,
@@ -443,7 +440,7 @@ impl Command for PExpire {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("PEXPIRE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.milliseconds.to_string()),
         ];
         if let Some(condition) = self.condition {
@@ -474,14 +471,14 @@ impl Command for PExpire {
 /// Returns `true` if the timeout was set.
 #[derive(Clone)]
 pub struct PExpireAt {
-    key: String,
+    key: CommandArg,
     ms_timestamp: i64,
     condition: Option<ExpireCondition>,
 }
 
 impl PExpireAt {
     /// Create a new [`PExpireAt`] command.
-    pub fn new(key: impl Into<String>, ms_timestamp: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, ms_timestamp: i64) -> Self {
         Self {
             key: key.into(),
             ms_timestamp,
@@ -502,7 +499,7 @@ impl Command for PExpireAt {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("PEXPIREAT"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.ms_timestamp.to_string()),
         ];
         if let Some(condition) = self.condition {
@@ -533,14 +530,14 @@ impl Command for PExpireAt {
 /// Returns `true` if the key was copied.
 #[derive(Clone)]
 pub struct Copy {
-    source: String,
-    destination: String,
+    source: CommandArg,
+    destination: CommandArg,
     replace: bool,
 }
 
 impl Copy {
     /// Create a new [`struct@Copy`] command.
-    pub fn new(source: impl Into<String>, destination: impl Into<String>) -> Self {
+    pub fn new(source: impl Into<CommandArg>, destination: impl Into<CommandArg>) -> Self {
         Self {
             source: source.into(),
             destination: destination.into(),
@@ -559,11 +556,7 @@ impl Command for Copy {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("COPY"),
-            bulk(self.source.as_str()),
-            bulk(self.destination.as_str()),
-        ];
+        let mut args = vec![bulk("COPY"), bulk(&self.source), bulk(&self.destination)];
         if self.replace {
             args.push(bulk("REPLACE"));
         }
@@ -591,12 +584,12 @@ impl Command for Copy {
 /// Returns all keys matching `pattern`.
 #[derive(Clone)]
 pub struct Keys {
-    pattern: String,
+    pattern: CommandArg,
 }
 
 impl Keys {
     /// Create a new [`Keys`] command.
-    pub fn new(pattern: impl Into<String>) -> Self {
+    pub fn new(pattern: impl Into<CommandArg>) -> Self {
         Self {
             pattern: pattern.into(),
         }
@@ -607,7 +600,7 @@ impl Command for Keys {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("KEYS"), bulk(self.pattern.as_str())])
+        array(vec![bulk("KEYS"), bulk(&self.pattern)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -690,19 +683,19 @@ impl Command for RandomKey {
 /// Returns the number of keys that were touched.
 #[derive(Clone)]
 pub struct Touch {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl Touch {
     /// Create a new [`Touch`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`Touch`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -715,7 +708,7 @@ impl Command for Touch {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("TOUCH")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -741,12 +734,12 @@ impl Command for Touch {
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
 #[derive(Clone)]
 pub struct ExpireTime {
-    key: String,
+    key: CommandArg,
 }
 
 impl ExpireTime {
     /// Create a new [`ExpireTime`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -755,7 +748,7 @@ impl Command for ExpireTime {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("EXPIRETIME"), bulk(self.key.as_str())])
+        array(vec![bulk("EXPIRETIME"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -783,12 +776,12 @@ impl Command for ExpireTime {
 /// Returns -1 if the key exists but has no expiry, -2 if the key does not exist.
 #[derive(Clone)]
 pub struct PExpireTime {
-    key: String,
+    key: CommandArg,
 }
 
 impl PExpireTime {
     /// Create a new [`PExpireTime`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -797,7 +790,7 @@ impl Command for PExpireTime {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("PEXPIRETIME"), bulk(self.key.as_str())])
+        array(vec![bulk("PEXPIRETIME"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -825,12 +818,12 @@ impl Command for PExpireTime {
 /// Returns `None` if the key does not exist.
 #[derive(Clone)]
 pub struct Dump {
-    key: String,
+    key: CommandArg,
 }
 
 impl Dump {
     /// Create a new [`Dump`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -839,7 +832,7 @@ impl Command for Dump {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("DUMP"), bulk(self.key.as_str())])
+        array(vec![bulk("DUMP"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -868,7 +861,7 @@ impl Command for Dump {
 /// The `ttl_ms` argument sets the time-to-live in milliseconds (0 for no expiry).
 #[derive(Clone)]
 pub struct Restore {
-    key: String,
+    key: CommandArg,
     ttl_ms: u64,
     serialized_value: Bytes,
     replace: bool,
@@ -879,7 +872,11 @@ pub struct Restore {
 
 impl Restore {
     /// Create a new [`Restore`] command.
-    pub fn new(key: impl Into<String>, ttl_ms: u64, serialized_value: impl Into<Bytes>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        ttl_ms: u64,
+        serialized_value: impl Into<Bytes>,
+    ) -> Self {
         Self {
             key: key.into(),
             ttl_ms,
@@ -922,7 +919,7 @@ impl Command for Restore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("RESTORE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.ttl_ms.to_string()),
             bulk(&self.serialized_value),
         ];
@@ -1176,18 +1173,18 @@ pub enum SortOrder {
 /// of bulk strings. The response type is `Frame` to accommodate both cases.
 #[derive(Clone)]
 pub struct Sort {
-    key: String,
-    by: Option<String>,
-    get: Vec<String>,
+    key: CommandArg,
+    by: Option<CommandArg>,
+    get: Vec<CommandArg>,
     limit: Option<(i64, i64)>,
     order: Option<SortOrder>,
     alpha: bool,
-    store: Option<String>,
+    store: Option<CommandArg>,
 }
 
 impl Sort {
     /// Create a new [`Sort`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             by: None,
@@ -1200,13 +1197,13 @@ impl Sort {
     }
 
     /// Configure the `by` option.
-    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+    pub fn by(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
     /// Configure the `get` option.
-    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+    pub fn get(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.get.push(pattern.into());
         self
     }
@@ -1230,7 +1227,7 @@ impl Sort {
     }
 
     /// Configure the `store` option.
-    pub fn store(mut self, destination: impl Into<String>) -> Self {
+    pub fn store(mut self, destination: impl Into<CommandArg>) -> Self {
         self.store = Some(destination.into());
         self
     }
@@ -1240,14 +1237,14 @@ impl Command for Sort {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SORT"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SORT"), bulk(&self.key)];
         if let Some(ref pattern) = self.by {
             args.push(bulk("BY"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         for pattern in &self.get {
             args.push(bulk("GET"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some((offset, count)) = self.limit {
             args.push(bulk("LIMIT"));
@@ -1265,7 +1262,7 @@ impl Command for Sort {
         }
         if let Some(ref dest) = self.store {
             args.push(bulk("STORE"));
-            args.push(bulk(dest.as_str()));
+            args.push(bulk(dest));
         }
         array(args)
     }
@@ -1286,9 +1283,9 @@ impl Command for Sort {
 /// GET references).
 #[derive(Clone)]
 pub struct SortRo {
-    key: String,
-    by: Option<String>,
-    get: Vec<String>,
+    key: CommandArg,
+    by: Option<CommandArg>,
+    get: Vec<CommandArg>,
     limit: Option<(i64, i64)>,
     order: Option<SortOrder>,
     alpha: bool,
@@ -1296,7 +1293,7 @@ pub struct SortRo {
 
 impl SortRo {
     /// Create a new [`SortRo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             by: None,
@@ -1308,13 +1305,13 @@ impl SortRo {
     }
 
     /// Configure the `by` option.
-    pub fn by(mut self, pattern: impl Into<String>) -> Self {
+    pub fn by(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.by = Some(pattern.into());
         self
     }
 
     /// Configure the `get` option.
-    pub fn get(mut self, pattern: impl Into<String>) -> Self {
+    pub fn get(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.get.push(pattern.into());
         self
     }
@@ -1342,14 +1339,14 @@ impl Command for SortRo {
     type Response = Vec<Option<Bytes>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("SORT_RO"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("SORT_RO"), bulk(&self.key)];
         if let Some(ref pattern) = self.by {
             args.push(bulk("BY"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         for pattern in &self.get {
             args.push(bulk("GET"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some((offset, count)) = self.limit {
             args.push(bulk("LIMIT"));
@@ -1402,12 +1399,12 @@ impl Command for SortRo {
 /// Returns the internal encoding of the Redis object stored at the key.
 #[derive(Clone)]
 pub struct ObjectEncoding {
-    key: String,
+    key: CommandArg,
 }
 
 impl ObjectEncoding {
     /// Create a new [`ObjectEncoding`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1416,11 +1413,7 @@ impl Command for ObjectEncoding {
     type Response = String;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("OBJECT"),
-            bulk("ENCODING"),
-            bulk(self.key.as_str()),
-        ])
+        array(vec![bulk("OBJECT"), bulk("ENCODING"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1448,12 +1441,12 @@ impl Command for ObjectEncoding {
 /// maxmemory-policy to be set to an LFU policy).
 #[derive(Clone)]
 pub struct ObjectFreq {
-    key: String,
+    key: CommandArg,
 }
 
 impl ObjectFreq {
     /// Create a new [`ObjectFreq`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1462,7 +1455,7 @@ impl Command for ObjectFreq {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("OBJECT"), bulk("FREQ"), bulk(self.key.as_str())])
+        array(vec![bulk("OBJECT"), bulk("FREQ"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1529,12 +1522,12 @@ impl Command for ObjectHelp {
 /// (not accessed by read or write operations).
 #[derive(Clone)]
 pub struct ObjectIdleTime {
-    key: String,
+    key: CommandArg,
 }
 
 impl ObjectIdleTime {
     /// Create a new [`ObjectIdleTime`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1543,11 +1536,7 @@ impl Command for ObjectIdleTime {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("OBJECT"),
-            bulk("IDLETIME"),
-            bulk(self.key.as_str()),
-        ])
+        array(vec![bulk("OBJECT"), bulk("IDLETIME"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1574,12 +1563,12 @@ impl Command for ObjectIdleTime {
 /// Returns the number of references of the object stored at the key.
 #[derive(Clone)]
 pub struct ObjectRefCount {
-    key: String,
+    key: CommandArg,
 }
 
 impl ObjectRefCount {
     /// Create a new [`ObjectRefCount`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1588,11 +1577,7 @@ impl Command for ObjectRefCount {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("OBJECT"),
-            bulk("REFCOUNT"),
-            bulk(self.key.as_str()),
-        ])
+        array(vec![bulk("OBJECT"), bulk("REFCOUNT"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1620,14 +1605,14 @@ impl Command for ObjectRefCount {
 /// Returns `true` if the timeout was set.
 #[derive(Clone)]
 pub struct ExpireAt {
-    key: String,
+    key: CommandArg,
     timestamp: i64,
     condition: Option<ExpireCondition>,
 }
 
 impl ExpireAt {
     /// Create a new [`ExpireAt`] command.
-    pub fn new(key: impl Into<String>, timestamp: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timestamp: i64) -> Self {
         Self {
             key: key.into(),
             timestamp,
@@ -1648,7 +1633,7 @@ impl Command for ExpireAt {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("EXPIREAT"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.timestamp.to_string()),
         ];
         if let Some(condition) = self.condition {
@@ -1679,12 +1664,12 @@ impl Command for ExpireAt {
 /// Returns -2 if the key does not exist, -1 if no expiry is set.
 #[derive(Clone)]
 pub struct Pttl {
-    key: String,
+    key: CommandArg,
 }
 
 impl Pttl {
     /// Create a new [`Pttl`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1693,7 +1678,7 @@ impl Command for Pttl {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("PTTL"), bulk(self.key.as_str())])
+        array(vec![bulk("PTTL"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1721,13 +1706,13 @@ impl Command for Pttl {
 /// Returns `true` if the key was renamed.
 #[derive(Clone)]
 pub struct RenameNx {
-    key: String,
-    new_key: String,
+    key: CommandArg,
+    new_key: CommandArg,
 }
 
 impl RenameNx {
     /// Create a new [`RenameNx`] command.
-    pub fn new(key: impl Into<String>, new_key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, new_key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             new_key: new_key.into(),
@@ -1739,11 +1724,7 @@ impl Command for RenameNx {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("RENAMENX"),
-            bulk(self.key.as_str()),
-            bulk(self.new_key.as_str()),
-        ])
+        array(vec![bulk("RENAMENX"), bulk(&self.key), bulk(&self.new_key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1768,13 +1749,13 @@ impl Command for RenameNx {
 /// destination database. Returns `true` if the key was moved.
 #[derive(Clone)]
 pub struct Move {
-    key: String,
+    key: CommandArg,
     db: u16,
 }
 
 impl Move {
     /// Create a new [`Move`] command.
-    pub fn new(key: impl Into<String>, db: u16) -> Self {
+    pub fn new(key: impl Into<CommandArg>, db: u16) -> Self {
         Self {
             key: key.into(),
             db,
@@ -1788,7 +1769,7 @@ impl Command for Move {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("MOVE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.db.to_string()),
         ])
     }

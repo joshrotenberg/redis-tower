@@ -1,5 +1,6 @@
 //! SCAN family commands for cursor-based iteration.
 
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -26,7 +27,7 @@ impl<T> ScanResult<T> {
 #[derive(Clone)]
 pub struct Scan {
     cursor: String,
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
     count: Option<u64>,
     key_type: Option<String>,
 }
@@ -49,7 +50,7 @@ impl Scan {
     }
 
     /// Filter keys matching a glob pattern.
-    pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
+    pub fn match_pattern(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
@@ -80,7 +81,7 @@ impl Command for Scan {
         let mut args = vec![bulk("SCAN"), bulk(self.cursor.as_str())];
         if let Some(ref pattern) = self.pattern {
             args.push(bulk("MATCH"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -107,15 +108,15 @@ impl Command for Scan {
 /// Iterates over members of a set.
 #[derive(Clone)]
 pub struct SScan {
-    key: String,
+    key: CommandArg,
     cursor: String,
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
     count: Option<u64>,
 }
 
 impl SScan {
     /// Create a new [`SScan`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             cursor: "0".to_string(),
@@ -131,7 +132,7 @@ impl SScan {
     }
 
     /// Configure the `match_pattern` option.
-    pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
+    pub fn match_pattern(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
@@ -147,14 +148,10 @@ impl Command for SScan {
     type Response = ScanResult<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("SSCAN"),
-            bulk(self.key.as_str()),
-            bulk(self.cursor.as_str()),
-        ];
+        let mut args = vec![bulk("SSCAN"), bulk(&self.key), bulk(self.cursor.as_str())];
         if let Some(ref pattern) = self.pattern {
             args.push(bulk("MATCH"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -177,15 +174,15 @@ impl Command for SScan {
 /// Iterates over fields and values of a hash. Returns (field, value) pairs.
 #[derive(Clone)]
 pub struct HScan {
-    key: String,
+    key: CommandArg,
     cursor: String,
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
     count: Option<u64>,
 }
 
 impl HScan {
     /// Create a new [`HScan`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             cursor: "0".to_string(),
@@ -201,7 +198,7 @@ impl HScan {
     }
 
     /// Configure the `match_pattern` option.
-    pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
+    pub fn match_pattern(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
@@ -217,14 +214,10 @@ impl Command for HScan {
     type Response = ScanResult<(Bytes, Bytes)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("HSCAN"),
-            bulk(self.key.as_str()),
-            bulk(self.cursor.as_str()),
-        ];
+        let mut args = vec![bulk("HSCAN"), bulk(&self.key), bulk(self.cursor.as_str())];
         if let Some(ref pattern) = self.pattern {
             args.push(bulk("MATCH"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));
@@ -247,15 +240,15 @@ impl Command for HScan {
 /// Iterates over members and scores of a sorted set. Returns (member, score) pairs.
 #[derive(Clone)]
 pub struct ZScan {
-    key: String,
+    key: CommandArg,
     cursor: String,
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
     count: Option<u64>,
 }
 
 impl ZScan {
     /// Create a new [`ZScan`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             cursor: "0".to_string(),
@@ -271,7 +264,7 @@ impl ZScan {
     }
 
     /// Configure the `match_pattern` option.
-    pub fn match_pattern(mut self, pattern: impl Into<String>) -> Self {
+    pub fn match_pattern(mut self, pattern: impl Into<CommandArg>) -> Self {
         self.pattern = Some(pattern.into());
         self
     }
@@ -287,14 +280,10 @@ impl Command for ZScan {
     type Response = ScanResult<(Bytes, f64)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("ZSCAN"),
-            bulk(self.key.as_str()),
-            bulk(self.cursor.as_str()),
-        ];
+        let mut args = vec![bulk("ZSCAN"), bulk(&self.key), bulk(self.cursor.as_str())];
         if let Some(ref pattern) = self.pattern {
             args.push(bulk("MATCH"));
-            args.push(bulk(pattern.as_str()));
+            args.push(bulk(pattern));
         }
         if let Some(n) = self.count {
             args.push(bulk("COUNT"));

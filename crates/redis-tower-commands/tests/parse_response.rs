@@ -848,7 +848,7 @@ fn mock_incr_success() {
 fn mock_ping_success() {
     let mut mock = MockConnection::new();
     mock.enqueue(Frame::SimpleString(Bytes::from("PONG")));
-    let result: String = mock.execute(Ping::new()).unwrap();
+    let result: Bytes = mock.execute(Ping::new()).unwrap();
     assert_eq!(result, "PONG");
 }
 

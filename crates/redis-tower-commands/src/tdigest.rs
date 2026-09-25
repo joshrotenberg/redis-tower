@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -64,13 +65,13 @@ fn parse_i64_array(frame: Frame) -> Result<Vec<i64>, RedisError> {
 /// Creates an empty T-Digest sketch at `key`.
 #[derive(Clone)]
 pub struct TdigestCreate {
-    key: String,
+    key: CommandArg,
     compression: Option<i64>,
 }
 
 impl TdigestCreate {
     /// Create a new [`TdigestCreate`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             compression: None,
@@ -88,7 +89,7 @@ impl Command for TdigestCreate {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.CREATE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.CREATE"), bulk(&self.key)];
         if let Some(c) = self.compression {
             args.push(bulk("COMPRESSION"));
             args.push(bulk(c.to_string()));
@@ -116,13 +117,13 @@ impl Command for TdigestCreate {
 /// Adds one or more values to the T-Digest sketch at `key`.
 #[derive(Clone)]
 pub struct TdigestAdd {
-    key: String,
+    key: CommandArg,
     values: Vec<f64>,
 }
 
 impl TdigestAdd {
     /// Create a new [`TdigestAdd`] command.
-    pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
             values: values.into_iter().collect(),
@@ -134,7 +135,7 @@ impl Command for TdigestAdd {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.ADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.ADD"), bulk(&self.key)];
         for v in &self.values {
             args.push(bulk(v.to_string()));
         }
@@ -162,8 +163,8 @@ impl Command for TdigestAdd {
 /// Merges one or more T-Digest sketches into a destination key.
 #[derive(Clone)]
 pub struct TdigestMerge {
-    destination: String,
-    sources: Vec<String>,
+    destination: CommandArg,
+    sources: Vec<CommandArg>,
     compression: Option<i64>,
     override_flag: bool,
 }
@@ -171,8 +172,8 @@ pub struct TdigestMerge {
 impl TdigestMerge {
     /// Create a new [`TdigestMerge`] command.
     pub fn new(
-        destination: impl Into<String>,
-        sources: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        sources: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -201,11 +202,11 @@ impl Command for TdigestMerge {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TDIGEST.MERGE"),
-            bulk(self.destination.as_str()),
+            bulk(&self.destination),
             bulk(self.sources.len().to_string()),
         ];
         for src in &self.sources {
-            args.push(bulk(src.as_str()));
+            args.push(bulk(src));
         }
         if let Some(c) = self.compression {
             args.push(bulk("COMPRESSION"));
@@ -237,13 +238,13 @@ impl Command for TdigestMerge {
 /// Returns the cumulative distribution function value for each given value.
 #[derive(Clone)]
 pub struct TdigestCdf {
-    key: String,
+    key: CommandArg,
     values: Vec<f64>,
 }
 
 impl TdigestCdf {
     /// Create a new [`TdigestCdf`] command.
-    pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
             values: values.into_iter().collect(),
@@ -255,7 +256,7 @@ impl Command for TdigestCdf {
     type Response = Vec<f64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.CDF"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.CDF"), bulk(&self.key)];
         for v in &self.values {
             args.push(bulk(v.to_string()));
         }
@@ -280,13 +281,13 @@ impl Command for TdigestCdf {
 /// Returns the estimated value at each given quantile.
 #[derive(Clone)]
 pub struct TdigestQuantile {
-    key: String,
+    key: CommandArg,
     quantiles: Vec<f64>,
 }
 
 impl TdigestQuantile {
     /// Create a new [`TdigestQuantile`] command.
-    pub fn new(key: impl Into<String>, quantiles: impl IntoIterator<Item = f64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, quantiles: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
             quantiles: quantiles.into_iter().collect(),
@@ -298,7 +299,7 @@ impl Command for TdigestQuantile {
     type Response = Vec<f64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.QUANTILE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.QUANTILE"), bulk(&self.key)];
         for q in &self.quantiles {
             args.push(bulk(q.to_string()));
         }
@@ -323,12 +324,12 @@ impl Command for TdigestQuantile {
 /// Returns the minimum value observed by the T-Digest.
 #[derive(Clone)]
 pub struct TdigestMin {
-    key: String,
+    key: CommandArg,
 }
 
 impl TdigestMin {
     /// Create a new [`TdigestMin`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -337,7 +338,7 @@ impl Command for TdigestMin {
     type Response = f64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TDIGEST.MIN"), bulk(self.key.as_str())])
+        array(vec![bulk("TDIGEST.MIN"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -358,12 +359,12 @@ impl Command for TdigestMin {
 /// Returns the maximum value observed by the T-Digest.
 #[derive(Clone)]
 pub struct TdigestMax {
-    key: String,
+    key: CommandArg,
 }
 
 impl TdigestMax {
     /// Create a new [`TdigestMax`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -372,7 +373,7 @@ impl Command for TdigestMax {
     type Response = f64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TDIGEST.MAX"), bulk(self.key.as_str())])
+        array(vec![bulk("TDIGEST.MAX"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -393,12 +394,12 @@ impl Command for TdigestMax {
 /// Returns information about the T-Digest at `key` as a raw Frame.
 #[derive(Clone)]
 pub struct TdigestInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl TdigestInfo {
     /// Create a new [`TdigestInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -407,7 +408,7 @@ impl Command for TdigestInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TDIGEST.INFO"), bulk(self.key.as_str())])
+        array(vec![bulk("TDIGEST.INFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -428,12 +429,12 @@ impl Command for TdigestInfo {
 /// Resets the T-Digest sketch at `key`, discarding all observed values.
 #[derive(Clone)]
 pub struct TdigestReset {
-    key: String,
+    key: CommandArg,
 }
 
 impl TdigestReset {
     /// Create a new [`TdigestReset`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -442,7 +443,7 @@ impl Command for TdigestReset {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TDIGEST.RESET"), bulk(self.key.as_str())])
+        array(vec![bulk("TDIGEST.RESET"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -465,14 +466,14 @@ impl Command for TdigestReset {
 /// Returns the trimmed mean between the given quantile bounds.
 #[derive(Clone)]
 pub struct TdigestTrimmedMean {
-    key: String,
+    key: CommandArg,
     low_quantile: f64,
     high_quantile: f64,
 }
 
 impl TdigestTrimmedMean {
     /// Create a new [`TdigestTrimmedMean`] command.
-    pub fn new(key: impl Into<String>, low_quantile: f64, high_quantile: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, low_quantile: f64, high_quantile: f64) -> Self {
         Self {
             key: key.into(),
             low_quantile,
@@ -487,7 +488,7 @@ impl Command for TdigestTrimmedMean {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("TDIGEST.TRIMMED_MEAN"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.low_quantile.to_string()),
             bulk(self.high_quantile.to_string()),
         ])
@@ -507,13 +508,13 @@ impl Command for TdigestTrimmedMean {
 /// Returns the estimated rank of each given value.
 #[derive(Clone)]
 pub struct TdigestRank {
-    key: String,
+    key: CommandArg,
     values: Vec<f64>,
 }
 
 impl TdigestRank {
     /// Create a new [`TdigestRank`] command.
-    pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
             values: values.into_iter().collect(),
@@ -525,7 +526,7 @@ impl Command for TdigestRank {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.RANK"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.RANK"), bulk(&self.key)];
         for v in &self.values {
             args.push(bulk(v.to_string()));
         }
@@ -550,13 +551,13 @@ impl Command for TdigestRank {
 /// Returns the estimated reverse rank of each given value.
 #[derive(Clone)]
 pub struct TdigestRevRank {
-    key: String,
+    key: CommandArg,
     values: Vec<f64>,
 }
 
 impl TdigestRevRank {
     /// Create a new [`TdigestRevRank`] command.
-    pub fn new(key: impl Into<String>, values: impl IntoIterator<Item = f64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, values: impl IntoIterator<Item = f64>) -> Self {
         Self {
             key: key.into(),
             values: values.into_iter().collect(),
@@ -568,7 +569,7 @@ impl Command for TdigestRevRank {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.REVRANK"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.REVRANK"), bulk(&self.key)];
         for v in &self.values {
             args.push(bulk(v.to_string()));
         }
@@ -593,13 +594,13 @@ impl Command for TdigestRevRank {
 /// Returns the estimated value at each given rank.
 #[derive(Clone)]
 pub struct TdigestByRank {
-    key: String,
+    key: CommandArg,
     ranks: Vec<i64>,
 }
 
 impl TdigestByRank {
     /// Create a new [`TdigestByRank`] command.
-    pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),
             ranks: ranks.into_iter().collect(),
@@ -611,7 +612,7 @@ impl Command for TdigestByRank {
     type Response = Vec<f64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.BYRANK"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.BYRANK"), bulk(&self.key)];
         for r in &self.ranks {
             args.push(bulk(r.to_string()));
         }
@@ -636,13 +637,13 @@ impl Command for TdigestByRank {
 /// Returns the estimated value at each given reverse rank.
 #[derive(Clone)]
 pub struct TdigestByRevRank {
-    key: String,
+    key: CommandArg,
     ranks: Vec<i64>,
 }
 
 impl TdigestByRevRank {
     /// Create a new [`TdigestByRevRank`] command.
-    pub fn new(key: impl Into<String>, ranks: impl IntoIterator<Item = i64>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, ranks: impl IntoIterator<Item = i64>) -> Self {
         Self {
             key: key.into(),
             ranks: ranks.into_iter().collect(),
@@ -654,7 +655,7 @@ impl Command for TdigestByRevRank {
     type Response = Vec<f64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TDIGEST.BYREVRANK"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TDIGEST.BYREVRANK"), bulk(&self.key)];
         for r in &self.ranks {
             args.push(bulk(r.to_string()));
         }

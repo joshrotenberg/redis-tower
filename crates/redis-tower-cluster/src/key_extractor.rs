@@ -1082,6 +1082,46 @@ mod tests {
     use bytes::Bytes;
     use redis_tower_protocol::helpers::{array, bulk};
 
+    #[test]
+    fn typed_migrated_commands_preserve_binary_routing_keys() {
+        use redis_tower_commands::{
+            BLPop, BitOp, BitOperation, Del, Eval, GeoAdd, HScan, MemoryUsage, PfAdd, Rename, VAdd,
+            Watch,
+        };
+        use redis_tower_core::Command;
+
+        fn assert_keys<C: Command>(command: C, expected: &[&[u8]]) {
+            let frame = command.to_frame();
+            let actual = extract_keys(&frame).expect("typed command must have a valid key layout");
+            assert_eq!(known_keys(&actual), expected);
+        }
+
+        let first = b"\0{same}\xff".as_slice();
+        let second = b"other\r\nkey".as_slice();
+        let destination = b"destination\0{same}".as_slice();
+
+        assert_keys(Del::keys([first, second]), &[first, second]);
+        assert_keys(Rename::new(first, destination), &[first, destination]);
+        assert_keys(BLPop::keys([first, second], 0.5), &[first, second]);
+        assert_keys(
+            Eval::new(b"return ARGV[1]")
+                .key(first)
+                .key(second)
+                .arg(b"\xff"),
+            &[first, second],
+        );
+        assert_keys(
+            BitOp::new(BitOperation::Xor, destination, [first, second]),
+            &[destination, first, second],
+        );
+        assert_keys(Watch::keys([first, second]), &[first, second]);
+        assert_keys(HScan::new(first), &[first]);
+        assert_keys(MemoryUsage::new(first), &[first]);
+        assert_keys(GeoAdd::new(first).member(1.0, 2.0, b"member\xff"), &[first]);
+        assert_keys(PfAdd::new(first, b"element\xff"), &[first]);
+        assert_keys(VAdd::new(first, vec![1.0, 2.0], b"element\xff"), &[first]);
+    }
+
     fn known_keys<'a>(result: &'a CommandKeys<'a>) -> &'a [&'a [u8]] {
         match result {
             CommandKeys::Known(keys) => keys,

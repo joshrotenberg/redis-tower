@@ -103,3 +103,25 @@ async fn vector_set_attr_then_del_attr() {
     use redis_tower::commands::Del;
     conn.execute(Del::new(key)).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a live Redis 8.0+ server with Vector Sets"]
+async fn vector_binary_key_and_element_roundtrip() {
+    let mut conn = connect().await;
+    let mut key = format!("test:vset:binary:{}:", unique_suffix()).into_bytes();
+    key.extend_from_slice(b"\0\xff");
+    let element = b"element\0\xff\r\n";
+
+    {
+        let mut vectors = VectorSetClient::new(&mut conn, &key);
+        assert!(vectors.add(vec![1.0, 0.0], element).await.unwrap());
+        let results = vectors
+            .search(VectorQuery::by_element(element).count(1))
+            .await
+            .unwrap();
+        assert_eq!(results[0].element.as_ref(), element);
+    }
+
+    use redis_tower::commands::Del;
+    conn.execute(Del::new(key)).await.unwrap();
+}

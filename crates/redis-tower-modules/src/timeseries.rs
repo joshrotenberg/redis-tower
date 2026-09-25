@@ -33,13 +33,14 @@
 //! # }
 //! ```
 
+use bytes::Bytes;
 use redis_tower::RedisExecutor;
 use redis_tower_core::{Frame, RedisError};
 
 // Low-level command builders
 use redis_tower::commands::{
-    TsAdd, TsAlter, TsCreate, TsDecrBy, TsDel, TsGet, TsIncrBy, TsInfo, TsMAdd, TsMGet, TsMRange,
-    TsMRevRange, TsQueryIndex, TsRange, TsRevRange,
+    CommandArg, TsAdd, TsAlter, TsCreate, TsDecrBy, TsDel, TsGet, TsIncrBy, TsInfo, TsMAdd, TsMGet,
+    TsMRange, TsMRevRange, TsQueryIndex, TsRange, TsRevRange,
 };
 
 // Re-export the enums from commands so callers don't need a second import.
@@ -63,9 +64,9 @@ pub struct TsSample {
 #[derive(Debug, Clone, PartialEq)]
 pub struct TsLabel {
     /// Label name.
-    pub key: String,
+    pub key: Bytes,
     /// Label value.
-    pub value: String,
+    pub value: Bytes,
 }
 
 /// Configuration for creating or altering a TimeSeries key.
@@ -116,10 +117,10 @@ impl TsKeyConfig {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push(TsLabel {
-            key: key.into(),
-            value: value.into(),
+            key: key.into().into_bytes(),
+            value: value.into().into_bytes(),
         });
         self
     }
@@ -155,10 +156,10 @@ impl TsIncrOptions {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push(TsLabel {
-            key: key.into(),
-            value: value.into(),
+            key: key.into().into_bytes(),
+            value: value.into().into_bytes(),
         });
         self
     }
@@ -169,7 +170,7 @@ impl TsIncrOptions {
 #[derive(Debug, Clone)]
 pub struct TsKeyResult {
     /// Time-series key.
-    pub key: String,
+    pub key: Bytes,
     /// Labels returned for the key.
     pub labels: Vec<TsLabel>,
     /// Samples returned for the key.
@@ -361,6 +362,17 @@ fn frame_to_string(frame: Frame) -> Result<String, RedisError> {
     }
 }
 
+fn frame_to_bytes(frame: Frame) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(bytes)) | Frame::SimpleString(bytes) => Ok(bytes),
+        Frame::BulkString(None) | Frame::Null => Ok(Bytes::new()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "bulk/simple string",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Parse a 2-element `[timestamp, value]` array into a `TsSample`.
 fn parse_sample(frame: Frame) -> Result<TsSample, RedisError> {
     match frame {
@@ -407,11 +419,8 @@ fn parse_get(frame: Frame) -> Result<Option<TsSample>, RedisError> {
 
 fn parse_label(key: Frame, value: Frame) -> Result<TsLabel, RedisError> {
     Ok(TsLabel {
-        key: frame_to_string(key)?,
-        value: match value {
-            Frame::Null => String::new(),
-            value => frame_to_string(value)?,
-        },
+        key: frame_to_bytes(key)?,
+        value: frame_to_bytes(value)?,
     })
 }
 
@@ -452,7 +461,7 @@ fn parse_mrange_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
             let labels_frame = elems.pop().unwrap();
             let key_frame = elems.pop().unwrap();
 
-            let key = frame_to_string(key_frame)?;
+            let key = frame_to_bytes(key_frame)?;
             let labels = parse_labels(labels_frame)?;
             let samples = parse_samples(samples_frame)?;
             Ok(TsKeyResult {
@@ -480,7 +489,7 @@ fn parse_resp3_mrange_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResul
             let labels_frame = elems.pop().unwrap();
 
             Ok(TsKeyResult {
-                key: frame_to_string(key_frame)?,
+                key: frame_to_bytes(key_frame)?,
                 labels: parse_labels(labels_frame)?,
                 samples: parse_samples(samples_frame)?,
             })
@@ -517,7 +526,7 @@ fn parse_mget_entry(frame: Frame) -> Result<TsKeyResult, RedisError> {
             let labels_frame = elems.pop().unwrap();
             let key_frame = elems.pop().unwrap();
 
-            let key = frame_to_string(key_frame)?;
+            let key = frame_to_bytes(key_frame)?;
             let labels = parse_labels(labels_frame)?;
             let samples = match parse_get(sample_frame)? {
                 Some(s) => vec![s],
@@ -545,7 +554,7 @@ fn parse_resp3_mget_entry(key_frame: Frame, frame: Frame) -> Result<TsKeyResult,
             let samples = parse_get(sample_frame)?.into_iter().collect();
 
             Ok(TsKeyResult {
-                key: frame_to_string(key_frame)?,
+                key: frame_to_bytes(key_frame)?,
                 labels: parse_labels(labels_frame)?,
                 samples,
             })
@@ -679,7 +688,11 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     // -----------------------------------------------------------------------
 
     /// Create a new TimeSeries key with the given configuration.
-    pub async fn create(&mut self, key: &str, config: TsKeyConfig) -> Result<(), RedisError> {
+    pub async fn create(
+        &mut self,
+        key: impl Into<CommandArg>,
+        config: TsKeyConfig,
+    ) -> Result<(), RedisError> {
         let mut cmd = TsCreate::new(key);
         if let Some(ms) = config.retention_ms {
             cmd = cmd.retention(ms);
@@ -700,7 +713,11 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     }
 
     /// Alter an existing TimeSeries key's configuration.
-    pub async fn alter(&mut self, key: &str, config: TsKeyConfig) -> Result<(), RedisError> {
+    pub async fn alter(
+        &mut self,
+        key: impl Into<CommandArg>,
+        config: TsKeyConfig,
+    ) -> Result<(), RedisError> {
         let mut cmd = TsAlter::new(key);
         if let Some(ms) = config.retention_ms {
             cmd = cmd.retention(ms);
@@ -719,7 +736,12 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
 
     /// Delete all samples in the time range `[from, to]` (inclusive).
     /// Returns the number of samples deleted.
-    pub async fn del_range(&mut self, key: &str, from: i64, to: i64) -> Result<i64, RedisError> {
+    pub async fn del_range(
+        &mut self,
+        key: impl Into<CommandArg>,
+        from: i64,
+        to: i64,
+    ) -> Result<i64, RedisError> {
         self.conn.execute(TsDel::new(key, from, to)).await
     }
 
@@ -732,7 +754,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Pass [`TsTimestamp::Auto`] to let the server assign the current time.
     pub async fn add(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         timestamp: impl Into<TsTimestamp>,
         value: f64,
     ) -> Result<i64, RedisError> {
@@ -747,7 +769,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// `config`. Useful for the "upsert" pattern.
     pub async fn add_with_config(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         timestamp: impl Into<TsTimestamp>,
         value: f64,
         config: TsKeyConfig,
@@ -776,13 +798,13 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Returns one `Result<i64, RedisError>` per input sample. Per-sample
     /// errors (e.g. duplicate-policy violations) are returned as `Err` items
     /// rather than propagating the whole call.
-    pub async fn madd(
+    pub async fn madd<A: AsRef<[u8]>>(
         &mut self,
-        samples: &[(&str, TsTimestamp, f64)],
+        samples: &[(A, TsTimestamp, f64)],
     ) -> Result<Vec<Result<i64, RedisError>>, RedisError> {
         let mut cmd = TsMAdd::new();
-        for &(key, ts, value) in samples {
-            cmd = cmd.sample(key, ts, value);
+        for (key, ts, value) in samples {
+            cmd = cmd.sample(CommandArg::copy_from_slice(key.as_ref()), *ts, *value);
         }
         let raw = self.conn.execute(cmd).await?;
         parse_madd(Frame::Array(Some(raw)))
@@ -792,7 +814,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Returns the timestamp of the updated sample.
     pub async fn incrby(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         value: f64,
         options: TsIncrOptions,
     ) -> Result<i64, RedisError> {
@@ -813,7 +835,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Returns the timestamp of the updated sample.
     pub async fn decrby(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         value: f64,
         options: TsIncrOptions,
     ) -> Result<i64, RedisError> {
@@ -835,13 +857,19 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     // -----------------------------------------------------------------------
 
     /// Return the last sample of a key, or `None` if the key has no samples.
-    pub async fn get(&mut self, key: &str) -> Result<Option<TsSample>, RedisError> {
+    pub async fn get(
+        &mut self,
+        key: impl Into<CommandArg>,
+    ) -> Result<Option<TsSample>, RedisError> {
         let raw = self.conn.execute(TsGet::new(key)).await?;
         parse_get(raw)
     }
 
     /// Return the last sample, including the latest un-compacted bucket.
-    pub async fn get_latest(&mut self, key: &str) -> Result<Option<TsSample>, RedisError> {
+    pub async fn get_latest(
+        &mut self,
+        key: impl Into<CommandArg>,
+    ) -> Result<Option<TsSample>, RedisError> {
         let raw = self.conn.execute(TsGet::new(key).latest()).await?;
         parse_get(raw)
     }
@@ -849,7 +877,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Query samples in chronological order.
     pub async fn range(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         query: TsRangeQuery,
     ) -> Result<Vec<TsSample>, RedisError> {
         let mut cmd = TsRange::new(key, query.from, query.to);
@@ -875,7 +903,7 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     /// Query samples in reverse chronological order.
     pub async fn revrange(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         query: TsRangeQuery,
     ) -> Result<Vec<TsSample>, RedisError> {
         let mut cmd = TsRevRange::new(key, query.from, query.to);
@@ -978,20 +1006,12 @@ impl<C: RedisExecutor> TimeSeriesClient<C> {
     // -----------------------------------------------------------------------
 
     /// Return all key names matching the given filter expression.
-    pub async fn query_index(&mut self, filter: &str) -> Result<Vec<String>, RedisError> {
-        let bytes = self.conn.execute(TsQueryIndex::new(filter)).await?;
-        bytes
-            .into_iter()
-            .map(|b| {
-                String::from_utf8(b.into()).map_err(|_| RedisError::TypeMismatch {
-                    expected: "UTF-8 key name",
-                })
-            })
-            .collect()
+    pub async fn query_index(&mut self, filter: &str) -> Result<Vec<Bytes>, RedisError> {
+        self.conn.execute(TsQueryIndex::new(filter)).await
     }
 
     /// Return typed statistics for the given key.
-    pub async fn info(&mut self, key: &str) -> Result<TsInfoResult, RedisError> {
+    pub async fn info(&mut self, key: impl Into<CommandArg>) -> Result<TsInfoResult, RedisError> {
         let raw = self.conn.execute(TsInfo::new(key)).await?;
         parse_info(raw)
     }
@@ -1348,6 +1368,12 @@ mod tests {
         ]))]);
         let mut ts = TimeSeriesClient::new(&mut mock);
         let keys = ts.query_index("sensor!=").await.unwrap();
-        assert_eq!(keys, vec!["sensors:temp", "sensors:humidity"]);
+        assert_eq!(
+            keys,
+            vec![
+                Bytes::from_static(b"sensors:temp"),
+                Bytes::from_static(b"sensors:humidity"),
+            ]
+        );
     }
 }

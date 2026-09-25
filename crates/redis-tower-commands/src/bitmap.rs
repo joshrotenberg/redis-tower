@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -7,14 +8,14 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// Returns the original bit value stored at `offset`.
 #[derive(Clone)]
 pub struct SetBit {
-    key: String,
+    key: CommandArg,
     offset: u64,
     value: u8,
 }
 
 impl SetBit {
     /// Create a new [`SetBit`] command.
-    pub fn new(key: impl Into<String>, offset: u64, value: u8) -> Self {
+    pub fn new(key: impl Into<CommandArg>, offset: u64, value: u8) -> Self {
         Self {
             key: key.into(),
             offset,
@@ -29,7 +30,7 @@ impl Command for SetBit {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SETBIT"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.offset.to_string()),
             bulk(self.value.to_string()),
         ])
@@ -55,13 +56,13 @@ impl Command for SetBit {
 /// Returns the bit value at `offset` in the string value stored at `key`.
 #[derive(Clone)]
 pub struct GetBit {
-    key: String,
+    key: CommandArg,
     offset: u64,
 }
 
 impl GetBit {
     /// Create a new [`GetBit`] command.
-    pub fn new(key: impl Into<String>, offset: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, offset: u64) -> Self {
         Self {
             key: key.into(),
             offset,
@@ -75,7 +76,7 @@ impl Command for GetBit {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("GETBIT"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.offset.to_string()),
         ])
     }
@@ -102,14 +103,14 @@ impl Command for GetBit {
 /// to interpret the range as bit offsets instead of byte offsets.
 #[derive(Clone)]
 pub struct BitCount {
-    key: String,
+    key: CommandArg,
     range: Option<(i64, i64)>,
     bit_mode: bool,
 }
 
 impl BitCount {
     /// Create a new [`BitCount`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             range: None,
@@ -134,7 +135,7 @@ impl Command for BitCount {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BITCOUNT"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BITCOUNT"), bulk(&self.key)];
         if let Some((start, end)) = self.range {
             args.push(bulk(start.to_string()));
             args.push(bulk(end.to_string()));
@@ -167,7 +168,7 @@ impl Command for BitCount {
 /// interpret the range as bit offsets instead of byte offsets.
 #[derive(Clone)]
 pub struct BitPos {
-    key: String,
+    key: CommandArg,
     bit: u8,
     range: Option<(i64, i64)>,
     bit_mode: bool,
@@ -175,7 +176,7 @@ pub struct BitPos {
 
 impl BitPos {
     /// Create a new [`BitPos`] command.
-    pub fn new(key: impl Into<String>, bit: u8) -> Self {
+    pub fn new(key: impl Into<CommandArg>, bit: u8) -> Self {
         Self {
             key: key.into(),
             bit,
@@ -201,11 +202,7 @@ impl Command for BitPos {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("BITPOS"),
-            bulk(self.key.as_str()),
-            bulk(self.bit.to_string()),
-        ];
+        let mut args = vec![bulk("BITPOS"), bulk(&self.key), bulk(self.bit.to_string())];
         if let Some((start, end)) = self.range {
             args.push(bulk(start.to_string()));
             args.push(bulk(end.to_string()));
@@ -263,16 +260,16 @@ impl BitOperation {
 #[derive(Clone)]
 pub struct BitOp {
     operation: BitOperation,
-    destkey: String,
-    keys: Vec<String>,
+    destkey: CommandArg,
+    keys: Vec<CommandArg>,
 }
 
 impl BitOp {
     /// Create a new [`BitOp`] command.
     pub fn new(
         operation: BitOperation,
-        destkey: impl Into<String>,
-        keys: impl IntoIterator<Item = impl Into<String>>,
+        destkey: impl Into<CommandArg>,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             operation,
@@ -289,10 +286,10 @@ impl Command for BitOp {
         let mut args = vec![
             bulk("BITOP"),
             bulk(self.operation.as_str()),
-            bulk(self.destkey.as_str()),
+            bulk(&self.destkey),
         ];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -393,13 +390,13 @@ enum BitfieldOp {
 /// ```
 #[derive(Clone)]
 pub struct Bitfield {
-    key: String,
+    key: CommandArg,
     ops: Vec<BitfieldOp>,
 }
 
 impl Bitfield {
     /// Create a new `BITFIELD` command targeting `key`.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             ops: Vec::new(),
@@ -482,7 +479,7 @@ impl Command for Bitfield {
     type Response = Vec<Option<i64>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BITFIELD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BITFIELD"), bulk(&self.key)];
         for op in &self.ops {
             match op {
                 BitfieldOp::Get { encoding, offset } => {
@@ -551,13 +548,13 @@ impl Command for Bitfield {
 /// ```
 #[derive(Clone)]
 pub struct BitfieldRo {
-    key: String,
+    key: CommandArg,
     gets: Vec<(String, String)>,
 }
 
 impl BitfieldRo {
     /// Create a new `BITFIELD_RO` command targeting `key`.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             gets: Vec::new(),
@@ -578,7 +575,7 @@ impl Command for BitfieldRo {
     type Response = Vec<Option<i64>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BITFIELD_RO"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BITFIELD_RO"), bulk(&self.key)];
         for (encoding, offset) in &self.gets {
             args.push(bulk("GET"));
             args.push(bulk(encoding.as_str()));

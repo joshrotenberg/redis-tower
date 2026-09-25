@@ -30,7 +30,7 @@ use redis_tower::RedisExecutor;
 use redis_tower_commands::{
     BfAdd, BfExists, BfInfo, BfInsert, BfMAdd, BfMExists, BfReserve, CfAdd, CfAddNx, CfCount,
     CfDel, CfExists, CfInfo, CfInsert, CfInsertNx, CfMExists, CfReserve, CmsIncrBy,
-    CmsInfo as CmsInfoCmd, CmsInitByDim, CmsInitByProb, CmsMerge, CmsQuery, TdigestAdd,
+    CmsInfo as CmsInfoCmd, CmsInitByDim, CmsInitByProb, CmsMerge, CmsQuery, CommandArg, TdigestAdd,
     TdigestByRank, TdigestByRevRank, TdigestCdf, TdigestCreate, TdigestInfo, TdigestMax,
     TdigestMerge, TdigestMin, TdigestQuantile, TdigestRank, TdigestReset, TdigestRevRank,
     TdigestTrimmedMean, TopkAdd, TopkCount, TopkIncrBy, TopkInfo, TopkList, TopkQuery, TopkReserve,
@@ -180,13 +180,13 @@ pub struct BfInsertConfig {
 
 /// High-level client for Bloom filter operations bound to a single key.
 pub struct BloomFilter<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor + Send> BloomFilter<'a, C> {
     /// Create a new [`BloomFilter`] bound to `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -224,31 +224,33 @@ impl<'a, C: RedisExecutor + Send> BloomFilter<'a, C> {
     }
 
     /// Add one item (BF.ADD). Returns `true` if newly added.
-    pub async fn add(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn add(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(BfAdd::new(&self.key, item)).await
     }
 
     /// Add multiple items (BF.MADD).
-    pub async fn madd(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(BfMAdd::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn madd(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(BfMAdd::new(&self.key, items)).await
     }
 
     /// Insert items, auto-creating the filter if absent (BF.INSERT plain).
-    pub async fn insert(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(BfInsert::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn insert(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(BfInsert::new(&self.key, items)).await
     }
 
     /// Insert items with full configuration options (BF.INSERT with options).
     pub async fn insert_with_config(
         &mut self,
-        items: &[&str],
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
         config: BfInsertConfig,
     ) -> Result<Vec<bool>, RedisError> {
-        let mut cmd = BfInsert::new(&self.key, items.iter().copied());
+        let mut cmd = BfInsert::new(&self.key, items);
         if let Some(cap) = config.capacity {
             cmd = cmd.capacity(cap);
         }
@@ -268,15 +270,16 @@ impl<'a, C: RedisExecutor + Send> BloomFilter<'a, C> {
     }
 
     /// Test membership of one item (BF.EXISTS).
-    pub async fn exists(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn exists(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(BfExists::new(&self.key, item)).await
     }
 
     /// Test membership of multiple items (BF.MEXISTS).
-    pub async fn mexists(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(BfMExists::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn mexists(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(BfMExists::new(&self.key, items)).await
     }
 
     /// Return filter metadata (BF.INFO).
@@ -331,13 +334,13 @@ pub struct CfReserveConfig {
 
 /// High-level client for Cuckoo filter operations bound to a single key.
 pub struct CuckooFilter<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor + Send> CuckooFilter<'a, C> {
     /// Create a new [`CuckooFilter`] bound to `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -369,48 +372,51 @@ impl<'a, C: RedisExecutor + Send> CuckooFilter<'a, C> {
     }
 
     /// Add one item (CF.ADD). Returns `true` if added successfully.
-    pub async fn add(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn add(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(CfAdd::new(&self.key, item)).await
     }
 
     /// Add one item only if it does not already exist (CF.ADDNX).
-    pub async fn add_nx(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn add_nx(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(CfAddNx::new(&self.key, item)).await
     }
 
     /// Insert multiple items (CF.INSERT).
-    pub async fn insert(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(CfInsert::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn insert(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(CfInsert::new(&self.key, items)).await
     }
 
     /// Insert multiple items only if they are absent (CF.INSERTNX).
-    pub async fn insert_nx(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(CfInsertNx::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn insert_nx(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(CfInsertNx::new(&self.key, items)).await
     }
 
     /// Test membership of one item (CF.EXISTS).
-    pub async fn exists(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn exists(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(CfExists::new(&self.key, item)).await
     }
 
     /// Test membership of multiple items (CF.MEXISTS).
-    pub async fn mexists(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(CfMExists::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn mexists(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(CfMExists::new(&self.key, items)).await
     }
 
     /// Count approximate occurrences of an item (CF.COUNT).
-    pub async fn count(&mut self, item: &str) -> Result<i64, RedisError> {
+    pub async fn count(&mut self, item: impl Into<CommandArg>) -> Result<i64, RedisError> {
         self.conn.execute(CfCount::new(&self.key, item)).await
     }
 
     /// Delete one occurrence of an item (CF.DEL). Returns `true` if found.
-    pub async fn del(&mut self, item: &str) -> Result<bool, RedisError> {
+    pub async fn del(&mut self, item: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn.execute(CfDel::new(&self.key, item)).await
     }
 
@@ -448,13 +454,13 @@ pub struct CmsInfo {
 
 /// High-level client for Count-Min Sketch operations bound to a single key.
 pub struct CountMinSketch<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor + Send> CountMinSketch<'a, C> {
     /// Create a new [`CountMinSketch`] bound to `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -476,42 +482,53 @@ impl<'a, C: RedisExecutor + Send> CountMinSketch<'a, C> {
     }
 
     /// Increment counts for one or more items (CMS.INCRBY).
-    pub async fn incrby(&mut self, items: &[(&str, i64)]) -> Result<Vec<i64>, RedisError> {
+    pub async fn incrby<A: AsRef<[u8]>>(
+        &mut self,
+        items: &[(A, i64)],
+    ) -> Result<Vec<i64>, RedisError> {
         self.conn
             .execute(CmsIncrBy::new(
                 &self.key,
-                items.iter().map(|&(s, n)| (s, n)),
+                items
+                    .iter()
+                    .map(|(item, count)| (CommandArg::copy_from_slice(item.as_ref()), *count)),
             ))
             .await
     }
 
     /// Query estimated counts for one or more items (CMS.QUERY).
-    pub async fn query(&mut self, items: &[&str]) -> Result<Vec<i64>, RedisError> {
-        self.conn
-            .execute(CmsQuery::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn query(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<i64>, RedisError> {
+        self.conn.execute(CmsQuery::new(&self.key, items)).await
     }
 
     /// Merge multiple sketches into `destination` (CMS.MERGE, no weights).
     ///
     /// Note: `self.key` is not used as the destination; pass it explicitly.
-    pub async fn merge(&mut self, destination: &str, sources: &[&str]) -> Result<(), RedisError> {
-        self.conn
-            .execute(CmsMerge::new(destination, sources.iter().copied()))
-            .await
+    pub async fn merge(
+        &mut self,
+        destination: impl Into<CommandArg>,
+        sources: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<(), RedisError> {
+        self.conn.execute(CmsMerge::new(destination, sources)).await
     }
 
     /// Merge multiple sketches into `destination` with per-source weights
     /// (CMS.MERGE … WEIGHTS).
     pub async fn merge_weighted(
         &mut self,
-        destination: &str,
-        sources: &[(&str, i64)],
+        destination: impl Into<CommandArg>,
+        sources: &[(impl AsRef<[u8]>, i64)],
     ) -> Result<(), RedisError> {
-        let keys: Vec<&str> = sources.iter().map(|(k, _)| *k).collect();
+        let keys: Vec<CommandArg> = sources
+            .iter()
+            .map(|(key, _)| CommandArg::copy_from_slice(key.as_ref()))
+            .collect();
         let weights: Vec<i64> = sources.iter().map(|(_, w)| *w).collect();
         self.conn
-            .execute(CmsMerge::new(destination, keys.iter().copied()).weights(weights))
+            .execute(CmsMerge::new(destination, keys).weights(weights))
             .await
     }
 
@@ -546,13 +563,13 @@ pub struct TopKInfo {
 
 /// High-level client for TopK operations bound to a single key.
 pub struct TopK<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor + Send> TopK<'a, C> {
     /// Create a new [`TopK`] bound to `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -578,57 +595,52 @@ impl<'a, C: RedisExecutor + Send> TopK<'a, C> {
     }
 
     /// Add items (TOPK.ADD). Returns evicted items for each slot, if any.
-    pub async fn add(&mut self, items: &[&str]) -> Result<Vec<Option<String>>, RedisError> {
-        let raw = self
-            .conn
-            .execute(TopkAdd::new(&self.key, items.iter().copied()))
-            .await?;
-        Ok(raw
-            .into_iter()
-            .map(|opt| opt.map(|b| String::from_utf8_lossy(&b).into_owned()))
-            .collect())
+    pub async fn add(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<Option<bytes::Bytes>>, RedisError> {
+        self.conn.execute(TopkAdd::new(&self.key, items)).await
     }
 
     /// Increment item scores (TOPK.INCRBY). Returns evicted items, if any.
     pub async fn incrby(
         &mut self,
-        items: &[(&str, i64)],
-    ) -> Result<Vec<Option<String>>, RedisError> {
-        let raw = self
-            .conn
+        items: &[(impl AsRef<[u8]>, i64)],
+    ) -> Result<Vec<Option<bytes::Bytes>>, RedisError> {
+        self.conn
             .execute(TopkIncrBy::new(
                 &self.key,
-                items.iter().map(|&(s, n)| (s, n)),
+                items
+                    .iter()
+                    .map(|(item, count)| (CommandArg::copy_from_slice(item.as_ref()), *count)),
             ))
-            .await?;
-        Ok(raw
-            .into_iter()
-            .map(|opt| opt.map(|b| String::from_utf8_lossy(&b).into_owned()))
-            .collect())
+            .await
     }
 
     /// Check whether items are in the Top-K (TOPK.QUERY).
-    pub async fn query(&mut self, items: &[&str]) -> Result<Vec<bool>, RedisError> {
-        self.conn
-            .execute(TopkQuery::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn query(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<bool>, RedisError> {
+        self.conn.execute(TopkQuery::new(&self.key, items)).await
     }
 
     /// Return approximate counts for items (TOPK.COUNT).
-    pub async fn count(&mut self, items: &[&str]) -> Result<Vec<i64>, RedisError> {
-        self.conn
-            .execute(TopkCount::new(&self.key, items.iter().copied()))
-            .await
+    pub async fn count(
+        &mut self,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<Vec<i64>, RedisError> {
+        self.conn.execute(TopkCount::new(&self.key, items)).await
     }
 
     /// List all top-k items (TOPK.LIST, no WITHCOUNT).
-    pub async fn list(&mut self) -> Result<Vec<String>, RedisError> {
+    pub async fn list(&mut self) -> Result<Vec<bytes::Bytes>, RedisError> {
         let frame = self.conn.execute(TopkList::new(&self.key)).await?;
         match frame {
             Frame::Array(Some(items)) => items
                 .into_iter()
                 .map(|f| match f {
-                    Frame::BulkString(Some(b)) => Ok(String::from_utf8_lossy(&b).into_owned()),
+                    Frame::BulkString(Some(bytes)) => Ok(bytes),
                     other => Err(RedisError::UnexpectedResponse {
                         expected: "bulk string",
                         actual: format!("{other:?}"),
@@ -645,7 +657,7 @@ impl<'a, C: RedisExecutor + Send> TopK<'a, C> {
     /// List top-k items with approximate counts (TOPK.LIST WITHCOUNT).
     ///
     /// Returns a `Vec` of `(item, count)` pairs.
-    pub async fn list_with_counts(&mut self) -> Result<Vec<(String, i64)>, RedisError> {
+    pub async fn list_with_counts(&mut self) -> Result<Vec<(bytes::Bytes, i64)>, RedisError> {
         let frame = self
             .conn
             .execute(TopkList::new(&self.key).withcount())
@@ -656,7 +668,7 @@ impl<'a, C: RedisExecutor + Send> TopK<'a, C> {
                 let mut iter = items.into_iter();
                 while let (Some(item_f), Some(count_f)) = (iter.next(), iter.next()) {
                     let item = match item_f {
-                        Frame::BulkString(Some(b)) => String::from_utf8_lossy(&b).into_owned(),
+                        Frame::BulkString(Some(bytes)) => bytes,
                         other => {
                             return Err(RedisError::UnexpectedResponse {
                                 expected: "bulk string item",
@@ -724,13 +736,13 @@ pub struct TDigestInfo {
 
 /// High-level client for T-Digest operations bound to a single key.
 pub struct TDigest<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor + Send> TDigest<'a, C> {
     /// Create a new [`TDigest`] bound to `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -759,9 +771,13 @@ impl<'a, C: RedisExecutor + Send> TDigest<'a, C> {
     /// Merge source sketches into `destination` (TDIGEST.MERGE).
     ///
     /// Note: `self.key` is not used as the destination; pass it explicitly.
-    pub async fn merge(&mut self, destination: &str, sources: &[&str]) -> Result<(), RedisError> {
+    pub async fn merge(
+        &mut self,
+        destination: impl Into<CommandArg>,
+        sources: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Result<(), RedisError> {
         self.conn
-            .execute(TdigestMerge::new(destination, sources.iter().copied()))
+            .execute(TdigestMerge::new(destination, sources))
             .await
     }
 
@@ -1074,7 +1090,10 @@ mod tests {
         ]))]);
         let mut topk = TopK::new(&mut mock, "test:topk");
         let result = topk.add(&["new1", "new2"]).await.unwrap();
-        assert_eq!(result, vec![None, Some("evicted-item".to_string())]);
+        assert_eq!(
+            result,
+            vec![None, Some(Bytes::from_static(b"evicted-item"))]
+        );
     }
 
     #[tokio::test]
@@ -1085,7 +1104,10 @@ mod tests {
         ]))]);
         let mut topk = TopK::new(&mut mock, "test:topk");
         let items = topk.list().await.unwrap();
-        assert_eq!(items, vec!["alpha", "beta"]);
+        assert_eq!(
+            items,
+            vec![Bytes::from_static(b"alpha"), Bytes::from_static(b"beta")]
+        );
     }
 
     // -----------------------------------------------------------------------

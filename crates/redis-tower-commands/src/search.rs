@@ -1815,7 +1815,7 @@ impl Command for FtProfile {
 /// FT.TAGVALS index field_name
 ///
 /// Returns the distinct set of indexed values for a `TAG` field. The values
-/// are returned as an array of strings.
+/// are returned as exact bytes because tag values are not required to be UTF-8.
 ///
 /// # Example
 ///
@@ -1848,7 +1848,7 @@ impl FtTagVals {
 }
 
 impl Command for FtTagVals {
-    type Response = Vec<String>;
+    type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
         array(vec![
@@ -1863,9 +1863,7 @@ impl Command for FtTagVals {
             Frame::Array(Some(frames)) | Frame::Set(frames) => frames
                 .into_iter()
                 .map(|f| match f {
-                    Frame::BulkString(Some(data)) | Frame::SimpleString(data) => {
-                        Ok(String::from_utf8_lossy(&data).into_owned())
-                    }
+                    Frame::BulkString(Some(data)) | Frame::SimpleString(data) => Ok(data),
                     other => Err(RedisError::UnexpectedResponse {
                         expected: "bulk string",
                         actual: format!("{other:?}"),
@@ -2323,11 +2321,11 @@ mod tests {
         let reply = array(vec![bulk("london"), bulk("paris")]);
         assert_eq!(
             cmd.parse_response(reply).unwrap(),
-            vec!["london".to_string(), "paris".to_string()]
+            vec![Bytes::from_static(b"london"), Bytes::from_static(b"paris")]
         );
         assert_eq!(
             cmd.parse_response(Frame::Array(None)).unwrap(),
-            Vec::<String>::new()
+            Vec::<Bytes>::new()
         );
     }
 }

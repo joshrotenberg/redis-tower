@@ -32,6 +32,7 @@ serde        = ["dep:serde", "dep:serde_json"]
 full         = ["json", "search", "timeseries", "probabilistic", "vector"]
 
 [dependencies]
+bytes = { workspace = true }
 redis-tower = { workspace = true }
 redis-tower-core = { workspace = true }
 redis-tower-commands = { workspace = true, optional = true }
@@ -39,7 +40,6 @@ serde     = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
-bytes = { workspace = true }
 redis = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 

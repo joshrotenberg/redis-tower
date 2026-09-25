@@ -40,7 +40,7 @@
 //!     .await?;
 //!
 //! for doc in &results.docs {
-//!     println!("{}: {} ({})", doc.key, doc.doc.name, doc.doc.price);
+//!     println!("{:?}: {} ({})", doc.key, doc.doc.name, doc.doc.price);
 //! }
 //! # Ok(())
 //! # }
@@ -48,11 +48,12 @@
 
 use std::collections::HashMap;
 
+use bytes::Bytes;
 use redis_tower::RedisExecutor;
 use redis_tower::commands::{
-    FieldType, FtAggregate, FtAliasAdd, FtAliasDel, FtAliasUpdate, FtAlter, FtConfigGet,
-    FtConfigSet, FtCreate, FtDropIndex, FtInfo, FtList, FtSearch, FtSpellCheck, FtSugAdd, FtSugDel,
-    FtSugGet, FtSugLen, SchemaField, SortOrder,
+    CommandArg, FieldType, FtAggregate, FtAliasAdd, FtAliasDel, FtAliasUpdate, FtAlter,
+    FtConfigGet, FtConfigSet, FtCreate, FtDropIndex, FtInfo, FtList, FtSearch, FtSpellCheck,
+    FtSugAdd, FtSugDel, FtSugGet, FtSugLen, SchemaField, SortOrder,
 };
 use redis_tower_core::{Frame, RedisError};
 use serde::de::DeserializeOwned;
@@ -274,7 +275,7 @@ pub struct SearchResults<T> {
 #[derive(Debug)]
 pub struct SearchDoc<T> {
     /// The document key in Redis.
-    pub key: String,
+    pub key: Bytes,
     /// The deserialized document.
     pub doc: T,
     /// Optional relevance score (present when `WITHSCORES` was used).
@@ -356,11 +357,11 @@ impl AggregateQuery {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Suggestion {
     /// The suggested string.
-    pub string: String,
+    pub string: Bytes,
     /// The score (present when `WITHSCORES` was requested).
     pub score: Option<f64>,
     /// The payload (present when `WITHPAYLOADS` was requested).
-    pub payload: Option<String>,
+    pub payload: Option<Bytes>,
 }
 
 /// Options for an `FT.SUGGET` request.
@@ -482,8 +483,8 @@ impl<'a, C: RedisExecutor> SearchClient<'a, C> {
     /// Returns the current size of the dictionary.
     pub async fn sug_add(
         &mut self,
-        key: &str,
-        string: &str,
+        key: impl Into<CommandArg>,
+        string: impl Into<CommandArg>,
         score: f64,
     ) -> Result<i64, RedisError> {
         self.conn.execute(FtSugAdd::new(key, string, score)).await
@@ -492,8 +493,8 @@ impl<'a, C: RedisExecutor> SearchClient<'a, C> {
     /// Get completion suggestions for a prefix.
     pub async fn sug_get(
         &mut self,
-        key: &str,
-        prefix: &str,
+        key: impl Into<CommandArg>,
+        prefix: impl Into<CommandArg>,
         options: SugGetOptions,
     ) -> Result<Vec<Suggestion>, RedisError> {
         let mut cmd = FtSugGet::new(key, prefix);
@@ -516,12 +517,16 @@ impl<'a, C: RedisExecutor> SearchClient<'a, C> {
     /// Delete a string from an auto-complete dictionary.
     ///
     /// Returns `true` if the string was found and removed.
-    pub async fn sug_del(&mut self, key: &str, string: &str) -> Result<bool, RedisError> {
+    pub async fn sug_del(
+        &mut self,
+        key: impl Into<CommandArg>,
+        string: impl Into<CommandArg>,
+    ) -> Result<bool, RedisError> {
         self.conn.execute(FtSugDel::new(key, string)).await
     }
 
     /// Return the number of entries in an auto-complete dictionary.
-    pub async fn sug_len(&mut self, key: &str) -> Result<i64, RedisError> {
+    pub async fn sug_len(&mut self, key: impl Into<CommandArg>) -> Result<i64, RedisError> {
         self.conn.execute(FtSugLen::new(key)).await
     }
 
@@ -590,6 +595,16 @@ fn frame_to_string(frame: &Frame) -> Result<String, RedisError> {
         Frame::Double(d) => Ok(d.to_string()),
         other => Err(RedisError::UnexpectedResponse {
             expected: "string-like frame",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+fn frame_to_bytes(frame: &Frame) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(data)) | Frame::SimpleString(data) => Ok(data.clone()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "bulk or simple string",
             actual: format!("{other:?}"),
         }),
     }
@@ -671,7 +686,7 @@ fn parse_resp2_search_results<T: DeserializeOwned>(
     let mut i = 1;
 
     while i < items.len() {
-        let key = frame_to_string(&items[i])?;
+        let key = frame_to_bytes(&items[i])?;
         i += 1;
 
         let score = if withscores {
@@ -782,7 +797,7 @@ fn parse_resp3_search_results<T: DeserializeOwned>(
                 expected: "result id field",
                 actual: "field not found".to_string(),
             })
-            .and_then(|frame| frame_to_string(&frame))?;
+            .and_then(|frame| frame_to_bytes(&frame))?;
 
         let score = if withscores {
             Some(
@@ -904,7 +919,7 @@ fn parse_suggestions(
     let mut out = Vec::new();
     let mut i = 0;
     while i < items.len() {
-        let string = frame_to_string(&items[i])?;
+        let string = frame_to_bytes(&items[i])?;
         let mut j = i + 1;
 
         let score = if withscores {
@@ -917,7 +932,7 @@ fn parse_suggestions(
 
         let payload = if withpayloads {
             let p = match items.get(j) {
-                Some(f) => Some(frame_to_string(f)?),
+                Some(f) => Some(frame_to_bytes(f)?),
                 None => None,
             };
             j += 1;

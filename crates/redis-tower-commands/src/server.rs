@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -14,10 +15,10 @@ fn parse_ok_response(frame: Frame) -> Result<(), RedisError> {
 
 /// PING \[message\]
 ///
-/// Returns PONG, or echoes the message if provided.
+/// Returns `PONG`, or echoes the message if provided, as exact bytes.
 #[derive(Clone)]
 pub struct Ping {
-    message: Option<String>,
+    message: Option<CommandArg>,
 }
 
 impl Ping {
@@ -27,7 +28,7 @@ impl Ping {
     }
 
     /// Create the [`Ping`] command using the `with_message` form.
-    pub fn with_message(message: impl Into<String>) -> Self {
+    pub fn with_message(message: impl Into<CommandArg>) -> Self {
         Self {
             message: Some(message.into()),
         }
@@ -41,20 +42,19 @@ impl Default for Ping {
 }
 
 impl Command for Ping {
-    type Response = String;
+    type Response = Bytes;
 
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PING")];
         if let Some(ref msg) = self.message {
-            args.push(bulk(msg.as_str()));
+            args.push(bulk(msg));
         }
         array(args)
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::SimpleString(s) => Ok(String::from_utf8_lossy(&s).into_owned()),
-            Frame::BulkString(Some(s)) => Ok(String::from_utf8_lossy(&s).into_owned()),
+            Frame::SimpleString(s) | Frame::BulkString(Some(s)) => Ok(s),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "simple string or bulk string",
                 actual: format!("{other:?}"),
@@ -267,12 +267,12 @@ impl Command for Select {
 #[derive(Clone)]
 pub struct Auth {
     username: Option<String>,
-    password: String,
+    password: CommandArg,
 }
 
 impl Auth {
     /// Authenticate with password only (pre-Redis 6).
-    pub fn password(password: impl Into<String>) -> Self {
+    pub fn password(password: impl Into<CommandArg>) -> Self {
         Self {
             username: None,
             password: password.into(),
@@ -280,7 +280,7 @@ impl Auth {
     }
 
     /// Authenticate with username and password (Redis 6+ ACL).
-    pub fn credentials(username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn credentials(username: impl Into<String>, password: impl Into<CommandArg>) -> Self {
         Self {
             username: Some(username.into()),
             password: password.into(),
@@ -296,7 +296,7 @@ impl Command for Auth {
         if let Some(ref user) = self.username {
             args.push(bulk(user.as_str()));
         }
-        args.push(bulk(self.password.as_str()));
+        args.push(bulk(&self.password));
         array(args)
     }
 
@@ -2409,12 +2409,12 @@ impl Command for ClientSetInfoLibVer {
 /// Returns `message` back to the client. Useful for testing connectivity.
 #[derive(Clone)]
 pub struct Echo {
-    message: String,
+    message: CommandArg,
 }
 
 impl Echo {
     /// Create a new [`Echo`] command.
-    pub fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<CommandArg>) -> Self {
         Self {
             message: message.into(),
         }
@@ -2425,7 +2425,7 @@ impl Command for Echo {
     type Response = Bytes;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("ECHO"), bulk(self.message.as_str())])
+        array(vec![bulk("ECHO"), bulk(&self.message)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -2692,7 +2692,7 @@ impl Command for Role {
 #[derive(Clone)]
 pub struct Hello {
     protover: Option<u8>,
-    auth: Option<(String, String)>,
+    auth: Option<(String, CommandArg)>,
     setname: Option<String>,
 }
 
@@ -2713,7 +2713,7 @@ impl Hello {
     }
 
     /// Authenticate while switching protocols.
-    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<CommandArg>) -> Self {
         self.auth = Some((username.into(), password.into()));
         self
     }
@@ -2742,7 +2742,7 @@ impl Command for Hello {
         if let Some((ref user, ref pass)) = self.auth {
             args.push(bulk("AUTH"));
             args.push(bulk(user.as_str()));
-            args.push(bulk(pass.as_str()));
+            args.push(bulk(pass));
         }
         if let Some(ref name) = self.setname {
             args.push(bulk("SETNAME"));
@@ -2852,7 +2852,7 @@ impl Command for CommandInfo {
 #[derive(Clone)]
 pub struct CommandGetKeys {
     command: String,
-    args: Vec<String>,
+    args: Vec<CommandArg>,
 }
 
 impl CommandGetKeys {
@@ -2865,7 +2865,7 @@ impl CommandGetKeys {
     }
 
     /// Add an argument to the command invocation being analyzed.
-    pub fn arg(mut self, a: impl Into<String>) -> Self {
+    pub fn arg(mut self, a: impl Into<CommandArg>) -> Self {
         self.args.push(a.into());
         self
     }
@@ -2881,7 +2881,7 @@ impl Command for CommandGetKeys {
             bulk(self.command.as_str()),
         ];
         for a in &self.args {
-            args.push(bulk(a.as_str()));
+            args.push(bulk(a));
         }
         array(args)
     }

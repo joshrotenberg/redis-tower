@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -36,13 +37,13 @@ fn parse_bool_array(frame: Frame) -> Result<Vec<bool>, RedisError> {
 /// newly added, `false` if it may have existed previously.
 #[derive(Clone)]
 pub struct BfAdd {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl BfAdd {
     /// Create a new [`BfAdd`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -54,11 +55,7 @@ impl Command for BfAdd {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("BF.ADD"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("BF.ADD"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -82,13 +79,13 @@ impl Command for BfAdd {
 /// Checks whether an item may exist in the Bloom filter at `key`.
 #[derive(Clone)]
 pub struct BfExists {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl BfExists {
     /// Create a new [`BfExists`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -100,11 +97,7 @@ impl Command for BfExists {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("BF.EXISTS"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("BF.EXISTS"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -133,13 +126,16 @@ impl Command for BfExists {
 /// booleans indicating whether each item was newly added.
 #[derive(Clone)]
 pub struct BfMAdd {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl BfMAdd {
     /// Create a new [`BfMAdd`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -151,9 +147,9 @@ impl Command for BfMAdd {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BF.MADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BF.MADD"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -172,13 +168,16 @@ impl Command for BfMAdd {
 /// Checks whether one or more items may exist in the Bloom filter at `key`.
 #[derive(Clone)]
 pub struct BfMExists {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl BfMExists {
     /// Create a new [`BfMExists`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -190,9 +189,9 @@ impl Command for BfMExists {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BF.MEXISTS"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BF.MEXISTS"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -216,7 +215,7 @@ impl Command for BfMExists {
 /// capacity.
 #[derive(Clone)]
 pub struct BfReserve {
-    key: String,
+    key: CommandArg,
     error_rate: f64,
     capacity: i64,
     expansion: Option<i64>,
@@ -225,7 +224,7 @@ pub struct BfReserve {
 
 impl BfReserve {
     /// Create a new [`BfReserve`] command.
-    pub fn new(key: impl Into<String>, error_rate: f64, capacity: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, error_rate: f64, capacity: i64) -> Self {
         Self {
             key: key.into(),
             error_rate,
@@ -254,7 +253,7 @@ impl Command for BfReserve {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("BF.RESERVE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.error_rate.to_string()),
             bulk(self.capacity.to_string()),
         ];
@@ -289,12 +288,12 @@ impl Command for BfReserve {
 /// (key-value pairs).
 #[derive(Clone)]
 pub struct BfInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl BfInfo {
     /// Create a new [`BfInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -303,7 +302,7 @@ impl Command for BfInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("BF.INFO"), bulk(self.key.as_str())])
+        array(vec![bulk("BF.INFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -326,18 +325,21 @@ impl Command for BfInfo {
 /// Supports builder-style configuration.
 #[derive(Clone)]
 pub struct BfInsert {
-    key: String,
+    key: CommandArg,
     capacity: Option<i64>,
     error: Option<f64>,
     expansion: Option<i64>,
     nocreate: bool,
     nonscaling: bool,
-    items: Vec<String>,
+    items: Vec<CommandArg>,
 }
 
 impl BfInsert {
     /// Create a new [`BfInsert`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             capacity: None,
@@ -384,7 +386,7 @@ impl Command for BfInsert {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("BF.INSERT"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("BF.INSERT"), bulk(&self.key)];
         if let Some(cap) = self.capacity {
             args.push(bulk("CAPACITY"));
             args.push(bulk(cap.to_string()));
@@ -405,7 +407,7 @@ impl Command for BfInsert {
         }
         args.push(bulk("ITEMS"));
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -429,13 +431,13 @@ impl Command for BfInsert {
 /// successfully added.
 #[derive(Clone)]
 pub struct CfAdd {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl CfAdd {
     /// Create a new [`CfAdd`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -447,11 +449,7 @@ impl Command for CfAdd {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CF.ADD"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("CF.ADD"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -476,13 +474,13 @@ impl Command for CfAdd {
 /// Returns `true` if the item was added, `false` if it may already exist.
 #[derive(Clone)]
 pub struct CfAddNx {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl CfAddNx {
     /// Create a new [`CfAddNx`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -494,11 +492,7 @@ impl Command for CfAddNx {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CF.ADDNX"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("CF.ADDNX"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -522,13 +516,13 @@ impl Command for CfAddNx {
 /// Checks whether an item may exist in the Cuckoo filter at `key`.
 #[derive(Clone)]
 pub struct CfExists {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl CfExists {
     /// Create a new [`CfExists`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -540,11 +534,7 @@ impl Command for CfExists {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CF.EXISTS"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("CF.EXISTS"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -572,13 +562,16 @@ impl Command for CfExists {
 /// Checks whether one or more items may exist in the Cuckoo filter at `key`.
 #[derive(Clone)]
 pub struct CfMExists {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl CfMExists {
     /// Create a new [`CfMExists`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -590,9 +583,9 @@ impl Command for CfMExists {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("CF.MEXISTS"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("CF.MEXISTS"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -616,13 +609,13 @@ impl Command for CfMExists {
 /// item was found and deleted, `false` otherwise.
 #[derive(Clone)]
 pub struct CfDel {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl CfDel {
     /// Create a new [`CfDel`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -634,11 +627,7 @@ impl Command for CfDel {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CF.DEL"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("CF.DEL"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -662,13 +651,13 @@ impl Command for CfDel {
 /// Returns the number of times an item may be in the Cuckoo filter.
 #[derive(Clone)]
 pub struct CfCount {
-    key: String,
-    item: String,
+    key: CommandArg,
+    item: CommandArg,
 }
 
 impl CfCount {
     /// Create a new [`CfCount`] command.
-    pub fn new(key: impl Into<String>, item: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, item: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             item: item.into(),
@@ -680,11 +669,7 @@ impl Command for CfCount {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("CF.COUNT"),
-            bulk(self.key.as_str()),
-            bulk(self.item.as_str()),
-        ])
+        array(vec![bulk("CF.COUNT"), bulk(&self.key), bulk(&self.item)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -712,7 +697,7 @@ impl Command for CfCount {
 /// Creates an empty Cuckoo filter with the given capacity.
 #[derive(Clone)]
 pub struct CfReserve {
-    key: String,
+    key: CommandArg,
     capacity: i64,
     bucketsize: Option<i64>,
     maxiterations: Option<i64>,
@@ -721,7 +706,7 @@ pub struct CfReserve {
 
 impl CfReserve {
     /// Create a new [`CfReserve`] command.
-    pub fn new(key: impl Into<String>, capacity: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, capacity: i64) -> Self {
         Self {
             key: key.into(),
             capacity,
@@ -756,7 +741,7 @@ impl Command for CfReserve {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("CF.RESERVE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.capacity.to_string()),
         ];
         if let Some(bs) = self.bucketsize {
@@ -794,12 +779,12 @@ impl Command for CfReserve {
 /// Returns information about the Cuckoo filter at `key` as a raw Frame.
 #[derive(Clone)]
 pub struct CfInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl CfInfo {
     /// Create a new [`CfInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -808,7 +793,7 @@ impl Command for CfInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("CF.INFO"), bulk(self.key.as_str())])
+        array(vec![bulk("CF.INFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -830,15 +815,18 @@ impl Command for CfInfo {
 /// exist. Returns a vector of booleans.
 #[derive(Clone)]
 pub struct CfInsert {
-    key: String,
+    key: CommandArg,
     capacity: Option<i64>,
     nocreate: bool,
-    items: Vec<String>,
+    items: Vec<CommandArg>,
 }
 
 impl CfInsert {
     /// Create a new [`CfInsert`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             capacity: None,
@@ -864,7 +852,7 @@ impl Command for CfInsert {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("CF.INSERT"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("CF.INSERT"), bulk(&self.key)];
         if let Some(cap) = self.capacity {
             args.push(bulk("CAPACITY"));
             args.push(bulk(cap.to_string()));
@@ -874,7 +862,7 @@ impl Command for CfInsert {
         }
         args.push(bulk("ITEMS"));
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -894,15 +882,18 @@ impl Command for CfInsert {
 /// exist, creating the filter if needed. Returns a vector of booleans.
 #[derive(Clone)]
 pub struct CfInsertNx {
-    key: String,
+    key: CommandArg,
     capacity: Option<i64>,
     nocreate: bool,
-    items: Vec<String>,
+    items: Vec<CommandArg>,
 }
 
 impl CfInsertNx {
     /// Create a new [`CfInsertNx`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             capacity: None,
@@ -928,7 +919,7 @@ impl Command for CfInsertNx {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("CF.INSERTNX"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("CF.INSERTNX"), bulk(&self.key)];
         if let Some(cap) = self.capacity {
             args.push(bulk("CAPACITY"));
             args.push(bulk(cap.to_string()));
@@ -938,7 +929,7 @@ impl Command for CfInsertNx {
         }
         args.push(bulk("ITEMS"));
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -996,12 +987,12 @@ fn parse_scandump(frame: Frame) -> Result<(u64, Bytes), RedisError> {
 /// that have been added. Returns `0` if the key does not exist.
 #[derive(Clone)]
 pub struct BfCard {
-    key: String,
+    key: CommandArg,
 }
 
 impl BfCard {
     /// Create a new [`BfCard`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -1010,7 +1001,7 @@ impl Command for BfCard {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("BF.CARD"), bulk(self.key.as_str())])
+        array(vec![bulk("BF.CARD"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1063,13 +1054,13 @@ impl Command for BfCard {
 /// ```
 #[derive(Clone)]
 pub struct BfScanDump {
-    key: String,
+    key: CommandArg,
     iterator: u64,
 }
 
 impl BfScanDump {
     /// Create a new [`BfScanDump`] command.
-    pub fn new(key: impl Into<String>, iterator: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, iterator: u64) -> Self {
         Self {
             key: key.into(),
             iterator,
@@ -1083,7 +1074,7 @@ impl Command for BfScanDump {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("BF.SCANDUMP"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.iterator.to_string()),
         ])
     }
@@ -1107,14 +1098,14 @@ impl Command for BfScanDump {
 /// in iteration order, to rebuild a Bloom filter on another server.
 #[derive(Clone)]
 pub struct BfLoadChunk {
-    key: String,
+    key: CommandArg,
     iterator: u64,
     data: Bytes,
 }
 
 impl BfLoadChunk {
     /// Create a new [`BfLoadChunk`] command.
-    pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, iterator: u64, data: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),
             iterator,
@@ -1129,7 +1120,7 @@ impl Command for BfLoadChunk {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("BF.LOADCHUNK"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.iterator.to_string()),
             bulk(self.data.as_ref()),
         ])
@@ -1157,13 +1148,13 @@ impl Command for BfLoadChunk {
 /// marking the end. Restore with [`CfLoadChunk`].
 #[derive(Clone)]
 pub struct CfScanDump {
-    key: String,
+    key: CommandArg,
     iterator: u64,
 }
 
 impl CfScanDump {
     /// Create a new [`CfScanDump`] command.
-    pub fn new(key: impl Into<String>, iterator: u64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, iterator: u64) -> Self {
         Self {
             key: key.into(),
             iterator,
@@ -1177,7 +1168,7 @@ impl Command for CfScanDump {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("CF.SCANDUMP"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.iterator.to_string()),
         ])
     }
@@ -1201,14 +1192,14 @@ impl Command for CfScanDump {
 /// in iteration order, to rebuild a Cuckoo filter on another server.
 #[derive(Clone)]
 pub struct CfLoadChunk {
-    key: String,
+    key: CommandArg,
     iterator: u64,
     data: Bytes,
 }
 
 impl CfLoadChunk {
     /// Create a new [`CfLoadChunk`] command.
-    pub fn new(key: impl Into<String>, iterator: u64, data: impl Into<Bytes>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, iterator: u64, data: impl Into<Bytes>) -> Self {
         Self {
             key: key.into(),
             iterator,
@@ -1223,7 +1214,7 @@ impl Command for CfLoadChunk {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("CF.LOADCHUNK"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.iterator.to_string()),
             bulk(self.data.as_ref()),
         ])

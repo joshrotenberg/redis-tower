@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -8,13 +9,13 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// estimated cardinality changed), `false` otherwise.
 #[derive(Clone)]
 pub struct PfAdd {
-    key: String,
-    elements: Vec<String>,
+    key: CommandArg,
+    elements: Vec<CommandArg>,
 }
 
 impl PfAdd {
     /// Create a new [`PfAdd`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             elements: vec![element.into()],
@@ -23,8 +24,8 @@ impl PfAdd {
 
     /// Create the [`PfAdd`] command for the supplied elements.
     pub fn elements(
-        key: impl Into<String>,
-        elements: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        elements: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -37,9 +38,9 @@ impl Command for PfAdd {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("PFADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("PFADD"), bulk(&self.key)];
         for element in &self.elements {
-            args.push(bulk(element.as_str()));
+            args.push(bulk(element));
         }
         array(args)
     }
@@ -67,19 +68,19 @@ impl Command for PfAdd {
 /// returns the approximate cardinality of the union.
 #[derive(Clone)]
 pub struct PfCount {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
 }
 
 impl PfCount {
     /// Create a new [`PfCount`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             keys: vec![key.into()],
         }
     }
 
     /// Create the [`PfCount`] command for the supplied keys.
-    pub fn keys(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn keys(keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
         }
@@ -92,7 +93,7 @@ impl Command for PfCount {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PFCOUNT")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }
@@ -118,15 +119,15 @@ impl Command for PfCount {
 /// The destination key will hold the union of the source keys.
 #[derive(Clone)]
 pub struct PfMerge {
-    destkey: String,
-    sourcekeys: Vec<String>,
+    destkey: CommandArg,
+    sourcekeys: Vec<CommandArg>,
 }
 
 impl PfMerge {
     /// Create a new [`PfMerge`] command.
     pub fn new(
-        destkey: impl Into<String>,
-        sourcekeys: impl IntoIterator<Item = impl Into<String>>,
+        destkey: impl Into<CommandArg>,
+        sourcekeys: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destkey: destkey.into(),
@@ -139,9 +140,9 @@ impl Command for PfMerge {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("PFMERGE"), bulk(self.destkey.as_str())];
+        let mut args = vec![bulk("PFMERGE"), bulk(&self.destkey)];
         for key in &self.sourcekeys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         array(args)
     }

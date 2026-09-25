@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -15,14 +16,14 @@ use crate::server::FlushMode;
 /// scripts can produce any response type.
 #[derive(Clone)]
 pub struct Eval {
-    script: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    script: CommandArg,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl Eval {
     /// Create a new [`Eval`] command.
-    pub fn new(script: impl Into<String>) -> Self {
+    pub fn new(script: impl Into<CommandArg>) -> Self {
         Self {
             script: script.into(),
             keys: Vec::new(),
@@ -31,13 +32,13 @@ impl Eval {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -49,14 +50,14 @@ impl Command for Eval {
     fn to_frame(&self) -> Frame {
         let mut parts = vec![
             bulk("EVAL"),
-            bulk(self.script.as_str()),
+            bulk(&self.script),
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -80,8 +81,8 @@ impl Command for Eval {
 #[derive(Clone)]
 pub struct EvalSha {
     sha1: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl EvalSha {
@@ -95,13 +96,13 @@ impl EvalSha {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -117,10 +118,10 @@ impl Command for EvalSha {
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -144,14 +145,14 @@ impl Command for EvalSha {
 /// write commands. Returns `Frame` directly.
 #[derive(Clone)]
 pub struct EvalRo {
-    script: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    script: CommandArg,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl EvalRo {
     /// Create a new [`EvalRo`] command.
-    pub fn new(script: impl Into<String>) -> Self {
+    pub fn new(script: impl Into<CommandArg>) -> Self {
         Self {
             script: script.into(),
             keys: Vec::new(),
@@ -160,13 +161,13 @@ impl EvalRo {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -178,14 +179,14 @@ impl Command for EvalRo {
     fn to_frame(&self) -> Frame {
         let mut parts = vec![
             bulk("EVAL_RO"),
-            bulk(self.script.as_str()),
+            bulk(&self.script),
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -210,8 +211,8 @@ impl Command for EvalRo {
 #[derive(Clone)]
 pub struct EvalShaRo {
     sha1: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl EvalShaRo {
@@ -225,13 +226,13 @@ impl EvalShaRo {
     }
 
     /// Add a key argument (populates KEYS table in Lua).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table in Lua).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -247,10 +248,10 @@ impl Command for EvalShaRo {
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -304,7 +305,7 @@ impl Command for EvalShaRo {
 /// ```
 #[derive(Clone, Debug)]
 pub struct Script {
-    source: String,
+    source: CommandArg,
     sha: String,
 }
 
@@ -314,7 +315,7 @@ impl Script {
     /// The SHA1 digest is computed immediately and cached for the lifetime of
     /// the value. It matches the digest `SCRIPT LOAD` returns, so it can be used
     /// directly with `EVALSHA`.
-    pub fn new(source: impl Into<String>) -> Self {
+    pub fn new(source: impl Into<CommandArg>) -> Self {
         let source = source.into();
         let sha = hex::encode(Sha1::digest(source.as_bytes()));
         Self { source, sha }
@@ -325,19 +326,28 @@ impl Script {
         &self.sha
     }
 
-    /// Get the Lua source code.
-    pub fn source(&self) -> &str {
-        &self.source
+    /// Get the exact Lua source bytes.
+    pub fn source(&self) -> &[u8] {
+        self.source.as_bytes()
     }
 
     /// Build an [`EvalSha`] command (preferred -- sends only the cached digest).
     pub fn evalsha(&self, keys: &[&str], args: &[&str]) -> EvalSha {
+        self.evalsha_args(keys, args)
+    }
+
+    /// Build an [`EvalSha`] command from binary-safe keys and arguments.
+    pub fn evalsha_args(
+        &self,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
+        args: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> EvalSha {
         let mut cmd = EvalSha::new(&self.sha);
-        for k in keys {
-            cmd = cmd.key(*k);
+        for key in keys {
+            cmd = cmd.key(key);
         }
-        for a in args {
-            cmd = cmd.arg(*a);
+        for arg in args {
+            cmd = cmd.arg(arg);
         }
         cmd
     }
@@ -345,12 +355,21 @@ impl Script {
     /// Build an [`EvalShaRo`] command, the read-only variant of
     /// [`evalsha`](Script::evalsha).
     pub fn evalsha_ro(&self, keys: &[&str], args: &[&str]) -> EvalShaRo {
+        self.evalsha_ro_args(keys, args)
+    }
+
+    /// Build an [`EvalShaRo`] command from binary-safe keys and arguments.
+    pub fn evalsha_ro_args(
+        &self,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
+        args: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> EvalShaRo {
         let mut cmd = EvalShaRo::new(&self.sha);
-        for k in keys {
-            cmd = cmd.key(*k);
+        for key in keys {
+            cmd = cmd.key(key);
         }
-        for a in args {
-            cmd = cmd.arg(*a);
+        for arg in args {
+            cmd = cmd.arg(arg);
         }
         cmd
     }
@@ -358,12 +377,21 @@ impl Script {
     /// Build an [`Eval`] command (fallback when EVALSHA returns NOSCRIPT --
     /// sends the full source, which the server then caches).
     pub fn eval(&self, keys: &[&str], args: &[&str]) -> Eval {
+        self.eval_args(keys, args)
+    }
+
+    /// Build an [`Eval`] command from binary-safe keys and arguments.
+    pub fn eval_args(
+        &self,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
+        args: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Eval {
         let mut cmd = Eval::new(&self.source);
-        for k in keys {
-            cmd = cmd.key(*k);
+        for key in keys {
+            cmd = cmd.key(key);
         }
-        for a in args {
-            cmd = cmd.arg(*a);
+        for arg in args {
+            cmd = cmd.arg(arg);
         }
         cmd
     }
@@ -371,12 +399,21 @@ impl Script {
     /// Build an [`EvalRo`] command, the read-only variant of
     /// [`eval`](Script::eval).
     pub fn eval_ro(&self, keys: &[&str], args: &[&str]) -> EvalRo {
+        self.eval_ro_args(keys, args)
+    }
+
+    /// Build an [`EvalRo`] command from binary-safe keys and arguments.
+    pub fn eval_ro_args(
+        &self,
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
+        args: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> EvalRo {
         let mut cmd = EvalRo::new(&self.source);
-        for k in keys {
-            cmd = cmd.key(*k);
+        for key in keys {
+            cmd = cmd.key(key);
         }
-        for a in args {
-            cmd = cmd.arg(*a);
+        for arg in args {
+            cmd = cmd.arg(arg);
         }
         cmd
     }
@@ -392,12 +429,12 @@ impl Script {
 /// SHA1 digest of the script.
 #[derive(Clone)]
 pub struct ScriptLoad {
-    script: String,
+    script: CommandArg,
 }
 
 impl ScriptLoad {
     /// Create a new [`ScriptLoad`] command.
-    pub fn new(script: impl Into<String>) -> Self {
+    pub fn new(script: impl Into<CommandArg>) -> Self {
         Self {
             script: script.into(),
         }
@@ -408,11 +445,7 @@ impl Command for ScriptLoad {
     type Response = String;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("SCRIPT"),
-            bulk("LOAD"),
-            bulk(self.script.as_str()),
-        ])
+        array(vec![bulk("SCRIPT"), bulk("LOAD"), bulk(&self.script)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -609,8 +642,8 @@ impl Command for ScriptKill {
 #[derive(Clone)]
 pub struct FCall {
     function: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl FCall {
@@ -624,13 +657,13 @@ impl FCall {
     }
 
     /// Add a key argument (populates KEYS table).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -646,10 +679,10 @@ impl Command for FCall {
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -674,8 +707,8 @@ impl Command for FCall {
 #[derive(Clone)]
 pub struct FCallRo {
     function: String,
-    keys: Vec<String>,
-    args: Vec<String>,
+    keys: Vec<CommandArg>,
+    args: Vec<CommandArg>,
 }
 
 impl FCallRo {
@@ -689,13 +722,13 @@ impl FCallRo {
     }
 
     /// Add a key argument (populates KEYS table).
-    pub fn key(mut self, key: impl Into<String>) -> Self {
+    pub fn key(mut self, key: impl Into<CommandArg>) -> Self {
         self.keys.push(key.into());
         self
     }
 
     /// Add a regular argument (populates ARGV table).
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
@@ -711,10 +744,10 @@ impl Command for FCallRo {
             bulk(self.keys.len().to_string()),
         ];
         for k in &self.keys {
-            parts.push(bulk(k.as_str()));
+            parts.push(bulk(k));
         }
         for a in &self.args {
-            parts.push(bulk(a.as_str()));
+            parts.push(bulk(a));
         }
         array(parts)
     }
@@ -737,13 +770,13 @@ impl Command for FCallRo {
 /// Loads a library to Redis. Returns the library name.
 #[derive(Clone)]
 pub struct FunctionLoad {
-    code: String,
+    code: CommandArg,
     replace: bool,
 }
 
 impl FunctionLoad {
     /// Create a new [`FunctionLoad`] command.
-    pub fn new(code: impl Into<String>) -> Self {
+    pub fn new(code: impl Into<CommandArg>) -> Self {
         Self {
             code: code.into(),
             replace: false,
@@ -765,7 +798,7 @@ impl Command for FunctionLoad {
         if self.replace {
             parts.push(bulk("REPLACE"));
         }
-        parts.push(bulk(self.code.as_str()));
+        parts.push(bulk(&self.code));
         array(parts)
     }
 
@@ -1517,7 +1550,7 @@ mod tests {
     #[test]
     fn script_source_is_preserved() {
         let script = Script::new("return redis.call('GET', KEYS[1])");
-        assert_eq!(script.source(), "return redis.call('GET', KEYS[1])");
+        assert_eq!(script.source(), b"return redis.call('GET', KEYS[1])");
     }
 
     #[test]
@@ -1553,6 +1586,24 @@ mod tests {
                 bulk("key1"),
                 bulk("arg1"),
                 bulk("arg2"),
+            ])
+        );
+    }
+
+    #[test]
+    fn script_argument_helpers_preserve_binary_keys_and_args() {
+        let script = Script::new(b"return {KEYS[1], ARGV[1]}".as_slice());
+        let keys = [CommandArg::from_static(b"key\0\xff")];
+        let args = [CommandArg::from_static(b"\r\n$5\r\nvalue")];
+
+        assert_eq!(
+            script.eval_args(&keys, &args).to_frame(),
+            array(vec![
+                bulk("EVAL"),
+                bulk(b"return {KEYS[1], ARGV[1]}".as_slice()),
+                bulk("1"),
+                bulk(b"key\0\xff".as_slice()),
+                bulk(b"\r\n$5\r\nvalue".as_slice()),
             ])
         );
     }

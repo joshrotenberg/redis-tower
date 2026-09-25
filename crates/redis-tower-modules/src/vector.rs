@@ -1,7 +1,7 @@
 //! # Vector Set Client
 //!
 //! Ergonomic, typed client over Redis [Vector Sets]. Vectors are exchanged as
-//! `Vec<f32>` and named elements as strings, hiding the raw
+//! `Vec<f32>` and binary-safe named elements, hiding the raw
 //! [`Frame`] reply structure. Similarity searches return
 //! typed [`SimilarityResult`] values and introspection returns a structured
 //! [`VectorSetInfo`].
@@ -31,15 +31,17 @@
 //!     .withscores();
 //! let hits = vset.search(query).await?;
 //! for hit in hits {
-//!     println!("{} -> {:?}", hit.element, hit.score);
+//!     println!("{:?} -> {:?}", hit.element, hit.score);
 //! }
 //! # Ok(())
 //! # }
 //! ```
 
+use bytes::Bytes;
 use redis_tower::RedisExecutor;
 use redis_tower::commands::{
-    VAdd, VCard, VDelAttr, VDim, VEmb, VGetAttr, VInfo, VLinks, VRandMember, VRem, VSetAttr, VSim,
+    CommandArg, VAdd, VCard, VDelAttr, VDim, VEmb, VGetAttr, VInfo, VLinks, VRandMember, VRem,
+    VSetAttr, VSim,
 };
 use redis_tower_core::{Frame, RedisError};
 
@@ -50,7 +52,7 @@ pub use redis_tower::commands::VQuantization;
 #[derive(Debug, Clone)]
 pub struct SimilarityResult {
     /// The element name.
-    pub element: String,
+    pub element: Bytes,
     /// The similarity score, present only when the query requested scores.
     pub score: Option<f64>,
 }
@@ -133,7 +135,7 @@ impl std::fmt::Debug for VAddOptions {
 /// Target for a similarity search query.
 pub enum QueryTarget {
     /// Search by an existing element name already present in the set.
-    Element(String),
+    Element(CommandArg),
     /// Search by a raw vector of values.
     Values(Vec<f32>),
 }
@@ -155,7 +157,7 @@ pub struct VectorQuery {
 
 impl VectorQuery {
     /// Search for elements similar to an existing element in the set.
-    pub fn by_element(element: impl Into<String>) -> Self {
+    pub fn by_element(element: impl Into<CommandArg>) -> Self {
         Self::with_target(QueryTarget::Element(element.into()))
     }
 
@@ -226,13 +228,13 @@ impl VectorQuery {
 /// key, exposing typed add/query/introspection operations over the elements of
 /// that set.
 pub struct VectorSetClient<'a, C> {
-    key: String,
+    key: CommandArg,
     conn: &'a mut C,
 }
 
 impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     /// Create a new [`VectorSetClient`] for `key`, borrowing `conn`.
-    pub fn new(conn: &'a mut C, key: impl Into<String>) -> Self {
+    pub fn new(conn: &'a mut C, key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             conn,
@@ -244,7 +246,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     pub async fn add(
         &mut self,
         vector: Vec<f32>,
-        element: impl Into<String>,
+        element: impl Into<CommandArg>,
     ) -> Result<bool, RedisError> {
         self.conn
             .execute(VAdd::new(self.key.clone(), vector, element.into()))
@@ -255,7 +257,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     pub async fn add_with_options(
         &mut self,
         vector: Vec<f32>,
-        element: impl Into<String>,
+        element: impl Into<CommandArg>,
         options: VAddOptions,
     ) -> Result<bool, RedisError> {
         let mut cmd = VAdd::new(self.key.clone(), vector, element.into());
@@ -278,7 +280,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     }
 
     /// Remove an element. Returns `true` if it existed and was removed.
-    pub async fn remove(&mut self, element: &str) -> Result<bool, RedisError> {
+    pub async fn remove(&mut self, element: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn
             .execute(VRem::new(self.key.clone(), element))
             .await
@@ -319,14 +321,20 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     }
 
     /// Retrieve the embedding (vector) for an element.
-    pub async fn embedding(&mut self, element: &str) -> Result<Vec<f64>, RedisError> {
+    pub async fn embedding(
+        &mut self,
+        element: impl Into<CommandArg>,
+    ) -> Result<Vec<f64>, RedisError> {
         self.conn
             .execute(VEmb::new(self.key.clone(), element))
             .await
     }
 
     /// Return the neighbour links of an element, with similarity scores.
-    pub async fn links(&mut self, element: &str) -> Result<Vec<SimilarityResult>, RedisError> {
+    pub async fn links(
+        &mut self,
+        element: impl Into<CommandArg>,
+    ) -> Result<Vec<SimilarityResult>, RedisError> {
         let raw = self
             .conn
             .execute(VLinks::new(self.key.clone(), element).withscores())
@@ -336,27 +344,30 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
 
     /// Return one or more random elements from the set. A negative `count`
     /// allows duplicates.
-    pub async fn random(&mut self, count: Option<i64>) -> Result<Vec<String>, RedisError> {
+    pub async fn random(&mut self, count: Option<i64>) -> Result<Vec<Bytes>, RedisError> {
         let mut cmd = VRandMember::new(self.key.clone());
         if let Some(n) = count {
             cmd = cmd.count(n);
         }
-        let raw = self.conn.execute(cmd).await?;
-        Ok(raw
-            .into_iter()
-            .map(|b| String::from_utf8_lossy(&b).into_owned())
-            .collect())
+        self.conn.execute(cmd).await
     }
 
     /// Set a JSON attribute string on an element. Returns `true` on success.
-    pub async fn set_attr(&mut self, element: &str, json: &str) -> Result<bool, RedisError> {
+    pub async fn set_attr(
+        &mut self,
+        element: impl Into<CommandArg>,
+        json: &str,
+    ) -> Result<bool, RedisError> {
         self.conn
             .execute(VSetAttr::new(self.key.clone(), element, json))
             .await
     }
 
     /// Get the JSON attribute string for an element, or `None` if unset.
-    pub async fn get_attr(&mut self, element: &str) -> Result<Option<String>, RedisError> {
+    pub async fn get_attr(
+        &mut self,
+        element: impl Into<CommandArg>,
+    ) -> Result<Option<String>, RedisError> {
         self.conn
             .execute(VGetAttr::new(self.key.clone(), element))
             .await
@@ -365,7 +376,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     /// Clear the attribute on an element. Redis has no `VDELATTR`, so this sets
     /// the attribute to the empty string via `VSETATTR`. Returns `true` if the
     /// element exists, `false` if it is not in the set.
-    pub async fn del_attr(&mut self, element: &str) -> Result<bool, RedisError> {
+    pub async fn del_attr(&mut self, element: impl Into<CommandArg>) -> Result<bool, RedisError> {
         self.conn
             .execute(VDelAttr::new(self.key.clone(), element))
             .await
@@ -391,7 +402,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     #[cfg(feature = "serde")]
     pub async fn set_attr_typed<T: serde::Serialize>(
         &mut self,
-        element: &str,
+        element: impl Into<CommandArg>,
         attr: &T,
     ) -> Result<bool, RedisError> {
         let json = serde_json::to_string(attr)
@@ -404,7 +415,7 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     #[cfg(feature = "serde")]
     pub async fn get_attr_typed<T: serde::de::DeserializeOwned>(
         &mut self,
-        element: &str,
+        element: impl Into<CommandArg>,
     ) -> Result<Option<T>, RedisError> {
         match self.get_attr(element).await? {
             None => Ok(None),
@@ -418,12 +429,9 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
 }
 
 /// Convert a raw `(bytes, score)` response into typed [`SimilarityResult`]s.
-fn to_results<B: AsRef<[u8]>>(raw: Vec<(B, Option<f64>)>) -> Vec<SimilarityResult> {
+fn to_results(raw: Vec<(Bytes, Option<f64>)>) -> Vec<SimilarityResult> {
     raw.into_iter()
-        .map(|(name, score)| SimilarityResult {
-            element: String::from_utf8_lossy(name.as_ref()).into_owned(),
-            score,
-        })
+        .map(|(element, score)| SimilarityResult { element, score })
         .collect()
 }
 
@@ -626,11 +634,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn random_returns_strings() {
+    async fn random_returns_bytes() {
         let mut mock = MockRedis::new(vec![Frame::Array(Some(vec![bulk("a"), bulk("b")]))]);
         let mut vset = VectorSetClient::new(&mut mock, "k");
         let members = vset.random(Some(2)).await.unwrap();
-        assert_eq!(members, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(
+            members,
+            vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")]
+        );
     }
 
     #[tokio::test]

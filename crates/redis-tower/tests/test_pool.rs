@@ -127,7 +127,7 @@ async fn pool_health_check_ping() {
     .await
     .expect("failed to create pool");
 
-    let pong: String = pool.execute(Ping::new()).await.unwrap();
+    let pong: bytes::Bytes = pool.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
 }
 
