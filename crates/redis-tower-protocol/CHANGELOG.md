@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - mixed-frame fragmentation properties, semantic fuzz oracles, reviewed seeds,
   and bounded scheduled fuzz campaigns with retained provenance
+- deterministic first-frame copied-byte regressions, retained-lifetime and
+  fragmented Criterion cases, plus raw allocation/copy evidence comparing the
+  historical whole-buffer clone and a split/shared ownership alternative
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-protocol-v0.1.2...redis-tower-protocol-v0.1.3) - 2026-09-24
 

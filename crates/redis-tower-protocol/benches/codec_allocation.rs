@@ -251,6 +251,33 @@ fn retained_head_scenario() -> Scenario {
     }
 }
 
+fn fragmented_scenario() -> Scenario {
+    let mut wire = Vec::new();
+    let mut frame_lengths = Vec::new();
+    for round in 0..16u8 {
+        append_frame(&mut wire, &mut frame_lengths, b"+OK\r\n");
+        append_bulk(&mut wire, &mut frame_lengths, 0, round);
+        append_bulk(&mut wire, &mut frame_lengths, 16, round);
+        append_bulk(&mut wire, &mut frame_lengths, 256, round);
+        append_frame(&mut wire, &mut frame_lengths, b":42\r\n");
+        append_frame(
+            &mut wire,
+            &mut frame_lengths,
+            b">2\r\n+invalidate\r\n$3\r\nkey\r\n",
+        );
+        append_frame(
+            &mut wire,
+            &mut frame_lengths,
+            b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n",
+        );
+    }
+    Scenario {
+        name: "mixed_112_fragmented",
+        wire,
+        frame_lengths,
+    }
+}
+
 fn decode(scenario: &Scenario, strategy: Strategy, retain: bool) -> DecodeOutcome {
     let mut input = BytesMut::from(scenario.wire.as_slice());
     let mut retained_frames = retain.then(|| Vec::with_capacity(scenario.frame_lengths.len()));
@@ -328,6 +355,28 @@ fn decode_first(scenario: &Scenario, strategy: Strategy) -> FirstDecodeOutcome {
     FirstDecodeOutcome { frame, unread }
 }
 
+fn decode_fragmented(scenario: &Scenario, chunk_size: usize, retain: bool) -> DecodeOutcome {
+    let mut input = BytesMut::new();
+    let mut codec = RespCodec::new();
+    let mut retained_frames = retain.then(|| Vec::with_capacity(scenario.frame_lengths.len()));
+    let mut decoded_frames = 0;
+
+    for chunk in scenario.wire.chunks(chunk_size) {
+        input.extend_from_slice(chunk);
+        while let Some(frame) = codec.decode(&mut input).unwrap() {
+            decoded_frames += 1;
+            retain_or_drop(&mut retained_frames, frame);
+        }
+    }
+
+    assert!(input.is_empty());
+    DecodeOutcome {
+        decoded_frames,
+        retained_frames,
+        input,
+    }
+}
+
 fn validate_equivalence(scenario: &Scenario) {
     let production = decode(scenario, Strategy::ProductionFirstFrameCopy, true);
     let expected = production.retained_frames.as_ref().unwrap();
@@ -386,6 +435,26 @@ fn retained_head_measurement(scenario: &Scenario, strategy: Strategy) -> Value {
     })
 }
 
+fn fragmented_allocation_measurement(scenario: &Scenario, chunk_size: usize) -> Value {
+    let before = AllocationSnapshot::now();
+    let outcome = black_box(decode_fragmented(scenario, chunk_size, true));
+    let after_decode = AllocationSnapshot::now();
+    assert_eq!(outcome.decoded_frames, scenario.frame_lengths.len());
+    assert_eq!(
+        outcome.retained_frames.as_ref().unwrap().len(),
+        outcome.decoded_frames
+    );
+    black_box(&outcome);
+    drop(outcome);
+    let after_drop = AllocationSnapshot::now();
+
+    json!({
+        "through_decode": after_decode.delta(before),
+        "through_drop": after_drop.delta(before),
+        "live_bytes_released_by_drop": after_decode.live_bytes - after_drop.live_bytes,
+    })
+}
+
 fn timing_samples(
     scenario: &Scenario,
     strategy: Strategy,
@@ -421,6 +490,26 @@ fn timing_samples_first(
             let started = Instant::now();
             for _ in 0..iterations {
                 black_box(decode_first(scenario, strategy));
+            }
+            started.elapsed().as_nanos() / iterations as u128
+        })
+        .collect()
+}
+
+fn timing_samples_fragmented(
+    scenario: &Scenario,
+    chunk_size: usize,
+    samples: usize,
+    iterations: usize,
+) -> Vec<u128> {
+    for _ in 0..3 {
+        black_box(decode_fragmented(scenario, chunk_size, true));
+    }
+    (0..samples)
+        .map(|_| {
+            let started = Instant::now();
+            for _ in 0..iterations {
+                black_box(decode_fragmented(scenario, chunk_size, true));
             }
             started.elapsed().as_nanos() / iterations as u128
         })
@@ -656,6 +745,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    let fragmented = fragmented_scenario();
+    let contiguous = decode(&fragmented, Strategy::ProductionFirstFrameCopy, true);
+    let expected_fragmented_frames = contiguous.retained_frames.as_ref().unwrap();
+    let fragmented_records = [1usize, 7, 64, 1024]
+        .into_iter()
+        .map(|chunk_size| {
+            let decoded = decode_fragmented(&fragmented, chunk_size, true);
+            assert_eq!(
+                decoded.retained_frames.as_ref().unwrap(),
+                expected_fragmented_frames
+            );
+            json!({
+                "chunk_size": chunk_size,
+                "expected_copied_wire_bytes": fragmented.wire.len(),
+                "allocation": fragmented_allocation_measurement(&fragmented, chunk_size),
+                "raw_duration_ns_per_iteration": timing_samples_fragmented(
+                    &fragmented,
+                    chunk_size,
+                    options.samples,
+                    options.iterations,
+                ),
+            })
+        })
+        .collect::<Vec<_>>();
+
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest_dir.join("../..");
     let lockfile = include_str!("../../../Cargo.lock");
@@ -693,6 +807,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "retained_head_frame_bytes": retained_head.frame_lengths[0],
             "unread_tail_bytes": retained_head.wire.len() - retained_head.frame_lengths[0],
             "strategies": retained_head_records,
+        },
+        "fragmented_production": {
+            "name": fragmented.name,
+            "frame_count": fragmented.frame_lengths.len(),
+            "wire_bytes": fragmented.wire.len(),
+            "retention": "retain_until_batch_complete",
+            "chunks": fragmented_records,
         },
     });
     let rendered = serde_json::to_string_pretty(&document)? + "\n";
