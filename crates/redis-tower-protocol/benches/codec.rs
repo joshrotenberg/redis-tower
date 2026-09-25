@@ -149,7 +149,15 @@ fn bench_decode_pipeline(c: &mut Criterion) {
         .collect();
 
     c.bench_function("decode_pipeline_100", |b| {
-        b.iter(|| decode_pipeline(pipeline_bytes.as_slice(), false));
+        b.iter(|| {
+            let mut buf = BytesMut::from(pipeline_bytes.as_slice());
+            let mut codec = RespCodec::new();
+            let mut count = 0usize;
+            while codec.decode(&mut buf).unwrap().is_some() {
+                count += 1;
+            }
+            count
+        });
     });
 
     let mixed = mixed_pipeline(32, true);
