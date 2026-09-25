@@ -9,16 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- binary-safe `CommandArg` inputs across typed strings, hashes, lists, sets,
-  sorted sets, and streams, including exact-byte stream response names
+- binary-safe `CommandArg` inputs across every opaque typed position in core,
+  scripting, Pub/Sub, server, and feature-gated module command families,
+  including exact-byte stream response names
+- binary-safe cached-script helpers for KEYS and ARGV
 
 ### Changed
 
 - **Breaking (next minor, 0.2.0):** common command constructors now use
-  `Into<CommandArg>` instead of `Into<String>`, and opaque stream/group/consumer
-  names in typed responses use `Bytes` instead of lossy `String` values. This
-  change must not ship in a `0.1.x` patch release; dependent workspace version
-  requirements must move to `redis-tower-commands` 0.2.0 for release.
+  `Into<CommandArg>` instead of `Into<String>`. Opaque response positions use
+  `Bytes` instead of lossy `String` values, including stream/group/consumer
+  names, `PING` messages, and Search tag values. This change must not ship in a
+  `0.1.x` patch release; dependent workspace version requirements must move to
+  `redis-tower-commands` 0.2.0 for release.
 
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.1...redis-tower-commands-v0.1.2) - 2026-09-24
 

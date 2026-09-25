@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -8,13 +9,13 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// that received the message.
 #[derive(Clone)]
 pub struct Publish {
-    channel: String,
-    message: String,
+    channel: CommandArg,
+    message: CommandArg,
 }
 
 impl Publish {
     /// Create a new [`Publish`] command.
-    pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(channel: impl Into<CommandArg>, message: impl Into<CommandArg>) -> Self {
         Self {
             channel: channel.into(),
             message: message.into(),
@@ -28,8 +29,8 @@ impl Command for Publish {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("PUBLISH"),
-            bulk(self.channel.as_str()),
-            bulk(self.message.as_str()),
+            bulk(&self.channel),
+            bulk(&self.message),
         ])
     }
 
@@ -54,13 +55,13 @@ impl Command for Publish {
 /// clients that received the message.
 #[derive(Clone)]
 pub struct SPublish {
-    channel: String,
-    message: String,
+    channel: CommandArg,
+    message: CommandArg,
 }
 
 impl SPublish {
     /// Create a new [`SPublish`] command.
-    pub fn new(channel: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(channel: impl Into<CommandArg>, message: impl Into<CommandArg>) -> Self {
         Self {
             channel: channel.into(),
             message: message.into(),
@@ -74,8 +75,8 @@ impl Command for SPublish {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("SPUBLISH"),
-            bulk(self.channel.as_str()),
-            bulk(self.message.as_str()),
+            bulk(&self.channel),
+            bulk(&self.message),
         ])
     }
 
@@ -102,7 +103,7 @@ impl Command for SPublish {
 /// listed. Glob-style patterns are supported.
 #[derive(Clone)]
 pub struct PubSubChannels {
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
 }
 
 impl PubSubChannels {
@@ -112,7 +113,7 @@ impl PubSubChannels {
     }
 
     /// Create the [`PubSubChannels`] command using the `with_pattern` form.
-    pub fn with_pattern(pattern: impl Into<String>) -> Self {
+    pub fn with_pattern(pattern: impl Into<CommandArg>) -> Self {
         Self {
             pattern: Some(pattern.into()),
         }
@@ -131,7 +132,7 @@ impl Command for PubSubChannels {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PUBSUB"), bulk("CHANNELS")];
         if let Some(ref pat) = self.pattern {
-            args.push(bulk(pat.as_str()));
+            args.push(bulk(pat));
         }
         array(args)
     }
@@ -173,7 +174,7 @@ impl Command for PubSubChannels {
 /// array of channel/count pairs in RESP2, or a map in RESP3.
 #[derive(Clone)]
 pub struct PubSubNumSub {
-    channels: Vec<String>,
+    channels: Vec<CommandArg>,
 }
 
 impl PubSubNumSub {
@@ -185,7 +186,7 @@ impl PubSubNumSub {
     }
 
     /// Create the [`PubSubNumSub`] command for the supplied channels.
-    pub fn with_channels(channels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_channels(channels: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             channels: channels.into_iter().map(|c| c.into()).collect(),
         }
@@ -204,7 +205,7 @@ impl Command for PubSubNumSub {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PUBSUB"), bulk("NUMSUB")];
         for ch in &self.channels {
-            args.push(bulk(ch.as_str()));
+            args.push(bulk(ch));
         }
         array(args)
     }
@@ -333,7 +334,7 @@ impl Command for PubSubNumPat {
 /// Glob-style patterns are supported. (Redis 7.0+)
 #[derive(Clone)]
 pub struct PubSubShardChannels {
-    pattern: Option<String>,
+    pattern: Option<CommandArg>,
 }
 
 impl PubSubShardChannels {
@@ -343,7 +344,7 @@ impl PubSubShardChannels {
     }
 
     /// Create the [`PubSubShardChannels`] command using the `with_pattern` form.
-    pub fn with_pattern(pattern: impl Into<String>) -> Self {
+    pub fn with_pattern(pattern: impl Into<CommandArg>) -> Self {
         Self {
             pattern: Some(pattern.into()),
         }
@@ -362,7 +363,7 @@ impl Command for PubSubShardChannels {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PUBSUB"), bulk("SHARDCHANNELS")];
         if let Some(ref pat) = self.pattern {
-            args.push(bulk(pat.as_str()));
+            args.push(bulk(pat));
         }
         array(args)
     }
@@ -404,7 +405,7 @@ impl Command for PubSubShardChannels {
 /// map in RESP3. (Redis 7.0+)
 #[derive(Clone)]
 pub struct PubSubShardNumSub {
-    channels: Vec<String>,
+    channels: Vec<CommandArg>,
 }
 
 impl PubSubShardNumSub {
@@ -416,7 +417,7 @@ impl PubSubShardNumSub {
     }
 
     /// Create the [`PubSubShardNumSub`] command for the supplied channels.
-    pub fn with_channels(channels: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_channels(channels: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         Self {
             channels: channels.into_iter().map(|c| c.into()).collect(),
         }
@@ -435,7 +436,7 @@ impl Command for PubSubShardNumSub {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("PUBSUB"), bulk("SHARDNUMSUB")];
         for ch in &self.channels {
-            args.push(bulk(ch.as_str()));
+            args.push(bulk(ch));
         }
         array(args)
     }

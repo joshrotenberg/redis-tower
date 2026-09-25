@@ -9,7 +9,10 @@ mod common;
 use std::fmt;
 
 use common::redis_addr;
-use redis_tower::commands::{HSet, RPush, RawCommand, SAdd, Set, XAdd, ZAdd};
+use redis_tower::commands::{
+    BitOp, BitOperation, Echo, Eval, GeoAdd, HSet, PfAdd, Publish, RPush, RawCommand, Rename, SAdd,
+    Set, XAdd, ZAdd,
+};
 use redis_tower::{
     Command, Frame, Pipeline, ProtocolVersion, RedisConnection, RedisError, Transaction,
     TransactionResult,
@@ -672,6 +675,151 @@ async fn diff_mcp_scalar_nil_binary_and_numeric_boundaries() {
             pair.diagnostic("ECHO", "redis-tower")
         );
         assert_eq!(redis_utf8.diagnostic, pair.diagnostic("ECHO", "redis-rs"));
+    }
+}
+
+#[tokio::test]
+async fn diff_typed_remaining_families_preserve_opaque_bytes() {
+    for protocol in Protocol::ALL {
+        let mut pair = Pair::connect("typed-remaining-binary", protocol).await;
+        let binary = [0xff, 0, b'\r', b'\n', b'*', b'3'];
+
+        let tower_source = pair.binary_key("tower", "rename-source");
+        let redis_source = pair.binary_key("redis-rs", "rename-source");
+        let tower_destination = pair.binary_key("tower", "rename-destination");
+        let redis_destination = pair.binary_key("redis-rs", "rename-destination");
+        pair.reset(&tower_source, &redis_source).await;
+        pair.reset(&tower_destination, &redis_destination).await;
+        pair.tower
+            .raw("SET", &[&tower_source, &binary])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_source, &binary])
+            .await
+            .unwrap();
+        pair.tower
+            .typed(
+                "typed RENAME",
+                Rename::new(&tower_source, &tower_destination),
+            )
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("RENAME", &[&redis_source, &redis_destination])
+            .await
+            .unwrap();
+        let tower = pair.tower.raw("GET", &[&tower_destination]).await.unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("GET", &[&redis_destination])
+            .await
+            .unwrap();
+        pair.same("typed-rename", tower, redis_rs);
+
+        let tower_script_key = pair.binary_key("tower", "script");
+        let redis_script_key = pair.binary_key("redis-rs", "script");
+        let script = b"return {string.sub(KEYS[1], -3), ARGV[1]}";
+        let tower = pair
+            .tower
+            .typed(
+                "typed EVAL",
+                Eval::new(script).key(&tower_script_key).arg(binary),
+            )
+            .await
+            .map(tower_value)
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("EVAL", &[script, b"1", &redis_script_key, &binary])
+            .await
+            .unwrap();
+        pair.same("typed-eval", tower, redis_rs);
+
+        let tower = pair
+            .tower
+            .typed("typed ECHO", Echo::new(binary))
+            .await
+            .map(|value| SemanticValue::Bytes(value.to_vec()))
+            .unwrap();
+        let redis_rs = pair.redis_rs.raw("ECHO", &[&binary]).await.unwrap();
+        pair.same("typed-echo", tower, redis_rs);
+
+        let tower_channel = pair.binary_key("tower", "channel");
+        let redis_channel = pair.binary_key("redis-rs", "channel");
+        let tower = pair
+            .tower
+            .typed("typed PUBLISH", Publish::new(&tower_channel, binary))
+            .await
+            .map(SemanticValue::Integer)
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("PUBLISH", &[&redis_channel, &binary])
+            .await
+            .unwrap();
+        pair.same("typed-publish", tower, redis_rs);
+
+        let tower_geo = pair.binary_key("tower", "geo");
+        let redis_geo = pair.binary_key("redis-rs", "geo");
+        pair.reset(&tower_geo, &redis_geo).await;
+        let tower = pair
+            .tower
+            .typed(
+                "typed GEOADD",
+                GeoAdd::new(&tower_geo).member(-122.4194, 37.7749, binary),
+            )
+            .await
+            .map(SemanticValue::Integer)
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("GEOADD", &[&redis_geo, b"-122.4194", b"37.7749", &binary])
+            .await
+            .unwrap();
+        pair.same("typed-geoadd", tower, redis_rs);
+
+        let tower_hll = pair.binary_key("tower", "hll");
+        let redis_hll = pair.binary_key("redis-rs", "hll");
+        pair.reset(&tower_hll, &redis_hll).await;
+        pair.tower
+            .typed("typed PFADD", PfAdd::new(&tower_hll, binary))
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("PFADD", &[&redis_hll, &binary])
+            .await
+            .unwrap();
+        let tower = pair.tower.raw("PFCOUNT", &[&tower_hll]).await.unwrap();
+        let redis_rs = pair.redis_rs.raw("PFCOUNT", &[&redis_hll]).await.unwrap();
+        pair.same("typed-hll", tower, redis_rs);
+
+        let tower_bitmap = pair.binary_key("tower", "bitmap");
+        let redis_bitmap = pair.binary_key("redis-rs", "bitmap");
+        pair.reset(&tower_bitmap, &redis_bitmap).await;
+        pair.tower
+            .raw("SET", &[&tower_bitmap, &binary])
+            .await
+            .unwrap();
+        pair.redis_rs
+            .raw("SET", &[&redis_bitmap, &binary])
+            .await
+            .unwrap();
+        let tower = pair
+            .tower
+            .typed(
+                "typed BITOP",
+                BitOp::new(BitOperation::Not, &tower_destination, [&tower_bitmap]),
+            )
+            .await
+            .map(SemanticValue::Integer)
+            .unwrap();
+        let redis_rs = pair
+            .redis_rs
+            .raw("BITOP", &[b"NOT", &redis_destination, &redis_bitmap])
+            .await
+            .unwrap();
+        pair.same("typed-bitop", tower, redis_rs);
     }
 }
 

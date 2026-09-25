@@ -2465,7 +2465,7 @@ mod tests {
 
         // 4 commands should distribute 2 to each connection.
         for _ in 0..4 {
-            let _: String = pool.execute(Ping::new()).await.unwrap();
+            let _: Bytes = pool.execute(Ping::new()).await.unwrap();
         }
 
         // Check distribution via the atomic counter -- pool alternates.
@@ -2514,8 +2514,8 @@ mod tests {
         .unwrap();
         let pool2 = pool.clone();
 
-        let _: String = pool.execute(Ping::new()).await.unwrap();
-        let _: String = pool2.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool2.execute(Ping::new()).await.unwrap();
 
         let c0 = pool.inner.connections[0].lock().await;
         assert_eq!(c0.calls(), 2); // Both clones hit the same connection.
@@ -2542,7 +2542,7 @@ mod tests {
         .unwrap();
 
         for _ in 0..20 {
-            let _: String = pool.execute(Ping::new()).await.unwrap();
+            let _: Bytes = pool.execute(Ping::new()).await.unwrap();
         }
 
         // All 20 calls should have been distributed (not all to one connection).
@@ -2620,7 +2620,7 @@ mod tests {
         // Sequential calls -- all inflight counts are 0 after each completes,
         // so least-connections falls back to picking index 0 each time.
         for _ in 0..4 {
-            let _: String = pool.execute(Ping::new()).await.unwrap();
+            let _: Bytes = pool.execute(Ping::new()).await.unwrap();
         }
 
         let c0 = pool.inner.connections[0].lock().await;
@@ -2700,7 +2700,7 @@ mod tests {
             PoolConfig::default().dispatch(DispatchStrategy::LeastConnections),
         )
         .unwrap();
-        let _: String = pool.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool.execute(Ping::new()).await.unwrap();
 
         assert_eq!(
             pool.inner.connections[0].inflight.load(Ordering::Relaxed),
@@ -2741,7 +2741,7 @@ mod tests {
             .last_used
             .store(0, Ordering::Release);
 
-        let _: String = pool.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool.execute(Ping::new()).await.unwrap();
 
         // The connection should have received 2 calls: the health check PING + the actual PING.
         let c0 = pool.inner.connections[0].lock().await;
@@ -2767,7 +2767,7 @@ mod tests {
         )
         .unwrap();
 
-        let _: String = pool.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool.execute(Ping::new()).await.unwrap();
 
         // Only 1 call -- no health check PING was sent.
         let c0 = pool.inner.connections[0].lock().await;
@@ -2792,7 +2792,7 @@ mod tests {
             .last_used
             .store(0, Ordering::Release);
 
-        let _: String = pool.execute(Ping::new()).await.unwrap();
+        let _: Bytes = pool.execute(Ping::new()).await.unwrap();
 
         // Only 1 call -- health check is disabled.
         let c0 = pool.inner.connections[0].lock().await;
@@ -2846,7 +2846,7 @@ mod tests {
         //  2. The PING on the dead connection returns an error.
         //  3. The factory creates the fresh connection and replaces the slot.
         //  4. The actual Ping command is sent on the fresh connection and succeeds.
-        let result: String = RedisExecutor::execute(&mut pool, Ping::new())
+        let result: Bytes = RedisExecutor::execute(&mut pool, Ping::new())
             .await
             .unwrap();
         assert_eq!(result, "PONG");
@@ -2907,7 +2907,7 @@ mod tests {
             .last_used
             .store(0, Ordering::Release);
 
-        let result: Result<String, _> = pool.execute(Ping::new()).await;
+        let result: Result<Bytes, _> = pool.execute(Ping::new()).await;
 
         assert!(result.is_err(), "replacement factory should be exhausted");
         assert_eq!(recorder.health_check_failures.load(Ordering::Relaxed), 1);
@@ -2960,7 +2960,7 @@ mod tests {
         .unwrap();
         let _guard = pool.inner.connections[0].lock().await;
 
-        let result: Result<String, _> = pool.execute(Ping::new()).await;
+        let result: Result<Bytes, _> = pool.execute(Ping::new()).await;
 
         assert!(matches!(
             result,
@@ -2983,7 +2983,7 @@ mod tests {
         )
         .unwrap();
 
-        let result: String = pool.execute(Ping::new()).await.unwrap();
+        let result: Bytes = pool.execute(Ping::new()).await.unwrap();
 
         assert_eq!(result, "PONG");
     }
@@ -3003,7 +3003,7 @@ mod tests {
         .unwrap();
         let _guard = pool.inner.connections[0].lock().await;
 
-        let result: Result<String, _> = pool
+        let result: Result<Bytes, _> = pool
             .execute(WithDeadline::after(Ping::new(), Duration::from_millis(25)))
             .await;
 
@@ -3046,7 +3046,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
 
         holder.await.unwrap();
-        let result: Result<String, _> = caller.await.unwrap();
+        let result: Result<Bytes, _> = caller.await.unwrap();
         assert!(matches!(result, Err(RedisError::CommandTimeout)));
         assert_eq!(pool.inner.connections[0].lock().await.calls(), 0);
     }
@@ -3078,7 +3078,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
 
         holder.await.unwrap();
-        let result: Result<String, _> = caller.await.unwrap();
+        let result: Result<Bytes, _> = caller.await.unwrap();
         assert!(matches!(
             result,
             Err(RedisError::PoolAcquisitionTimeout {
@@ -3101,7 +3101,7 @@ mod tests {
         .unwrap();
         let _guard = pool.inner.connections[0].lock().await;
 
-        let result: Result<String, _> = pool
+        let result: Result<Bytes, _> = pool
             .execute(WithDeadline::after(Ping::new(), Duration::from_secs(1)))
             .await;
 
@@ -3125,7 +3125,7 @@ mod tests {
         let command =
             WithDeadline::new(Ping::new(), TokioInstant::now() - Duration::from_millis(1));
 
-        let result: Result<String, _> = pool.execute(command).await;
+        let result: Result<Bytes, _> = pool.execute(command).await;
 
         assert!(matches!(result, Err(RedisError::CommandTimeout)));
         assert_eq!(pool.stats().total_inflight, 0);
@@ -3158,7 +3158,7 @@ mod tests {
         let mut service = CommandTimeoutLayer::new(Duration::from_secs(1))
             .with_request_deadlines()
             .layer(ExecutorService::new(pool.clone()));
-        let result: Result<String, _> = service
+        let result: Result<Bytes, _> = service
             .call(WithDeadline::after(Ping::new(), Duration::from_millis(200)))
             .await;
 
@@ -3228,7 +3228,7 @@ mod tests {
         release_tx.send(()).unwrap();
         late_attempt_rx.await.unwrap();
 
-        let successor: Result<String, _> = pool.execute(Ping::new()).await;
+        let successor: Result<Bytes, _> = pool.execute(Ping::new()).await;
         assert!(matches!(successor, Err(RedisError::ConnectionClosed)));
         server_task.await.unwrap();
     }
@@ -3250,11 +3250,11 @@ mod tests {
         )
         .unwrap();
 
-        let pong: String = pool.execute(Ping::new()).await.unwrap();
+        let pong: Bytes = pool.execute(Ping::new()).await.unwrap();
         assert_eq!(pong, "PONG");
 
         let _guard = pool.inner.connections[0].lock().await;
-        let result: Result<String, _> = pool.execute(Ping::new()).await;
+        let result: Result<Bytes, _> = pool.execute(Ping::new()).await;
         assert!(matches!(
             result,
             Err(RedisError::PoolAcquisitionTimeout { .. })
@@ -3324,7 +3324,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(5)).await;
 
         // execute() should block until the background task releases, then succeed.
-        let result: String = pool.execute(Ping::new()).await.unwrap();
+        let result: Bytes = pool.execute(Ping::new()).await.unwrap();
         assert_eq!(result, "PONG");
     }
 
@@ -3355,7 +3355,7 @@ mod tests {
         // execute() prefers slot 0 (busy) but should fall through to the idle
         // slot 1 and return promptly rather than waiting on the held lock.
         let start = Instant::now();
-        let pong: String = pool.execute(Ping::new()).await.unwrap();
+        let pong: Bytes = pool.execute(Ping::new()).await.unwrap();
         let elapsed = start.elapsed();
 
         assert_eq!(pong, "PONG");
@@ -3631,12 +3631,12 @@ mod tests {
         assert!(executor_view.is_closed());
 
         // The inherent execute path rejects new commands.
-        let result: Result<String, _> = executor_view.execute(Ping::new()).await;
+        let result: Result<Bytes, _> = executor_view.execute(Ping::new()).await;
         assert!(matches!(result, Err(RedisError::ConnectionClosed)));
 
         // The RedisExecutor path rejects them too.
         let mut executor_view = executor_view;
-        let result: Result<String, _> =
+        let result: Result<Bytes, _> =
             RedisExecutor::execute(&mut executor_view, Ping::new()).await;
         assert!(matches!(result, Err(RedisError::ConnectionClosed)));
     }
@@ -3679,7 +3679,7 @@ mod tests {
 
         // Release the command; both it and close() then complete.
         release.notify_one();
-        let cmd_result: Result<String, _> = cmd_task.await.unwrap();
+        let cmd_result: Result<Bytes, _> = cmd_task.await.unwrap();
         assert!(cmd_result.is_ok());
         tokio::time::timeout(Duration::from_secs(1), close_task)
             .await
@@ -3768,7 +3768,7 @@ mod tests {
         assert_eq!(pool.size(), 0);
         assert_eq!(observed.creates(), 0);
 
-        let pong: String = pool.execute(Ping::new()).await.unwrap();
+        let pong: Bytes = pool.execute(Ping::new()).await.unwrap();
         assert_eq!(pong, "PONG");
         assert_eq!(pool.size(), 1);
         assert_eq!(observed.creates(), 1);
@@ -3785,7 +3785,7 @@ mod tests {
             SlowFactory::new(Duration::from_secs(60)),
         );
 
-        let result: Result<String, _> =
+        let result: Result<Bytes, _> =
             tokio::time::timeout(Duration::from_secs(1), pool.execute(Ping::new()))
                 .await
                 .expect("pool acquisition timeout must cancel a slow factory");
@@ -3808,7 +3808,7 @@ mod tests {
         .unwrap();
         let busy = pool.inner.connections[0].lock().await;
 
-        let result: Result<String, _> = pool
+        let result: Result<Bytes, _> = pool
             .execute(WithDeadline::after(Ping::new(), Duration::from_millis(10)))
             .await;
         assert!(matches!(result, Err(RedisError::CommandTimeout)));
@@ -3834,7 +3834,7 @@ mod tests {
         first.abort();
         assert!(first.await.unwrap_err().is_cancelled());
 
-        let pong: String = tokio::time::timeout(Duration::from_secs(1), pool.execute(Ping::new()))
+        let pong: Bytes = tokio::time::timeout(Duration::from_secs(1), pool.execute(Ping::new()))
             .await
             .expect("a canceled factory must release the pool's scale lock")
             .unwrap();
@@ -3857,7 +3857,7 @@ mod tests {
             tasks.push(tokio::spawn(async move { pool.execute(Ping::new()).await }));
         }
         for task in tasks {
-            let result: Result<String, _> = task.await.unwrap();
+            let result: Result<Bytes, _> = task.await.unwrap();
             assert_eq!(result.unwrap(), "PONG");
         }
 
@@ -3888,7 +3888,7 @@ mod tests {
             tasks.push(tokio::spawn(async move { pool.execute(Ping::new()).await }));
         }
         for task in tasks {
-            let result: Result<String, _> = task.await.unwrap();
+            let result: Result<Bytes, _> = task.await.unwrap();
             result.unwrap();
         }
         assert_eq!(pool.size(), 3);

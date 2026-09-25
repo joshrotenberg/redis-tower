@@ -31,7 +31,7 @@
 //!     .await?;
 //!
 //! for doc in &results.docs {
-//!     println!("{}: {:?}", doc.key, doc.doc);
+//!     println!("{}: {:?}", String::from_utf8_lossy(&doc.key), doc.doc);
 //! }
 //! # Ok(())
 //! # }
@@ -41,6 +41,7 @@
 // but its own impl blocks and tests still reference it internally.
 #![allow(deprecated)]
 
+use bytes::Bytes;
 use redis_tower_commands::{FtSearch, SortOrder};
 use redis_tower_core::{Frame, RedisError};
 use serde::de::DeserializeOwned;
@@ -68,8 +69,8 @@ pub struct SearchResults<T> {
 /// A single document from search results.
 #[derive(Debug)]
 pub struct SearchDoc<T> {
-    /// The document key in Redis.
-    pub key: String,
+    /// The exact document key bytes in Redis.
+    pub key: Bytes,
     /// The deserialized document.
     pub doc: T,
     /// Optional score (present when WITHSCORES was used).
@@ -264,6 +265,17 @@ fn extract_string(frame: &Frame) -> Result<String, RedisError> {
     }
 }
 
+/// Extract exact bytes from a BulkString frame.
+fn extract_bytes(frame: &Frame) -> Result<Bytes, RedisError> {
+    match frame {
+        Frame::BulkString(Some(data)) => Ok(data.clone()),
+        _ => Err(RedisError::UnexpectedResponse {
+            expected: "bulk string",
+            actual: format!("{frame:?}"),
+        }),
+    }
+}
+
 /// Parse an FT.SEARCH response frame into typed search results.
 ///
 /// FT.SEARCH returns:
@@ -306,7 +318,7 @@ fn parse_search_results<T: DeserializeOwned>(
     let mut i = 1;
 
     while i < items.len() {
-        let key = extract_string(&items[i])?;
+        let key = extract_bytes(&items[i])?;
         i += 1;
 
         let score = if withscores {
@@ -462,7 +474,7 @@ mod tests {
         assert_eq!(results.total, 2);
         assert_eq!(results.docs.len(), 2);
 
-        assert_eq!(results.docs[0].key, "doc:1");
+        assert_eq!(results.docs[0].key, Bytes::from_static(b"doc:1"));
         assert_eq!(
             results.docs[0].doc,
             Product {
@@ -473,7 +485,7 @@ mod tests {
         );
         assert!(results.docs[0].score.is_none());
 
-        assert_eq!(results.docs[1].key, "doc:2");
+        assert_eq!(results.docs[1].key, Bytes::from_static(b"doc:2"));
         assert_eq!(
             results.docs[1].doc,
             Product {
@@ -482,6 +494,26 @@ mod tests {
                 category: "footwear".into(),
             }
         );
+    }
+
+    #[test]
+    fn parse_search_results_preserves_binary_document_keys() {
+        let key = Bytes::from_static(b"doc:\0\xff\r\n");
+        let frame = Frame::Array(Some(vec![
+            Frame::Integer(1),
+            Frame::BulkString(Some(key.clone())),
+            Frame::Array(Some(vec![
+                bs("name"),
+                bs("Shoe A"),
+                bs("price"),
+                bs("50"),
+                bs("category"),
+                bs("footwear"),
+            ])),
+        ]));
+
+        let results: SearchResults<Product> = parse_search_results(frame, false).unwrap();
+        assert_eq!(results.docs[0].key, key);
     }
 
     #[test]
@@ -513,7 +545,7 @@ mod tests {
         let results: SearchResults<Product> = parse_search_results(frame, true).unwrap();
         assert_eq!(results.total, 1);
         assert_eq!(results.docs.len(), 1);
-        assert_eq!(results.docs[0].key, "doc:1");
+        assert_eq!(results.docs[0].key, Bytes::from_static(b"doc:1"));
         assert!((results.docs[0].score.unwrap() - 0.95).abs() < f64::EPSILON);
         assert_eq!(results.docs[0].doc.name, "Shoe A");
     }

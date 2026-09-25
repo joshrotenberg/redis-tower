@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -17,7 +18,7 @@ pub enum JsonSetCondition {
 /// exist. Returns `Ok(())` on success.
 #[derive(Clone)]
 pub struct JsonSet {
-    key: String,
+    key: CommandArg,
     path: String,
     value: String,
     condition: Option<JsonSetCondition>,
@@ -25,7 +26,11 @@ pub struct JsonSet {
 
 impl JsonSet {
     /// Create a new [`JsonSet`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        path: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -53,7 +58,7 @@ impl Command for JsonSet {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("JSON.SET"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.value.as_str()),
         ];
@@ -87,13 +92,13 @@ impl Command for JsonSet {
 /// returns a JSON object mapping each path to its value.
 #[derive(Clone)]
 pub struct JsonGet {
-    key: String,
+    key: CommandArg,
     paths: Vec<String>,
 }
 
 impl JsonGet {
     /// Create a new [`JsonGet`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             paths: Vec::new(),
@@ -117,7 +122,7 @@ impl Command for JsonGet {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.GET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.GET"), bulk(&self.key)];
         for path in &self.paths {
             args.push(bulk(path.as_str()));
         }
@@ -150,13 +155,13 @@ impl Command for JsonGet {
 /// the number of paths deleted.
 #[derive(Clone)]
 pub struct JsonDel {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonDel {
     /// Create a new [`JsonDel`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -174,7 +179,7 @@ impl Command for JsonDel {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.DEL"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.DEL"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -202,13 +207,16 @@ impl Command for JsonDel {
 /// where the path does not exist.
 #[derive(Clone)]
 pub struct JsonMGet {
-    keys: Vec<String>,
+    keys: Vec<CommandArg>,
     path: String,
 }
 
 impl JsonMGet {
     /// Create a new [`JsonMGet`] command.
-    pub fn new(keys: impl IntoIterator<Item = impl Into<String>>, path: impl Into<String>) -> Self {
+    pub fn new(
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
+        path: impl Into<String>,
+    ) -> Self {
         Self {
             keys: keys.into_iter().map(Into::into).collect(),
             path: path.into(),
@@ -222,7 +230,7 @@ impl Command for JsonMGet {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("JSON.MGET")];
         for key in &self.keys {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
         }
         args.push(bulk(self.path.as_str()));
         array(args)
@@ -266,13 +274,13 @@ impl Command for JsonMGet {
 /// key or path has no matches.
 #[derive(Clone)]
 pub struct JsonType {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonType {
     /// Create a new [`JsonType`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -290,7 +298,7 @@ impl Command for JsonType {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.TYPE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.TYPE"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -333,14 +341,14 @@ impl Command for JsonType {
 /// as a string.
 #[derive(Clone)]
 pub struct JsonNumIncrBy {
-    key: String,
+    key: CommandArg,
     path: String,
     value: f64,
 }
 
 impl JsonNumIncrBy {
     /// Create a new [`JsonNumIncrBy`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, value: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, path: impl Into<String>, value: f64) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -355,7 +363,7 @@ impl Command for JsonNumIncrBy {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("JSON.NUMINCRBY"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.value.to_string()),
         ])
@@ -382,13 +390,13 @@ impl Command for JsonNumIncrBy {
 /// returns an array of integers.
 #[derive(Clone)]
 pub struct JsonStrLen {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonStrLen {
     /// Create a new [`JsonStrLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -406,7 +414,7 @@ impl Command for JsonStrLen {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.STRLEN"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.STRLEN"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -431,14 +439,14 @@ impl Command for JsonStrLen {
 /// Appends a string to the JSON string at `path`. Returns the new length(s).
 #[derive(Clone)]
 pub struct JsonStrAppend {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
     value: String,
 }
 
 impl JsonStrAppend {
     /// Create a new [`JsonStrAppend`] command.
-    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -457,7 +465,7 @@ impl Command for JsonStrAppend {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.STRAPPEND"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.STRAPPEND"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -480,14 +488,14 @@ impl Command for JsonStrAppend {
 /// length(s) of the array.
 #[derive(Clone)]
 pub struct JsonArrAppend {
-    key: String,
+    key: CommandArg,
     path: String,
     values: Vec<String>,
 }
 
 impl JsonArrAppend {
     /// Create a new [`JsonArrAppend`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, path: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -514,7 +522,7 @@ impl Command for JsonArrAppend {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("JSON.ARRAPPEND"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
         ];
         for value in &self.values {
@@ -537,13 +545,13 @@ impl Command for JsonArrAppend {
 /// Returns the length of the JSON array at `path`.
 #[derive(Clone)]
 pub struct JsonArrLen {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonArrLen {
     /// Create a new [`JsonArrLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -561,7 +569,7 @@ impl Command for JsonArrLen {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.ARRLEN"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.ARRLEN"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -587,7 +595,7 @@ impl Command for JsonArrLen {
 /// Returns the index, or -1 if not found.
 #[derive(Clone)]
 pub struct JsonArrIndex {
-    key: String,
+    key: CommandArg,
     path: String,
     value: String,
     start: Option<i64>,
@@ -596,7 +604,11 @@ pub struct JsonArrIndex {
 
 impl JsonArrIndex {
     /// Create a new [`JsonArrIndex`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        path: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -625,7 +637,7 @@ impl Command for JsonArrIndex {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("JSON.ARRINDEX"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.value.as_str()),
         ];
@@ -657,14 +669,14 @@ impl Command for JsonArrIndex {
 /// Defaults to the last element (-1).
 #[derive(Clone)]
 pub struct JsonArrPop {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
     index: Option<i64>,
 }
 
 impl JsonArrPop {
     /// Create a new [`JsonArrPop`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -689,7 +701,7 @@ impl Command for JsonArrPop {
     type Response = Option<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.ARRPOP"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.ARRPOP"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
             if let Some(index) = self.index {
@@ -720,13 +732,13 @@ impl Command for JsonArrPop {
 /// Returns the keys of the JSON object at `path`.
 #[derive(Clone)]
 pub struct JsonObjKeys {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonObjKeys {
     /// Create a new [`JsonObjKeys`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -744,7 +756,7 @@ impl Command for JsonObjKeys {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.OBJKEYS"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.OBJKEYS"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -769,13 +781,13 @@ impl Command for JsonObjKeys {
 /// Returns the number of keys in the JSON object at `path`.
 #[derive(Clone)]
 pub struct JsonObjLen {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonObjLen {
     /// Create a new [`JsonObjLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -793,7 +805,7 @@ impl Command for JsonObjLen {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.OBJLEN"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.OBJLEN"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -820,14 +832,18 @@ impl Command for JsonObjLen {
 /// added, and setting a key to `null` removes it. Returns `Ok(())` on success.
 #[derive(Clone)]
 pub struct JsonMerge {
-    key: String,
+    key: CommandArg,
     path: String,
     value: String,
 }
 
 impl JsonMerge {
     /// Create a new `JSON.MERGE` command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        path: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -842,7 +858,7 @@ impl Command for JsonMerge {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("JSON.MERGE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.value.as_str()),
         ])
@@ -890,7 +906,7 @@ impl Command for JsonMerge {
 /// ```
 #[derive(Clone, Default)]
 pub struct JsonMSet {
-    entries: Vec<(String, String, String)>,
+    entries: Vec<(CommandArg, String, String)>,
 }
 
 impl JsonMSet {
@@ -904,7 +920,7 @@ impl JsonMSet {
     /// Add a `(key, path, value)` triple. `value` is a serialized JSON string.
     pub fn entry(
         mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         path: impl Into<String>,
         value: impl Into<String>,
     ) -> Self {
@@ -919,7 +935,7 @@ impl Command for JsonMSet {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("JSON.MSET")];
         for (key, path, value) in &self.entries {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
             args.push(bulk(path.as_str()));
             args.push(bulk(value.as_str()));
         }
@@ -964,13 +980,13 @@ impl Command for JsonMSet {
 /// ```
 #[derive(Clone)]
 pub struct JsonToggle {
-    key: String,
+    key: CommandArg,
     path: String,
 }
 
 impl JsonToggle {
     /// Create a new [`JsonToggle`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, path: impl Into<String>) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -984,7 +1000,7 @@ impl Command for JsonToggle {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("JSON.TOGGLE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
         ])
     }
@@ -1019,13 +1035,13 @@ impl Command for JsonToggle {
 /// ```
 #[derive(Clone)]
 pub struct JsonClear {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonClear {
     /// Create a new [`JsonClear`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -1043,7 +1059,7 @@ impl Command for JsonClear {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.CLEAR"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.CLEAR"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -1090,7 +1106,7 @@ impl Command for JsonClear {
 /// ```
 #[derive(Clone)]
 pub struct JsonArrInsert {
-    key: String,
+    key: CommandArg,
     path: String,
     index: i64,
     values: Vec<String>,
@@ -1098,7 +1114,7 @@ pub struct JsonArrInsert {
 
 impl JsonArrInsert {
     /// Create a new [`JsonArrInsert`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, index: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, path: impl Into<String>, index: i64) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -1126,7 +1142,7 @@ impl Command for JsonArrInsert {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("JSON.ARRINSERT"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.index.to_string()),
         ];
@@ -1169,7 +1185,7 @@ impl Command for JsonArrInsert {
 /// ```
 #[derive(Clone)]
 pub struct JsonArrTrim {
-    key: String,
+    key: CommandArg,
     path: String,
     start: i64,
     stop: i64,
@@ -1177,7 +1193,7 @@ pub struct JsonArrTrim {
 
 impl JsonArrTrim {
     /// Create a new [`JsonArrTrim`] command.
-    pub fn new(key: impl Into<String>, path: impl Into<String>, start: i64, stop: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, path: impl Into<String>, start: i64, stop: i64) -> Self {
         Self {
             key: key.into(),
             path: path.into(),
@@ -1193,7 +1209,7 @@ impl Command for JsonArrTrim {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("JSON.ARRTRIM"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.path.as_str()),
             bulk(self.start.to_string()),
             bulk(self.stop.to_string()),
@@ -1215,13 +1231,13 @@ impl Command for JsonArrTrim {
 /// stored at `key` and returns the number of paths deleted.
 #[derive(Clone)]
 pub struct JsonForget {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonForget {
     /// Create a new [`JsonForget`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -1239,7 +1255,7 @@ impl Command for JsonForget {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.FORGET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.FORGET"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }
@@ -1267,13 +1283,13 @@ impl Command for JsonForget {
 /// `key`. With no path the size of the whole document is returned.
 #[derive(Clone)]
 pub struct JsonDebugMemory {
-    key: String,
+    key: CommandArg,
     path: Option<String>,
 }
 
 impl JsonDebugMemory {
     /// Create a new [`JsonDebugMemory`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             path: None,
@@ -1291,7 +1307,7 @@ impl Command for JsonDebugMemory {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("JSON.DEBUG"), bulk("MEMORY"), bulk(&self.key)];
         if let Some(path) = &self.path {
             args.push(bulk(path.as_str()));
         }

@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -20,9 +21,9 @@ pub enum VQuantization {
 /// if the element was added, `false` if it already existed (and was updated).
 #[derive(Clone)]
 pub struct VAdd {
-    key: String,
+    key: CommandArg,
     vector: Vec<f32>,
-    element: String,
+    element: CommandArg,
     reduce: Option<u64>,
     cas: bool,
     m: Option<u64>,
@@ -34,9 +35,9 @@ pub struct VAdd {
 impl VAdd {
     /// Create a new [`VAdd`] command.
     pub fn new(
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         vector: impl Into<Vec<f32>>,
-        element: impl Into<String>,
+        element: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -94,14 +95,14 @@ impl Command for VAdd {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("VADD"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk("VALUES"),
             bulk(self.vector.len().to_string()),
         ];
         for v in &self.vector {
             args.push(bulk(v.to_string()));
         }
-        args.push(bulk(self.element.as_str()));
+        args.push(bulk(&self.element));
 
         if let Some(dim) = self.reduce {
             args.push(bulk("REDUCE"));
@@ -155,13 +156,13 @@ impl Command for VAdd {
 /// element was removed, `false` if it did not exist.
 #[derive(Clone)]
 pub struct VRem {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl VRem {
     /// Create a new [`VRem`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -173,11 +174,7 @@ impl Command for VRem {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("VREM"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
-        ])
+        array(vec![bulk("VREM"), bulk(&self.key), bulk(&self.element)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -202,12 +199,12 @@ impl Command for VRem {
 /// Returns the number of elements in the vector set at `key`.
 #[derive(Clone)]
 pub struct VCard {
-    key: String,
+    key: CommandArg,
 }
 
 impl VCard {
     /// Create a new [`VCard`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -216,7 +213,7 @@ impl Command for VCard {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("VCARD"), bulk(self.key.as_str())])
+        array(vec![bulk("VCARD"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -239,12 +236,12 @@ impl Command for VCard {
 /// Returns the dimensionality of the vectors in the vector set at `key`.
 #[derive(Clone)]
 pub struct VDim {
-    key: String,
+    key: CommandArg,
 }
 
 impl VDim {
     /// Create a new [`VDim`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -253,7 +250,7 @@ impl Command for VDim {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("VDIM"), bulk(self.key.as_str())])
+        array(vec![bulk("VDIM"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -280,13 +277,13 @@ impl Command for VDim {
 /// shapes are normalized to [`bool`].
 #[derive(Clone)]
 pub struct VIsMember {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl VIsMember {
     /// Creates a membership check for `element` in the vector set at `key`.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -300,8 +297,8 @@ impl Command for VIsMember {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("VISMEMBER"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(&self.key),
+            bulk(&self.element),
         ])
     }
 
@@ -333,14 +330,14 @@ impl Command for VIsMember {
 /// binary blob.
 #[derive(Clone)]
 pub struct VEmb {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
     raw: bool,
 }
 
 impl VEmb {
     /// Create a new [`VEmb`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -359,11 +356,7 @@ impl Command for VEmb {
     type Response = Vec<f64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("VEMB"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
-        ];
+        let mut args = vec![bulk("VEMB"), bulk(&self.key), bulk(&self.element)];
         if self.raw {
             args.push(bulk("RAW"));
         }
@@ -410,7 +403,7 @@ impl Command for VEmb {
 /// WITHSCORES is specified.
 #[derive(Clone)]
 pub struct VSim {
-    key: String,
+    key: CommandArg,
     target: VSimTarget,
     count: Option<u64>,
     ef: Option<u64>,
@@ -425,14 +418,14 @@ pub struct VSim {
 #[derive(Clone)]
 pub enum VSimTarget {
     /// Search by existing element name.
-    Element(String),
+    Element(CommandArg),
     /// Search by vector values.
     Values(Vec<f32>),
 }
 
 impl VSim {
     /// Search by existing element name.
-    pub fn by_element(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn by_element(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             target: VSimTarget::Element(element.into()),
@@ -447,7 +440,7 @@ impl VSim {
     }
 
     /// Search by vector values.
-    pub fn by_values(key: impl Into<String>, vector: impl Into<Vec<f32>>) -> Self {
+    pub fn by_values(key: impl Into<CommandArg>, vector: impl Into<Vec<f32>>) -> Self {
         Self {
             key: key.into(),
             target: VSimTarget::Values(vector.into()),
@@ -580,12 +573,12 @@ impl Command for VSim {
     type Response = Vec<(Bytes, Option<f64>)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("VSIM"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("VSIM"), bulk(&self.key)];
 
         match &self.target {
             VSimTarget::Element(elem) => {
                 args.push(bulk("ELE"));
-                args.push(bulk(elem.as_str()));
+                args.push(bulk(elem));
             }
             VSimTarget::Values(vector) => {
                 args.push(bulk("VALUES"));
@@ -639,13 +632,13 @@ impl Command for VSim {
 /// Returns one or more random elements from the vector set at `key`.
 #[derive(Clone)]
 pub struct VRandMember {
-    key: String,
+    key: CommandArg,
     count: Option<i64>,
 }
 
 impl VRandMember {
     /// Create a new [`VRandMember`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             count: None,
@@ -663,7 +656,7 @@ impl Command for VRandMember {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("VRANDMEMBER"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("VRANDMEMBER"), bulk(&self.key)];
         if let Some(n) = self.count {
             args.push(bulk(n.to_string()));
         }
@@ -712,15 +705,19 @@ impl Command for VRandMember {
 /// optional count as a bare positional argument.
 #[derive(Clone)]
 pub struct VRange {
-    key: String,
-    start: String,
-    end: String,
+    key: CommandArg,
+    start: CommandArg,
+    end: CommandArg,
     count: Option<i64>,
 }
 
 impl VRange {
     /// Creates a lexicographical range query for the vector set at `key`.
-    pub fn new(key: impl Into<String>, start: impl Into<String>, end: impl Into<String>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        start: impl Into<CommandArg>,
+        end: impl Into<CommandArg>,
+    ) -> Self {
         Self {
             key: key.into(),
             start: start.into(),
@@ -745,9 +742,9 @@ impl Command for VRange {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("VRANGE"),
-            bulk(self.key.as_str()),
-            bulk(self.start.as_str()),
-            bulk(self.end.as_str()),
+            bulk(&self.key),
+            bulk(&self.start),
+            bulk(&self.end),
         ];
         if let Some(count) = self.count {
             args.push(bulk(count.to_string()));
@@ -789,13 +786,13 @@ impl Command for VRange {
 /// or `None` if no attribute is set.
 #[derive(Clone)]
 pub struct VGetAttr {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl VGetAttr {
     /// Create a new [`VGetAttr`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -807,11 +804,7 @@ impl Command for VGetAttr {
     type Response = Option<String>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("VGETATTR"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
-        ])
+        array(vec![bulk("VGETATTR"), bulk(&self.key), bulk(&self.element)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -844,16 +837,16 @@ impl Command for VGetAttr {
 /// `true` on success.
 #[derive(Clone)]
 pub struct VSetAttr {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
     json: String,
 }
 
 impl VSetAttr {
     /// Create a new [`VSetAttr`] command.
     pub fn new(
-        key: impl Into<String>,
-        element: impl Into<String>,
+        key: impl Into<CommandArg>,
+        element: impl Into<CommandArg>,
         json: impl Into<String>,
     ) -> Self {
         Self {
@@ -870,8 +863,8 @@ impl Command for VSetAttr {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("VSETATTR"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(&self.key),
+            bulk(&self.element),
             bulk(self.json.as_str()),
         ])
     }
@@ -902,13 +895,13 @@ impl Command for VSetAttr {
 /// (its attribute is cleared), `false` if the element is not in the set.
 #[derive(Clone)]
 pub struct VDelAttr {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
 }
 
 impl VDelAttr {
     /// Create a new [`VDelAttr`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -924,8 +917,8 @@ impl Command for VDelAttr {
         // it to the empty string via VSETATTR.
         array(vec![
             bulk("VSETATTR"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
+            bulk(&self.key),
+            bulk(&self.element),
             bulk(""),
         ])
     }
@@ -955,12 +948,12 @@ impl Command for VDelAttr {
 /// alternating field names and values.
 #[derive(Clone)]
 pub struct VInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl VInfo {
     /// Create a new [`VInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -969,7 +962,7 @@ impl Command for VInfo {
     type Response = Vec<Frame>;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("VINFO"), bulk(self.key.as_str())])
+        array(vec![bulk("VINFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -1002,14 +995,14 @@ impl Command for VInfo {
 /// With WITHSCORES, returns (element, score) pairs.
 #[derive(Clone)]
 pub struct VLinks {
-    key: String,
-    element: String,
+    key: CommandArg,
+    element: CommandArg,
     withscores: bool,
 }
 
 impl VLinks {
     /// Create a new [`VLinks`] command.
-    pub fn new(key: impl Into<String>, element: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, element: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             element: element.into(),
@@ -1028,11 +1021,7 @@ impl Command for VLinks {
     type Response = Vec<(Bytes, Option<f64>)>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("VLINKS"),
-            bulk(self.key.as_str()),
-            bulk(self.element.as_str()),
-        ];
+        let mut args = vec![bulk("VLINKS"), bulk(&self.key), bulk(&self.element)];
         if self.withscores {
             args.push(bulk("WITHSCORES"));
         }

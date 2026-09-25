@@ -133,7 +133,7 @@ async fn topk_reserve_add_and_query() {
 
         // TOPK.LIST returns the tracked items (at most k of them).
         let list = topk.list().await.unwrap();
-        assert!(list.contains(&"a".to_string()));
+        assert!(list.contains(&bytes::Bytes::from_static(b"a")));
         assert!(list.len() <= 3);
     }
 
@@ -163,6 +163,24 @@ async fn tdigest_create_add_and_quantile() {
         assert_eq!(quantiles.len(), 3);
         assert_eq!(quantiles[0], 1.0);
         assert_eq!(quantiles[2], 5.0);
+    }
+
+    use redis_tower::commands::Del;
+    conn.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires a live Redis Stack server with the Bloom module"]
+async fn bloom_binary_key_and_item_roundtrip() {
+    let mut conn = connect().await;
+    let mut key = format!("test:bf:binary:{}:", unique_suffix()).into_bytes();
+    key.extend_from_slice(b"\0\xff");
+    let item = b"item\0\xff\r\n";
+
+    {
+        let mut filter = BloomFilter::new(&mut conn, &key);
+        assert!(filter.add(item).await.unwrap());
+        assert!(filter.exists(item).await.unwrap());
     }
 
     use redis_tower::commands::Del;

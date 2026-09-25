@@ -33,7 +33,7 @@ fn sync_connect_and_set_get() {
 
     client.execute(Del::new("sync:set_get")).unwrap();
 
-    let pong: String = client.execute(Ping::new()).unwrap();
+    let pong: bytes::Bytes = client.execute(Ping::new()).unwrap();
     assert_eq!(pong, "PONG");
 }
 

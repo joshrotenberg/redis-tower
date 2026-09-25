@@ -51,6 +51,15 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Binary data
+//!
+//! Module keys, Bloom/Cuckoo/sketch items, Search suggestions and payloads,
+//! TimeSeries labels, and Vector Set elements accept binary-safe
+//! [`CommandArg`](redis_tower::commands::CommandArg) inputs. Corresponding
+//! opaque response positions use [`bytes::Bytes`]. JSONPath, serialized JSON,
+//! Search query/schema syntax, timestamps, and Vector Set filter expressions
+//! remain structured text or numeric inputs.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

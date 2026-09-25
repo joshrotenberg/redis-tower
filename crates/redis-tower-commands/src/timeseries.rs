@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -109,12 +110,12 @@ impl TsEncoding {
 // Helper: push labels onto an args vec
 // ---------------------------------------------------------------------------
 
-fn push_labels(args: &mut Vec<Frame>, labels: &[(String, String)]) {
+fn push_labels(args: &mut Vec<Frame>, labels: &[(CommandArg, CommandArg)]) {
     if !labels.is_empty() {
         args.push(bulk("LABELS"));
         for (k, v) in labels {
-            args.push(bulk(k.as_str()));
-            args.push(bulk(v.as_str()));
+            args.push(bulk(k));
+            args.push(bulk(v));
         }
     }
 }
@@ -129,17 +130,17 @@ fn push_labels(args: &mut Vec<Frame>, labels: &[(String, String)]) {
 /// Creates a new TimeSeries key.
 #[derive(Clone)]
 pub struct TsCreate {
-    key: String,
+    key: CommandArg,
     retention: Option<u64>,
     encoding: Option<TsEncoding>,
     chunk_size: Option<u64>,
     duplicate_policy: Option<TsDuplicatePolicy>,
-    labels: Vec<(String, String)>,
+    labels: Vec<(CommandArg, CommandArg)>,
 }
 
 impl TsCreate {
     /// Create a new [`TsCreate`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             retention: None,
@@ -175,7 +176,7 @@ impl TsCreate {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
     }
@@ -185,7 +186,7 @@ impl Command for TsCreate {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TS.CREATE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TS.CREATE"), bulk(&self.key)];
         if let Some(retention) = self.retention {
             args.push(bulk("RETENTION"));
             args.push(bulk(retention.to_string()));
@@ -231,16 +232,16 @@ impl Command for TsCreate {
 /// Alters an existing TimeSeries key configuration.
 #[derive(Clone)]
 pub struct TsAlter {
-    key: String,
+    key: CommandArg,
     retention: Option<u64>,
     chunk_size: Option<u64>,
     duplicate_policy: Option<TsDuplicatePolicy>,
-    labels: Vec<(String, String)>,
+    labels: Vec<(CommandArg, CommandArg)>,
 }
 
 impl TsAlter {
     /// Create a new [`TsAlter`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             retention: None,
@@ -269,7 +270,7 @@ impl TsAlter {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
     }
@@ -279,7 +280,7 @@ impl Command for TsAlter {
     type Response = ();
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TS.ALTER"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TS.ALTER"), bulk(&self.key)];
         if let Some(retention) = self.retention {
             args.push(bulk("RETENTION"));
             args.push(bulk(retention.to_string()));
@@ -321,14 +322,14 @@ impl Command for TsAlter {
 /// of samples deleted.
 #[derive(Clone)]
 pub struct TsDel {
-    key: String,
+    key: CommandArg,
     from: i64,
     to: i64,
 }
 
 impl TsDel {
     /// Create a new [`TsDel`] command.
-    pub fn new(key: impl Into<String>, from: i64, to: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, from: i64, to: i64) -> Self {
         Self {
             key: key.into(),
             from,
@@ -343,7 +344,7 @@ impl Command for TsDel {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("TS.DEL"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.from.to_string()),
             bulk(self.to.to_string()),
         ])
@@ -400,19 +401,19 @@ impl From<i64> for TsTimestamp {
 /// added sample.
 #[derive(Clone)]
 pub struct TsAdd {
-    key: String,
+    key: CommandArg,
     timestamp: TsTimestamp,
     value: f64,
     retention: Option<u64>,
     encoding: Option<TsEncoding>,
     chunk_size: Option<u64>,
     on_duplicate: Option<TsDuplicatePolicy>,
-    labels: Vec<(String, String)>,
+    labels: Vec<(CommandArg, CommandArg)>,
 }
 
 impl TsAdd {
     /// Create a new [`TsAdd`] command.
-    pub fn new(key: impl Into<String>, timestamp: impl Into<TsTimestamp>, value: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, timestamp: impl Into<TsTimestamp>, value: f64) -> Self {
         Self {
             key: key.into(),
             timestamp: timestamp.into(),
@@ -450,7 +451,7 @@ impl TsAdd {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
     }
@@ -462,7 +463,7 @@ impl Command for TsAdd {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TS.ADD"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             self.timestamp.to_bulk(),
             bulk(self.value.to_string()),
         ];
@@ -511,7 +512,7 @@ impl Command for TsAdd {
 /// timestamps (or errors per sample).
 #[derive(Clone)]
 pub struct TsMAdd {
-    samples: Vec<(String, TsTimestamp, f64)>,
+    samples: Vec<(CommandArg, TsTimestamp, f64)>,
 }
 
 impl TsMAdd {
@@ -525,7 +526,7 @@ impl TsMAdd {
     /// Add a sample (key, timestamp, value) to the batch.
     pub fn sample(
         mut self,
-        key: impl Into<String>,
+        key: impl Into<CommandArg>,
         timestamp: impl Into<TsTimestamp>,
         value: f64,
     ) -> Self {
@@ -546,7 +547,7 @@ impl Command for TsMAdd {
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("TS.MADD")];
         for (key, ts, value) in &self.samples {
-            args.push(bulk(key.as_str()));
+            args.push(bulk(key));
             args.push(ts.to_bulk());
             args.push(bulk(value.to_string()));
         }
@@ -578,16 +579,16 @@ impl Command for TsMAdd {
 /// Creates the key if it does not exist. Returns the timestamp.
 #[derive(Clone)]
 pub struct TsIncrBy {
-    key: String,
+    key: CommandArg,
     value: f64,
     timestamp: Option<TsTimestamp>,
     retention: Option<u64>,
-    labels: Vec<(String, String)>,
+    labels: Vec<(CommandArg, CommandArg)>,
 }
 
 impl TsIncrBy {
     /// Create a new [`TsIncrBy`] command.
-    pub fn new(key: impl Into<String>, value: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: f64) -> Self {
         Self {
             key: key.into(),
             value,
@@ -610,7 +611,7 @@ impl TsIncrBy {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
     }
@@ -622,7 +623,7 @@ impl Command for TsIncrBy {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TS.INCRBY"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.value.to_string()),
         ];
         if let Some(ts) = &self.timestamp {
@@ -658,16 +659,16 @@ impl Command for TsIncrBy {
 /// Creates the key if it does not exist. Returns the timestamp.
 #[derive(Clone)]
 pub struct TsDecrBy {
-    key: String,
+    key: CommandArg,
     value: f64,
     timestamp: Option<TsTimestamp>,
     retention: Option<u64>,
-    labels: Vec<(String, String)>,
+    labels: Vec<(CommandArg, CommandArg)>,
 }
 
 impl TsDecrBy {
     /// Create a new [`TsDecrBy`] command.
-    pub fn new(key: impl Into<String>, value: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, value: f64) -> Self {
         Self {
             key: key.into(),
             value,
@@ -690,7 +691,7 @@ impl TsDecrBy {
     }
 
     /// Add a label key-value pair.
-    pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn label(mut self, key: impl Into<CommandArg>, value: impl Into<CommandArg>) -> Self {
         self.labels.push((key.into(), value.into()));
         self
     }
@@ -702,7 +703,7 @@ impl Command for TsDecrBy {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TS.DECRBY"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.value.to_string()),
         ];
         if let Some(ts) = &self.timestamp {
@@ -742,13 +743,13 @@ impl Command for TsDecrBy {
 /// (timestamp-value pair, or empty if the key has no samples).
 #[derive(Clone)]
 pub struct TsGet {
-    key: String,
+    key: CommandArg,
     latest: bool,
 }
 
 impl TsGet {
     /// Create a new [`TsGet`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             latest: false,
@@ -766,7 +767,7 @@ impl Command for TsGet {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TS.GET"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TS.GET"), bulk(&self.key)];
         if self.latest {
             args.push(bulk("LATEST"));
         }
@@ -868,7 +869,7 @@ impl Command for TsMGet {
 /// Common options for TS.RANGE and TS.REVRANGE.
 #[derive(Clone)]
 struct TsRangeOptions {
-    key: String,
+    key: CommandArg,
     from: String,
     to: String,
     latest: bool,
@@ -891,7 +892,7 @@ pub struct TsRange {
 impl TsRange {
     /// Create a range query. `from` and `to` are timestamp strings
     /// (use "-" for minimum, "+" for maximum, or a millisecond timestamp).
-    pub fn new(key: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             opts: TsRangeOptions {
                 key: key.into(),
@@ -938,7 +939,7 @@ impl TsRange {
 }
 
 fn push_range_args(args: &mut Vec<Frame>, opts: &TsRangeOptions) {
-    args.push(bulk(opts.key.as_str()));
+    args.push(bulk(&opts.key));
     args.push(bulk(opts.from.as_str()));
     args.push(bulk(opts.to.as_str()));
     if opts.latest {
@@ -1001,7 +1002,7 @@ pub struct TsRevRange {
 impl TsRevRange {
     /// Create a reverse range query. `from` and `to` are timestamp strings
     /// (use "-" for minimum, "+" for maximum, or a millisecond timestamp).
-    pub fn new(key: impl Into<String>, from: impl Into<String>, to: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, from: impl Into<String>, to: impl Into<String>) -> Self {
         Self {
             opts: TsRangeOptions {
                 key: key.into(),
@@ -1320,13 +1321,13 @@ impl Command for TsMRevRange {
 /// the raw Frame (complex nested structure).
 #[derive(Clone)]
 pub struct TsInfo {
-    key: String,
+    key: CommandArg,
     debug: bool,
 }
 
 impl TsInfo {
     /// Create a new [`TsInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             debug: false,
@@ -1344,7 +1345,7 @@ impl Command for TsInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TS.INFO"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TS.INFO"), bulk(&self.key)];
         if self.debug {
             args.push(bulk("DEBUG"));
         }
@@ -1457,8 +1458,8 @@ impl Command for TsQueryIndex {
 /// ```
 #[derive(Clone)]
 pub struct TsCreateRule {
-    source_key: String,
-    dest_key: String,
+    source_key: CommandArg,
+    dest_key: CommandArg,
     aggregation: TsAggregation,
     bucket_duration: i64,
     align_timestamp: Option<i64>,
@@ -1467,8 +1468,8 @@ pub struct TsCreateRule {
 impl TsCreateRule {
     /// Create a new [`TsCreateRule`] command.
     pub fn new(
-        source_key: impl Into<String>,
-        dest_key: impl Into<String>,
+        source_key: impl Into<CommandArg>,
+        dest_key: impl Into<CommandArg>,
         aggregation: TsAggregation,
         bucket_duration: i64,
     ) -> Self {
@@ -1494,8 +1495,8 @@ impl Command for TsCreateRule {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TS.CREATERULE"),
-            bulk(self.source_key.as_str()),
-            bulk(self.dest_key.as_str()),
+            bulk(&self.source_key),
+            bulk(&self.dest_key),
             bulk("AGGREGATION"),
             bulk(self.aggregation.as_str()),
             bulk(self.bucket_duration.to_string()),
@@ -1545,13 +1546,13 @@ impl Command for TsCreateRule {
 /// ```
 #[derive(Clone)]
 pub struct TsDeleteRule {
-    source_key: String,
-    dest_key: String,
+    source_key: CommandArg,
+    dest_key: CommandArg,
 }
 
 impl TsDeleteRule {
     /// Create a new [`TsDeleteRule`] command.
-    pub fn new(source_key: impl Into<String>, dest_key: impl Into<String>) -> Self {
+    pub fn new(source_key: impl Into<CommandArg>, dest_key: impl Into<CommandArg>) -> Self {
         Self {
             source_key: source_key.into(),
             dest_key: dest_key.into(),
@@ -1565,8 +1566,8 @@ impl Command for TsDeleteRule {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("TS.DELETERULE"),
-            bulk(self.source_key.as_str()),
-            bulk(self.dest_key.as_str()),
+            bulk(&self.source_key),
+            bulk(&self.dest_key),
         ])
     }
 

@@ -2,8 +2,9 @@
 
 Redis keys and most data arguments are byte strings. They are not required to
 be UTF-8. `redis-tower-commands` uses [`CommandArg`](https://docs.rs/redis-tower-commands/latest/redis_tower_commands/struct.CommandArg.html)
-for binary-safe typed inputs in the high-use string, hash, list, set, sorted-set,
-and stream families.
+for binary-safe typed inputs wherever Redis treats an argument as opaque data:
+keys, stored values, fields, members, patterns, script arguments, channels, and
+module payloads.
 
 ```rust,ignore
 use bytes::Bytes;
@@ -82,26 +83,49 @@ means Redis compares, stores, hashes, or routes the exact bytes.
 | Sets | keys and members | counts and limits | `CommandArg` throughout |
 | Sorted sets | keys and members; lex bounds contain a binary member after their Redis prefix | scores, rank indexes, aggregation and direction tokens | all builder byte strings use `CommandArg`; Redis validates bound grammar |
 | Streams | stream keys, field names/values, group and consumer names | entry IDs/cursors, trim thresholds and option tokens | builder byte strings use `CommandArg`; stream keys and field names decode as `Bytes` |
-| Keys and key lifecycle | keys, rename/copy destinations, patterns, serialized RESTORE payload | TTLs, database numbers, SORT grammar | `MIGRATE` and RESTORE payload are binary-safe; remaining typed key positions are deferred and `RawCommand` is the byte path |
-| Blocking commands | list/zset keys | timeouts and direction tokens | deferred; use `RawCommand` for invalid UTF-8 keys |
-| Scan | collection keys and glob patterns | cursors, count, TYPE token | deferred; results are already bytes |
-| Scripting and functions | script bodies, KEYS and ARGV, function payloads | SHA-1 hex digests and subcommand grammar | function dump/restore payloads are bytes; other opaque typed inputs are deferred |
-| Pub/Sub commands and sessions | channels, patterns, payloads | PUBSUB subcommands | connection and cluster Pub/Sub sessions are binary-safe; typed `Publish`/introspection builders are deferred |
-| Geo and HyperLogLog | keys, members/elements | coordinates, units | deferred |
-| Bitmap, transaction, diagnostics, and server helpers | keys, WATCH keys, tracking prefixes and selected payloads | numeric offsets plus administrative grammar | mixed existing byte paths; remaining typed inputs are deferred |
-| ACL and cluster administration | selected names/passwords/node identifiers are byte tokens but operationally configured as text | addresses, command grammar and numeric slots | intentionally text-first today; `RawCommand` remains available |
+| Keys and key lifecycle | keys, rename/copy destinations, patterns, serialized RESTORE payload | TTLs, database numbers, SORT grammar | opaque positions use `CommandArg` throughout |
+| Blocking commands | list/zset keys | timeouts and direction tokens | keys use `CommandArg` throughout |
+| Scan | collection keys and glob patterns | cursors, count, TYPE token | keys/patterns use `CommandArg`; results are `Bytes` |
+| Scripting and functions | script bodies, KEYS and ARGV, function payloads | SHA-1 hex digests, function/library names and subcommand grammar | opaque positions use `CommandArg`; cached `Script` helpers also provide binary argument methods |
+| Pub/Sub commands and sessions | channels, patterns, payloads | PUBSUB subcommands | typed commands and dedicated sessions are binary-safe |
+| Geo and HyperLogLog | keys, members/elements | coordinates, units | opaque positions use `CommandArg` throughout |
+| Bitmap, transaction, diagnostics, and server helpers | keys, WATCH keys, tracking prefixes and data-bearing arguments | numeric offsets plus administrative grammar | opaque positions use `CommandArg`; `PING`/`ECHO` echo responses are exact `Bytes` |
+| ACL and cluster administration | ACL passwords and simulated command arguments; keys supplied to `CLUSTER KEYSLOT` | ACL usernames/rules/categories, node IDs, addresses, command grammar and numeric slots | deliberate split: opaque data uses `CommandArg`; operational identifiers remain text-first |
 | Redis 8.8 arrays | keys, values, predicates | indexes and option grammar | already binary-safe |
-| Bloom/Cuckoo, sketches, t-digest | keys and item payloads | capacities, probabilities and numeric observations | typed opaque inputs are deferred |
-| JSON | keys plus JSON document bytes | JSONPath and JSON syntax | keys are deferred; structured JSON interfaces stay text/serde-oriented |
-| Search | document keys and vector blobs; selected parameters | index/schema/query syntax | vector blobs are already bytes; names and query DSL stay text-oriented; other payload work is deferred |
-| Time series | keys and label names/values | timestamps, reducers and retention/configuration | typed byte inputs are deferred |
-| Vector sets | keys and element names; vector bytes | filter/query expression grammar | vector data is already binary; keys/elements are deferred |
+| Bloom/Cuckoo, sketches, t-digest | keys and item payloads | capacities, probabilities and numeric observations | opaque positions use `CommandArg` throughout |
+| JSON | keys | JSONPath and serialized JSON syntax | keys use `CommandArg`; structured JSON interfaces stay text/serde-oriented |
+| Search | document keys, suggestion payloads, tag values and vector blobs | index/schema/query syntax and autocomplete suggestion text | opaque inputs and outputs preserve bytes; Redis Search can terminate NUL-containing suggestions and normalize malformed UTF-8 |
+| Time series | keys and label names/values | timestamps, reducers and retention/configuration | opaque inputs and returned keys/labels preserve bytes |
+| Vector sets | keys and element names; vector bytes | JSON attributes and filter/query expression grammar | keys/elements use `CommandArg`; returned elements are `Bytes` |
 
-The deferred rows are explicit follow-up scope in
-[#722](https://github.com/joshrotenberg/redis-tower/issues/722), rather than an
-assertion that every typed builder is binary-safe today. `RawCommand::arg` is
-the universal escape hatch: it accepts `AsRef<[u8]>` and can retain a typed
-response with `.query::<T>()`. It does not perform lossy conversion.
+`RawCommand::arg` remains the universal escape hatch for commands or extension
+syntax outside the typed surface. It accepts `AsRef<[u8]>`, can retain a typed
+response with `.query::<T>()`, and does not perform lossy conversion.
+
+## Response decoding
+
+Responses corresponding to opaque values preserve exact bytes. This includes
+keys, members, stream names/fields, Search documents/suggestions/payloads/tag
+values, TimeSeries keys/labels, Vector Set elements, TopK items, and echoed
+`PING`/`ECHO` messages.
+
+Redis-defined textual metadata remains `String`: scan cursors, stream IDs,
+SHA-1 digests, JSON text, query plans, server diagnostic reports, ACL usernames
+and rules, Cluster node descriptions and IDs, addresses, and command/config
+names. Some of these existing metadata parsers use UTF-8 replacement for a
+malformed server reply; that behavior cannot affect an opaque value because
+those positions are classified separately above.
+
+ACL usernames/rules/categories and Cluster node IDs/addresses intentionally
+remain text-first. Redis exposes them as operational configuration grammar, not
+application key/value payloads. In contrast, ACL passwords and `ACL DRYRUN`
+arguments, and the key accepted by `CLUSTER KEYSLOT`, preserve exact bytes.
+
+The client serializes Search suggestion strings as exact bulk-string bytes, but
+Redis Search implements them as text: an embedded NUL is a terminator and
+malformed UTF-8 can be normalized. Suggestion dictionary keys and payloads
+remain binary-safe. Suggestion responses preserve the exact bytes returned by
+the server rather than applying another client-side conversion.
 
 ## Cluster routing
 

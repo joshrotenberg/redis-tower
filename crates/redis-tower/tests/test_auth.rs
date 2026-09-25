@@ -685,7 +685,7 @@ async fn multiplexed_reconnect_fetches_rotated_provider_credentials() {
     .await
     .expect("initial provider-backed multiplexed connection should authenticate");
 
-    let pong: String = client.execute(Ping::new()).await.unwrap();
+    let pong: Bytes = client.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
     assert_eq!(provider.get_calls(), 1);
 
@@ -705,7 +705,7 @@ async fn multiplexed_reconnect_fetches_rotated_provider_credentials() {
         loop {
             match client.execute(Ping::new()).await {
                 Ok(pong) if pong == "PONG" && provider.get_calls() >= 2 => break,
-                Ok(other) => panic!("unexpected PING response after reconnect: {other}"),
+                Ok(other) => panic!("unexpected PING response after reconnect: {other:?}"),
                 Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
             }
         }
@@ -753,7 +753,7 @@ async fn pool_replacement_fetches_rotated_provider_credentials() {
     .await
     .expect("build provider-backed pool");
 
-    let pong: String = pool.execute(Ping::new()).await.unwrap();
+    let pong: Bytes = pool.execute(Ping::new()).await.unwrap();
     assert_eq!(pong, "PONG");
     assert_eq!(provider.get_calls(), 1);
 
@@ -766,7 +766,7 @@ async fn pool_replacement_fetches_rotated_provider_credentials() {
         .await
         .expect("restart protected pool server with rotated password");
 
-    let pong: String = pool
+    let pong: Bytes = pool
         .execute(Ping::new())
         .await
         .expect("failed health PING should install an authenticated replacement");

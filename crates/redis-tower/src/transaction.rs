@@ -27,7 +27,7 @@ use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 
-use redis_tower_commands::Watch;
+use redis_tower_commands::{CommandArg, Watch};
 use redis_tower_core::{Command, Frame, RedisConnection, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 use tokio::sync::Mutex;
@@ -178,7 +178,7 @@ struct TransactionEntry {
 /// # }
 /// ```
 pub struct Transaction {
-    watch_keys: Vec<String>,
+    watch_keys: Vec<CommandArg>,
     entries: Vec<TransactionEntry>,
 }
 
@@ -240,7 +240,7 @@ impl Transaction {
     ///
     /// If any watched key is modified by another client between the WATCH
     /// and the EXEC, the transaction will be aborted.
-    pub fn watch(mut self, keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn watch(mut self, keys: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         self.watch_keys.extend(keys.into_iter().map(Into::into));
         self
     }
@@ -277,7 +277,7 @@ impl Transaction {
         } else {
             let mut args = vec![bulk("WATCH")];
             for key in &self.watch_keys {
-                args.push(bulk(key.as_str()));
+                args.push(bulk(key));
             }
             vec![array(args)]
         };
@@ -384,7 +384,7 @@ pub const DEFAULT_TRANSACTION_RETRIES: usize = 16;
 /// ```
 pub async fn transaction<C, F>(
     conn: &mut C,
-    keys: impl IntoIterator<Item = impl Into<String>>,
+    keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     build: F,
 ) -> Result<PipelineResults, RedisError>
 where
@@ -404,7 +404,7 @@ where
 /// See [`transaction`] for the full contract.
 pub async fn transaction_with_retries<C, F>(
     conn: &mut C,
-    keys: impl IntoIterator<Item = impl Into<String>>,
+    keys: impl IntoIterator<Item = impl Into<CommandArg>>,
     max_retries: usize,
     mut build: F,
 ) -> Result<PipelineResults, RedisError>
@@ -418,7 +418,7 @@ where
     // optimistic locking.
     conn.validate_transaction_retry()?;
 
-    let keys: Vec<String> = keys.into_iter().map(Into::into).collect();
+    let keys: Vec<CommandArg> = keys.into_iter().map(Into::into).collect();
     let mut remaining = max_retries;
 
     loop {
@@ -557,6 +557,58 @@ mod tests {
             });
             async move { Ok(responses) }
         }
+    }
+
+    #[derive(Default)]
+    struct CapturingBinaryTransactionConn {
+        direct_watch_frames: Vec<Frame>,
+        helper_watch_frames: Vec<Frame>,
+    }
+
+    impl RedisExecutor for CapturingBinaryTransactionConn {
+        fn execute<Cmd: Command>(
+            &mut self,
+            cmd: Cmd,
+        ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            self.helper_watch_frames.push(cmd.to_frame());
+            let response = cmd.parse_response(Frame::SimpleString(bytes::Bytes::from("OK")));
+            async move { response }
+        }
+    }
+
+    impl TransactionExecutor for CapturingBinaryTransactionConn {
+        fn execute_transaction(
+            &mut self,
+            watch_frames: Vec<Frame>,
+            command_frames: Vec<Frame>,
+        ) -> impl Future<Output = Result<Option<Vec<Frame>>, RedisError>> + Send {
+            self.direct_watch_frames.extend(watch_frames);
+            let responses = command_frames
+                .iter()
+                .map(|_| Frame::SimpleString(bytes::Bytes::from("OK")))
+                .collect();
+            async move { Ok(Some(responses)) }
+        }
+    }
+
+    #[tokio::test]
+    async fn transaction_wrappers_preserve_binary_watch_keys() {
+        let key = b"watch\0\xff\r\nkey".as_slice();
+        let expected = array(vec![bulk("WATCH"), bulk(key)]);
+
+        let mut direct = CapturingBinaryTransactionConn::default();
+        let _ = Transaction::new()
+            .watch([key])
+            .execute(&mut direct)
+            .await
+            .unwrap();
+        assert_eq!(direct.direct_watch_frames, std::slice::from_ref(&expected));
+
+        let mut helper = CapturingBinaryTransactionConn::default();
+        transaction(&mut helper, [key], async |_conn| Ok(Transaction::new()))
+            .await
+            .unwrap();
+        assert_eq!(helper.helper_watch_frames, [expected]);
     }
 
     #[tokio::test]

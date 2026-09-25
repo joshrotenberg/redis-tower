@@ -38,7 +38,7 @@ use bytes::Bytes;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use redis_tower_commands::{JsonDel, JsonGet, JsonMGet, JsonNumIncrBy, JsonSet};
+use redis_tower_commands::{CommandArg, JsonDel, JsonGet, JsonMGet, JsonNumIncrBy, JsonSet};
 use redis_tower_core::RedisError;
 
 use crate::RedisExecutor;
@@ -102,7 +102,7 @@ impl<C: RedisExecutor> Json<C> {
     /// given key. Creates the key if it does not exist.
     pub async fn set<T: Serialize>(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         path: &str,
         value: &T,
     ) -> Result<(), RedisError> {
@@ -117,7 +117,7 @@ impl<C: RedisExecutor> Json<C> {
     /// outer array for paths starting with `$`.
     pub async fn get<T: DeserializeOwned>(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         path: &str,
     ) -> Result<T, RedisError> {
         let response = self.conn.execute(JsonGet::new(key).path(path)).await?;
@@ -130,7 +130,7 @@ impl<C: RedisExecutor> Json<C> {
     /// Get a value, returning `None` if the key does not exist.
     pub async fn get_opt<T: DeserializeOwned>(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         path: &str,
     ) -> Result<Option<T>, RedisError> {
         let response = self.conn.execute(JsonGet::new(key).path(path)).await?;
@@ -141,7 +141,7 @@ impl<C: RedisExecutor> Json<C> {
     }
 
     /// Delete a JSON path. Returns the number of paths deleted.
-    pub async fn del(&mut self, key: &str, path: &str) -> Result<i64, RedisError> {
+    pub async fn del(&mut self, key: impl Into<CommandArg>, path: &str) -> Result<i64, RedisError> {
         self.conn.execute(JsonDel::new(key).path(path)).await
     }
 
@@ -149,7 +149,7 @@ impl<C: RedisExecutor> Json<C> {
     /// response bytes from the server.
     pub async fn incr_by(
         &mut self,
-        key: &str,
+        key: impl Into<CommandArg>,
         path: &str,
         value: f64,
     ) -> Result<Bytes, RedisError> {
@@ -163,13 +163,10 @@ impl<C: RedisExecutor> Json<C> {
     /// Returns `None` for keys where the path does not exist.
     pub async fn mget<T: DeserializeOwned>(
         &mut self,
-        keys: &[&str],
+        keys: impl IntoIterator<Item = impl Into<CommandArg>>,
         path: &str,
     ) -> Result<Vec<Option<T>>, RedisError> {
-        let responses = self
-            .conn
-            .execute(JsonMGet::new(keys.iter().copied(), path))
-            .await?;
+        let responses = self.conn.execute(JsonMGet::new(keys, path)).await?;
         responses
             .into_iter()
             .map(|opt_bytes| match opt_bytes {
@@ -209,12 +206,14 @@ mod tests {
     /// A mock executor that returns pre-configured frames.
     struct MockRedis {
         responses: VecDeque<Frame>,
+        requests: Vec<Frame>,
     }
 
     impl MockRedis {
         fn new(responses: Vec<Frame>) -> Self {
             Self {
                 responses: VecDeque::from(responses),
+                requests: Vec::new(),
             }
         }
     }
@@ -224,6 +223,7 @@ mod tests {
             &mut self,
             cmd: Cmd,
         ) -> impl Future<Output = Result<Cmd::Response, RedisError>> + Send {
+            self.requests.push(cmd.to_frame());
             let frame = self.responses.pop_front().unwrap_or(Frame::Null);
             async move { cmd.parse_response(frame) }
         }
@@ -398,5 +398,49 @@ mod tests {
         let mut json = Json::new(&mut mock);
         let results: Vec<Option<User>> = json.mget(&["u:1", "u:2", "u:3"], "$").await.unwrap();
         assert_eq!(results, vec![Some(alice), None, Some(bob)]);
+    }
+
+    #[tokio::test]
+    async fn deprecated_json_wrapper_preserves_binary_keys() {
+        fn args(frame: &Frame) -> Vec<Bytes> {
+            match frame {
+                Frame::Array(Some(items)) => items
+                    .iter()
+                    .map(|item| match item {
+                        Frame::BulkString(Some(bytes)) => bytes.clone(),
+                        other => panic!("expected bulk string argument, got {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("expected command array, got {other:?}"),
+            }
+        }
+
+        let key = b"json:\0\xff\r\nkey".as_slice();
+        let other = b"json:other:\x80".as_slice();
+        let mut mock = MockRedis::new(vec![
+            Frame::SimpleString(Bytes::from("OK")),
+            Frame::BulkString(Some(Bytes::from("[1]"))),
+            Frame::Null,
+            Frame::Integer(1),
+            Frame::BulkString(Some(Bytes::from("[2]"))),
+            Frame::Array(Some(vec![Frame::Null, Frame::Null])),
+        ]);
+
+        {
+            let mut json = Json::new(&mut mock);
+            json.set(key, "$", &1).await.unwrap();
+            let _: i64 = json.get(key, "$").await.unwrap();
+            let _: Option<i64> = json.get_opt(key, "$").await.unwrap();
+            json.del(key, "$").await.unwrap();
+            json.incr_by(key, "$", 1.0).await.unwrap();
+            let _: Vec<Option<i64>> = json.mget([key, other], "$").await.unwrap();
+        }
+
+        for request in &mock.requests[..5] {
+            assert_eq!(args(request)[1], key);
+        }
+        let mget = args(&mock.requests[5]);
+        assert_eq!(mget[1], key);
+        assert_eq!(mget[2], other);
     }
 }

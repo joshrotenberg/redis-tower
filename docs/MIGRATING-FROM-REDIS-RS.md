@@ -15,9 +15,9 @@ The headline differences:
   equivalent layering point.
 - **Bytes, not stringly-typed.** String-shaped responses come back as
   `bytes::Bytes` by default; convert at the edge when you want `String`.
-- **Binary-safe common builders.** Keys, values, fields, members, and stream
-  data in the main command families accept `&[u8]`, `Vec<u8>`, or `Bytes` as
-  well as strings through `CommandArg`.
+- **Binary-safe typed builders.** Opaque Redis arguments across core and module
+  families accept `&[u8]`, `Vec<u8>`, or `Bytes` as well as strings through
+  `CommandArg`; grammar such as JSONPath and Search queries remains textual.
 
 ## Cargo.toml
 
@@ -79,7 +79,7 @@ let value: Option<bytes::Bytes> = client.execute(Get::new(key)).await?;
 Owned `String` and `Vec<u8>` values move into the command, `Bytes` shares its
 storage, and borrowed values are copied once. See [Binary data and typed
 arguments](BINARY-DATA.md) for the full family inventory and the intentionally
-textual or not-yet-migrated surfaces.
+textual surfaces.
 
 Each command's response type is its natural Redis shape (`Get` -> `Option<Bytes>`,
 `Incr` -> `i64`, ...). To get redis-rs-style "parse into whatever type I asked
@@ -113,9 +113,9 @@ let reply = client.execute(RawCommand::new("SET").arg("key").arg("value")).await
 // `reply` is a raw `Frame`; match on it for the value you expect.
 ```
 
-`RawCommand::arg` is also the binary escape hatch for command families whose
-typed builders have not yet migrated to `CommandArg`. Add `.query::<T>()` when
-you want the raw request to keep a typed response decoder.
+`RawCommand::arg` is also the binary escape hatch for extension commands or
+syntax outside the typed surface. Add `.query::<T>()` when you want the raw
+request to keep a typed response decoder.
 
 ## Pipelining
 

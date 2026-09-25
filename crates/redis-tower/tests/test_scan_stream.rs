@@ -242,3 +242,83 @@ async fn zscan() {
 
     c.execute(Del::new(key)).await.unwrap();
 }
+
+#[tokio::test]
+async fn scan_stream_wrappers_preserve_binary_keys_and_patterns() {
+    let mut c = conn().await;
+    let scan_key = b"scan_stream_test:binary:\xff\0:key".as_slice();
+    let scan_pattern = b"scan_stream_test:binary:\xff\0:*".as_slice();
+    let hash_key = b"scan_stream_test:hscan:\xff\0".as_slice();
+    let set_key = b"scan_stream_test:sscan:\xff\0".as_slice();
+    let zset_key = b"scan_stream_test:zscan:\xff\0".as_slice();
+    let member = b"member:\xff\0\r\n".as_slice();
+    let member_pattern = b"member:\xff\0*".as_slice();
+
+    c.execute(Del::keys([scan_key, hash_key, set_key, zset_key]))
+        .await
+        .unwrap();
+    c.execute(Set::new(scan_key, b"value".as_slice()))
+        .await
+        .unwrap();
+    c.execute(HSet::new(hash_key, member, b"hash-value".as_slice()))
+        .await
+        .unwrap();
+    c.execute(SAdd::new(set_key, member)).await.unwrap();
+    c.execute(ZAdd::new(zset_key).member(1.5, member))
+        .await
+        .unwrap();
+
+    let scan_results = {
+        let stream = ScanStream::scan(&mut c, scan_pattern);
+        tokio::pin!(stream);
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item.unwrap());
+        }
+        results
+    };
+    assert!(scan_results.iter().any(|key| key.as_ref() == scan_key));
+
+    let hash_results = {
+        let stream = ScanStream::hscan(&mut c, hash_key, member_pattern);
+        tokio::pin!(stream);
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item.unwrap());
+        }
+        results
+    };
+    assert_eq!(
+        hash_results,
+        [(
+            Bytes::copy_from_slice(member),
+            Bytes::from_static(b"hash-value")
+        )]
+    );
+
+    let set_results = {
+        let stream = ScanStream::sscan(&mut c, set_key, member_pattern);
+        tokio::pin!(stream);
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item.unwrap());
+        }
+        results
+    };
+    assert_eq!(set_results, [Bytes::copy_from_slice(member)]);
+
+    let zset_results = {
+        let stream = ScanStream::zscan(&mut c, zset_key, member_pattern);
+        tokio::pin!(stream);
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item.unwrap());
+        }
+        results
+    };
+    assert_eq!(zset_results, [(Bytes::copy_from_slice(member), 1.5)]);
+
+    c.execute(Del::keys([scan_key, hash_key, set_key, zset_key]))
+        .await
+        .unwrap();
+}

@@ -118,3 +118,31 @@ async fn timeseries_add_and_range() {
     use redis_tower::commands::Del;
     conn.execute(Del::new(key)).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a live Redis Stack server with RedisTimeSeries"]
+async fn timeseries_binary_key_and_labels_roundtrip() {
+    let mut conn = connect().await;
+    let mut key = format!("test:ts:binary:{}:", unique_suffix()).into_bytes();
+    key.extend_from_slice(b"\0\xff");
+    let label_key = b"sensor\0\xff";
+    let label_value = b"temperature\r\n\xff";
+
+    {
+        let mut ts = TimeSeriesClient::new(&mut conn);
+        ts.create(
+            &key,
+            TsKeyConfig::new().label(label_key.as_slice(), label_value.as_slice()),
+        )
+        .await
+        .unwrap();
+        ts.add(&key, TsTimestamp::Value(1_000), 21.5).await.unwrap();
+        let info = ts.info(&key).await.unwrap();
+        assert!(info.labels.iter().any(|label| {
+            label.key.as_ref() == label_key && label.value.as_ref() == label_value
+        }));
+    }
+
+    use redis_tower::commands::Del;
+    conn.execute(Del::new(key)).await.unwrap();
+}

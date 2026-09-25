@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -6,18 +7,23 @@ use redis_tower_protocol::helpers::{array, bulk};
 ///
 /// Adds a suggestion string to an auto-complete dictionary. Returns the
 /// current size of the dictionary.
+///
+/// Arguments are serialized byte-for-byte. Redis Search treats suggestion
+/// strings as text: an embedded NUL is a terminator and malformed UTF-8 can be
+/// normalized by the server. Dictionary keys and payloads are not subject to
+/// that suggestion-string limitation.
 #[derive(Clone)]
 pub struct FtSugAdd {
-    key: String,
-    string: String,
+    key: CommandArg,
+    string: CommandArg,
     score: f64,
     incr: bool,
-    payload: Option<String>,
+    payload: Option<CommandArg>,
 }
 
 impl FtSugAdd {
     /// Create a new [`FtSugAdd`] command.
-    pub fn new(key: impl Into<String>, string: impl Into<String>, score: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, string: impl Into<CommandArg>, score: f64) -> Self {
         Self {
             key: key.into(),
             string: string.into(),
@@ -34,7 +40,7 @@ impl FtSugAdd {
     }
 
     /// Set an opaque payload to store with the suggestion.
-    pub fn payload(mut self, payload: impl Into<String>) -> Self {
+    pub fn payload(mut self, payload: impl Into<CommandArg>) -> Self {
         self.payload = Some(payload.into());
         self
     }
@@ -46,8 +52,8 @@ impl Command for FtSugAdd {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("FT.SUGADD"),
-            bulk(self.key.as_str()),
-            bulk(self.string.as_str()),
+            bulk(&self.key),
+            bulk(&self.string),
             bulk(self.score.to_string()),
         ];
         if self.incr {
@@ -55,7 +61,7 @@ impl Command for FtSugAdd {
         }
         if let Some(payload) = &self.payload {
             args.push(bulk("PAYLOAD"));
-            args.push(bulk(payload.as_str()));
+            args.push(bulk(payload));
         }
         array(args)
     }
@@ -81,8 +87,8 @@ impl Command for FtSugAdd {
 /// The response structure varies based on options, so it returns a raw `Frame`.
 #[derive(Clone)]
 pub struct FtSugGet {
-    key: String,
-    prefix: String,
+    key: CommandArg,
+    prefix: CommandArg,
     fuzzy: bool,
     withscores: bool,
     withpayloads: bool,
@@ -91,7 +97,7 @@ pub struct FtSugGet {
 
 impl FtSugGet {
     /// Create a new [`FtSugGet`] command.
-    pub fn new(key: impl Into<String>, prefix: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, prefix: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             prefix: prefix.into(),
@@ -131,11 +137,7 @@ impl Command for FtSugGet {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![
-            bulk("FT.SUGGET"),
-            bulk(self.key.as_str()),
-            bulk(self.prefix.as_str()),
-        ];
+        let mut args = vec![bulk("FT.SUGGET"), bulk(&self.key), bulk(&self.prefix)];
         if self.fuzzy {
             args.push(bulk("FUZZY"));
         }
@@ -167,13 +169,13 @@ impl Command for FtSugGet {
 /// string was found and deleted.
 #[derive(Clone)]
 pub struct FtSugDel {
-    key: String,
-    string: String,
+    key: CommandArg,
+    string: CommandArg,
 }
 
 impl FtSugDel {
     /// Create a new [`FtSugDel`] command.
-    pub fn new(key: impl Into<String>, string: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, string: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             string: string.into(),
@@ -185,11 +187,7 @@ impl Command for FtSugDel {
     type Response = bool;
 
     fn to_frame(&self) -> Frame {
-        array(vec![
-            bulk("FT.SUGDEL"),
-            bulk(self.key.as_str()),
-            bulk(self.string.as_str()),
-        ])
+        array(vec![bulk("FT.SUGDEL"), bulk(&self.key), bulk(&self.string)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -213,12 +211,12 @@ impl Command for FtSugDel {
 /// Returns the number of entries in an auto-complete dictionary.
 #[derive(Clone)]
 pub struct FtSugLen {
-    key: String,
+    key: CommandArg,
 }
 
 impl FtSugLen {
     /// Create a new [`FtSugLen`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -227,7 +225,7 @@ impl Command for FtSugLen {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("FT.SUGLEN"), bulk(self.key.as_str())])
+        array(vec![bulk("FT.SUGLEN"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {

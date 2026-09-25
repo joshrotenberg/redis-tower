@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -74,14 +75,14 @@ fn parse_optional_bytes_array(frame: Frame) -> Result<Vec<Option<Bytes>>, RedisE
 /// Initializes a Count-Min Sketch with the given width and depth.
 #[derive(Clone)]
 pub struct CmsInitByDim {
-    key: String,
+    key: CommandArg,
     width: i64,
     depth: i64,
 }
 
 impl CmsInitByDim {
     /// Create a new [`CmsInitByDim`] command.
-    pub fn new(key: impl Into<String>, width: i64, depth: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, width: i64, depth: i64) -> Self {
         Self {
             key: key.into(),
             width,
@@ -96,7 +97,7 @@ impl Command for CmsInitByDim {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("CMS.INITBYDIM"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.width.to_string()),
             bulk(self.depth.to_string()),
         ])
@@ -122,14 +123,14 @@ impl Command for CmsInitByDim {
 /// Initializes a Count-Min Sketch with the given error rate and probability.
 #[derive(Clone)]
 pub struct CmsInitByProb {
-    key: String,
+    key: CommandArg,
     error: f64,
     probability: f64,
 }
 
 impl CmsInitByProb {
     /// Create a new [`CmsInitByProb`] command.
-    pub fn new(key: impl Into<String>, error: f64, probability: f64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, error: f64, probability: f64) -> Self {
         Self {
             key: key.into(),
             error,
@@ -144,7 +145,7 @@ impl Command for CmsInitByProb {
     fn to_frame(&self) -> Frame {
         array(vec![
             bulk("CMS.INITBYPROB"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.error.to_string()),
             bulk(self.probability.to_string()),
         ])
@@ -171,15 +172,15 @@ impl Command for CmsInitByProb {
 /// estimated count for each item after incrementing.
 #[derive(Clone)]
 pub struct CmsIncrBy {
-    key: String,
-    items: Vec<(String, i64)>,
+    key: CommandArg,
+    items: Vec<(CommandArg, i64)>,
 }
 
 impl CmsIncrBy {
     /// Create a new [`CmsIncrBy`] command.
     pub fn new(
-        key: impl Into<String>,
-        items: impl IntoIterator<Item = (impl Into<String>, i64)>,
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = (impl Into<CommandArg>, i64)>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -192,9 +193,9 @@ impl Command for CmsIncrBy {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("CMS.INCRBY"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("CMS.INCRBY"), bulk(&self.key)];
         for (item, incr) in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
             args.push(bulk(incr.to_string()));
         }
         array(args)
@@ -214,13 +215,16 @@ impl Command for CmsIncrBy {
 /// Returns the estimated count for one or more items in the Count-Min Sketch.
 #[derive(Clone)]
 pub struct CmsQuery {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl CmsQuery {
     /// Create a new [`CmsQuery`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -232,9 +236,9 @@ impl Command for CmsQuery {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("CMS.QUERY"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("CMS.QUERY"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -257,16 +261,16 @@ impl Command for CmsQuery {
 /// Merges several Count-Min Sketches into a destination sketch.
 #[derive(Clone)]
 pub struct CmsMerge {
-    destination: String,
-    sources: Vec<String>,
+    destination: CommandArg,
+    sources: Vec<CommandArg>,
     weights: Vec<i64>,
 }
 
 impl CmsMerge {
     /// Create a new [`CmsMerge`] command.
     pub fn new(
-        destination: impl Into<String>,
-        sources: impl IntoIterator<Item = impl Into<String>>,
+        destination: impl Into<CommandArg>,
+        sources: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             destination: destination.into(),
@@ -288,11 +292,11 @@ impl Command for CmsMerge {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("CMS.MERGE"),
-            bulk(self.destination.as_str()),
+            bulk(&self.destination),
             bulk(self.sources.len().to_string()),
         ];
         for src in &self.sources {
-            args.push(bulk(src.as_str()));
+            args.push(bulk(src));
         }
         if !self.weights.is_empty() {
             args.push(bulk("WEIGHTS"));
@@ -323,12 +327,12 @@ impl Command for CmsMerge {
 /// Returns information about the Count-Min Sketch at `key` as a raw Frame.
 #[derive(Clone)]
 pub struct CmsInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl CmsInfo {
     /// Create a new [`CmsInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -337,7 +341,7 @@ impl Command for CmsInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("CMS.INFO"), bulk(self.key.as_str())])
+        array(vec![bulk("CMS.INFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
@@ -362,7 +366,7 @@ impl Command for CmsInfo {
 /// Initializes a Top-K data structure with the given parameters.
 #[derive(Clone)]
 pub struct TopkReserve {
-    key: String,
+    key: CommandArg,
     topk: i64,
     width: Option<i64>,
     depth: Option<i64>,
@@ -371,7 +375,7 @@ pub struct TopkReserve {
 
 impl TopkReserve {
     /// Create a new [`TopkReserve`] command.
-    pub fn new(key: impl Into<String>, topk: i64) -> Self {
+    pub fn new(key: impl Into<CommandArg>, topk: i64) -> Self {
         Self {
             key: key.into(),
             topk,
@@ -396,7 +400,7 @@ impl Command for TopkReserve {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("TOPK.RESERVE"),
-            bulk(self.key.as_str()),
+            bulk(&self.key),
             bulk(self.topk.to_string()),
         ];
         if let (Some(w), Some(d), Some(decay)) = (self.width, self.depth, self.decay) {
@@ -428,13 +432,16 @@ impl Command for TopkReserve {
 /// (or None for items that did not cause an eviction).
 #[derive(Clone)]
 pub struct TopkAdd {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl TopkAdd {
     /// Create a new [`TopkAdd`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -446,9 +453,9 @@ impl Command for TopkAdd {
     type Response = Vec<Option<Bytes>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TOPK.ADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TOPK.ADD"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -468,15 +475,15 @@ impl Command for TopkAdd {
 /// of evicted items (or None for items that did not cause an eviction).
 #[derive(Clone)]
 pub struct TopkIncrBy {
-    key: String,
-    items: Vec<(String, i64)>,
+    key: CommandArg,
+    items: Vec<(CommandArg, i64)>,
 }
 
 impl TopkIncrBy {
     /// Create a new [`TopkIncrBy`] command.
     pub fn new(
-        key: impl Into<String>,
-        items: impl IntoIterator<Item = (impl Into<String>, i64)>,
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = (impl Into<CommandArg>, i64)>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -489,9 +496,9 @@ impl Command for TopkIncrBy {
     type Response = Vec<Option<Bytes>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TOPK.INCRBY"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TOPK.INCRBY"), bulk(&self.key)];
         for (item, incr) in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
             args.push(bulk(incr.to_string()));
         }
         array(args)
@@ -511,13 +518,16 @@ impl Command for TopkIncrBy {
 /// Checks whether one or more items are in the Top-K.
 #[derive(Clone)]
 pub struct TopkQuery {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl TopkQuery {
     /// Create a new [`TopkQuery`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -529,9 +539,9 @@ impl Command for TopkQuery {
     type Response = Vec<bool>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TOPK.QUERY"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TOPK.QUERY"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -554,13 +564,16 @@ impl Command for TopkQuery {
 /// Returns the approximate count for one or more items in the Top-K.
 #[derive(Clone)]
 pub struct TopkCount {
-    key: String,
-    items: Vec<String>,
+    key: CommandArg,
+    items: Vec<CommandArg>,
 }
 
 impl TopkCount {
     /// Create a new [`TopkCount`] command.
-    pub fn new(key: impl Into<String>, items: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn new(
+        key: impl Into<CommandArg>,
+        items: impl IntoIterator<Item = impl Into<CommandArg>>,
+    ) -> Self {
         Self {
             key: key.into(),
             items: items.into_iter().map(Into::into).collect(),
@@ -572,9 +585,9 @@ impl Command for TopkCount {
     type Response = Vec<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TOPK.COUNT"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TOPK.COUNT"), bulk(&self.key)];
         for item in &self.items {
-            args.push(bulk(item.as_str()));
+            args.push(bulk(item));
         }
         array(args)
     }
@@ -598,13 +611,13 @@ impl Command for TopkCount {
 /// includes counts interleaved with items, returned as a raw Frame.
 #[derive(Clone)]
 pub struct TopkList {
-    key: String,
+    key: CommandArg,
     withcount: bool,
 }
 
 impl TopkList {
     /// Create a new [`TopkList`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             withcount: false,
@@ -622,7 +635,7 @@ impl Command for TopkList {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("TOPK.LIST"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("TOPK.LIST"), bulk(&self.key)];
         if self.withcount {
             args.push(bulk("WITHCOUNT"));
         }
@@ -647,12 +660,12 @@ impl Command for TopkList {
 /// Returns information about the Top-K at `key` as a raw Frame.
 #[derive(Clone)]
 pub struct TopkInfo {
-    key: String,
+    key: CommandArg,
 }
 
 impl TopkInfo {
     /// Create a new [`TopkInfo`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self { key: key.into() }
     }
 }
@@ -661,7 +674,7 @@ impl Command for TopkInfo {
     type Response = Frame;
 
     fn to_frame(&self) -> Frame {
-        array(vec![bulk("TOPK.INFO"), bulk(self.key.as_str())])
+        array(vec![bulk("TOPK.INFO"), bulk(&self.key)])
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {

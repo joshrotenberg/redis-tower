@@ -17,7 +17,7 @@ async fn docker_fixture_runs_the_real_client() -> Result<(), Box<dyn Error>> {
     let fixture = RedisFixture::start(&image).await?;
     let mut connection = RedisConnection::connect(fixture.address()).await?;
 
-    let pong: String = connection.execute(Ping::new()).await?;
+    let pong = connection.execute(Ping::new()).await?;
     assert_eq!(pong, "PONG");
 
     Ok(())

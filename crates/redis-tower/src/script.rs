@@ -23,7 +23,7 @@
 //! # }
 //! ```
 
-use redis_tower_commands::{Eval, EvalRo, EvalSha, EvalShaRo};
+use redis_tower_commands::{CommandArg, Eval, EvalRo, EvalSha, EvalShaRo};
 use redis_tower_core::{Frame, RedisError};
 
 use crate::executor::RedisExecutor;
@@ -49,7 +49,7 @@ impl Script {
     ///
     /// The SHA1 digest is computed immediately and cached for the lifetime of
     /// the value.
-    pub fn new(source: impl Into<String>) -> Self {
+    pub fn new(source: impl Into<CommandArg>) -> Self {
         Self {
             inner: redis_tower_commands::Script::new(source),
         }
@@ -60,8 +60,8 @@ impl Script {
         self.inner.sha()
     }
 
-    /// Get the Lua source code.
-    pub fn source(&self) -> &str {
+    /// Get the exact Lua source bytes.
+    pub fn source(&self) -> &[u8] {
         self.inner.source()
     }
 
@@ -70,10 +70,20 @@ impl Script {
         self.inner.evalsha(keys, args)
     }
 
+    /// Build an [`EvalSha`] command from binary-safe keys and arguments.
+    pub fn evalsha_args(&self, keys: &[CommandArg], args: &[CommandArg]) -> EvalSha {
+        self.inner.evalsha_args(keys, args)
+    }
+
     /// Build an [`EvalShaRo`] command, the read-only variant of
     /// [`evalsha`](Script::evalsha).
     pub fn evalsha_ro(&self, keys: &[&str], args: &[&str]) -> EvalShaRo {
         self.inner.evalsha_ro(keys, args)
+    }
+
+    /// Build an [`EvalShaRo`] command from binary-safe keys and arguments.
+    pub fn evalsha_ro_args(&self, keys: &[CommandArg], args: &[CommandArg]) -> EvalShaRo {
+        self.inner.evalsha_ro_args(keys, args)
     }
 
     /// Build an [`Eval`] command (fallback when EVALSHA returns NOSCRIPT).
@@ -81,10 +91,20 @@ impl Script {
         self.inner.eval(keys, args)
     }
 
+    /// Build an [`Eval`] command from binary-safe keys and arguments.
+    pub fn eval_args(&self, keys: &[CommandArg], args: &[CommandArg]) -> Eval {
+        self.inner.eval_args(keys, args)
+    }
+
     /// Build an [`EvalRo`] command, the read-only variant of
     /// [`eval`](Script::eval).
     pub fn eval_ro(&self, keys: &[&str], args: &[&str]) -> EvalRo {
         self.inner.eval_ro(keys, args)
+    }
+
+    /// Build an [`EvalRo`] command from binary-safe keys and arguments.
+    pub fn eval_ro_args(&self, keys: &[CommandArg], args: &[CommandArg]) -> EvalRo {
+        self.inner.eval_ro_args(keys, args)
     }
 
     /// Execute the script, trying EVALSHA first and falling back to EVAL on
@@ -108,6 +128,19 @@ impl Script {
         }
     }
 
+    /// Execute with binary-safe keys and arguments, with automatic NOSCRIPT fallback.
+    pub async fn execute_args<E: RedisExecutor>(
+        &self,
+        executor: &mut E,
+        keys: &[CommandArg],
+        args: &[CommandArg],
+    ) -> Result<Frame, RedisError> {
+        match executor.execute(self.evalsha_args(keys, args)).await {
+            Err(e) if e.is_noscript() => executor.execute(self.eval_args(keys, args)).await,
+            other => other,
+        }
+    }
+
     /// Execute the script read-only, trying EVALSHA_RO first and falling back to
     /// EVAL_RO on NOSCRIPT.
     ///
@@ -122,6 +155,19 @@ impl Script {
     ) -> Result<Frame, RedisError> {
         match executor.execute(self.evalsha_ro(keys, args)).await {
             Err(e) if e.is_noscript() => executor.execute(self.eval_ro(keys, args)).await,
+            other => other,
+        }
+    }
+
+    /// Execute read-only with binary-safe keys and arguments and NOSCRIPT fallback.
+    pub async fn execute_ro_args<E: RedisExecutor>(
+        &self,
+        executor: &mut E,
+        keys: &[CommandArg],
+        args: &[CommandArg],
+    ) -> Result<Frame, RedisError> {
+        match executor.execute(self.evalsha_ro_args(keys, args)).await {
+            Err(e) if e.is_noscript() => executor.execute(self.eval_ro_args(keys, args)).await,
             other => other,
         }
     }
@@ -143,7 +189,7 @@ mod tests {
     #[test]
     fn source_is_preserved() {
         let script = Script::new("return redis.call('GET', KEYS[1])");
-        assert_eq!(script.source(), "return redis.call('GET', KEYS[1])");
+        assert_eq!(script.source(), b"return redis.call('GET', KEYS[1])");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -586,7 +587,7 @@ impl Command for AclGenPass {
 pub struct AclDryRun {
     username: String,
     command: String,
-    args: Vec<String>,
+    args: Vec<CommandArg>,
 }
 
 impl AclDryRun {
@@ -600,13 +601,13 @@ impl AclDryRun {
     }
 
     /// Add an argument to the simulated command.
-    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+    pub fn arg(mut self, arg: impl Into<CommandArg>) -> Self {
         self.args.push(arg.into());
         self
     }
 
     /// Add multiple arguments to the simulated command.
-    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn args(mut self, args: impl IntoIterator<Item = impl Into<CommandArg>>) -> Self {
         self.args.extend(args.into_iter().map(Into::into));
         self
     }
@@ -623,7 +624,7 @@ impl Command for AclDryRun {
             bulk(self.command.as_str()),
         ];
         for arg in &self.args {
-            frame_args.push(bulk(arg.as_str()));
+            frame_args.push(bulk(arg));
         }
         array(frame_args)
     }

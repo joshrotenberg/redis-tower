@@ -56,8 +56,8 @@
 //!
 //! # Binary-safe inputs
 //!
-//! Redis keys and stored data are arbitrary bytes. The high-use string, hash,
-//! list, set, sorted-set, and stream builders accept strings or bytes through
+//! Redis keys and stored data are arbitrary bytes. Opaque arguments across the
+//! core and feature-gated command families accept strings or bytes through
 //! [`CommandArg`]:
 //!
 //! ```
@@ -74,8 +74,10 @@
 //! ```
 //!
 //! Owned strings and vectors move into the command, [`bytes::Bytes`] shares
-//! storage, and borrowed inputs are copied once. [`RawCommand`] remains the
-//! byte-oriented escape hatch for typed families not yet using `CommandArg`.
+//! storage, and borrowed inputs are copied once. Redis grammar such as cursors,
+//! JSONPath, Search query syntax, stream IDs, addresses, and SHA-1 digests stays
+//! text- or number-typed. [`RawCommand`] remains the byte-oriented escape hatch
+//! for extension commands outside the typed surface.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

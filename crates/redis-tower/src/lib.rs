@@ -59,6 +59,12 @@
 //! # }
 //! ```
 //!
+//! Redis keys and application data are byte strings, not necessarily UTF-8.
+//! Typed builders accept `&str`, `String`, byte slices, `Vec<u8>`, and
+//! [`bytes::Bytes`] through [`commands::CommandArg`] wherever Redis treats an
+//! argument as opaque. Structured grammar such as JSONPath, Search queries,
+//! stream IDs, addresses, and numeric options remains strongly typed.
+//!
 //! Use [`RedisValueExt::parse_into`] for ergonomic type conversion from
 //! command responses:
 //!

@@ -138,6 +138,12 @@ impl From<&str> for CommandArg {
     }
 }
 
+impl From<&&str> for CommandArg {
+    fn from(value: &&str) -> Self {
+        Self::from(*value)
+    }
+}
+
 impl From<&mut str> for CommandArg {
     fn from(value: &mut str) -> Self {
         Self::from(&*value)
@@ -153,6 +159,12 @@ impl From<&String> for CommandArg {
 impl From<&[u8]> for CommandArg {
     fn from(value: &[u8]) -> Self {
         Self::copy_from_slice(value)
+    }
+}
+
+impl From<&&[u8]> for CommandArg {
+    fn from(value: &&[u8]) -> Self {
+        Self::from(*value)
     }
 }
 

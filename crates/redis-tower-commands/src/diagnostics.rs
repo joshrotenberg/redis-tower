@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -12,13 +13,13 @@ use redis_tower_protocol::helpers::{array, bulk};
 /// in RAM. Returns `None` if the key does not exist.
 #[derive(Clone)]
 pub struct MemoryUsage {
-    key: String,
+    key: CommandArg,
     samples: Option<u64>,
 }
 
 impl MemoryUsage {
     /// Create a new [`MemoryUsage`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             samples: None,
@@ -36,7 +37,7 @@ impl Command for MemoryUsage {
     type Response = Option<i64>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("MEMORY"), bulk("USAGE"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("MEMORY"), bulk("USAGE"), bulk(&self.key)];
         if let Some(samples) = self.samples {
             args.push(bulk("SAMPLES"));
             args.push(bulk(samples.to_string()));

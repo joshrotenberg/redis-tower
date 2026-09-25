@@ -1,3 +1,4 @@
+use crate::CommandArg;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -33,8 +34,8 @@ impl GeoUnit {
 /// (excluding score updates when `CH` is not set).
 #[derive(Clone)]
 pub struct GeoAdd {
-    key: String,
-    members: Vec<(f64, f64, String)>,
+    key: CommandArg,
+    members: Vec<(f64, f64, CommandArg)>,
     nx: bool,
     xx: bool,
     ch: bool,
@@ -42,7 +43,7 @@ pub struct GeoAdd {
 
 impl GeoAdd {
     /// Create a new [`GeoAdd`] command.
-    pub fn new(key: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: Vec::new(),
@@ -53,7 +54,7 @@ impl GeoAdd {
     }
 
     /// Adds a member with the given longitude and latitude.
-    pub fn member(mut self, longitude: f64, latitude: f64, name: impl Into<String>) -> Self {
+    pub fn member(mut self, longitude: f64, latitude: f64, name: impl Into<CommandArg>) -> Self {
         self.members.push((longitude, latitude, name.into()));
         self
     }
@@ -84,7 +85,7 @@ impl Command for GeoAdd {
     type Response = i64;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("GEOADD"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("GEOADD"), bulk(&self.key)];
         if self.nx {
             args.push(bulk("NX"));
         } else if self.xx {
@@ -96,7 +97,7 @@ impl Command for GeoAdd {
         for (longitude, latitude, name) in &self.members {
             args.push(bulk(longitude.to_string()));
             args.push(bulk(latitude.to_string()));
-            args.push(bulk(name.as_str()));
+            args.push(bulk(name));
         }
         array(args)
     }
@@ -123,18 +124,18 @@ impl Command for GeoAdd {
 /// or `None` if one or both members are missing.
 #[derive(Clone)]
 pub struct GeoDist {
-    key: String,
-    member1: String,
-    member2: String,
+    key: CommandArg,
+    member1: CommandArg,
+    member2: CommandArg,
     unit: Option<GeoUnit>,
 }
 
 impl GeoDist {
     /// Create a new [`GeoDist`] command.
     pub fn new(
-        key: impl Into<String>,
-        member1: impl Into<String>,
-        member2: impl Into<String>,
+        key: impl Into<CommandArg>,
+        member1: impl Into<CommandArg>,
+        member2: impl Into<CommandArg>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -157,9 +158,9 @@ impl Command for GeoDist {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("GEODIST"),
-            bulk(self.key.as_str()),
-            bulk(self.member1.as_str()),
-            bulk(self.member2.as_str()),
+            bulk(&self.key),
+            bulk(&self.member1),
+            bulk(&self.member2),
         ];
         if let Some(unit) = &self.unit {
             args.push(bulk(unit.as_str()));
@@ -200,13 +201,13 @@ impl Command for GeoDist {
 /// does not.
 #[derive(Clone)]
 pub struct GeoHash {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl GeoHash {
     /// Create a new [`GeoHash`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -215,8 +216,8 @@ impl GeoHash {
 
     /// Creates a `GeoHash` command for multiple members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -229,9 +230,9 @@ impl Command for GeoHash {
     type Response = Vec<Option<String>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("GEOHASH"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("GEOHASH"), bulk(&self.key)];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member));
         }
         array(args)
     }
@@ -270,13 +271,13 @@ impl Command for GeoHash {
 /// `None` if it does not.
 #[derive(Clone)]
 pub struct GeoPos {
-    key: String,
-    members: Vec<String>,
+    key: CommandArg,
+    members: Vec<CommandArg>,
 }
 
 impl GeoPos {
     /// Create a new [`GeoPos`] command.
-    pub fn new(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn new(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self {
             key: key.into(),
             members: vec![member.into()],
@@ -285,8 +286,8 @@ impl GeoPos {
 
     /// Creates a `GeoPos` command for multiple members.
     pub fn members(
-        key: impl Into<String>,
-        members: impl IntoIterator<Item = impl Into<String>>,
+        key: impl Into<CommandArg>,
+        members: impl IntoIterator<Item = impl Into<CommandArg>>,
     ) -> Self {
         Self {
             key: key.into(),
@@ -333,9 +334,9 @@ impl Command for GeoPos {
     type Response = Vec<Option<(f64, f64)>>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("GEOPOS"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("GEOPOS"), bulk(&self.key)];
         for member in &self.members {
-            args.push(bulk(member.as_str()));
+            args.push(bulk(member));
         }
         array(args)
     }
@@ -368,7 +369,7 @@ impl Command for GeoPos {
 /// Origin for a GEOSEARCH or GEOSEARCHSTORE command.
 #[derive(Clone)]
 enum GeoSearchOrigin {
-    Member(String),
+    Member(CommandArg),
     LonLat(f64, f64),
 }
 
@@ -392,7 +393,7 @@ enum GeoSearchOrder {
 /// that are within the borders of the area specified by a given shape.
 #[derive(Clone)]
 pub struct GeoSearch {
-    key: String,
+    key: CommandArg,
     origin: GeoSearchOrigin,
     shape: GeoSearchShape,
     order: Option<GeoSearchOrder>,
@@ -401,7 +402,7 @@ pub struct GeoSearch {
 }
 
 impl GeoSearch {
-    fn new_with_origin(key: impl Into<String>, origin: GeoSearchOrigin) -> Self {
+    fn new_with_origin(key: impl Into<CommandArg>, origin: GeoSearchOrigin) -> Self {
         Self {
             key: key.into(),
             origin,
@@ -413,12 +414,12 @@ impl GeoSearch {
     }
 
     /// Searches from an existing member in the sorted set.
-    pub fn from_member(key: impl Into<String>, member: impl Into<String>) -> Self {
+    pub fn from_member(key: impl Into<CommandArg>, member: impl Into<CommandArg>) -> Self {
         Self::new_with_origin(key, GeoSearchOrigin::Member(member.into()))
     }
 
     /// Searches from the given longitude and latitude.
-    pub fn from_lonlat(key: impl Into<String>, longitude: f64, latitude: f64) -> Self {
+    pub fn from_lonlat(key: impl Into<CommandArg>, longitude: f64, latitude: f64) -> Self {
         Self::new_with_origin(key, GeoSearchOrigin::LonLat(longitude, latitude))
     }
 
@@ -468,7 +469,7 @@ impl GeoSearch {
         match &self.origin {
             GeoSearchOrigin::Member(member) => {
                 args.push(bulk("FROMMEMBER"));
-                args.push(bulk(member.as_str()));
+                args.push(bulk(member));
             }
             GeoSearchOrigin::LonLat(lon, lat) => {
                 args.push(bulk("FROMLONLAT"));
@@ -510,7 +511,7 @@ impl Command for GeoSearch {
     type Response = Vec<Bytes>;
 
     fn to_frame(&self) -> Frame {
-        let mut args = vec![bulk("GEOSEARCH"), bulk(self.key.as_str())];
+        let mut args = vec![bulk("GEOSEARCH"), bulk(&self.key)];
         args.extend(self.build_search_args());
         array(args)
     }
@@ -547,8 +548,8 @@ impl Command for GeoSearch {
 /// stores distances instead of geospatial data.
 #[derive(Clone)]
 pub struct GeoSearchStore {
-    destination: String,
-    source: String,
+    destination: CommandArg,
+    source: CommandArg,
     origin: GeoSearchOrigin,
     shape: GeoSearchShape,
     order: Option<GeoSearchOrder>,
@@ -559,8 +560,8 @@ pub struct GeoSearchStore {
 
 impl GeoSearchStore {
     fn new_with_origin(
-        destination: impl Into<String>,
-        source: impl Into<String>,
+        destination: impl Into<CommandArg>,
+        source: impl Into<CommandArg>,
         origin: GeoSearchOrigin,
     ) -> Self {
         Self {
@@ -577,17 +578,17 @@ impl GeoSearchStore {
 
     /// Searches from an existing member in the source sorted set.
     pub fn from_member(
-        destination: impl Into<String>,
-        source: impl Into<String>,
-        member: impl Into<String>,
+        destination: impl Into<CommandArg>,
+        source: impl Into<CommandArg>,
+        member: impl Into<CommandArg>,
     ) -> Self {
         Self::new_with_origin(destination, source, GeoSearchOrigin::Member(member.into()))
     }
 
     /// Searches from the given longitude and latitude.
     pub fn from_lonlat(
-        destination: impl Into<String>,
-        source: impl Into<String>,
+        destination: impl Into<CommandArg>,
+        source: impl Into<CommandArg>,
         longitude: f64,
         latitude: f64,
     ) -> Self {
@@ -652,7 +653,7 @@ impl GeoSearchStore {
         match &self.origin {
             GeoSearchOrigin::Member(member) => {
                 args.push(bulk("FROMMEMBER"));
-                args.push(bulk(member.as_str()));
+                args.push(bulk(member));
             }
             GeoSearchOrigin::LonLat(lon, lat) => {
                 args.push(bulk("FROMLONLAT"));
@@ -696,8 +697,8 @@ impl Command for GeoSearchStore {
     fn to_frame(&self) -> Frame {
         let mut args = vec![
             bulk("GEOSEARCHSTORE"),
-            bulk(self.destination.as_str()),
-            bulk(self.source.as_str()),
+            bulk(&self.destination),
+            bulk(&self.source),
         ];
         args.extend(self.build_search_args());
         if self.store_dist {

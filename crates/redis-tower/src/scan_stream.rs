@@ -22,7 +22,7 @@
 
 use bytes::Bytes;
 use futures::Stream;
-use redis_tower_commands::{HScan, SScan, Scan, ZScan};
+use redis_tower_commands::{CommandArg, HScan, SScan, Scan, ZScan};
 use redis_tower_core::{RedisConnection, RedisError};
 
 /// Async stream wrappers for SCAN-family cursor iteration.
@@ -57,7 +57,7 @@ impl ScanStream {
     /// ```
     pub fn scan<'a>(
         conn: &'a mut RedisConnection,
-        pattern: impl Into<String>,
+        pattern: impl Into<CommandArg>,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
         let pattern = pattern.into();
         async_stream::try_stream! {
@@ -84,7 +84,7 @@ impl ScanStream {
     /// per iteration. Redis may return more or fewer.
     pub fn scan_with_count<'a>(
         conn: &'a mut RedisConnection,
-        pattern: impl Into<String>,
+        pattern: impl Into<CommandArg>,
         count: u64,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
         let pattern = pattern.into();
@@ -131,8 +131,8 @@ impl ScanStream {
     /// ```
     pub fn hscan<'a>(
         conn: &'a mut RedisConnection,
-        key: impl Into<String>,
-        pattern: impl Into<String>,
+        key: impl Into<CommandArg>,
+        pattern: impl Into<CommandArg>,
     ) -> impl Stream<Item = Result<(Bytes, Bytes), RedisError>> + 'a {
         let key = key.into();
         let pattern = pattern.into();
@@ -176,8 +176,8 @@ impl ScanStream {
     /// ```
     pub fn sscan<'a>(
         conn: &'a mut RedisConnection,
-        key: impl Into<String>,
-        pattern: impl Into<String>,
+        key: impl Into<CommandArg>,
+        pattern: impl Into<CommandArg>,
     ) -> impl Stream<Item = Result<Bytes, RedisError>> + 'a {
         let key = key.into();
         let pattern = pattern.into();
@@ -221,8 +221,8 @@ impl ScanStream {
     /// ```
     pub fn zscan<'a>(
         conn: &'a mut RedisConnection,
-        key: impl Into<String>,
-        pattern: impl Into<String>,
+        key: impl Into<CommandArg>,
+        pattern: impl Into<CommandArg>,
     ) -> impl Stream<Item = Result<(Bytes, f64), RedisError>> + 'a {
         let key = key.into();
         let pattern = pattern.into();

@@ -112,3 +112,24 @@ async fn json_merge_and_array_ops() {
     use redis_tower::commands::Del;
     conn.execute(Del::new(key)).await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires a live Redis Stack server with RedisJSON"]
+async fn json_binary_key_roundtrip() {
+    let mut conn = connect().await;
+    let mut key = format!("test:json:binary:{}:", unique_suffix()).into_bytes();
+    key.extend_from_slice(b"\0\xff\r\n");
+
+    {
+        let mut json = JsonClient::new(&mut conn);
+        let value = serde_json::json!({ "binary": true });
+        json.set(&key, "$", &value).await.unwrap();
+        assert_eq!(
+            json.get::<serde_json::Value>(&key, "$").await.unwrap(),
+            Some(value)
+        );
+    }
+
+    use redis_tower::commands::Del;
+    conn.execute(Del::new(key)).await.unwrap();
+}
