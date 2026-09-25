@@ -1,305 +1,332 @@
 # Migrating from redis-rs
 
-This guide maps common [`redis-rs`](https://github.com/redis-rs/redis-rs) idioms
-to their `redis-tower` equivalents. The two crates share the same mental model
-(open a connection, run commands, pipeline, pub/sub, cluster, sentinel), so most
-migrations are mechanical.
+This guide maps [`redis-rs` 1.7](https://docs.rs/redis/1.7.0/redis/) to the
+current redis-tower API. Both clients provide typed conveniences, raw commands,
+multiplexing, pipelines, transactions, Cluster, Sentinel, TLS, pub/sub, and
+RESP3. The migration is primarily about choosing explicit connection and
+response contracts, not replacing an "untyped" client with a typed one.
 
-The headline differences:
+## The migration in one table
 
-- **Typed command builders instead of a `Cmd`/`AsyncCommands` split.** Every
-  command is a value (`Get::new("k")`) you pass to `execute`, with a typed
-  response. There is no `AsyncCommands` trait to import and no `query_async`.
-- **Tower-native.** Clients are `Service`s, so middleware (tracing, metrics,
-  circuit breaking, timeouts) composes as Tower layers. redis-rs has no
-  equivalent layering point.
-- **Bytes, not stringly-typed.** String-shaped responses come back as
-  `bytes::Bytes` by default; convert at the edge when you want `String`.
-- **Binary-safe typed builders.** Opaque Redis arguments across core and module
-  families accept `&[u8]`, `Vec<u8>`, or `Bytes` as well as strings through
-  `CommandArg`; grammar such as JSONPath and Search queries remains textual.
+| redis-rs 1.7 | redis-tower |
+|---|---|
+| `MultiplexedConnection` | `MultiplexedClient` |
+| `ConnectionManager` | Factory-backed `MultiplexedClient`, or serialized `ResilientRedisClient` |
+| `AsyncCommands` / `AsyncTypedCommands` methods | Command values such as `Get` and `Set`, passed to `execute` |
+| Caller-selected `FromRedisValue` response | Command-defined response type; `RedisValueExt` converts at the edge |
+| `Cmd` | `RawCommand`, returning `Frame`, or `TypedRawCommand<T>` |
+| `Pipeline` / atomic pipeline | `Pipeline` / `Transaction` |
+| Async pub/sub connection | Dedicated `PubSubConnection` |
+| Async Cluster connection | `MultiplexedClusterClient` |
+| Sentinel client | `MultiplexedSentinelClient` |
+| `RedisError` + `ErrorKind` | `RedisError` + classification helpers |
 
-## Cargo.toml
+## Dependencies
+
+The versions below are the released APIs used by this guide. Choose only the
+redis-tower topology crates the application needs:
 
 ```toml
-# redis-rs
-redis = { version = "0.27", features = ["tokio-comp", "cluster-async"] }
+[dependencies]
+# Before
+redis = { version = "=1.7.0", features = ["tokio-comp", "cluster-async", "connection-manager"] }
 
-# redis-tower
-redis-tower = "0.1"
-# Cluster, sentinel, sync, and modules live in sibling crates:
-redis-tower-cluster = "0.1"
-redis-tower-sentinel = "0.1"
+# After
+redis-tower = "0.1.3"
+redis-tower-cluster = "0.1.3"  # only for Redis Cluster
+redis-tower-sentinel = "0.1.3" # only for Sentinel
+bytes = "1"
+tokio-stream = "0.1"           # only for stream APIs such as pub/sub
 ```
 
-TLS is a feature flag on either backend: `tls-rustls` (recommended; pure-Rust,
-aws-lc-rs) or `tls-native-tls`.
+For TLS, enable `tls-rustls` (recommended) or `tls-native-tls` on the facade and
+on each topology crate that opens TLS connections; neither backend is enabled
+by the facade's default feature set. Redis Stack command groups can be selected
+individually or through the facade's default `commands-stack` feature.
 
-## Connecting
+The standalone
+[registry compatibility harness](https://github.com/joshrotenberg/redis-tower/tree/main/release-tests/redis-rs-migration)
+is compiled in CI against these exact crates.io versions. It is an independent
+workspace, so local path crates cannot mask a published-API mismatch. The larger
+live oracle is documented in [Differential testing](DIFFERENTIAL-TESTING.md).
+
+## Connect and share
 
 ```rust,ignore
-// redis-rs (async, multiplexed)
-let client = redis::Client::open("redis://127.0.0.1/")?;
-let mut con = client.get_multiplexed_async_connection().await?;
+// redis-rs
+let redis_rs = redis::Client::open("redis://127.0.0.1:6379/0")?;
+let mut connection = redis_rs.get_multiplexed_async_connection().await?;
 
 // redis-tower
 use redis_tower::MultiplexedClient;
-let client = MultiplexedClient::connect_url("redis://127.0.0.1").await?;
-// or, from a host:port: MultiplexedClient::connect("127.0.0.1:6379").await?
+let client = MultiplexedClient::connect_url("redis://127.0.0.1:6379/0").await?;
 ```
 
-`MultiplexedClient` is `Clone` and shares one auto-pipelined connection across
-tasks, like redis-rs's `MultiplexedConnection`. For a single exclusive
-connection use `RedisConnection`; for an `Arc<Mutex<_>>` shareable handle use
-`RedisClient`.
+Both handles can be cloned and shared across Tokio tasks. Do not add an
+`Arc<Mutex<_>>` around `MultiplexedClient`; its worker already serializes and
+auto-pipelines concurrent requests.
 
-## Running commands
+Choose a different redis-tower connection when the ownership contract differs:
+
+- `RedisConnection` exclusively owns one socket.
+- `RedisClient` is a simple serialized shared connection.
+- `ConnectionPool<RedisConnection>` owns multiple independent sockets.
+- A factory-backed `MultiplexedClient` reconnects without giving up concurrent
+  multiplexing.
+- `ResilientRedisClient` is a simpler reconnecting, mutex-serialized client.
+
+## Protocol, URLs, and authentication
+
+The defaults differ. A normal redis-rs 1.7 URL selects RESP2; add
+`?protocol=resp3` to request RESP3. redis-tower's default
+`ProtocolVersion::Auto` tries `HELLO 3` and falls back to RESP2 when RESP3 is not
+available. If wire shape matters during a migration, pin both clients instead
+of comparing different protocols:
+
+```rust,ignore
+// redis-rs RESP2
+let redis_rs = redis::Client::open("redis://127.0.0.1:6379/?protocol=resp2")?;
+
+// redis-tower RESP2. The released URL parser does not consume `protocol=`;
+// select the protocol with ConnectionConfig.
+use redis_tower::{ConnectionConfig, MultiplexedClient, ProtocolVersion};
+let config = ConnectionConfig::new().with_protocol(ProtocolVersion::Resp2);
+let tower = MultiplexedClient::connect_url_with_connection_config(
+    "redis://127.0.0.1:6379/",
+    &config,
+).await?;
+
+// Use ProtocolVersion::Resp3 to force RESP3 without fallback.
+```
+
+`redis://user:password@host/db` and `rediss://...` carry ACL credentials,
+database selection, and TLS. Percent-encode URL-special bytes in usernames and
+passwords. redis-tower authenticates and selects the database as part of setup;
+a reconnecting URL factory repeats those steps on every new socket.
+
+The released redis-tower URL parser accepts Unix sockets with an optional
+database query:
+
+```text
+unix:///run/redis.sock?db=1
+```
+
+The 0.1.3 Unix URL grammar has no authentication or protocol query keys.
+`ConnectionConfig` can select the protocol for an unauthenticated Unix socket;
+an authenticated Unix/RESP3 setup needs an explicit custom setup sequence.
+Do not copy redis-rs Unix query parameters into this released URL unchanged.
+
+For rotating tokens, replace static URL credentials with redis-tower's
+`CredentialProvider`; see [Cloud and rotating credentials](CLOUD-AUTH.md).
+
+## Typed commands and response shapes
+
+redis-rs command traits select a conversion from the type requested by the
+caller. redis-tower command values have one public response type:
 
 ```rust,ignore
 // redis-rs
 use redis::AsyncCommands;
-con.set("key", "value").await?;
-let v: Option<String> = con.get("key").await?;
+let _: () = connection.set("key", "value").await?;
+let value: Option<String> = connection.get("key").await?;
 
 // redis-tower
 use redis_tower::commands::{Get, Set};
 client.execute(Set::new("key", "value")).await?;
-let v: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
+let value: Option<bytes::Bytes> = client.execute(Get::new("key")).await?;
 ```
 
-The same builders accept invalid UTF-8 without falling back to a raw command:
-
-```rust,ignore
-let key = b"binary:\xff".as_slice();
-let payload = vec![0x00, 0xfe, 0xff];
-client.execute(Set::new(key, payload)).await?;
-let value: Option<bytes::Bytes> = client.execute(Get::new(key)).await?;
-```
-
-Owned `String` and `Vec<u8>` values move into the command, `Bytes` shares its
-storage, and borrowed values are copied once. See [Binary data and typed
-arguments](BINARY-DATA.md) for the full family inventory and the intentionally
-textual surfaces.
-
-Each command's response type is its natural Redis shape (`Get` -> `Option<Bytes>`,
-`Incr` -> `i64`, ...). To get redis-rs-style "parse into whatever type I asked
-for," bring in `RedisValueExt` and call `parse_into` -- this replaces the
-`FromRedisValue` type inference redis-rs does on `get`:
+String-shaped Redis data stays binary-safe as `Bytes`. Convert only at an
+application boundary:
 
 ```rust,ignore
 use redis_tower::RedisValueExt;
-let v: String = client.execute(Get::new("key")).await?.parse_into()?;
-let n: i64    = client.execute(Get::new("counter")).await?.parse_into()?;
+let value: String = client.execute(Get::new("key")).await?.parse_into()?;
 ```
 
-Command options that are method chains in redis-rs are builder methods here:
+Do not assume identical public values just because both clients decoded the
+same RESP frame. RESP2 may represent a map as a flat array; RESP3 has map, set,
+boolean, and verbatim-string types. redis-rs `Value`, redis-tower `Frame`, and a
+typed command response deliberately expose different layers. Compare the
+documented command result, normalizing only semantics Redis declares unordered
+or protocol-dependent.
+
+### Binary arguments
+
+The published 0.1.3 facade depends on `redis-tower-commands` 0.1.2, where many
+common typed builders—including `Get` and `Set`—accept UTF-8 strings. Use the
+binary-safe `RawCommand::arg` escape hatch for opaque keys and values:
 
 ```rust,ignore
-// redis-rs:  con.set_options("k", "v", SetOptions::default().with_expiration(EX(10)))
-// redis-tower:
-client.execute(Set::new("k", "v").ex(10)).await?;   // SET k v EX 10
-client.execute(Set::new("k", "v").nx()).await?;     // SET k v NX -> bool
+use redis_tower::commands::RawCommand;
+
+let key = b"binary:\xff".as_slice();
+let payload = vec![0x00, 0xfe, 0xff];
+client
+    .execute(RawCommand::new("SET").arg(key).arg(payload))
+    .await?;
+let value: Option<bytes::Bytes> = client
+    .execute(RawCommand::new("GET").arg(key).query())
+    .await?;
 ```
 
-### Arbitrary / not-yet-typed commands
+Do not force opaque data through UTF-8. The evolving per-family inventory and
+ownership rules are tracked in
+[Binary data and typed arguments](BINARY-DATA.md); check the rustdoc for the
+exact published command version before replacing a raw path with a typed one.
+
+### Raw commands
 
 ```rust,ignore
 // redis-rs
-redis::cmd("SET").arg("key").arg("value").query_async(&mut con).await?;
+let value: redis::Value = redis::cmd("MYCOMMAND")
+    .arg("key")
+    .query_async(&mut connection)
+    .await?;
 
 // redis-tower
 use redis_tower::commands::RawCommand;
-let reply = client.execute(RawCommand::new("SET").arg("key").arg("value")).await?;
-// `reply` is a raw `Frame`; match on it for the value you expect.
-```
-
-`RawCommand::arg` is also the binary escape hatch for extension commands or
-syntax outside the typed surface. Add `.query::<T>()` when you want the raw
-request to keep a typed response decoder.
-
-## Pipelining
-
-```rust,ignore
-// redis-rs
-let (a, b): (i64, i64) = redis::pipe()
-    .cmd("INCR").arg("k")
-    .cmd("GET").arg("k")
-    .query_async(&mut con).await?;
-
-// redis-tower
-use redis_tower::Pipeline;
-use redis_tower::commands::{Get, Incr};
-let mut results = Pipeline::new()
-    .push(Incr::new("k"))
-    .push(Get::new("k"))
-    .execute(&mut conn)
+let frame = client
+    .execute(RawCommand::new("MYCOMMAND").arg("key"))
     .await?;
-let a: i64 = results.take(0)?;
-let b: Option<bytes::Bytes> = results.take(1)?;
 ```
 
-Note: with `MultiplexedClient`, concurrent commands from different tasks are
-already batched into pipelines automatically -- you only need an explicit
-`Pipeline` when one task wants to send a batch atomically on the wire.
+`RawCommand` returns a `Frame`; validate its shape at the boundary. A typed
+builder is preferable when available because it also carries key-routing,
+blocking, idempotency, and response-decoding metadata.
 
-## Transactions (MULTI/EXEC, WATCH)
+## Pipelines and transactions
+
+Concurrent `MultiplexedClient` calls are automatically batched. Use an explicit
+`Pipeline` when one task needs an ordered batch on one connection:
 
 ```rust,ignore
-// redis-rs
-let (n,): (i64,) = redis::pipe().atomic()
-    .cmd("INCR").arg("k")
-    .query_async(&mut con).await?;
+use redis_tower::{Pipeline, RedisConnection};
+use redis_tower::commands::{Get, Incr};
 
-// redis-tower
+let mut connection = RedisConnection::connect("127.0.0.1:6379").await?;
+let mut replies = Pipeline::new()
+    .push(Incr::new("counter"))
+    .push(Get::new("counter"))
+    .execute(&mut connection)
+    .await?;
+let count: i64 = replies.take(0)?;
+let observed: Option<bytes::Bytes> = replies.take(1)?;
+```
+
+A pipeline is not atomic. Replace redis-rs's atomic pipeline with
+`Transaction`; its result explicitly distinguishes `Committed` from `Aborted`
+after a WATCH conflict:
+
+```rust,ignore
 use redis_tower::{Transaction, TransactionResult};
-use redis_tower::commands::Incr;
-match Transaction::new().push(Incr::new("k")).execute(&mut conn).await? {
-    TransactionResult::Committed(results) => { let n: &i64 = results.get(0)?; }
-    TransactionResult::Aborted => { /* a WATCHed key changed -- rebuild and retry */ }
+
+match Transaction::new()
+    .watch(["counter"])
+    .push(Incr::new("counter"))
+    .execute(&mut connection)
+    .await?
+{
+    TransactionResult::Committed(mut replies) => {
+        let count: i64 = replies.take(0)?;
+        # let _ = count;
+    }
+    TransactionResult::Aborted => { /* rebuild and retry if appropriate */ }
 }
 ```
 
-When the transaction body is already known, protect it with
-`Transaction::new().watch(["k"])...`; the result is `Aborted` if a watched key
-changed before `EXEC`. For read-compute-write retries, use `transaction` with a
-dedicated `RedisConnection` so the read and build remain inside the WATCH
-window.
+For read-compute-write WATCH loops, keep the entire loop on a dedicated
+`RedisConnection` (or another connection instance that the application owns
+exclusively for the full loop).
 
-## Pub/Sub
+## Dedicated and stateful sessions
+
+Do not move every operation onto the default multiplexed client. These APIs
+need an exclusive or purpose-built session:
+
+- Run `BLPOP`, blocking `XREAD`, and other blocking commands on a dedicated
+  `RedisConnection` or a pool with enough independent connections. One blocking
+  request would otherwise stop the shared pipeline worker.
+- Construct `PubSubConnection` from a fresh `RedisConnection`; it owns
+  subscription state, and `reconnect_with` can restore confirmed subscriptions
+  after the application supplies a replacement connection.
+- Construct `MonitorStream` from a fresh `RedisConnection`; entering MONITOR
+  permanently changes that socket's mode until it is closed.
+- Keep manual connection-state sequences and read-compute-write WATCH loops on
+  one exclusive connection.
 
 ```rust,ignore
-// redis-rs
-let mut pubsub = client.get_async_pubsub().await?;
-pubsub.subscribe("channel").await?;
-let mut stream = pubsub.on_message();
-while let Some(msg) = stream.next().await { /* ... */ }
-
-// redis-tower
 use redis_tower::{PubSubConnection, RedisConnection};
 use tokio_stream::StreamExt;
-let conn = RedisConnection::connect_url("redis://127.0.0.1").await?;
-let mut pubsub = PubSubConnection::from_connection(conn)?;
-pubsub.subscribe(&["channel"]).await?;
-while let Some(msg) = pubsub.next().await {
-    let msg = msg?; // PubSubMessage { channel, payload, .. }
+
+let connection = RedisConnection::connect_url("redis://127.0.0.1:6379").await?;
+let mut pubsub = PubSubConnection::from_connection(connection)?;
+pubsub.subscribe(&["events"]).await?;
+while let Some(message) = pubsub.next().await {
+    let message = message?;
+    # let _ = message;
 }
 ```
 
-redis-tower tracks active subscriptions, so after a connection drop you can
-`pubsub.reconnect_with(&factory).await?` to restore them -- the subscriptions
-survive the reconnect instead of silently going quiet.
-
-## Cluster
+## Cluster and Sentinel
 
 ```rust,ignore
-// redis-rs
-let client = redis::cluster::ClusterClient::new(vec!["redis://127.0.0.1:6379/"])?;
-let mut con = client.get_async_connection().await?;
-
-// redis-tower
 use redis_tower_cluster::MultiplexedClusterClient;
-let client = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
-// or with auth/TLS from a URL:
-let client = MultiplexedClusterClient::connect_url("rediss://default:pw@host:7000").await?;
-```
+let cluster = MultiplexedClusterClient::connect_url(
+    "rediss://default:secret@seed.example:6379",
+).await?;
 
-MOVED/ASK redirects, single-slot topology patching, TRYAGAIN/CLUSTERDOWN/LOADING
-retries, and failover self-healing (dead-node replacement + pruning) are handled
-automatically.
-
-Cluster subscriptions are explicit about their ownership model. Use
-`pubsub_on(node)` for regular `SUBSCRIBE`/`PSUBSCRIBE` pinned to one designated
-node, or `sharded_pubsub(channels)` for `SSUBSCRIBE` routed to the channels'
-shared slot owner. Both reconnect and replay confirmed subscriptions;
-slot-scoped subscriptions also follow committed owner changes. One sharded
-handle accepts only channels in the same slot, typically by sharing a hash tag
-such as `{orders}`. Messages published during a reconnect gap are not replayed.
-
-## Sentinel
-
-```rust,ignore
-// redis-rs
-let mut sentinel = redis::sentinel::SentinelClient::build(
-    vec!["redis://127.0.0.1:26379/"], "mymaster".into(),
-    Some(redis::sentinel::SentinelNodeConnectionInfo::default()),
-    redis::sentinel::SentinelServerType::Master,
-)?;
-
-// redis-tower
 use redis_tower_sentinel::MultiplexedSentinelClient;
-let client = MultiplexedSentinelClient::connect(&["127.0.0.1:26379"], "mymaster").await?;
-// with separate sentinel-hop and node-hop credentials / TLS:
-let client = MultiplexedSentinelClient::builder(&["127.0.0.1:26379"], "mymaster")
-    .sentinel_credentials(StaticCredentials::password("sentinel_pw"))
-    .node_credentials(StaticCredentials::password("redis_pw"))
-    .connect_with_reconnect()
-    .await?;
+let sentinel = MultiplexedSentinelClient::connect(
+    &["127.0.0.1:26379"],
+    "mymaster",
+).await?;
 ```
 
-The client verifies `ROLE` after discovery and re-authenticates across failover.
+Cluster handles MOVED/ASK routing and topology refresh. Sentinel separates
+Sentinel-hop and Redis-node credentials/TLS in its builder and verifies the
+discovered role. Cluster pub/sub makes ownership explicit: fixed-node regular
+subscriptions and slot-following sharded subscriptions are different APIs.
 
-## TLS, custom CA, and mTLS
+## Reconnection, retry, and unknown execution
 
-```rust,ignore
-// redis-rs: rediss:// + the tls features
-let client = redis::Client::open("rediss://host:6380/")?;
+redis-rs `ConnectionManager` reconnects in the background: the command that
+observes the dropped connection errors, while later commands wait for the new
+connection. redis-tower separates three policies:
 
-// redis-tower: rediss:// uses rustls by default
-let conn = RedisConnection::connect_url("rediss://host:6380").await?;
+1. a connection factory recreates and reconfigures the socket;
+2. reconnect backoff controls when another socket is attempted;
+3. retry or offline-queue policy decides whether an application command is
+   eligible to be sent again.
 
-// custom CA / mutual TLS:
-use redis_tower_core::tls::TlsConfig;
-let tls = TlsConfig::default_rustls()
-    .with_root_ca_pem(std::fs::read("ca.pem")?)
-    .with_client_auth_pem(std::fs::read("client.pem")?, std::fs::read("client.key")?);
-let conn = RedisConnection::connect_url_with_tls("rediss://host:6380", &tls).await?;
-```
+A write whose request reached Redis but whose reply was lost has unknown
+execution. redis-tower does not blindly replay a non-idempotent command such as
+`INCR`. Applications that retry such work need an idempotency key or a
+transaction/script that makes duplication safe.
 
-## Automatic reconnection
+## Tower middleware
 
-```rust,ignore
-// redis-rs
-let mut con = redis::aio::ConnectionManager::new(client).await?;
+redis-tower clients implement `tower::Service`, so timeout, tracing, metrics,
+circuit-breaker, concurrency, and application-specific policy can compose at a
+stable request boundary. The built-in layers are documented on the
+[`redis-tower` crate](https://docs.rs/redis-tower). Connection setup timeout,
+per-command deadline, Redis's own blocking timeout, and an end-to-end request
+deadline are separate controls; preserve that distinction during migration.
 
-// redis-tower
-use redis_tower::ResilientRedisClient;
-let client = ResilientRedisClient::connect("127.0.0.1:6379").await?;
-```
+## Lessons from an MCP integration
 
-`ResilientRedisClient` reconnects with bounded exponential backoff + jitter,
-single-flights reconnects across clones, and applies the configured
-`connect_timeout`. For finer control, build a `MultiplexedClient` /
-`ResilientConnection` from a `ConnectionFactory` (e.g. `UrlConnectionFactory`,
-which replays AUTH/SELECT -- and TLS, via `.with_tls()` -- on every reconnect).
+A downstream MCP integration motivated the public
+[differential corpus](DIFFERENTIAL-TESTING.md). The reusable lessons are backed
+by that repository-local case ledger and executable tests:
 
-## Error handling
+- keep redis-rs as an independent oracle instead of sharing redis-tower's
+  serializers or response conversion;
+- define an application response boundary instead of leaking either client's
+  raw protocol enum through a public schema;
+- distinguish top-level server errors from nested per-entry errors;
+- exercise RESP2 and RESP3 rather than assuming one public response shape;
+- test Cluster routing, blocking sessions, binary/null/error values,
+  cancellation, and lost replies as separate contracts.
 
-`redis_tower_core::RedisError` replaces `redis::RedisError`. Instead of matching
-on `ErrorKind`, use the classification helpers:
-
-| redis-rs | redis-tower |
-|---|---|
-| `e.kind() == ErrorKind::TypeError` (WRONGTYPE) | `e.is_wrongtype()` |
-| `e.kind() == ErrorKind::Moved` / `Ask` | `e.is_moved()` / `e.is_ask()` |
-| `e.kind() == ErrorKind::TryAgain` | `e.is_tryagain()` |
-| `e.kind() == ErrorKind::ClusterDown` | `e.is_clusterdown()` |
-| `e.kind() == ErrorKind::ReadOnly` | `e.is_readonly()` |
-| `e.is_connection_dropped()` | `e.is_connection_error()` |
-| (retry heuristics by hand) | `e.is_retryable()` |
-
-## Middleware (no redis-rs equivalent)
-
-Because every client is a Tower `Service`, you can wrap the frame-level service
-in a stack and hand it to `MultiplexedClient::from_layered`:
-
-```rust,ignore
-use redis_tower::{TracingLayer, MetricsLayer, CircuitBreakerLayer, CommandTimeoutLayer};
-```
-
-- `TracingLayer` -- per-command spans with stable OpenTelemetry DB conventions.
-- `MetricsLayer` -- latency/error metrics via a `MetricsRecorder` hook.
-- `CircuitBreakerLayer` -- three-state breaker, shared across clones.
-- `CommandTimeoutLayer` -- per-command deadline.
-
-These compose the same way in front of standalone, cluster, and sentinel
-clients.
+The corpus pins redis-rs 1.7.0 and records the intentionally narrow
+normalizations used for each case.

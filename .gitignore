@@ -1,6 +1,8 @@
 # Rust
 /target
 Cargo.lock
+!release-tests/redis-rs-migration/Cargo.lock
+/release-tests/*/target/
 
 # IDE
 .idea/

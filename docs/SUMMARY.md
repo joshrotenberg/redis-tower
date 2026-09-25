@@ -20,7 +20,7 @@
 
 - [Binary data and typed arguments](BINARY-DATA.md)
 - [RESP codec support and validation](PROTOCOL-TESTING.md)
-- [Feature matrix](FEATURE-MATRIX.md)
+- [Client comparison](FEATURE-MATRIX.md)
 - [Test conformance](TEST-CONFORMANCE.md)
 - [Differential testing](DIFFERENTIAL-TESTING.md)
 - [Engineering hygiene](ENGINEERING-HYGIENE.md)

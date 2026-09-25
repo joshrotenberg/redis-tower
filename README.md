@@ -457,7 +457,7 @@ let value = client.execute(Get::new("key"))?;
 - [Distributed primitives](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRIMITIVES.md)
 - [Migrating from redis-rs](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-REDIS-RS.md)
 - [Migrating from Fred](https://github.com/joshrotenberg/redis-tower/blob/main/docs/MIGRATING-FROM-FRED.md)
-- [Feature matrix](https://github.com/joshrotenberg/redis-tower/blob/main/docs/FEATURE-MATRIX.md)
+- [Sourced client comparison](https://github.com/joshrotenberg/redis-tower/blob/main/docs/FEATURE-MATRIX.md)
 - [Test conformance](https://github.com/joshrotenberg/redis-tower/blob/main/docs/TEST-CONFORMANCE.md)
 
 Runnable programs live in the

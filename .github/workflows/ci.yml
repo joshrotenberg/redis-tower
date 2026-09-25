@@ -64,6 +64,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+      - name: Compile published redis-rs migration examples
+        run: >-
+          cargo check --locked
+          --manifest-path release-tests/redis-rs-migration/Cargo.toml
+
       - name: Build the documentation site
         run: mdbook build
 

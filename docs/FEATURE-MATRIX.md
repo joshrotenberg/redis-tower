@@ -1,123 +1,77 @@
-# Feature matrix
+# Client comparison
 
-How redis-tower compares to other Redis clients. Two tables: the Rust async
-clients it is most often weighed against (redis-rs, fred), and the
-cross-language clients that set the broader expectation for what a Redis client
-should do (Lettuce, go-redis, StackExchange.Redis, ioredis).
+This page compares documented client contracts, not feature counts. A checkmark
+can hide the questions that matter in production: whether a connection is
+exclusive or multiplexed, which commands are replayed after reconnect, whether
+a cache is managed for you, and whether a "typed" API fixes the response type
+or lets the caller choose one.
 
-## How to read this page
+The comparison was checked on **2026-09-25** against the versions and revisions
+below. Links point to upstream documentation or pinned source. Treat a claim as
+unknown when the cited material does not establish it; do not infer absence
+from an empty cell.
 
-- Every **redis-tower** cell links to the code or test that backs the claim, so
-  you can verify it rather than take it on faith. A claim with no verification
-  path is not on this page.
-- The competitor columns describe each library's **documented** capabilities.
-  They are summaries of those projects' own docs, not measurements taken in this
-  repository, and they are not linked. Check the upstream project before relying
-  on a competitor cell.
-- "Standalone-only" and "in progress" cells say so on purpose.
-  This page is meant to be honest about where redis-tower is today, not where it
-  is headed.
-- This page is the canonical client comparison. The obsolete empty
-  `comparisons/` directory husks were deliberately removed and remain removed;
-  comparison claims belong here, next to a verification link, rather than in
-  duplicated per-client pages that can drift independently.
+| Client | Baseline used here |
+|---|---|
+| redis-tower | [`186719e`](https://github.com/joshrotenberg/redis-tower/commit/186719e97c3b742ef713d4210d26538aebfe4f68); published workspace versions range from 0.1.1 to 0.1.3 |
+| redis-rs | [`1.7.0` (`2a29a8f`)](https://github.com/redis-rs/redis-rs/tree/2a29a8fdec37ba5858f7681639b21617e7f824e1) |
+| Fred | [`10.1.0` (`29d4790`)](https://github.com/aembke/fred.rs/tree/29d4790e8522a3b0c67531081fc0488585dbc665) |
+| Lettuce | [`4461844`](https://github.com/redis/lettuce/tree/44618449ca11ad4c3414819e72280022a5c52163) plus the rolling Lettuce wiki, checked on the date above |
+| go-redis | [`2fc3ccd`](https://github.com/redis/go-redis/tree/2fc3ccd4e373e2b38b47a7f0bb55c72a3a64d9f6) |
+| StackExchange.Redis | [`0a92ae4`](https://github.com/StackExchange/StackExchange.Redis/tree/0a92ae43b0f8e80467920115a54f9761cc04ee4c) |
+| ioredis | [`b597303`](https://github.com/redis/ioredis/tree/b59730310716d7e4b3330ee42c140f7acd409444) |
+| node-redis | [`d3eac3d`](https://github.com/redis/node-redis/tree/d3eac3d5834cfe32970fb6e7383f044e49ee26ff) |
+| redis-py | [`ba6976b`](https://github.com/redis/redis-py/tree/ba6976bc2b8d5daed034be982c30194770ed1c15) |
 
-Legend: yes / no / partial, with a short qualifier where it matters.
+## Rust clients
 
-## redis-tower vs redis-rs and fred
+redis-tower, redis-rs, and Fred overlap heavily, but expose different contracts.
 
-| Capability | redis-tower | redis-rs | fred |
+| Contract | redis-tower | redis-rs 1.7 | Fred 10.1 |
 |---|---|---|---|
-| Typed command builders (compile-time response types) | yes -- [`redis-tower-commands`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-commands/src) | partial (stringly-typed `Cmd` + `AsyncCommands`) | partial (typed args, generic responses) |
-| Tower `Service` / `Layer` composition | yes -- [`command_adapter.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_adapter.rs) | no | no |
-| Auto-pipelining of concurrent commands | yes -- [`auto_pipeline.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/auto_pipeline.rs) | yes (multiplexed connection) | yes |
-| Connection pool | yes (fixed/dynamic/lazy, active probing, explicit idle reaping) -- [`pool.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pool.rs) | yes (`bb8`/`deadpool` via features) | yes |
-| Cluster (MOVED/ASK, topology refresh) | yes (AZ/EWMA/health-aware replica reads) -- [`redis-tower-cluster`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes |
-| Sentinel discovery + failover | yes -- [`redis-tower-sentinel`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/connection.rs) | yes | yes |
-| Client-side caching (RESP3 tracking) | standalone and master-routed cluster: cloneable cached clients, tracking modes, reconnect-safe invalidation, bounds, and metrics -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs), [`cluster caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/caching.rs), [live cluster coverage](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/tests/cluster_integration.rs) | yes (`cache-aio`) | yes |
-| Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no | partial (via reconnect policy) |
-| Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | partial (connection-level) | yes |
-| Reconnect with backoff + jitter | yes -- [`reconnect.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/reconnect.rs) | partial | yes |
-| Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | no | partial (tracing feature) |
-| RESP3 protocol | standalone, cluster, and Sentinel, including AUTH-before-HELLO setup -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`cluster connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs), [`sentinel discovery.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/discovery.rs) | yes | yes |
-| TLS (rustls + native-tls, mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes |
-| Pub/sub | standalone plus fixed-node and slot-following Cluster subscriptions -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs), [`cluster pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/pubsub.rs) | yes | yes |
-| Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | partial (raw commands) | partial |
-| Pipeline + transactions (MULTI/EXEC/WATCH) | yes -- [`pipeline.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pipeline.rs), [`transaction.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/transaction.rs) | yes | yes |
-| Lua scripting (EVALSHA-first) | yes -- [`script.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/script.rs) | yes | yes |
-| Distributed coordination primitives | fenced lock, leader election, expirable semaphore, countdown latch, delayed queue, block ID generator, and Redis-time GCRA -- [`redis-tower-primitives`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-primitives/src) | no (external crates available) | no (external crates available) |
-| Redis Stack modules (JSON/Search/TS/Bloom/Vector) | yes -- [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-modules/src) | partial (JSON via separate crate) | partial (RedisJSON/RediSearch) |
-| Blocking (sync) client | yes -- [`redis-tower-sync`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sync/src/lib.rs) | yes (sync connection) | no |
-| One client over standalone/cluster/sentinel | yes -- [`redis-tower-client`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-client/src/lib.rs) | no | no |
-| Pluggable credential provider (token rotation) | reconnect and push rotation across standalone, pool, cluster, and Sentinel; AWS IAM and Entra providers -- [`credentials.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/credentials.rs), [`cloud auth guide`](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) | partial | partial |
+| Typed command API | Command values fix their response types; pinned [`Get`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower-commands/src/strings.rs) returns `Option<Bytes>`. Raw commands can opt into a decoder. | [`AsyncTypedCommands`](https://docs.rs/redis/1.7.0/redis/trait.AsyncTypedCommands.html) provides typed convenience methods; `Cmd::query_async::<T>` retains caller-selected conversion. | Command traits expose typed arguments and caller-selected response types; see the versioned [interfaces module](https://docs.rs/fred/10.1.0/fred/interfaces/index.html). |
+| Composition point | Frame services implement Tower `Service`; pinned middleware sources cover [timeouts](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/command_timeout.rs), [circuit breaking](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/circuit_breaker.rs), [tracing](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/tracing_layer.rs), and [metrics](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/metrics_layer.rs). | **Unknown / not compared:** the [1.7 API index](https://docs.rs/redis/1.7.0/redis/) documents commands and connections, but this review did not establish a general middleware contract. | [`Config`](https://docs.rs/fred/10.1.0/fred/types/config/struct.Config.html) and the versioned [interfaces](https://docs.rs/fred/10.1.0/fred/interfaces/index.html) are client-specific extension points; no cross-client middleware equivalence is asserted here. |
+| Shared connection | Pinned [`MultiplexedClient`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/multiplexed.rs) is cloneable and auto-pipelines concurrent commands over one connection. | [`MultiplexedConnection`](https://docs.rs/redis/1.7.0/redis/aio/struct.MultiplexedConnection.html) is cloneable and multiplexed. | [`Client`](https://docs.rs/fred/10.1.0/fred/clients/struct.Client.html) is a cloneable handle over the driver's connections. |
+| Pool | Pinned [`ConnectionPool`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/pool.rs) owns independent connections with fixed, dynamic, or lazy population and explicit health/lifecycle controls. | Optional `r2d2` and `bb8` integrations are listed in the pinned [1.7 feature definitions](https://github.com/redis-rs/redis-rs/blob/2a29a8fdec37ba5858f7681639b21617e7f824e1/redis/Cargo.toml). A multiplexed connection is not itself a checkout pool. | [`Pool`](https://docs.rs/fred/10.1.0/fred/clients/struct.Pool.html) distributes commands across clients; stateful interfaces are intentionally omitted. |
+| Topology | Standalone, Cluster, and Sentinel are separate clients; pinned [`UniversalClient`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower-client/src/lib.rs) provides one enum-backed entry point. | Standalone plus the `cluster-async` and `sentinel` features are defined in the pinned [1.7 manifest](https://github.com/redis-rs/redis-rs/blob/2a29a8fdec37ba5858f7681639b21617e7f824e1/redis/Cargo.toml). | [`ServerConfig`](https://docs.rs/fred/10.1.0/fred/types/config/enum.ServerConfig.html) covers centralized, Cluster, Sentinel, and Unix deployments. |
+| Reconnect and replay | Pinned [`ResilientRedisClient`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/resilient.rs) single-flights reconnects with bounded backoff. Ordinary in-flight commands are not silently replayed; stateful APIs document their own restoration rules. | [`ConnectionManager`](https://docs.rs/redis/1.7.0/redis/aio/struct.ConnectionManager.html) reconnects in the background; the command that observes the dropped connection errors and later commands wait for the replacement connection. | [`ReconnectPolicy`](https://docs.rs/fred/10.1.0/fred/types/config/enum.ReconnectPolicy.html) controls reconnect delay. Fred's pinned [`ConnectionConfig`](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/types/config.rs#L393-L484) defaults to three command attempts, and [`reconnect_once`](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/router/utils.rs#L185-L202) flushes previously in-flight commands from the retry buffer. The [redelivery metric](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/commands/interfaces/metrics.rs#L6-L18) counts requests sent again after close while awaiting a response; pinned [command policy](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/protocol/command.rs#L1549-L1552) and [attempt checks](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/protocol/command.rs#L1770-L1783) show that fail-fast, attempt exhaustion, or no reconnect policy stops redelivery. |
+| Client-side caching | Pinned [standalone and master-routed Cluster caching](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/docs/CLIENT-SIDE-CACHING.md) manages tracking, invalidations, bounds, metrics, and reconnect fail-closed behavior. | The experimental [`cache-aio`](https://docs.rs/redis/1.7.0/redis/caching/index.html) feature integrates caching with multiplexed, connection-manager, and async Cluster connections. | [`TrackingInterface`](https://docs.rs/fred/10.1.0/fred/interfaces/trait.TrackingInterface.html) exposes RESP3 tracking and invalidation commands; it is not documented as a managed local cache. |
+| Redis Stack and newer families | Pinned [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower-modules/src/lib.rs) covers JSON, Search, TimeSeries, Bloom/Cuckoo, and Vector Sets. | The pinned [1.7 feature definitions](https://github.com/redis-rs/redis-rs/blob/2a29a8fdec37ba5858f7681639b21617e7f824e1/redis/Cargo.toml) include JSON, Bloom, and Vector Sets; Search is marked unfinished. | The versioned [interfaces module](https://docs.rs/fred/10.1.0/fred/interfaces/index.html) documents JSON and Search interfaces. Other families remain unverified here. |
+| Credentials | Pinned [`CredentialProvider`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower/src/credentials.rs) supports reconnect/push rotation; sibling crates provide AWS IAM and Microsoft Entra providers. | The pinned [1.7 feature definitions](https://github.com/redis-rs/redis-rs/blob/2a29a8fdec37ba5858f7681639b21617e7f824e1/redis/Cargo.toml) include token-based authentication and Microsoft Entra support. | Versioned [`Config`](https://docs.rs/fred/10.1.0/fred/types/config/struct.Config.html) exposes a credential provider when its feature is enabled. |
+| Observability | Pinned [production guidance](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/docs/PRODUCTION-TUNING.md) documents stable tracing fields, metrics-facade recording, pool/queue snapshots, and bounded opt-in per-node Cluster labels. | **Unknown / not compared:** no client-wide tracing/metrics contract was verified from the [1.7 API index](https://docs.rs/redis/1.7.0/redis/); application wrappers are outside this comparison. | Pinned [`TracingConfig`](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/types/config.rs#L1187-L1229) is feature-gated; versioned [`MetricsInterface`](https://docs.rs/fred/10.1.0/fred/interfaces/trait.MetricsInterface.html) exposes redelivery, queue, latency, and payload-size measurements. Export to an external metrics backend remains application work. |
+| RESP behavior | Pinned [`redis-tower-protocol`](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/crates/redis-tower-protocol/src/lib.rs) documents RESP2/RESP3 negotiation, push demultiplexing, and explicit rejection of unsupported attributes/streamed aggregates. | RESP2 and RESP3 are supported; URL selection is documented by versioned [`ConnectionInfo`](https://docs.rs/redis/1.7.0/redis/struct.ConnectionInfo.html). | Pinned [`Config::version`](https://github.com/aembke/fred.rs/blob/29d4790e8522a3b0c67531081fc0488585dbc665/src/types/config.rs#L607-L621) defaults to RESP2 and can require RESP3; [`TrackingInterface`](https://docs.rs/fred/10.1.0/fred/interfaces/trait.TrackingInterface.html) requires RESP3 for tracking. |
 
-## redis-tower vs Lettuce, go-redis, StackExchange.Redis, ioredis
+The important typed-API distinction is not "typed versus untyped." All three
+clients provide typed conveniences. redis-tower command values own a specific
+decoder, while redis-rs and Fred also make caller-selected response conversion
+a common path.
 
-These are the most-used clients in the JVM, Go, .NET, and Node ecosystems. The
-comparison is about capability parity across languages, not API shape.
+## Lessons from widely used clients
 
-| Capability | redis-tower (Rust) | Lettuce (Java) | go-redis (Go) | StackExchange.Redis (.NET) | ioredis (Node) |
-|---|---|---|---|---|---|
-| Typed command surface | yes -- [`redis-tower-commands`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-commands/src) | yes | yes | yes | partial |
-| Composable middleware layer | yes (Tower) -- [`command_adapter.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_adapter.rs) | no | partial (hooks) | no | partial (Promise wrappers) |
-| Auto-pipelining | yes -- [`auto_pipeline.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/auto_pipeline.rs) | yes | partial | yes (multiplexed) | yes |
-| Connection pool | yes (fixed/dynamic/lazy, active probing, explicit idle reaping) -- [`pool.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pool.rs) | yes | yes | yes (multiplexed) | yes |
-| Cluster (MOVED/ASK) | yes -- [`redis-tower-cluster`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs) | yes | yes | yes | yes |
-| Sentinel | yes -- [`redis-tower-sentinel`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/connection.rs) | yes | yes | yes | yes |
-| Client-side caching | standalone and master-routed cluster yes -- [`caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/caching.rs), [`cluster caching.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/caching.rs) | yes | partial | no | no |
-| Circuit breaker | yes -- [`circuit_breaker.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/circuit_breaker.rs) | no (external) | no (external) | no (external) | no (external) |
-| Per-command timeout | yes -- [`command_timeout.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/command_timeout.rs) | yes | yes (context) | yes | yes |
-| Tracing / observability | tracing with OTel DB semconv; metrics-facade recorder, pool/queue exporters, and cluster redirect/topology/opt-in bounded node metrics -- [`tracing_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/tracing_layer.rs), [`metrics_layer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/metrics_layer.rs) | partial (Micrometer) | partial (hooks) | partial (events/profiling) | partial (events) |
-| RESP3 protocol | standalone, cluster, and Sentinel, including authenticated setup -- [`codec.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-protocol/src/codec.rs), [`cluster connection.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/connection.rs), [`sentinel discovery.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-sentinel/src/discovery.rs) | yes | yes | partial | yes |
-| TLS (incl. mTLS) | yes -- [`tls.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-core/src/tls.rs) | yes | yes | yes | yes |
-| Pub/sub | standalone plus fixed-node and slot-following Cluster subscriptions -- [`pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/pubsub.rs), [`cluster pubsub.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower-cluster/src/pubsub.rs) | yes | yes | yes | yes |
-| Stream consumer groups (high-level) | yes -- [`consumer.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/consumer.rs) | yes | partial | partial | partial |
-| Transactions (MULTI/EXEC/WATCH) | yes -- [`transaction.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/transaction.rs) | yes | yes | yes | yes |
-| Lua scripting (EVALSHA-first) | yes -- [`script.rs`](https://github.com/joshrotenberg/redis-tower/blob/main/crates/redis-tower/src/script.rs) | yes | yes | yes | yes |
-| Redis Stack modules | yes -- [`redis-tower-modules`](https://github.com/joshrotenberg/redis-tower/tree/main/crates/redis-tower-modules/src) | partial | partial | partial | partial |
-| Pluggable credential provider | reconnect and push rotation across standalone, pool, cluster, and Sentinel; AWS IAM and Entra providers -- [`cloud auth guide`](https://github.com/joshrotenberg/redis-tower/blob/main/docs/CLOUD-AUTH.md) | yes | partial | partial | partial |
+These clients are useful design references, not direct feature-score opponents.
 
-## Two corrections this page enforces
+| Client | Documented contract worth carrying into a review |
+|---|---|
+| Lettuce | Its [execution reliability](https://github.com/redis/lettuce/wiki/Command-Execution-Reliability) documentation treats reconnect replay, duplicates, ordering, and transaction behavior as separate guarantees. A generic "reconnects automatically" claim is insufficient. |
+| go-redis | The pinned [README](https://github.com/redis/go-redis/blob/2fc3ccd4e373e2b38b47a7f0bb55c72a3a64d9f6/README.md) documents automatic pooling, experimental streaming credentials, RESP3 client caching limits, and OpenTelemetry instrumentation. Its experimental auto-pipeline warns that retrying a whole batch can duplicate non-idempotent work. |
+| StackExchange.Redis | [`ConnectionMultiplexer`](https://github.com/StackExchange/StackExchange.Redis/blob/0a92ae43b0f8e80467920115a54f9761cc04ee4c/docs/Basics.md) is designed to be shared and reused; cheap database handles and multiplexing are deliberately different from checking out a socket per request. |
+| ioredis | The pinned [README](https://github.com/redis/ioredis/blob/b59730310716d7e4b3330ee42c140f7acd409444/README.md) documents standalone, Sentinel, and Cluster connections, offline queues, retry behavior, and auto-pipelining. Queueing before connect and replaying after a disconnect are different decisions. |
+| node-redis | Its pinned [FAQ](https://github.com/redis/node-redis/blob/d3eac3d5834cfe32970fb6e7383f044e49ee26ff/docs/FAQ.md) says already-sent commands reject when the socket closes because Redis may have executed them; unsent commands can remain queued for reconnect. That boundary is a useful retry model. |
+| redis-py | The pinned [unified response proposal](https://github.com/redis/redis-py/blob/ba6976bc2b8d5daed034be982c30194770ed1c15/docs/unified_responses.rst) separates wire-protocol shape from the public response contract. Differential tests must normalize client-facing values, not merely compare raw RESP frames. |
 
-These are stated explicitly so the page does not drift back into overclaiming:
+## What this page does not claim
 
-1. **RESP3 is available on standalone, cluster, and Sentinel clients.** Cluster
-   and Sentinel builders preserve an explicit protocol policy across
-   authenticated discovery, node creation, redirects, topology refreshes,
-   failover, and reconnects, with authentication before HELLO negotiation.
-2. **Observability includes tracing and metrics.** redis-tower ships a
-   `TracingLayer` with OpenTelemetry database semantic conventions and a
-   `MetricsRecorder` integration backed by the `metrics` facade. The built-in
-   recorder covers commands, pipelines, pools, cluster redirects, and topology
-   refreshes; pool/queue snapshot exporters and Prometheus/OpenTelemetry
-   examples show complete backend wiring. Per-node cluster labels remain
-   opt-in and bounded to 64 concrete addresses per client plus `_OTHER`, with
-   overflow folded into `_OTHER`.
-3. **Client-side caching covers standalone and master-routed Cluster use.** The
-   cluster client keeps one cache above routing, forces RESP3, and installs a
-   receiver plus `CLIENT TRACKING ... REDIRECT` on every current master. Cache
-   use fails closed with a full clear across receiver/data loss and topology
-   coverage reconfiguration. Slot epochs also reject stale in-flight fills
-   immediately when ownership moves. Replica read preferences remain
-   unsupported until equivalent invalidation coverage can be guaranteed.
+- It does not rank clients. API fit, deployed topology, language ecosystem, and
+  operational familiarity usually matter more than a total capability count.
+- It does not publish performance conclusions. The repository's
+  pinned [benchmark publication protocol](https://github.com/joshrotenberg/redis-tower/blob/186719e97c3b742ef713d4210d26538aebfe4f68/scripts/benchmarks/README.md) defines
+  workloads, client versions and adapters, topology, connection count,
+  timeouts, metadata, and reproducibility requirements. A result is evidence
+  only for the measured environment and scenario.
+- It does not turn undocumented behavior into "no." Unknown behavior stays
+  unknown until a stable upstream source or a reproducible experiment supports
+  a narrower statement.
 
-## Verifying a cell yourself
-
-Each redis-tower link points at the module or test that implements the
-capability. To exercise them:
-
-```bash
-# Unit + doc tests across all features
-cargo test --lib --all-features
-
-# Standalone integration suites (starts its own redis-server)
-cargo test --test '*' --all-features
-
-# Cluster and sentinel suites (single-threaded, gated behind --ignored)
-cargo test -p redis-tower-cluster  --test cluster_integration  -- --ignored
-cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored
-```
-
-See
-[CONTRIBUTING.md](https://github.com/joshrotenberg/redis-tower/blob/main/CONTRIBUTING.md)
-for the full check list.
+When updating this page, pin the source revision, record the check date, link
+the precise upstream contract, and describe reconnect, retry, replay, pooling,
+caching, and response typing independently.
