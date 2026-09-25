@@ -1750,19 +1750,24 @@ mod tests {
     #[cfg(feature = "tls-rustls")]
     #[tokio::test]
     async fn tls_urls_complete_an_ipv6_connection() {
-        let mut backends = vec![(
+        let rustls = (
             "rustls",
             crate::tls::TlsConfig::default_rustls()
                 .danger_accept_invalid_certs(true)
                 .danger_accept_invalid_hostnames(true),
-        )];
+        );
         #[cfg(feature = "tls-native-tls")]
-        backends.push((
-            "native-tls",
-            crate::tls::TlsConfig::default_native_tls()
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true),
-        ));
+        let backends = [
+            rustls,
+            (
+                "native-tls",
+                crate::tls::TlsConfig::default_native_tls()
+                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_hostnames(true),
+            ),
+        ];
+        #[cfg(not(feature = "tls-native-tls"))]
+        let backends = [rustls];
 
         for (backend, tls) in backends {
             for scheme in ["rediss", "valkeys"] {
