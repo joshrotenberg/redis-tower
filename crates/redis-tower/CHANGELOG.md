@@ -37,6 +37,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   must not ship in a `0.1.x` patch release; the `redis-tower-commands`
   requirement must move to 0.2.0 for release.
 
+### Fixed
+
+- defer managed stream-consumer automatic `XACK` until the caller advances
+  past the delivered item, leaving it pending and recoverable if the stream is
+  dropped before that point (#734)
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.2...redis-tower-v0.1.3) - 2026-09-24
 
 ### Fixed

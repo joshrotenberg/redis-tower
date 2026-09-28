@@ -3,6 +3,16 @@
 //! Wraps XREADGROUP into a Rust [`Stream`](futures::Stream) with automatic
 //! acknowledgement and consumer group management.
 //!
+//! # Acknowledgement semantics
+//!
+//! With [`ConsumerConfig::auto_ack`] enabled, an item is acknowledged when the
+//! returned stream is polled again after yielding it. Dropping the stream
+//! before that next poll leaves the item pending so another consumer can
+//! recover it. Advancing the stream is only a delivery acknowledgement; it
+//! cannot prove that arbitrary application-side processing succeeded. Use
+//! `auto_ack: false` and send [`XAck`] explicitly when the application must
+//! decide whether processing was successful.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -58,7 +68,13 @@ pub struct ConsumerConfig {
     pub batch_size: u64,
     /// Block timeout in milliseconds. `None` for non-blocking. Default: `Some(5000)`.
     pub block_ms: Option<u64>,
-    /// Automatically XACK messages after yielding them. Default: true.
+    /// Automatically XACK each message when the stream is polled again after
+    /// yielding it. Default: true.
+    ///
+    /// This acknowledges delivery through the pull stream, not successful
+    /// completion of arbitrary application-side processing. Set this to
+    /// `false` and issue [`XAck`] explicitly for application-controlled
+    /// acknowledgement.
     pub auto_ack: bool,
     /// If set, claim idle messages older than this many ms via XAUTOCLAIM on startup.
     pub claim_idle_ms: Option<u64>,
@@ -82,8 +98,9 @@ impl Default for ConsumerConfig {
 ///
 /// On startup the consumer optionally creates the consumer group, drains
 /// pending entries (id `"0"`), and then enters a loop reading new entries
-/// (id `">"`). When `auto_ack` is enabled each message is acknowledged
-/// immediately after being yielded.
+/// (id `">"`). When `auto_ack` is enabled each message is acknowledged when
+/// the caller polls the stream again after receiving it. Dropping the stream
+/// before that next poll leaves the message pending.
 pub struct StreamConsumer {
     group: CommandArg,
     consumer: CommandArg,
@@ -123,7 +140,8 @@ impl StreamConsumer {
     /// 3. Drains all pending messages (id `"0"`) until none remain.
     /// 4. Enters a loop reading new messages (id `">"`) with the configured
     ///    COUNT and BLOCK settings.
-    /// 5. If `auto_ack` is true, sends XACK for each yielded message.
+    /// 5. If `auto_ack` is true, sends XACK when the caller advances the
+    ///    stream after a yielded message.
     pub fn into_stream(
         self,
         mut conn: RedisConnection,
@@ -169,11 +187,13 @@ impl StreamConsumer {
                                 id: entry.id.clone(),
                                 fields: entry.fields,
                             };
+                            let ack_stream = stream_key.clone();
+                            let ack_id = msg.id.clone();
+                            yield msg;
                             if config.auto_ack {
-                                let ack = XAck::new(stream_key, &group, &msg.id);
+                                let ack = XAck::new(&ack_stream, &group, &ack_id);
                                 conn.execute(ack).await?;
                             }
-                            yield msg;
                         }
 
                         // "0-0" means we have scanned everything.
@@ -199,11 +219,13 @@ impl StreamConsumer {
                             id: entry.id.clone(),
                             fields: entry.fields,
                         };
+                        let ack_stream = stream_key.clone();
+                        let ack_id = msg.id.clone();
+                        yield msg;
                         if config.auto_ack {
-                            let ack = XAck::new(&stream_key, &group, &msg.id);
+                            let ack = XAck::new(&ack_stream, &group, &ack_id);
                             conn.execute(ack).await?;
                         }
-                        yield msg;
                     }
                 }
 
@@ -231,11 +253,13 @@ impl StreamConsumer {
                             id: entry.id.clone(),
                             fields: entry.fields,
                         };
+                        let ack_stream = stream_key.clone();
+                        let ack_id = msg.id.clone();
+                        yield msg;
                         if config.auto_ack {
-                            let ack = XAck::new(&stream_key, &group, &msg.id);
+                            let ack = XAck::new(&ack_stream, &group, &ack_id);
                             conn.execute(ack).await?;
                         }
-                        yield msg;
                     }
                 }
             }

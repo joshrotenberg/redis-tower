@@ -1,7 +1,329 @@
 mod common;
 
 use common::conn;
+use redis_tower::RedisError;
 use redis_tower::commands::*;
+use redis_tower::consumer::{ConsumerConfig, StreamConsumer};
+use std::time::Duration;
+use tokio_stream::StreamExt;
+
+// ---------------------------------------------------------------------------
+// Managed StreamConsumer acknowledgement ordering (issue #734)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn stream_consumer_drop_before_advance_leaves_delivery_pending() {
+    let mut control = conn().await;
+    let key = "test:streams:consumer:drop_before_advance";
+    let group = "managed";
+    let consumer_name = "worker-1";
+
+    control.execute(Del::new(key)).await.unwrap();
+    let id = control
+        .execute(XAdd::new(key).field("job", "one"))
+        .await
+        .unwrap();
+
+    let consumer = StreamConsumer::new(group, consumer_name, [key]).config(ConsumerConfig {
+        batch_size: 1,
+        block_ms: Some(5_000),
+        auto_ack: true,
+        claim_idle_ms: None,
+        create_group: true,
+    });
+    let mut deliveries = Box::pin(consumer.into_stream(conn().await));
+
+    let delivered = tokio::time::timeout(Duration::from_secs(2), deliveries.next())
+        .await
+        .expect("managed consumer should produce the seeded entry")
+        .expect("managed consumer should remain open")
+        .expect("seeded entry should be delivered successfully");
+    assert_eq!(delivered.id, id);
+
+    let pending = control
+        .execute(XPendingSummary::new(key, group))
+        .await
+        .unwrap();
+    assert_eq!(pending.count, 1, "delivery must remain pending after yield");
+
+    drop(deliveries);
+
+    let pending_after_drop = control
+        .execute(XPendingSummary::new(key, group))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_after_drop.count, 1,
+        "dropping before the next poll must not acknowledge the delivery"
+    );
+
+    control
+        .execute(XGroupDestroy::new(key, group))
+        .await
+        .unwrap();
+    control.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_consumer_advance_acks_only_the_previous_delivery() {
+    let mut control = conn().await;
+    let key = "test:streams:consumer:ack_on_advance";
+    let group = "managed";
+
+    control.execute(Del::new(key)).await.unwrap();
+    let id1 = control
+        .execute(XAdd::new(key).field("job", "one"))
+        .await
+        .unwrap();
+    let id2 = control
+        .execute(XAdd::new(key).field("job", "two"))
+        .await
+        .unwrap();
+    let id3 = control
+        .execute(XAdd::new(key).field("job", "three"))
+        .await
+        .unwrap();
+
+    let consumer = StreamConsumer::new(group, "worker-1", [key]).config(ConsumerConfig {
+        batch_size: 1,
+        block_ms: Some(5_000),
+        auto_ack: true,
+        claim_idle_ms: None,
+        create_group: true,
+    });
+    let mut deliveries = Box::pin(consumer.into_stream(conn().await));
+
+    let first = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(first.id, id1);
+    assert_eq!(
+        control
+            .execute(XPendingSummary::new(key, group))
+            .await
+            .unwrap()
+            .count,
+        1
+    );
+
+    let second = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(second.id, id2);
+    let pending_after_second = control
+        .execute(XPendingRange::new(key, group, "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_after_second
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![id2.as_str()],
+        "advancing to the second item should ACK only the first"
+    );
+
+    let third = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(third.id, id3);
+    let pending_after_third = control
+        .execute(XPendingRange::new(key, group, "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_after_third
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![id3.as_str()],
+        "advancing to the third item should ACK the second, not the third"
+    );
+
+    assert_eq!(
+        control.execute(XAck::new(key, group, &id1)).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        control.execute(XAck::new(key, group, &id2)).await.unwrap(),
+        0
+    );
+
+    drop(deliveries);
+    control
+        .execute(XGroupDestroy::new(key, group))
+        .await
+        .unwrap();
+    control.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_consumer_surfaces_deferred_ack_failure_before_another_item() {
+    let mut control = conn().await;
+    let key = "test:streams:consumer:ack_failure";
+    let group = "managed";
+
+    control.execute(Del::new(key)).await.unwrap();
+    control
+        .execute(XAdd::new(key).field("job", "one"))
+        .await
+        .unwrap();
+
+    let consumer = StreamConsumer::new(group, "worker-1", [key]).config(ConsumerConfig {
+        batch_size: 1,
+        block_ms: Some(5_000),
+        auto_ack: true,
+        claim_idle_ms: None,
+        create_group: true,
+    });
+    let mut deliveries = Box::pin(consumer.into_stream(conn().await));
+
+    deliveries.next().await.unwrap().unwrap();
+    control
+        .execute(XGroupDestroy::new(key, group))
+        .await
+        .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_secs(2), deliveries.next())
+        .await
+        .expect("deferred XACK should fail without blocking")
+        .expect("the acknowledgement failure should be yielded")
+        .expect_err("destroying the group should make deferred XACK fail");
+    assert!(
+        matches!(error, RedisError::Redis(ref message) if message.contains("NOGROUP")),
+        "expected the deferred XACK NOGROUP error, got {error:?}"
+    );
+
+    control.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_consumer_pending_recovery_is_acked_only_on_advance() {
+    let mut control = conn().await;
+    let key = "test:streams:consumer:pending_recovery";
+    let group = "managed";
+    let consumer_name = "worker-1";
+
+    control.execute(Del::new(key)).await.unwrap();
+    let recovered_id = control
+        .execute(XAdd::new(key).field("job", "recover"))
+        .await
+        .unwrap();
+    control
+        .execute(XGroupCreate::new(key, group, "0"))
+        .await
+        .unwrap();
+    control
+        .execute(XReadGroup::new(group, consumer_name, key).count(1))
+        .await
+        .unwrap();
+
+    let consumer = StreamConsumer::new(group, consumer_name, [key]).config(ConsumerConfig {
+        batch_size: 1,
+        block_ms: Some(5_000),
+        auto_ack: true,
+        claim_idle_ms: None,
+        create_group: false,
+    });
+    let mut deliveries = Box::pin(consumer.into_stream(conn().await));
+
+    let recovered = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(recovered.id, recovered_id);
+    assert_eq!(
+        control
+            .execute(XPendingSummary::new(key, group))
+            .await
+            .unwrap()
+            .count,
+        1,
+        "a recovered pending item must remain pending while yielded"
+    );
+
+    let next_id = control
+        .execute(XAdd::new(key).field("job", "next"))
+        .await
+        .unwrap();
+    let next = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(next.id, next_id);
+    let pending = control
+        .execute(XPendingRange::new(key, group, "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![next_id.as_str()],
+        "advancing should ACK the recovered item before yielding the next one"
+    );
+
+    drop(deliveries);
+    control
+        .execute(XGroupDestroy::new(key, group))
+        .await
+        .unwrap();
+    control.execute(Del::new(key)).await.unwrap();
+}
+
+#[tokio::test]
+async fn stream_consumer_claimed_delivery_is_acked_only_on_advance() {
+    let mut control = conn().await;
+    let key = "test:streams:consumer:claimed_recovery";
+    let group = "managed";
+
+    control.execute(Del::new(key)).await.unwrap();
+    let claimed_id = control
+        .execute(XAdd::new(key).field("job", "claim"))
+        .await
+        .unwrap();
+    control
+        .execute(XGroupCreate::new(key, group, "0"))
+        .await
+        .unwrap();
+    control
+        .execute(XReadGroup::new(group, "abandoned", key).count(1))
+        .await
+        .unwrap();
+
+    let consumer = StreamConsumer::new(group, "worker-1", [key]).config(ConsumerConfig {
+        batch_size: 1,
+        block_ms: Some(5_000),
+        auto_ack: true,
+        claim_idle_ms: Some(0),
+        create_group: false,
+    });
+    let mut deliveries = Box::pin(consumer.into_stream(conn().await));
+
+    let claimed = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(claimed.id, claimed_id);
+    let pending = control
+        .execute(XPendingRange::new(key, group, "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, claimed_id);
+    assert_eq!(pending[0].consumer, "worker-1");
+
+    let next_id = control
+        .execute(XAdd::new(key).field("job", "next"))
+        .await
+        .unwrap();
+    let next = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(next.id, next_id);
+    let pending_after_advance = control
+        .execute(XPendingRange::new(key, group, "-", "+", 10))
+        .await
+        .unwrap();
+    assert_eq!(
+        pending_after_advance
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![next_id.as_str()]
+    );
+
+    drop(deliveries);
+    control
+        .execute(XGroupDestroy::new(key, group))
+        .await
+        .unwrap();
+    control.execute(Del::new(key)).await.unwrap();
+}
 
 // ---------------------------------------------------------------------------
 // Stream consumer group integration tests (issue #350)
