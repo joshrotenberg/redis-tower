@@ -274,7 +274,36 @@ Nine workflows. Four fire on every PR and contribute **22 required checks**:
 Five more jobs appear on the PR as `SKIPPED` by design -- the four mutation jobs
 and CI wall-clock and flake budget are gated on
 `github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'`.
-They are not gaps.
+They are not gaps. Codec Benchmark First Pass also appears on every PR and Codec
+Benchmark Confirmation appears as `SKIPPED` unless the first pass measures a
+regression; neither is a required check (see below).
+
+### The codec benchmark gate
+
+The required Codec Benchmark Regression check is an aggregator over two worker
+jobs:
+
+1. **Codec Benchmark First Pass** benchmarks the base commit, then the head
+   commit, and compares them with `scripts/check_criterion_regressions.py`
+   (`+10%` with a non-overlapping confidence interval). A regression does not
+   fail this job: it sets the `needs_confirmation` output and uploads the saved
+   Criterion baselines as an artifact.
+2. **Codec Benchmark Confirmation** runs only when that output is `true`. It
+   runs on a fresh runner, restores the first-pass baselines, re-benchmarks in
+   the reverse order (head first, then base), and fails only when the same
+   benchmark regresses in both passes.
+3. **Codec Benchmark Regression** (`needs` both, `if: always()`) runs
+   `scripts/decide_codec_benchmark_gate.py`. It passes only when the first pass
+   succeeded and either no confirmation was needed or the confirmation
+   succeeded. A missing output, a cancelled worker, or a confirmation that was
+   needed but skipped fails closed.
+
+The confirmation runs on a separate runner because reversing the order within a
+single job controls for drift across that job but not for a skew that lasts as
+long as the runner does. Issue #692 recorded a `+19.43%` regression, endorsed at
+`+19.59%` by a same-runner reversal, on a pull request whose diff contained no
+code. The threshold is uniform across benchmarks; per-benchmark tuning waits on
+retained multi-run evidence (#710).
 
 The remaining workflows do not run on PRs: `docs.yml` (mdBook build plus GitHub
 Pages deploy, `push: main` only), `nightly.yml`, `nightly-modules.yml`, and

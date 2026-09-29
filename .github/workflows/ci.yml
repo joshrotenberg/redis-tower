@@ -97,6 +97,11 @@ jobs:
       - name: Test CI workflow contract
         run: python3 scripts/test_ci_workflow.py
 
+      - name: Test benchmark regression gate
+        run: |
+          python3 scripts/test_check_criterion_regressions.py
+          python3 scripts/test_decide_codec_benchmark_gate.py
+
       - name: Test coverage generator
         run: python3 scripts/test_generate_command_coverage.py
 
@@ -186,10 +191,21 @@ jobs:
           path: fuzz/artifacts
           if-no-files-found: ignore
 
-  bench-regression:
-    name: Codec Benchmark Regression
+  # The codec benchmark gate is three jobs. The first pass benchmarks the base
+  # and head commits on one runner. A regression there does not fail anything
+  # yet: it is re-measured by the confirmation job, which runs on a fresh
+  # runner in the reverse order. Reversing within a single job controls for
+  # drift across that job but not for a skew that lasts as long as the runner
+  # does; issue #692 recorded a +19% regression, endorsed by a same-runner
+  # reversal, on a pull request whose diff contained no code. The final
+  # aggregator carries the required check name and passes only when no
+  # confirmation was needed or the separate-runner confirmation passed.
+  bench-regression-first-pass:
+    name: Codec Benchmark First Pass
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    outputs:
+      needs_confirmation: ${{ steps.compare.outputs.needs_confirmation }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -237,15 +253,68 @@ jobs:
           set -e
           if [[ "$status" -eq 1 ]]; then
             echo "needs_confirmation=true" >> "$GITHUB_OUTPUT"
-            echo "Initial regression requires a reversed-order confirmation run."
+            echo "::notice::Unconfirmed regression. Codec Benchmark Confirmation re-measures it on a separate runner."
           elif [[ "$status" -eq 0 ]]; then
             echo "needs_confirmation=false" >> "$GITHUB_OUTPUT"
           else
             exit "$status"
           fi
 
-      - name: Confirm benchmark pull request first
+      - name: Package baselines for the confirmation job
         if: steps.compare.outputs.needs_confirmation == 'true'
+        run: tar -czf criterion-baselines.tar.gz -C target --exclude=report criterion
+
+      - name: Upload baselines for the confirmation job
+        if: steps.compare.outputs.needs_confirmation == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-baselines-${{ github.event.pull_request.number }}
+          path: criterion-baselines.tar.gz
+          if-no-files-found: error
+
+      - name: Upload comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-${{ github.event.pull_request.number }}
+          path: benchmark-comparison.txt
+          if-no-files-found: ignore
+
+  bench-regression-confirm:
+    name: Codec Benchmark Confirmation
+    needs: bench-regression-first-pass
+    if: needs.bench-regression-first-pass.outputs.needs_confirmation == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install critcmp
+        uses: taiki-e/install-action@v2
+        with:
+          tool: critcmp
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codec-benchmark
+          save-if: false
+
+      - name: Download first-pass baselines
+        uses: actions/download-artifact@v4
+        with:
+          name: codec-benchmark-baselines-${{ github.event.pull_request.number }}
+
+      - name: Restore first-pass baselines
+        run: |
+          mkdir -p target
+          tar -xzf criterion-baselines.tar.gz -C target
+
+      - name: Confirm benchmark pull request first
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
@@ -255,7 +324,6 @@ jobs:
             --save-baseline candidate-confirm
 
       - name: Confirm benchmark main second
-        if: steps.compare.outputs.needs_confirmation == 'true'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -265,12 +333,12 @@ jobs:
             --save-baseline main-confirm
 
       - name: Compare confirmation results
-        if: steps.compare.outputs.needs_confirmation == 'true'
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git checkout --detach "$CANDIDATE_SHA"
-          printf '\nReversed-order confirmation:\n' | tee -a benchmark-comparison.txt
+          critcmp main candidate --list | tee benchmark-comparison.txt
+          printf '\nReversed-order confirmation (separate runner):\n' | tee -a benchmark-comparison.txt
           critcmp main-confirm candidate-confirm --list | tee -a benchmark-comparison.txt
           python3 scripts/check_criterion_regressions.py \
             --baseline main --candidate candidate --threshold 10 \
@@ -281,9 +349,24 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: codec-benchmark-${{ github.event.pull_request.number }}
+          name: codec-benchmark-confirmation-${{ github.event.pull_request.number }}
           path: benchmark-comparison.txt
           if-no-files-found: ignore
+
+  bench-regression:
+    name: Codec Benchmark Regression
+    needs: [bench-regression-first-pass, bench-regression-confirm]
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decide the codec benchmark gate
+        env:
+          FIRST_PASS: ${{ needs.bench-regression-first-pass.result }}
+          NEEDS_CONFIRMATION: ${{ needs.bench-regression-first-pass.outputs.needs_confirmation }}
+          CONFIRMATION: ${{ needs.bench-regression-confirm.result }}
+        run: python3 scripts/decide_codec_benchmark_gate.py
 
   test-unit:
     name: Unit Tests
