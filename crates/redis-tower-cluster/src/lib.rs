@@ -20,7 +20,7 @@
 //! # }
 //! ```
 //!
-//! # Which client to use
+//! # Replayable connection setup
 //!
 //! Configure persistent logical identity with either connection builder's
 //! `.client_name("redis-mcp")`, or `.connection_setup(policy)` for a
@@ -28,6 +28,25 @@
 //! connected masters/replicas, redirect/topology-created sockets, dedicated
 //! node connections, and reconnects. A one-time `CLIENT SETNAME` on a borrowed
 //! socket is not replayed. See the policy's ordering and fail-closed contract.
+//!
+//! ```no_run
+//! # async fn example() -> Result<(), redis_tower::RedisError> {
+//! use redis_tower::{ConnectionConfig, ResilientRedisClient};
+//! use redis_tower_cluster::MultiplexedClusterClient;
+//!
+//! let standalone = ResilientRedisClient::connect_url_with_connection_config(
+//!     "redis://127.0.0.1:6379/0",
+//!     ConnectionConfig::new().with_client_name("redis-mcp"),
+//! ).await?;
+//! let cluster = MultiplexedClusterClient::builder("127.0.0.1:7000")
+//!     .client_name("redis-mcp")
+//!     .connect().await?;
+//! # let _ = (standalone, cluster);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Which client to use
 //!
 //! | You need... | Use |
 //! |---|---|

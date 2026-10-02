@@ -415,7 +415,7 @@ blocking caller-side readiness wait.
 Configure logical client identity in `ConnectionConfig`, not with a one-time
 `CLIENT SETNAME` on a borrowed connection:
 
-```rust,no_run
+```rust,ignore
 # async fn example() -> Result<(), redis_tower::RedisError> {
 use redis_tower::{ConnectionConfig, ResilientRedisClient};
 use redis_tower_cluster::MultiplexedClusterClient;
