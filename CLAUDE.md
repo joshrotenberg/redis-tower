@@ -291,7 +291,9 @@ jobs:
 2. **Codec Benchmark Confirmation** runs only when that output is `true`. It
    runs on a fresh runner, restores the first-pass baselines, re-benchmarks in
    the reverse order (head first, then base), and fails only when the same
-   benchmark regresses in both passes.
+   benchmark regresses in both passes or confirmation evidence is incomplete.
+   Every initially regressed benchmark must be measured in both confirmation
+   baselines; missing measurements are an error, not a cleared regression.
 3. **Codec Benchmark Regression** (`needs` both, `if: always()`) runs
    `scripts/decide_codec_benchmark_gate.py`. It passes only when the first pass
    succeeded and either no confirmation was needed or the confirmation

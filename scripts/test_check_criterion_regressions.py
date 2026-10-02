@@ -1,4 +1,6 @@
 import json
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 import tempfile
 import unittest
 from pathlib import Path
@@ -121,6 +123,33 @@ class CriterionRegressionTests(unittest.TestCase):
                 ),
                 1,
             )
+
+    def test_missing_initial_regression_in_confirmation_fails_closed(self) -> None:
+        for missing in (
+            ("main-confirm",),
+            ("candidate-confirm",),
+            ("main-confirm", "candidate-confirm"),
+        ):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                # Another clean benchmark must remain comparable: otherwise
+                # empty-baseline/no-common-benchmark checks mask this gap.
+                for saved in ("main", "candidate", "main-confirm", "candidate-confirm"):
+                    self._write_estimate(root, saved, 100.0, 98.0, 102.0, "codec/encode")
+                self._write_estimate(root, "main", 100.0, 98.0, 102.0)
+                self._write_estimate(root, "candidate", 120.0, 117.0, 123.0)
+                for saved in ("main-confirm", "candidate-confirm"):
+                    if saved not in missing:
+                        self._write_estimate(root, saved, 100.0, 98.0, 102.0)
+                errors = StringIO()
+                with redirect_stdout(StringIO()), redirect_stderr(errors):
+                    status = main([
+                        "--criterion-dir", str(root),
+                        "--confirmation-baseline", "main-confirm",
+                        "--confirmation-candidate", "candidate-confirm",
+                    ])
+                self.assertEqual(status, 2, "missing evidence must not clear a regression")
+                self.assertIn("codec/decode", errors.getvalue())
 
     @staticmethod
     def _write_estimate(
