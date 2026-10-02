@@ -24,6 +24,11 @@
 //! [`CredentialConnectionFactory`](crate::credentials::CredentialConnectionFactory)
 //! with the same protocol setting.
 //!
+//! For reconnect-safe logical identity, add
+//! `ConnectionConfig::new().with_client_name("redis-mcp")` to the factory.
+//! [`crate::ConnectionSetup`] defines the replay-safe settings and fail-closed
+//! lifecycle contract; one-time commands on borrowed sockets are not retained.
+//!
 //! # Example
 //!
 //! ```no_run
@@ -744,6 +749,11 @@ pub(crate) enum ConnState {
 /// reconnect via their `with_connection_config` builders.
 ///
 /// # Custom Setup on Reconnect
+///
+/// For logical identity and safe connection-local flags, use
+/// [`ConnectionConfig::with_client_name`] or [`ConnectionConfig::with_setup`].
+/// Built-in factories replay that policy after authentication, URL database
+/// selection, and protocol negotiation, before exposing each replacement.
 ///
 /// Server-side state such as `CLIENT TRACKING`, pub/sub subscriptions, or
 /// other session-level configuration is **not** automatically replayed on

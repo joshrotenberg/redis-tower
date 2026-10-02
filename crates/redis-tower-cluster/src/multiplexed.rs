@@ -537,6 +537,20 @@ pub struct MultiplexedClusterClientBuilder {
 }
 
 impl MultiplexedClusterClientBuilder {
+    /// Replay safe settings on every discovery, worker, and replacement socket.
+    ///
+    /// See [`redis_tower_core::ConnectionSetup`] for the lifecycle contract.
+    pub fn connection_setup(mut self, setup: redis_tower_core::ConnectionSetup) -> Self {
+        self.connection_config = self.connection_config.with_setup(setup);
+        self
+    }
+
+    /// Name every physical connection, including redirect and replacement nodes.
+    pub fn client_name(mut self, name: impl AsRef<[u8]>) -> Self {
+        self.connection_config = self.connection_config.with_client_name(name);
+        self
+    }
+
     /// Set the host override for Docker/proxy environments.
     pub fn host_override(mut self, host: impl Into<String>) -> Self {
         self.host_override = Some(host.into());
@@ -1858,7 +1872,7 @@ impl MultiplexedClusterClient {
     ///
     /// Use this for node-local diagnostics, blocking operations, or a complete
     /// stateful exchange such as WATCH/MULTI/EXEC. The connection uses the
-    /// client's credentials, TLS, protocol, RESP limits, and configured connect
+    /// client's credentials, TLS, protocol, RESP limits, connection-setup policy, and configured connect
     /// timeout. The address must come from the current topology, including any
     /// configured address mapping; unknown addresses are rejected before I/O.
     ///
@@ -2649,7 +2663,8 @@ async fn build_node_service(
 ///    and send AUTH. Fetching on every reconnect means credential rotation
 ///    flows through automatically.
 /// 3. Negotiate the configured RESP protocol.
-/// 4. If `readonly` is set (replica node), send READONLY so reads to this
+/// 4. Replay the configured connection-local setup, checking every reply.
+/// 5. If `readonly` is set (replica node), send READONLY so reads to this
 ///    connection succeed.
 pub(crate) struct NodeConnectionFactory {
     addr: String,
@@ -2980,7 +2995,9 @@ mod parallel_connect_tests {
             addr,
             readonly: false,
             connector: ClusterNodeConnector::new(
-                ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+                ConnectionConfig::new()
+                    .with_protocol(ProtocolVersion::Resp3)
+                    .with_client_name("replayed-name"),
                 Some(Arc::new(provider)),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
                 None,
@@ -3014,6 +3031,19 @@ mod parallel_connect_tests {
                 let hello = command_parts(framed.next().await.unwrap().unwrap());
                 assert_eq!(hello[0].as_ref(), b"HELLO");
                 assert_eq!(hello[1].as_ref(), b"3");
+                framed
+                    .send(Frame::SimpleString(b"OK"[..].into()))
+                    .await
+                    .unwrap();
+                let setup = command_parts(framed.next().await.unwrap().unwrap());
+                assert_eq!(
+                    setup,
+                    vec![
+                        bytes::Bytes::from_static(b"CLIENT"),
+                        bytes::Bytes::from_static(b"SETNAME"),
+                        bytes::Bytes::from_static(b"replayed-name")
+                    ]
+                );
                 framed
                     .send(Frame::SimpleString(b"OK"[..].into()))
                     .await

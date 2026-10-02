@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sync-v0.1.2...redis-tower-sync-v0.1.3) - 2026-10-01
+
+### Added
+
+- *(conformance)* add versioned capability ledger ([#730](https://github.com/joshrotenberg/redis-tower/pull/730))
+- *(commands)* extend CommandArg across remaining typed families ([#726](https://github.com/joshrotenberg/redis-tower/pull/726))
+
+### Fixed
+
+- *(core)* support authenticated Unix Redis URLs ([#719](https://github.com/joshrotenberg/redis-tower/pull/719))
+
+### Other
+
+- coordinate refreshing credentials across sessions ([#732](https://github.com/joshrotenberg/redis-tower/pull/732))
+- add command guides and lifecycle contracts ([#728](https://github.com/joshrotenberg/redis-tower/pull/728))
+- refresh release state, comparisons, and migration guidance ([#727](https://github.com/joshrotenberg/redis-tower/pull/727))
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sync-v0.1.1...redis-tower-sync-v0.1.2) - 2026-09-24
 
 ### Other

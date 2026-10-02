@@ -7,13 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-modules-v0.1.2...redis-tower-modules-v0.1.3) - 2026-10-01
+
 ### Changed
 
 - run module behavior and redis-rs differential assertions in a path-filtered
   pull-request gate after verifying the actual server version and commands
-- **Breaking (next minor, 0.2.0):** module keys, items, labels, suggestion
+- **Pre-1.0 source compatibility:** module keys, items, labels, suggestion
   strings/payloads, and Vector Set elements now use `CommandArg`/`Bytes`
-  end-to-end instead of requiring or lossily producing UTF-8 `String` values
+  end-to-end instead of requiring or lossily producing UTF-8 `String` values;
+  downstreams naming these concrete types must update when adopting 0.1.3
 
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-modules-v0.1.1...redis-tower-modules-v0.1.2) - 2026-09-24
 
