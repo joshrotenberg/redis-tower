@@ -1374,6 +1374,10 @@ class RunnerContractTests(unittest.TestCase):
         self.assertIn("cargo test -p standalone-bench --bin standalone-bench", workflow)
         self.assertIn("cargo test -p cluster-bench --bin cluster-bench", workflow)
         self.assertIn("cargo test -p soak-bench --lib --bin soak-bench", workflow)
+        self.assertIn(
+            "cargo test -p standalone-bench -p cluster-bench live_get_payload_integrity -- --ignored --test-threads=1",
+            workflow,
+        )
 
 
 if __name__ == "__main__":

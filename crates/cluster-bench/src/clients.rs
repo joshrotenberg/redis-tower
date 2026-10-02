@@ -286,7 +286,7 @@ async fn tower_loop(client: TowerClusterClient, context: WorkerContext) -> Worke
                 .is_ok(),
             Workload::Get => matches!(
                 client.execute(TGet::new(key)).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_ref() == context.payload.as_bytes()
             ),
         };
         record_outcome(&mut histogram, &context, started, succeeded);
@@ -308,7 +308,7 @@ async fn tower_mux_loop(client: MultiplexedClusterClient, context: WorkerContext
                 .is_ok(),
             Workload::Get => matches!(
                 client.execute(TGet::new(&key)).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_ref() == context.payload.as_bytes()
             ),
         };
         record_outcome(&mut histogram, &context, started, succeeded);
@@ -335,7 +335,7 @@ async fn redis_rs_async_loop(
                 .is_ok(),
             Workload::Get => matches!(
                 client.get::<_, Option<Vec<u8>>>(&key).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_slice() == context.payload.as_bytes()
             ),
         };
         record_outcome(&mut histogram, &context, started, succeeded);
@@ -370,7 +370,7 @@ fn redis_rs_sync_loop(
                 .is_ok(),
             Workload::Get => matches!(
                 connection.get::<_, Option<Vec<u8>>>(&key),
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_slice() == context.payload.as_bytes()
             ),
         };
         record_outcome(&mut histogram, &context, started, succeeded);
@@ -392,7 +392,7 @@ async fn fred_loop(client: fred::clients::Client, context: WorkerContext) -> Wor
                 .is_ok(),
             Workload::Get => matches!(
                 client.get::<Option<String>, _>(&key).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_bytes() == context.payload.as_bytes()
             ),
         };
         record_outcome(&mut histogram, &context, started, succeeded);
@@ -477,33 +477,105 @@ pub async fn prepopulate_and_verify_replicas(
         }
     }
 
+    verify_replica_reads(fixture, payload).await
+}
+
+/// Verify without reseeding, so tests can distinguish freshness from integrity.
+async fn verify_replica_reads(fixture: &ClusterFixture, payload: &str) -> Result<(), String> {
     let replica_client = MultiplexedClusterClient::builder(fixture.seed_addr())
         .read_preference(ReadPreference::Replica)
         .connect()
         .await
         .map_err(|error| format!("replica verification connect failed: {error}"))?;
-    for sequence in 0..1024u64 {
-        let key = next_key(sequence);
-        match replica_client.execute(TGet::new(&key)).await {
-            Ok(Some(value)) if value.len() == payload.len() => {}
-            Ok(Some(value)) => {
-                return Err(format!(
-                    "replica GET {key} returned {} bytes, expected {}",
-                    value.len(),
-                    payload.len()
-                ));
+    let result = async {
+        for sequence in 0..1024u64 {
+            let key = next_key(sequence);
+            match replica_client.execute(TGet::new(&key)).await {
+                Ok(Some(value)) if value.as_ref() == payload.as_bytes() => {}
+                Ok(Some(value)) => {
+                    return Err(format!(
+                        "replica GET {key} payload mismatch ({} bytes, expected {})",
+                        value.len(),
+                        payload.len()
+                    ));
+                }
+                Ok(None) => return Err(format!("replica GET {key} missed")),
+                Err(error) => return Err(format!("replica GET {key} failed: {error}")),
             }
-            Ok(None) => return Err(format!("replica GET {key} missed")),
-            Err(error) => return Err(format!("replica GET {key} failed: {error}")),
         }
+        Ok(())
     }
+    .await;
     replica_client.shutdown().await;
-    Ok(())
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_get_payload_integrity_all_adapters() {
+        use crate::runner::{BenchConfig, run};
+        use std::time::Duration;
+
+        let fixture = ClusterFixture::start().await.unwrap();
+        let seed_urls = fixture
+            .node_addrs()
+            .into_iter()
+            .map(|addr| format!("redis://{addr}/"))
+            .collect::<Vec<_>>();
+        let expected = "x".repeat(64);
+        let corrupt = format!("{}y", "x".repeat(63));
+        let mut failures = Vec::new();
+        for (payload, valid) in [(&corrupt, false), (&expected, true)] {
+            // WAIT on each slot owner keeps strict replica reads deterministic.
+            prepopulate_and_verify_replicas(&fixture, payload)
+                .await
+                .unwrap();
+            if !valid {
+                let error = verify_replica_reads(&fixture, &expected).await.unwrap_err();
+                assert!(error.contains("payload mismatch"), "{error}");
+            }
+            for kind in ClientKind::THROUGHPUT_DEFAULTS
+                .into_iter()
+                .chain([ClientKind::RedisTowerMuxReplica])
+            {
+                let client = Client::connect(kind, &fixture.seed_addr(), &seed_urls)
+                    .await
+                    .unwrap();
+                let report = run(
+                    client,
+                    BenchConfig {
+                        duration: Duration::from_millis(250),
+                        warmup: Duration::ZERO,
+                        concurrency: 1,
+                        workload: Workload::Get,
+                        payload_bytes: expected.len(),
+                    },
+                )
+                .await
+                .unwrap();
+                let accounted = if valid {
+                    report.errors == 0 && report.total_commands > 0 && report.p50_us > 0.0
+                } else {
+                    report.errors > 0
+                        && report.total_commands == 0
+                        && report.commands_per_sec == 0.0
+                        && report.p50_us == 0.0
+                        && report.p90_us == 0.0
+                        && report.p99_us == 0.0
+                        && report.p999_us == 0.0
+                        && report.max_us == 0.0
+                };
+                if !accounted {
+                    failures.push(format!("{} valid={valid}: {report:?}", kind.as_str()));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
 
     #[test]
     fn client_aliases_parse() {
