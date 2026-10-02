@@ -22,6 +22,9 @@ env:
   BENCH_RUNS: "3"
   BENCH_CONCURRENCY: "1,32,128"
   BENCH_PAYLOAD_SIZES: "64,1024,16384"
+  # Pin the existing pipeline defaults for measurement and validation alike.
+  BENCH_PIPELINE_CONCURRENCY: "1"
+  BENCH_PIPELINE_COMMANDS: "100"
 
 jobs:
   comparison:
@@ -86,6 +89,12 @@ jobs:
               > benchmark-results/cluster-bench-replica.json \
               2> benchmark-results/cluster-bench-replica.log
           fi
+          python3 scripts/benchmarks/validate_weekly_results.py \
+            --result-dir benchmark-results --package ${{ matrix.package }} \
+            --payload-sizes "$BENCH_PAYLOAD_SIZES" --concurrency "$BENCH_CONCURRENCY" \
+            --runs "$BENCH_RUNS" --secs "$BENCH_SECS" \
+            --pipeline-concurrency "$BENCH_PIPELINE_CONCURRENCY" \
+            --pipeline-commands "$BENCH_PIPELINE_COMMANDS"
 
       - name: Upload benchmark results
         if: always()

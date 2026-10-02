@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import copy
 import hashlib
 import importlib.util
@@ -36,6 +37,7 @@ sanitize_metadata = load_module("sanitize_metadata")
 artifact_manifest = load_module("artifact_manifest")
 check_disk_budget = load_module("check_disk_budget")
 execution_fingerprint = load_module("execution_fingerprint")
+validate_weekly_results = load_module("validate_weekly_results")
 
 
 def record(
@@ -1287,8 +1289,152 @@ class ManifestTests(unittest.TestCase):
             )
 
 
+def weekly_record(client, workload, payload, concurrency, *, commands_per_batch=1):
+    row = record(client, workload, payload, concurrency, commands_per_batch=commands_per_batch)
+    for sample in row["samples"]:
+        sample["elapsed_secs"] *= 0.3
+        for field in ("batches_per_sec", "commands_per_sec"):
+            sample[field] /= 0.3
+    for field in ("batches_per_sec_mean", "batches_per_sec_stddev", "commands_per_sec_mean",
+                  "commands_per_sec_stddev", "ops_per_sec_mean", "ops_per_sec_stddev"):
+        row[field] /= 0.3
+    if client == "redis-tower-mux-replica":
+        row["client"] = "RedisTowerMuxReplica"
+    return row
+
+
+def weekly_fixture(package, *, replica=False):
+    clients = ("redis-tower-mux", "redis-tower-mux-replica") if replica else (
+        render_results.STANDALONE_CLIENTS if package == "standalone-bench"
+        else render_results.CLUSTER_CLIENTS)
+    rows = [weekly_record(client, workload, payload, concurrency)
+        for client in clients for workload in (("Get",) if replica else ("Set", "Get"))
+        for payload in (64, 1024, 16384) for concurrency in (1, 32, 128)]
+    if package == "standalone-bench":
+        rows += [weekly_record(client, "Pipeline", payload, 1, commands_per_batch=100)
+            for client in clients for payload in (64, 1024, 16384)]
+    return rows
+
+
+class WeeklyResultValidationTests(unittest.TestCase):
+    def validate(self, root, package):
+        return validate_weekly_results.validate_weekly(
+            root, package, payloads=(64, 1024, 16384), concurrencies=(1, 32, 128),
+            runs=3, measurement_secs=3,
+        )
+
+    def write_fixtures(self, root):
+        for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
+            rows = weekly_fixture("cluster-bench" if name.endswith("replica") else name,
+                                  replica=name.endswith("replica"))
+            (root / f"{name}.json").write_text(json.dumps(rows), encoding="utf-8")
+
+    def test_exact_weekly_defaults_accept_all_cells(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixtures(root)
+            self.assertEqual(self.validate(root, "standalone-bench"), 126)
+            self.assertEqual(self.validate(root, "cluster-bench"), 90 + 18)
+
+    def test_each_artifact_rejects_incomplete_duplicate_or_extra_cells(self):
+        mutations = {
+            "missing": lambda rows: rows.pop(),
+            "duplicate": lambda rows: rows.append(copy.deepcopy(rows[0])),
+            "extra payload": lambda rows: rows[0].update(payload_bytes=65),
+            "unknown workload": lambda rows: rows.append(dict(rows[0], workload="Unknown")),
+            "mislabelled client": lambda rows: rows[0].update(client="Unknown"),
+        }
+        for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
+            for reason, mutate in mutations.items():
+                with self.subTest(artifact=name, reason=reason), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.write_fixtures(root)
+                    path = root / f"{name}.json"
+                    rows = json.loads(path.read_text())
+                    mutate(rows)
+                    path.write_text(json.dumps(rows), encoding="utf-8")
+                    package = "cluster-bench" if name.endswith("replica") else name
+                    with self.assertRaises(validate_weekly_results.render_results.ResultError):
+                        self.validate(root, package)
+
+    def test_each_artifact_requires_consistent_raw_samples(self):
+        mutations = {
+            "missing samples": lambda row: row.pop("samples"),
+            "non-object sample": lambda row: row["samples"].__setitem__(0, None),
+            "duplicate run": lambda row: row["samples"][0].update(run=2),
+            "wrong runs": lambda row: row.update(runs=2),
+            "aggregate errors": lambda row: row.update(errors=1),
+            "sample errors": lambda row: row["samples"][0].update(errors=1),
+            "zero duration": lambda row: row["samples"][0].update(elapsed_secs=0),
+            "nonfinite duration": lambda row: row["samples"][0].update(elapsed_secs=float("nan")),
+            "outside window": lambda row: row["samples"][0].update(elapsed_secs=30),
+            "wrong count": lambda row: row["samples"][0].update(total_commands=1),
+            "wrong rate": lambda row: row["samples"][0].update(commands_per_sec=1),
+            "wrong mean": lambda row: row.update(commands_per_sec_mean=1),
+            "wrong spread": lambda row: row.update(commands_per_sec_stddev=1),
+            "unordered quantiles": lambda row: row["samples"][0].update(p90_us=1),
+            "wrong max": lambda row: row.update(max_us=51),
+        }
+        for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
+            for reason, mutate in mutations.items():
+                with self.subTest(artifact=name, reason=reason), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    self.write_fixtures(root)
+                    path = root / f"{name}.json"
+                    rows = json.loads(path.read_text())
+                    mutate(rows[0])
+                    path.write_text(json.dumps(rows), encoding="utf-8")
+                    package = "cluster-bench" if name.endswith("replica") else name
+                    with self.assertRaises(validate_weekly_results.render_results.ResultError):
+                        self.validate(root, package)
+
+    def test_pipeline_depth_and_strict_replica_identity_are_checked(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixtures(root)
+            with self.assertRaises(validate_weekly_results.render_results.ResultError):
+                validate_weekly_results.validate_weekly(
+                    root, "standalone-bench", payloads=(64, 1024, 16384),
+                    concurrencies=(1, 32, 128), runs=3, measurement_secs=3,
+                    pipeline_commands=99,
+                )
+            path = root / "cluster-bench-replica.json"
+            rows = json.loads(path.read_text())
+            next(row for row in rows if row["client_id"] == "redis-tower-mux-replica")["client"] = "RedisTowerMux"
+            path.write_text(json.dumps(rows), encoding="utf-8")
+            with self.assertRaises(validate_weekly_results.render_results.ResultError):
+                self.validate(root, "cluster-bench")
+
+    def test_cli_returns_success_or_actionable_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.write_fixtures(root)
+            command = [sys.executable, str(SCRIPT_DIR / "validate_weekly_results.py"),
+                       "--result-dir", str(root), "--package", "cluster-bench",
+                       "--payload-sizes", "64,1024,16384", "--concurrency", "1,32,128",
+                       "--runs", "3", "--secs", "3"]
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("108 cells, 324 retained samples", result.stdout)
+            (root / "cluster-bench-replica.json").unlink()
+            result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("weekly validation failed", result.stderr)
+            self.assertIn("cluster-bench-replica.json", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_cli_rejects_invalid_expected_matrix_knobs(self):
+        for value in ("0", "-1", "nan", "1.5", ""):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                validate_weekly_results.positive_integer(value)
+        for value in ("1,1", "1,", "0,1", "nan"):
+            with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
+                validate_weekly_results.integer_csv(value)
+
+
 class WeeklyComparisonExecutionTests(unittest.TestCase):
-    def run_step(self, package: str, *, existing_lock: bool = False, fail: bool = False):
+    def run_step(self, package: str, *, existing_lock: bool = False, fail: bool = False,
+                 corrupt: str | None = None):
         workflow = (
             SCRIPT_DIR.parent.parent / ".github/workflows/benchmarks.yml"
         ).read_text(encoding="utf-8")
@@ -1301,12 +1447,17 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
             root = Path(temporary)
             tools = root / "tools"
             tools.mkdir()
-            sanitizer = root / "scripts/benchmarks/sanitize_metadata.py"
-            sanitizer.parent.mkdir(parents=True)
-            sanitizer.write_text(
-                (SCRIPT_DIR / "sanitize_metadata.py").read_text(encoding="utf-8"),
-                encoding="utf-8",
-            )
+            scripts = root / "scripts/benchmarks"
+            scripts.mkdir(parents=True)
+            for name in ("sanitize_metadata.py", "render_results.py", "validate_weekly_results.py"):
+                if (SCRIPT_DIR / name).exists():
+                    (scripts / name).write_text((SCRIPT_DIR / name).read_text(), encoding="utf-8")
+            for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
+                rows = weekly_fixture("cluster-bench" if name.endswith("replica") else name,
+                                      replica=name.endswith("replica"))
+                if name == corrupt:
+                    rows[0]["errors"] = 1
+                (root / f"fixture-{name}.json").write_text(json.dumps(rows), encoding="utf-8")
             if existing_lock:
                 (root / "Cargo.lock").write_text("retained lockfile\n", encoding="utf-8")
             stub = f"#!{sys.executable}\n" + textwrap.dedent('''\
@@ -1333,7 +1484,10 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
                     if os.environ.get("FAIL_MEASUREMENT") == "1":
                         print("fixture measurement failure", file=sys.stderr)
                         sys.exit(23)
-                    print(os.environ["FIXTURE_RESULT"])
+                    package = args[args.index("-p") + 1]
+                    if os.environ.get("BENCH_SCENARIO") == "replica":
+                        package += "-replica"
+                    print(Path("fixture-" + package + ".json").read_text())
                 elif tool == "git":
                     assert args == ["rev-parse", "HEAD"]
                     print("a" * 40)
@@ -1350,7 +1504,9 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
             environment.update({
                 "PATH": str(tools) + os.pathsep + environment["PATH"],
                 "FAIL_MEASUREMENT": "1" if fail else "0",
-                "FIXTURE_RESULT": json.dumps([record("redis-tower-mux", "Get", 64, 1)]),
+                "BENCH_SECS": "3", "BENCH_RUNS": "3", "BENCH_PAYLOAD_SIZES": "64,1024,16384",
+                "BENCH_CONCURRENCY": "1,32,128", "BENCH_PIPELINE_CONCURRENCY": "1",
+                "BENCH_PIPELINE_COMMANDS": "100",
             })
             execution = subprocess.run(
                 ["bash", "-e", "-o", "pipefail", "-c", script],
@@ -1408,8 +1564,33 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
                 self.assertEqual(artifacts[f"{package}.json"], b"")
                 self.assertEqual(len([c for c in calls if c["args"][0] == "run"]), 1)
 
+    def test_invalid_results_fail_workflow_gate_but_retain_artifacts(self):
+        for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
+            package = "cluster-bench" if name.endswith("replica") else name
+            with self.subTest(corrupt=name):
+                execution, artifacts, _ = self.run_step(package, existing_lock=True, corrupt=name)
+                self.assertNotEqual(execution.returncode, 0)
+                self.assertIn("weekly validation failed", execution.stderr)
+                self.assert_provenance(artifacts, existing_lock=True)
+                self.assertEqual(json.loads(artifacts[f"{name}.json"])[0]["errors"], 1)
+                self.assertIn(f"{name}.log", artifacts)
+
 
 class RunnerContractTests(unittest.TestCase):
+    def test_weekly_validator_uses_the_measurement_configuration(self) -> None:
+        workflow = (SCRIPT_DIR.parent.parent / ".github/workflows/benchmarks.yml").read_text()
+        self.assertIn('  BENCH_PIPELINE_CONCURRENCY: "1"', workflow)
+        self.assertIn('  BENCH_PIPELINE_COMMANDS: "100"', workflow)
+        for option, variable in (
+            ("payload-sizes", "BENCH_PAYLOAD_SIZES"), ("concurrency", "BENCH_CONCURRENCY"),
+            ("runs", "BENCH_RUNS"), ("secs", "BENCH_SECS"),
+            ("pipeline-concurrency", "BENCH_PIPELINE_CONCURRENCY"),
+            ("pipeline-commands", "BENCH_PIPELINE_COMMANDS"),
+        ):
+            self.assertIn(f'--{option} "${variable}"', workflow)
+        self.assertLess(workflow.index("validate_weekly_results.py"),
+                        workflow.index("      - name: Upload benchmark results"))
+
     def test_weekly_benchmark_retains_failure_diagnostics(self) -> None:
         workflow = (
             SCRIPT_DIR.parent.parent / ".github/workflows/benchmarks.yml"

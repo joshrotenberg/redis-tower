@@ -140,6 +140,31 @@ Compare the lockfile and source SHA with those recorded in a reproduced run.
 The workflow uploads available artifacts and diagnostics even when a run fails;
 missing, partial or failed measurements are not complete comparison evidence.
 
+Before upload, the weekly job validates the exact configured comparison matrix:
+126 standalone cells (GET/SET plus depth-100 pipelines), 90 Cluster GET/SET
+cells, and 18 master/strict-replica GET cells, with three raw samples per cell.
+Missing, extra or duplicate cells, incorrect client identities, nonzero errors,
+missing samples and inconsistent counts, rates or latency summaries fail the job.
+The validator reuses the publication accounting and measured-window checks;
+it does not seal the archive or validate complete host/configuration provenance.
+Artifacts remain available on failure for investigation.
+
+Recheck an extracted weekly comparison artifact with its recorded configuration
+(the current workflow defaults are shown here):
+
+```bash
+python3 scripts/benchmarks/validate_weekly_results.py \
+  --result-dir /absolute/path/to/extracted-artifact --package standalone-bench \
+  --payload-sizes 64,1024,16384 --concurrency 1,32,128 --runs 3 --secs 3 \
+  --pipeline-concurrency 1 --pipeline-commands 100
+```
+
+For the Cluster artifact, use `--package cluster-bench`; both normal and replica
+JSON must be present. Use the original run's expected configuration, not a
+matrix inferred from whichever result rows survived. These counts and the
+depth-100 default describe validation inputs, not matched batching semantics
+across clients or new performance conclusions.
+
 These are short hosted-runner saturation measurements, not fixed-load latency
 tests, verified manifests, complete host/configuration provenance or the sealed
 dedicated-host publication evidence described below. They do not establish an
