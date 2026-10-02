@@ -1,6 +1,6 @@
 [package]
 name = "redis-tower-primitives"
-version = "0.1.2"
+version = "0.1.3"
 description = "Auditable distributed coordination primitives for redis-tower"
 edition.workspace = true
 authors.workspace = true

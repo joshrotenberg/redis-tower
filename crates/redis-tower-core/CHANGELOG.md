@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.2...redis-tower-core-v0.1.3) - 2026-10-01
+
 ### Added
 
 - staged Redis URL connections for provider authentication before preserved
   database selection and RESP negotiation
+
+### Fixed
+
+- percent-decode authenticated Unix socket URLs and preserve URL credentials
+  through connection setup
+  ([#719](https://github.com/joshrotenberg/redis-tower/pull/719))
+- normalize bracketed and unbracketed IPv6 hosts before rustls server-name
+  validation ([#718](https://github.com/joshrotenberg/redis-tower/pull/718))
+
+### Changed
+
+- share refreshing credential-provider state across sessions so concurrent
+  setup does not stampede the provider
+  ([#732](https://github.com/joshrotenberg/redis-tower/pull/732))
 
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.1...redis-tower-core-v0.1.2) - 2026-09-24
 

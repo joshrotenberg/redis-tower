@@ -7,13 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-protocol-v0.1.3...redis-tower-protocol-v0.1.4) - 2026-10-01
+
 ### Added
 
 - mixed-frame fragmentation properties, semantic fuzz oracles, reviewed seeds,
   and bounded scheduled fuzz campaigns with retained provenance
 - deterministic first-frame copied-byte regressions, retained-lifetime and
-  fragmented Criterion cases, plus raw allocation/copy evidence comparing the
-  historical whole-buffer clone and a split/shared ownership alternative
+  fragmented Criterion cases
+
+### Fixed
+
+- enforce configured frame bounds before materializing RESP payloads and reject
+  unsupported streamed RESP3 tokens without losing reply alignment
+  ([#706](https://github.com/joshrotenberg/redis-tower/pull/706))
+
+### Changed
+
+- eliminate whole-buffer decode copies while retaining fragmented-input
+  correctness and bounded frame ownership
+  ([#733](https://github.com/joshrotenberg/redis-tower/pull/733))
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-protocol-v0.1.2...redis-tower-protocol-v0.1.3) - 2026-09-24
 
