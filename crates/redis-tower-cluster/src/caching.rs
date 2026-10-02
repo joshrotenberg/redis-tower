@@ -803,16 +803,21 @@ impl CacheSafetyGate {
     }
 
     fn close(&self) -> u64 {
-        let previous = self
-            .state
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                let generation = (state >> 1)
-                    .checked_add(1)
-                    .expect("cluster cache safety generation overflowed");
-                Some(generation << 1)
-            })
-            .expect("cache safety close update is infallible");
-        (previous >> 1) + 1
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            let generation = (state >> 1)
+                .checked_add(1)
+                .expect("cluster cache safety generation overflowed");
+            match self.state.compare_exchange_weak(
+                state,
+                generation << 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return generation,
+                Err(current) => state = current,
+            }
+        }
     }
 
     fn open_if_generation(&self, generation: u64) -> bool {

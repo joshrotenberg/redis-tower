@@ -7,10 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.3...redis-tower-cluster-v0.1.4) - 2026-10-01
+
+### Added
+
+- binary-safe routing inputs from `CommandArg` across typed command families
+  ([#721](https://github.com/joshrotenberg/redis-tower/pull/721),
+  [#726](https://github.com/joshrotenberg/redis-tower/pull/726))
+
+### Fixed
+
+- normalize IPv6 TLS server names through the shared core transport path
+  ([#718](https://github.com/joshrotenberg/redis-tower/pull/718))
+
 ### Changed
 
 - make Cluster TLS conformance use a real TLS-only three-node cluster with
   trusted test certificates and fail-closed CI activation for both TLS backends
+- share refreshing credential-provider state across node sessions to avoid
+  concurrent refresh stampedes
+  ([#732](https://github.com/joshrotenberg/redis-tower/pull/732))
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.2...redis-tower-cluster-v0.1.3) - 2026-09-24
 
