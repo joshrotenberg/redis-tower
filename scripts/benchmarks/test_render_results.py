@@ -8,8 +8,10 @@ import importlib.util
 import json
 import math
 import os
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from typing import Any
@@ -1283,6 +1285,128 @@ class ManifestTests(unittest.TestCase):
             self.assertEqual(
                 matrix_paths - publication_paths, {"rendered/summary.incomplete.json"}
             )
+
+
+class WeeklyComparisonExecutionTests(unittest.TestCase):
+    def run_step(self, package: str, *, existing_lock: bool = False, fail: bool = False):
+        workflow = (
+            SCRIPT_DIR.parent.parent / ".github/workflows/benchmarks.yml"
+        ).read_text(encoding="utf-8")
+        start = workflow.index("      - name: Run comparison benchmark\n")
+        end = workflow.index("      - name: Upload benchmark results\n", start)
+        script = textwrap.dedent(workflow[start:end].split("        run: |\n", 1)[1])
+        script = script.replace("${{ matrix.package }}", package)
+        self.assertNotIn("${{", script)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = root / "tools"
+            tools.mkdir()
+            sanitizer = root / "scripts/benchmarks/sanitize_metadata.py"
+            sanitizer.parent.mkdir(parents=True)
+            sanitizer.write_text(
+                (SCRIPT_DIR / "sanitize_metadata.py").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            if existing_lock:
+                (root / "Cargo.lock").write_text("retained lockfile\n", encoding="utf-8")
+            stub = f"#!{sys.executable}\n" + textwrap.dedent('''\
+                import json, os, sys
+                from pathlib import Path
+
+                tool, args = Path(sys.argv[0]).name, sys.argv[1:]
+                with Path("calls.jsonl").open("a") as trace:
+                    trace.write(json.dumps({"tool": tool, "args": args,
+                        "scenario": os.environ.get("BENCH_SCENARIO")}) + "\\n")
+                if tool == "cargo" and args[0] == "generate-lockfile":
+                    Path("Cargo.lock").write_text("generated lockfile\\n")
+                elif tool == "cargo" and args[0] == "metadata":
+                    assert "--locked" in args and Path("Cargo.lock").is_file()
+                    print(json.dumps({"packages": [{"id": "private-workspace-id",
+                        "name": "cluster-bench", "version": "0.0.0", "source": None,
+                        "manifest_path": "/private/checkout/Cargo.toml"}],
+                        "workspace_members": ["private-workspace-id"],
+                        "resolve": {"nodes": [{"id": "private-workspace-id",
+                            "features": ["default"]}]}, "workspace_root": "/private/checkout"}))
+                elif tool == "cargo" and args[0] == "run":
+                    assert "--locked" in args and Path("Cargo.lock").is_file()
+                    assert "--include-samples" in args and "--json" in args
+                    if os.environ.get("FAIL_MEASUREMENT") == "1":
+                        print("fixture measurement failure", file=sys.stderr)
+                        sys.exit(23)
+                    print(os.environ["FIXTURE_RESULT"])
+                elif tool == "git":
+                    assert args == ["rev-parse", "HEAD"]
+                    print("a" * 40)
+                else:
+                    assert args in (["-Vv"], ["--version"])
+                    print(tool + " fixture version")
+                ''')
+            for tool in ("cargo", "rustc", "redis-server", "git"):
+                executable = tools / tool
+                executable.write_text(stub, encoding="utf-8")
+                executable.chmod(0o755)
+            environment = os.environ.copy()
+            environment.pop("BENCH_SCENARIO", None)
+            environment.update({
+                "PATH": str(tools) + os.pathsep + environment["PATH"],
+                "FAIL_MEASUREMENT": "1" if fail else "0",
+                "FIXTURE_RESULT": json.dumps([record("redis-tower-mux", "Get", 64, 1)]),
+            })
+            execution = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", script],
+                cwd=root, env=environment, capture_output=True, text=True, timeout=15,
+            )
+            artifacts = {
+                path.name: path.read_bytes()
+                for path in (root / "benchmark-results").iterdir()
+            }
+            calls = [json.loads(line) for line in (root / "calls.jsonl").read_text().splitlines()]
+            return execution, artifacts, calls
+
+    def assert_provenance(self, artifacts, *, existing_lock=False):
+        expected_lock = b"retained lockfile\n" if existing_lock else b"generated lockfile\n"
+        self.assertEqual(artifacts["Cargo.lock"], expected_lock)
+        self.assertEqual(artifacts["source-sha.txt"], b"a" * 40 + b"\n")
+        for tool in ("cargo", "rust", "redis"):
+            self.assertTrue(artifacts[f"{tool}-version.txt"])
+        self.assertEqual(json.loads(artifacts["dependencies.json"]), {
+            "schema_version": 1,
+            "packages": [{"name": "cluster-bench", "version": "0.0.0",
+                "source": "workspace", "resolved_features": ["default"]}],
+        })
+        self.assertNotIn(b"/private/checkout", artifacts["dependencies.json"])
+        self.assertNotIn(b"private-workspace-id", artifacts["dependencies.json"])
+
+    def test_weekly_comparisons_preserve_raw_samples_and_locked_resolution(self):
+        for package in ("standalone-bench", "cluster-bench"):
+            for existing_lock in (False, True):
+                with self.subTest(package=package, existing_lock=existing_lock):
+                    execution, artifacts, calls = self.run_step(package, existing_lock=existing_lock)
+                    self.assertEqual(execution.returncode, 0, execution.stderr)
+                    self.assert_provenance(artifacts, existing_lock=existing_lock)
+                    generated = [c for c in calls if c["args"][0] == "generate-lockfile"]
+                    self.assertEqual(len(generated), 0 if existing_lock else 1)
+                    measurements = [c for c in calls if c["args"][0] == "run"]
+                    self.assertEqual(len(measurements), 2 if package == "cluster-bench" else 1)
+                    self.assertIsNone(measurements[0]["scenario"])
+                    if package == "cluster-bench":
+                        self.assertEqual(measurements[1]["scenario"], "replica")
+                    names = [package] + (["cluster-bench-replica"] if package == "cluster-bench" else [])
+                    for name in names:
+                        rows = json.loads(artifacts[f"{name}.json"])
+                        self.assertEqual(len(rows[0]["samples"]), 3)
+                        self.assertIn(f"{name}.log", artifacts)
+                    self.assertEqual(len(artifacts), 6 + 2 * len(names))
+
+    def test_failed_measurement_retains_provenance_and_diagnostics(self):
+        for package in ("standalone-bench", "cluster-bench"):
+            with self.subTest(package=package):
+                execution, artifacts, calls = self.run_step(package, existing_lock=True, fail=True)
+                self.assertEqual(execution.returncode, 23, execution.stderr)
+                self.assert_provenance(artifacts, existing_lock=True)
+                self.assertIn(b"fixture measurement failure", artifacts[f"{package}.log"])
+                self.assertEqual(artifacts[f"{package}.json"], b"")
+                self.assertEqual(len([c for c in calls if c["args"][0] == "run"]), 1)
 
 
 class RunnerContractTests(unittest.TestCase):

@@ -69,11 +69,20 @@ jobs:
           mkdir -p benchmark-results
           redis-server --version > benchmark-results/redis-version.txt
           rustc -Vv > benchmark-results/rust-version.txt
-          cargo run -p ${{ matrix.package }} --release -- --json \
+          cargo -Vv > benchmark-results/cargo-version.txt
+          git rev-parse HEAD > benchmark-results/source-sha.txt
+          if [ ! -f Cargo.lock ]; then
+            cargo generate-lockfile
+          fi
+          cp Cargo.lock benchmark-results/Cargo.lock
+          cargo metadata --locked --format-version 1 \
+            | python3 scripts/benchmarks/sanitize_metadata.py \
+            > benchmark-results/dependencies.json
+          cargo run --locked -p ${{ matrix.package }} --release -- --include-samples --json \
             > benchmark-results/${{ matrix.package }}.json \
             2> benchmark-results/${{ matrix.package }}.log
           if [ "${{ matrix.package }}" = "cluster-bench" ]; then
-            BENCH_SCENARIO=replica cargo run -p cluster-bench --release -- --json \
+            BENCH_SCENARIO=replica cargo run --locked -p cluster-bench --release -- --include-samples --json \
               > benchmark-results/cluster-bench-replica.json \
               2> benchmark-results/cluster-bench-replica.log
           fi

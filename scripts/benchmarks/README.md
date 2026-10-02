@@ -122,6 +122,32 @@ the isolated target has consumed part of that budget.
 
 ## Verify and reproduce archived evidence
 
+### Weekly hosted-runner comparisons
+
+The weekly standalone and Cluster comparison artifacts are retained for 90 days.
+Their normal and Cluster replica JSON includes the bounded raw run samples:
+counts, measured wall time, errors, rates and latency. These allow throughput
+means and population standard deviations to be recomputed; aggregate latency
+percentiles remain means of per-run percentiles, not pooled percentiles.
+
+Each comparison artifact also contains its `Cargo.lock`, exact `source-sha.txt`,
+Cargo/rustc/Redis versions, path-free `dependencies.json`, and stderr logs.
+The lockfile is generated only when absent and is recorded before measurements;
+metadata and comparison commands use `--locked`. The dependency metadata is a
+sanitized **workspace-wide** resolution (names, versions, normalized sources and
+resolved features), not a claim about the feature set of one selected binary.
+Compare the lockfile and source SHA with those recorded in a reproduced run.
+The workflow uploads available artifacts and diagnostics even when a run fails;
+missing, partial or failed measurements are not complete comparison evidence.
+
+These are short hosted-runner saturation measurements, not fixed-load latency
+tests, verified manifests, complete host/configuration provenance or the sealed
+dedicated-host publication evidence described below. They do not establish an
+absolute performance guarantee or universal client ranking. Full inventory
+sealing and dedicated-host/fault/publication work remain separate follow-ups.
+
+### Sealed publication artifacts
+
 A completed result directory is self-verifying on any host; this does not
 rerun benchmarks or require the original isolated Cargo target:
 
