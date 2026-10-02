@@ -287,23 +287,34 @@
 //! # Streams
 //!
 //! [`StreamConsumer`] wraps XREADGROUP into a Rust [`futures::Stream`] with
-//! automatic acknowledgement and consumer group management. Configure batch
-//! size, block timeout, and auto-ack behavior via [`ConsumerConfig`].
+//! consumer group management. With automatic acknowledgement enabled, polling
+//! for the next item acknowledges the previous delivery; dropping the stream
+//! first leaves it pending. Because that boundary cannot prove application
+//! processing succeeded, this example uses manual acknowledgement on a separate
+//! connection. Configure batch size, block timeout, and acknowledgement
+//! behavior via [`ConsumerConfig`].
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! use redis_tower::consumer::{StreamConsumer, ConsumerConfig};
-//! use redis_tower::RedisConnection;
+//! use redis_tower::{
+//!     commands::XAck,
+//!     consumer::{ConsumerConfig, StreamConsumer},
+//!     RedisConnection,
+//! };
 //! use tokio_stream::StreamExt;
 //!
-//! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let read_conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut ack_conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //! let consumer = StreamConsumer::new("my-group", "worker-1", ["my-stream"])
-//!     .config(ConsumerConfig { batch_size: 20, auto_ack: true, ..Default::default() });
+//!     .config(ConsumerConfig { batch_size: 20, auto_ack: false, ..Default::default() });
 //!
-//! let mut stream = std::pin::pin!(consumer.into_stream(conn));
+//! let mut stream = std::pin::pin!(consumer.into_stream(read_conn));
 //! while let Some(msg) = stream.next().await {
 //!     let msg = msg?;
 //!     println!("{}: {} fields", msg.id, msg.fields.len());
+//!     ack_conn
+//!         .execute(XAck::new(&msg.stream, "my-group", &msg.id))
+//!         .await?;
 //! }
 //! # Ok(())
 //! # }

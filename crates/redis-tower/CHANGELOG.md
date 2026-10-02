@@ -12,6 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - declarative connection-local setup retained by built-in address, URL, and
   credential factories across standalone reconnects
 
+### Fixed
+
+- defer managed stream-consumer automatic `XACK` until the caller advances
+  past the delivered item, leaving it pending and recoverable if the stream is
+  dropped before that point (#734)
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.3...redis-tower-v0.1.4) - 2026-10-01
 
 ### Added
