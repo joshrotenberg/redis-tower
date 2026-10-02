@@ -207,6 +207,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
+        measured_names = {comparison.name for comparison in confirmation_comparisons}
+        missing_regressions = {comparison.name for comparison in regressions} - measured_names
+        if missing_regressions:
+            print(
+                "error: confirmation is missing measurements for initially "
+                "regressed benchmarks: " + ", ".join(sorted(missing_regressions)),
+                file=sys.stderr,
+            )
+            return 2
+
         print(
             "\nReversed-order confirmation: "
             f"{args.confirmation_baseline} -> {args.confirmation_candidate}"

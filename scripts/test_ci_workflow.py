@@ -38,7 +38,89 @@ def command_coverage_job() -> str:
     return workflow[start:end]
 
 
+def workflow_job(name: str, next_name: str) -> str:
+    workflow = WORKFLOW.read_text()
+    start = workflow.index(f"  {name}:\n")
+    end = workflow.index(f"\n  {next_name}:\n", start)
+    return workflow[start:end]
+
+
 class CiWorkflowTests(unittest.TestCase):
+    def test_codec_benchmark_scripts_are_tested(self) -> None:
+        job = command_coverage_job()
+        self.assertIn("python3 scripts/test_check_criterion_regressions.py", job)
+        self.assertIn("python3 scripts/test_decide_codec_benchmark_gate.py", job)
+
+    def test_codec_benchmark_confirmation_runs_on_a_separate_runner(self) -> None:
+        first = workflow_job("bench-regression-first-pass", "bench-regression-confirm")
+        confirm = workflow_job("bench-regression-confirm", "bench-regression")
+        self.assertIn("name: Codec Benchmark First Pass", first)
+        self.assertIn(
+            "needs_confirmation: ${{ steps.compare.outputs.needs_confirmation }}", first
+        )
+        # The first pass hands a regression off instead of confirming it itself.
+        self.assertNotIn("--confirmation-baseline", first)
+        self.assertNotIn("candidate-confirm", first)
+        self.assertIn("name: Codec Benchmark Confirmation", confirm)
+        self.assertIn("needs: bench-regression-first-pass", confirm)
+        self.assertIn(
+            "if: needs.bench-regression-first-pass.outputs.needs_confirmation == 'true'",
+            confirm,
+        )
+        self.assertIn("runs-on:", confirm)
+        self.assertIn("save-if: false", confirm)
+
+    def test_codec_benchmark_baselines_transfer_between_jobs(self) -> None:
+        first = workflow_job("bench-regression-first-pass", "bench-regression-confirm")
+        confirm = workflow_job("bench-regression-confirm", "bench-regression")
+        artifact = "name: codec-benchmark-baselines-${{ github.event.pull_request.number }}"
+        self.assertIn("uses: actions/upload-artifact@v4", first)
+        self.assertIn(artifact, first)
+        self.assertIn("--exclude=report criterion", first)
+        self.assertIn("uses: actions/download-artifact@v4", confirm)
+        self.assertIn(artifact, confirm)
+        self.assertIn("tar -xzf criterion-baselines.tar.gz -C target", confirm)
+
+    def test_codec_benchmark_confirmation_reverses_the_order(self) -> None:
+        first = workflow_job("bench-regression-first-pass", "bench-regression-confirm")
+        confirm = workflow_job("bench-regression-confirm", "bench-regression")
+        self.assertLess(
+            first.index("--save-baseline main"), first.index("--save-baseline candidate")
+        )
+        self.assertLess(
+            confirm.index("--save-baseline candidate-confirm"),
+            confirm.index("--save-baseline main-confirm"),
+        )
+        self.assertIn("--confirmation-baseline main-confirm", confirm)
+        self.assertIn("--confirmation-candidate candidate-confirm", confirm)
+
+    def test_codec_benchmark_thresholds_are_uniform(self) -> None:
+        first = workflow_job("bench-regression-first-pass", "bench-regression-confirm")
+        confirm = workflow_job("bench-regression-confirm", "bench-regression")
+        for job in (first, confirm):
+            self.assertIn("--threshold 10", job)
+            self.assertNotIn("--benchmark-threshold", job)
+
+    def test_codec_benchmark_final_gate_waits_for_both_workers(self) -> None:
+        gate = workflow_job("bench-regression", "test-unit")
+        self.assertIn("name: Codec Benchmark Regression", gate)
+        self.assertIn(
+            "needs: [bench-regression-first-pass, bench-regression-confirm]", gate
+        )
+        self.assertIn("if: always() && github.event_name == 'pull_request'", gate)
+        self.assertIn("FIRST_PASS: ${{ needs.bench-regression-first-pass.result }}", gate)
+        self.assertIn(
+            "NEEDS_CONFIRMATION: "
+            "${{ needs.bench-regression-first-pass.outputs.needs_confirmation }}",
+            gate,
+        )
+        self.assertIn("CONFIRMATION: ${{ needs.bench-regression-confirm.result }}", gate)
+        self.assertIn("python3 scripts/decide_codec_benchmark_gate.py", gate)
+        # Only the aggregator carries the required check name.
+        self.assertEqual(
+            WORKFLOW.read_text().count("name: Codec Benchmark Regression\n"), 1
+        )
+
     def test_command_capability_ledger_is_tested_and_checked_offline(self) -> None:
         job = command_coverage_job()
         self.assertIn("python3 scripts/test_generate_command_capabilities.py", job)
