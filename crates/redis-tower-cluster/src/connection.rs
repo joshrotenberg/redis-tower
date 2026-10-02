@@ -215,6 +215,20 @@ pub struct ClusterConnectionBuilder {
 }
 
 impl ClusterConnectionBuilder {
+    /// Replay safe settings on seeds, masters, replicas, and replacement sockets.
+    ///
+    /// See [`redis_tower_core::ConnectionSetup`] for the lifecycle contract.
+    pub fn connection_setup(mut self, setup: redis_tower_core::ConnectionSetup) -> Self {
+        self.connection_config = self.connection_config.with_setup(setup);
+        self
+    }
+
+    /// Name every physical connection, including redirect and replacement nodes.
+    pub fn client_name(mut self, name: impl AsRef<[u8]>) -> Self {
+        self.connection_config = self.connection_config.with_client_name(name);
+        self
+    }
+
     /// Set the host override for Docker/proxy environments.
     pub fn host_override(mut self, host: impl Into<String>) -> Self {
         self.host_override = Some(host.into());
@@ -1193,7 +1207,7 @@ impl ClusterNodeConnector {
     /// Open and initialize one master or replica connection.
     ///
     /// Setup order is transport/CLIENT SETINFO, AUTH, protocol negotiation,
-    /// then READONLY for replica connections.
+    /// replayable connection setup, then READONLY for replica connections.
     pub(crate) async fn connect(
         &self,
         addr: &str,
@@ -1205,6 +1219,7 @@ impl ClusterNodeConnector {
         let bootstrap_config = self
             .connection_config
             .clone()
+            .with_setup(Default::default())
             .with_protocol(ProtocolVersion::Resp2);
 
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -1232,6 +1247,7 @@ impl ClusterNodeConnector {
         }
         conn.negotiate_protocol(self.connection_config.protocol())
             .await?;
+        conn.apply_setup(self.connection_config.setup()).await?;
 
         if readonly {
             let responses = conn
@@ -2548,7 +2564,9 @@ mod tests {
     async fn node_setup_authenticates_before_hello_and_configures_replica_last() {
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let connector = ClusterNodeConnector::new(
-            ConnectionConfig::new().with_protocol(ProtocolVersion::Resp3),
+            ConnectionConfig::new()
+                .with_protocol(ProtocolVersion::Resp3)
+                .with_client_name("cluster-logical-name"),
             Some(Arc::new(StaticCredentials::new("alice", "secret"))),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
@@ -2556,9 +2574,19 @@ mod tests {
 
         let server_task = tokio::spawn(async move {
             let mut framed = Framed::new(RedisStream::Unix(server), RespCodec::new());
-            for expected in [b"AUTH".as_slice(), b"HELLO", b"READONLY"] {
+            for expected in [b"AUTH".as_slice(), b"HELLO", b"CLIENT", b"READONLY"] {
                 let frame = framed.next().await.unwrap().unwrap();
                 assert_eq!(command_name(&frame), expected);
+                if expected == b"CLIENT" {
+                    assert_eq!(
+                        frame,
+                        array(vec![
+                            bulk("CLIENT"),
+                            bulk("SETNAME"),
+                            bulk("cluster-logical-name")
+                        ])
+                    );
+                }
                 framed
                     .send(Frame::SimpleString(b"OK"[..].into()))
                     .await

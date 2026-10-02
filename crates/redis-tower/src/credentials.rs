@@ -582,6 +582,7 @@ impl CredentialConnectionFactory {
         let bootstrap_config = self
             .connection_config
             .clone()
+            .with_setup(Default::default())
             .with_protocol(ProtocolVersion::Resp2);
 
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -604,6 +605,9 @@ impl CredentialConnectionFactory {
                     };
                     authenticate_with_refresh(&mut connection, self.provider.as_ref()).await?;
                     connection.negotiate_protocol(requested_protocol).await?;
+                    connection
+                        .apply_setup(self.connection_config.setup())
+                        .await?;
                     Ok(connection)
                 }
                 CredentialTarget::Url(url) => {
@@ -638,6 +642,9 @@ impl CredentialConnectionFactory {
                         RedisConnection::connect_with_config(addr, &bootstrap_config).await?;
                     authenticate_with_refresh(&mut connection, self.provider.as_ref()).await?;
                     connection.negotiate_protocol(requested_protocol).await?;
+                    connection
+                        .apply_setup(self.connection_config.setup())
+                        .await?;
                     Ok(connection)
                 }
                 CredentialTarget::Url(url) => {

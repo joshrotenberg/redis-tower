@@ -9,14 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- declarative connection-local setup retained by built-in address, URL, and
+  credential factories across standalone reconnects
+
+### Fixed
+
+- defer managed stream-consumer automatic `XACK` until the caller advances
+  past the delivered item, leaving it pending and recoverable if the stream is
+  dropped before that point (#734)
+
+## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.3...redis-tower-v0.1.4) - 2026-10-01
+
+### Added
+
 - shared type-erased credential-provider ownership, URL-backed provider
   factories with full setup deadlines, and provider-aware Pub/Sub/MONITOR
   constructors with explicit reconnect-or-terminate rotation contracts
+  ([#732](https://github.com/joshrotenberg/redis-tower/pull/732))
 - an additive structured `SET` outcome mode for conditional writes, while the
   original `Option<Bytes>` response remains available for compatibility
 - an owned, cloneable `AutoPipelineShutdownHandle` for router and trait-erased
   hosts to stop admission, drain accepted work, and join fixed or reconnecting
   workers even while service clones remain
+  ([#723](https://github.com/joshrotenberg/redis-tower/pull/723))
+
+### Fixed
+
+- carry authenticated Unix URL parsing and IPv6 TLS hostname normalization
+  through the public client constructors
+  ([#718](https://github.com/joshrotenberg/redis-tower/pull/718),
+  [#719](https://github.com/joshrotenberg/redis-tower/pull/719))
 
 ### Changed
 
@@ -29,13 +51,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - make live Redis 8 and TLS conformance tests discover and verify the actual
   server capabilities, certificate chain, hostname, authentication, and
   selected database instead of trusting environment labels or insecure TLS
-- **Breaking (next minor, 0.2.0):** managed stream consumers now preserve
+- **Pre-1.0 source compatibility:** managed stream consumers now preserve
   stream keys and field names as exact `Bytes` instead of applying lossy UTF-8
   conversion; transaction and scan helpers, cached scripts, and the deprecated
   JSON/Search wrappers accept binary keys, patterns, source, KEYS, and ARGV;
-  and `PING` plus Search document identifiers return exact `Bytes`. This change
-  must not ship in a `0.1.x` patch release; the `redis-tower-commands`
-  requirement must move to 0.2.0 for release.
+  and `PING` plus Search document identifiers return exact `Bytes`. Downstreams
+  naming those concrete types must update when adopting 0.1.4.
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.2...redis-tower-v0.1.3) - 2026-09-24
 

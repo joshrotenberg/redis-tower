@@ -7,24 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.2...redis-tower-commands-v0.1.3) - 2026-10-01
+
 ### Added
 
 - additive `Set::with_outcome` response mode that preserves applied versus
   rejected `NX`/`XX` status independently from missing, empty, binary, or
   unrequested previous values
+  ([#731](https://github.com/joshrotenberg/redis-tower/pull/731))
 - binary-safe `CommandArg` inputs across every opaque typed position in core,
   scripting, Pub/Sub, server, and feature-gated module command families,
   including exact-byte stream response names
+  ([#721](https://github.com/joshrotenberg/redis-tower/pull/721),
+  [#726](https://github.com/joshrotenberg/redis-tower/pull/726))
 - binary-safe cached-script helpers for KEYS and ARGV
 
 ### Changed
 
-- **Breaking (next minor, 0.2.0):** common command constructors now use
+- **Pre-1.0 source compatibility:** common command constructors now use
   `Into<CommandArg>` instead of `Into<String>`. Opaque response positions use
   `Bytes` instead of lossy `String` values, including stream/group/consumer
-  names, `PING` messages, and Search tag values. This change must not ship in a
-  `0.1.x` patch release; dependent workspace version requirements must move to
-  `redis-tower-commands` 0.2.0 for release.
+  names, `PING` messages, and Search tag values. Downstreams that name these
+  concrete types must update when adopting 0.1.3.
 
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.1...redis-tower-commands-v0.1.2) - 2026-09-24
 

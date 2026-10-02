@@ -107,6 +107,11 @@ The [production tuning guide](https://github.com/joshrotenberg/redis-tower/blob/
 goes deeper on client selection, backpressure, timeouts, pooling, reconnects,
 and shutdown.
 
+For reconnect-safe names, use `ConnectionConfig::with_client_name("my-app")`
+on a standalone factory or `.client_name("my-app")` on a Cluster builder.
+The [connection setup contract](https://github.com/joshrotenberg/redis-tower/blob/main/docs/PRODUCTION-TUNING.md#make-reconnection-replay-connection-state)
+covers replay, ordering, failure, and redaction.
+
 ## Common operations
 
 Commands are ordinary typed values. Optional arguments use builder methods.
