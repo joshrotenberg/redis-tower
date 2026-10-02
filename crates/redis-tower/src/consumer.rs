@@ -17,22 +17,33 @@
 //!
 //! ```no_run
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! use redis_tower::{RedisConnection, consumer::{StreamConsumer, ConsumerConfig}};
+//! use redis_tower::{
+//!     commands::XAck,
+//!     consumer::{ConsumerConfig, StreamConsumer},
+//!     RedisConnection,
+//! };
 //! use tokio_stream::StreamExt;
 //!
-//! let conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let read_conn = RedisConnection::connect("127.0.0.1:6379").await?;
+//! let mut ack_conn = RedisConnection::connect("127.0.0.1:6379").await?;
 //! let consumer = StreamConsumer::new("my-group", "worker-1", ["my-stream"])
 //!     .config(ConsumerConfig {
 //!         batch_size: 20,
-//!         auto_ack: true,
+//!         // Manual acknowledgement lets the application define success.
+//!         auto_ack: false,
 //!         ..Default::default()
 //!     });
 //!
 //! // The stream is not `Unpin`, so pin it before polling.
-//! let mut stream = Box::pin(consumer.into_stream(conn));
+//! let mut stream = Box::pin(consumer.into_stream(read_conn));
 //! while let Some(msg) = stream.next().await {
 //!     let msg = msg?;
+//!     // Process before acknowledging. The stream owns its blocking read
+//!     // connection, so manual ACKs use a separate connection.
 //!     println!("{}: {} fields", msg.id, msg.fields.len());
+//!     ack_conn
+//!         .execute(XAck::new(&msg.stream, "my-group", &msg.id))
+//!         .await?;
 //! }
 //! # Ok(())
 //! # }

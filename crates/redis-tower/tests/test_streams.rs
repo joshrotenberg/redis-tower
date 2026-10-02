@@ -57,6 +57,13 @@ async fn stream_consumer_drop_before_advance_leaves_delivery_pending() {
         "dropping before the next poll must not acknowledge the delivery"
     );
 
+    let reclaimed = control
+        .execute(XAutoClaim::new(key, group, "replacement", 0, "0-0"))
+        .await
+        .unwrap();
+    assert_eq!(reclaimed.entries.len(), 1);
+    assert_eq!(reclaimed.entries[0].id, id);
+
     control
         .execute(XGroupDestroy::new(key, group))
         .await
@@ -85,7 +92,7 @@ async fn stream_consumer_advance_acks_only_the_previous_delivery() {
         .unwrap();
 
     let consumer = StreamConsumer::new(group, "worker-1", [key]).config(ConsumerConfig {
-        batch_size: 1,
+        batch_size: 3,
         block_ms: Some(5_000),
         auto_ack: true,
         claim_idle_ms: None,
@@ -101,7 +108,8 @@ async fn stream_consumer_advance_acks_only_the_previous_delivery() {
             .await
             .unwrap()
             .count,
-        1
+        3,
+        "the whole fetched batch is pending, but no delivery is ACKed yet"
     );
 
     let second = deliveries.next().await.unwrap().unwrap();
@@ -115,8 +123,8 @@ async fn stream_consumer_advance_acks_only_the_previous_delivery() {
             .iter()
             .map(|entry| entry.id.as_str())
             .collect::<Vec<_>>(),
-        vec![id2.as_str()],
-        "advancing to the second item should ACK only the first"
+        vec![id2.as_str(), id3.as_str()],
+        "advancing within a buffered batch should ACK only the first"
     );
 
     let third = deliveries.next().await.unwrap().unwrap();
@@ -162,9 +170,13 @@ async fn stream_consumer_surfaces_deferred_ack_failure_before_another_item() {
         .execute(XAdd::new(key).field("job", "one"))
         .await
         .unwrap();
+    control
+        .execute(XAdd::new(key).field("job", "buffered"))
+        .await
+        .unwrap();
 
     let consumer = StreamConsumer::new(group, "worker-1", [key]).config(ConsumerConfig {
-        batch_size: 1,
+        batch_size: 2,
         block_ms: Some(5_000),
         auto_ack: true,
         claim_idle_ms: None,
@@ -173,19 +185,23 @@ async fn stream_consumer_surfaces_deferred_ack_failure_before_another_item() {
     let mut deliveries = Box::pin(consumer.into_stream(conn().await));
 
     deliveries.next().await.unwrap().unwrap();
-    control
-        .execute(XGroupDestroy::new(key, group))
-        .await
-        .unwrap();
+    // XACK against a missing group returns zero rather than an error. Replace
+    // the stream with a string to make the deferred XACK itself fail, while
+    // the second fetched delivery remains buffered in the consumer.
+    control.execute(Set::new(key, "wrong-type")).await.unwrap();
 
     let error = tokio::time::timeout(Duration::from_secs(2), deliveries.next())
         .await
         .expect("deferred XACK should fail without blocking")
         .expect("the acknowledgement failure should be yielded")
-        .expect_err("destroying the group should make deferred XACK fail");
+        .expect_err("overwriting the stream should make deferred XACK fail");
     assert!(
-        matches!(error, RedisError::Redis(ref message) if message.contains("NOGROUP")),
-        "expected the deferred XACK NOGROUP error, got {error:?}"
+        matches!(error, RedisError::Redis(ref message) if message.contains("WRONGTYPE")),
+        "expected the deferred XACK WRONGTYPE error, got {error:?}"
+    );
+    assert!(
+        deliveries.next().await.is_none(),
+        "ACK failure terminates before the buffered second item"
     );
 
     control.execute(Del::new(key)).await.unwrap();
