@@ -49,9 +49,14 @@ cargo run -p cluster-bench --release -- \
 
 JSON output contains one object per cell with the payload size, successful
 command count, error count, commands/s mean and standard deviation, and HDR
-p50/p90/p99/p999/max latency. A missing GET or a value of the wrong size is an
-error, not a successful operation. Failed seed writes, worker connection/setup
-errors, and worker panics abort the benchmark with a non-zero exit status.
+p50/p90/p99/p999/max latency. Every successful GET must match the exact fixture
+bytes (`x` repeated to the configured size), including strict replica reads.
+Missing, wrong-sized, and same-sized corrupt values are errors; they contribute
+neither successful commands nor success latency samples. Replica preflight also
+checks exact contents. GET timing includes byte validation for every adapter;
+older length-only runs are not directly equivalent measurements.
+Failed seed writes, worker connection/setup errors, and worker panics abort the
+benchmark with a non-zero exit status.
 Latency uses a checked HDR histogram with an explicit two-minute range; an
 out-of-range successful operation fails loudly instead of being clipped. The
 aggregate percentiles are means of per-run percentiles, while `max_us` is the

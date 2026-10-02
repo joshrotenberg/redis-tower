@@ -48,9 +48,12 @@ cargo run -p standalone-bench --release -- \
 
 ## Reading the report
 
-Every successful GET must return a value of the configured size. Missing or
-wrong-sized values count as errors. Failed prepopulation writes, worker
-connection/setup errors, and worker panics abort with a non-zero exit status.
+Every successful GET must return the exact fixture bytes (`x` repeated to the
+configured size). Missing, wrong-sized, and same-sized corrupt values count as
+errors and contribute neither successful commands nor success latency samples.
+GET timing includes this byte comparison for every adapter; older length-only
+runs are not directly equivalent measurements. Failed prepopulation writes,
+worker connection/setup errors, and worker panics abort with a non-zero exit status.
 JSON and human output report p50, p99, and p999 (plus p90/max in JSON).
 Latency uses a checked HDR histogram with an explicit two-minute range; an
 out-of-range successful operation fails loudly instead of being clipped. The

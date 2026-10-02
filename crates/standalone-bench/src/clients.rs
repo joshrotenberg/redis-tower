@@ -323,7 +323,7 @@ async fn tower_loop(client: RedisClient, addr: String, context: WorkerContext) -
                 .is_ok(),
             Workload::Get => matches!(
                 client.execute(TGet::new(&key)).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_ref() == context.payload.as_bytes()
             ),
             Workload::Pipeline => match pipeline_connection.as_mut() {
                 Some(connection) => {
@@ -358,7 +358,7 @@ async fn tower_mux_loop(client: MultiplexedClient, context: WorkerContext) -> Wo
                 .is_ok(),
             Workload::Get => matches!(
                 client.execute(TGet::new(&key)).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_ref() == context.payload.as_bytes()
             ),
             Workload::Pipeline => {
                 let operations = (0..context.pipeline_commands).map(|index| {
@@ -402,7 +402,7 @@ async fn redis_rs_async_loop(
                 .map_err(|error| redis_error_detail("SET", &error)),
             Workload::Get => validate_redis_get(
                 client.get::<_, Option<Vec<u8>>>(&key).await,
-                context.payload.len(),
+                context.payload.as_bytes(),
             ),
             Workload::Pipeline => {
                 let mut pipeline = redis::Pipeline::new();
@@ -445,7 +445,7 @@ async fn redis_rs_manager_loop(
                 .map_err(|error| redis_error_detail("SET", &error)),
             Workload::Get => validate_redis_get(
                 client.get::<_, Option<Vec<u8>>>(&key).await,
-                context.payload.len(),
+                context.payload.as_bytes(),
             ),
             Workload::Pipeline => {
                 let mut pipeline = redis::Pipeline::new();
@@ -493,7 +493,7 @@ fn redis_rs_sync_loop(client: redis::Client, context: WorkerContext) -> WorkerRe
                 .is_ok(),
             Workload::Get => matches!(
                 connection.get::<_, Option<Vec<u8>>>(&key),
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_slice() == context.payload.as_bytes()
             ),
             Workload::Pipeline => {
                 let mut pipeline = redis::Pipeline::new();
@@ -525,7 +525,7 @@ async fn fred_loop(client: fred::clients::Client, context: WorkerContext) -> Wor
                 .is_ok(),
             Workload::Get => matches!(
                 client.get::<Option<String>, _>(&key).await,
-                Ok(Some(value)) if value.len() == context.payload.len()
+                Ok(Some(value)) if value.as_bytes() == context.payload.as_bytes()
             ),
             Workload::Pipeline => fred_pipeline(&client, &context).await,
         };
@@ -593,14 +593,16 @@ fn record_failure(
 
 fn validate_redis_get(
     result: redis::RedisResult<Option<Vec<u8>>>,
-    expected_len: usize,
+    expected: &[u8],
 ) -> Result<(), String> {
     match result {
-        Ok(Some(value)) if value.len() == expected_len => Ok(()),
-        Ok(Some(value)) => Err(format!(
-            "GET returned {} bytes; expected {expected_len}",
-            value.len()
+        Ok(Some(value)) if value.as_slice() == expected => Ok(()),
+        Ok(Some(value)) if value.len() != expected.len() => Err(format!(
+            "GET returned {} bytes; expected {}",
+            value.len(),
+            expected.len()
         )),
+        Ok(Some(_)) => Err("GET returned wrong content at the expected length".to_owned()),
         Ok(None) => Err("GET returned no value".to_owned()),
         Err(error) => Err(redis_error_detail("GET", &error)),
     }
@@ -629,6 +631,69 @@ pub async fn prepopulate(addr: &str, payload: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    /// Exercise the real workers, not just a standalone validation helper.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_get_payload_integrity_all_adapters() {
+        use crate::runner::{BenchConfig, run};
+        use std::time::Duration;
+
+        let directory = tempfile::tempdir().unwrap();
+        let lease = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = lease.local_addr().unwrap().port();
+        drop(lease);
+        let server = redis_server_wrapper::RedisServer::new()
+            .redis_server_bin("redis-server")
+            .no_stack_modules()
+            .dir(directory.path())
+            .port(port)
+            .start()
+            .await
+            .unwrap();
+        let expected = "x".repeat(64);
+        // Only the final byte differs: a prefix/length check is insufficient.
+        let corrupt = format!("{}y", "x".repeat(63));
+        let mut failures = Vec::new();
+        for (payload, valid) in [(&corrupt, false), (&expected, true)] {
+            prepopulate(&server.addr(), payload).await.unwrap();
+            for kind in ClientKind::DEFAULTS {
+                let client = Client::connect(kind, &server.addr()).await.unwrap();
+                let report = run(
+                    client,
+                    BenchConfig {
+                        duration: Duration::from_millis(250),
+                        warmup: Duration::ZERO,
+                        concurrency: 1,
+                        workload: Workload::Get,
+                        payload_bytes: expected.len(),
+                        pipeline_commands: 1,
+                    },
+                )
+                .await
+                .unwrap();
+                let accounted = if valid {
+                    report.errors == 0 && report.total_commands > 0 && report.p50_us > 0.0
+                } else {
+                    report.errors > 0
+                        && report.total_batches == 0
+                        && report.total_commands == 0
+                        && report.commands_per_sec == 0.0
+                        && report.p50_us == 0.0
+                        && report.p90_us == 0.0
+                        && report.p99_us == 0.0
+                        && report.p999_us == 0.0
+                        && report.max_us == 0.0
+                };
+                if !accounted {
+                    failures.push(format!("{} valid={valid}: {report:?}", kind.as_str()));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+        // Drop the owned process before its isolated directory.
+        drop(server);
+    }
+
     #[test]
     fn client_aliases_parse() {
         assert_eq!(ClientKind::parse("fred"), Some(ClientKind::Fred));
@@ -648,14 +713,34 @@ mod tests {
 
     #[test]
     fn redis_get_validation_distinguishes_missing_and_wrong_length_values() {
-        assert!(validate_redis_get(Ok(Some(vec![0; 4])), 4).is_ok());
+        let expected = b"xxxx";
+        assert!(validate_redis_get(Ok(Some(expected.to_vec())), expected).is_ok());
         assert_eq!(
-            validate_redis_get(Ok(None), 4).unwrap_err(),
+            validate_redis_get(Ok(None), expected).unwrap_err(),
             "GET returned no value"
         );
         assert_eq!(
-            validate_redis_get(Ok(Some(vec![0; 3])), 4).unwrap_err(),
+            validate_redis_get(Ok(Some(vec![0; 3])), expected).unwrap_err(),
             "GET returned 3 bytes; expected 4"
         );
+    }
+
+    #[test]
+    fn redis_get_validation_checks_every_byte_and_preserves_read_errors() {
+        let expected = [0, 128, 255, 42];
+        assert!(validate_redis_get(Ok(Some(expected.to_vec())), &expected).is_ok());
+        for index in 0..expected.len() {
+            let mut corrupt = expected;
+            corrupt[index] ^= 1;
+            assert_eq!(
+                validate_redis_get(Ok(Some(corrupt.to_vec())), &expected).unwrap_err(),
+                "GET returned wrong content at the expected length"
+            );
+        }
+        assert!(validate_redis_get(Ok(Some(Vec::new())), b"").is_ok());
+        let error = redis::RedisError::from(std::io::Error::other("fixture error"));
+        let detail = validate_redis_get(Err(error), &expected).unwrap_err();
+        assert!(detail.starts_with("GET redis error Io:"), "{detail}");
+        assert!(detail.contains("fixture error"), "{detail}");
     }
 }
