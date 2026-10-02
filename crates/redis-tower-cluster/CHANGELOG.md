@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- connection-setup/client-name builder policies replayed on discovery, masters,
+  replicas, redirected/topology-created nodes, dedicated sockets, and replacements
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.3...redis-tower-cluster-v0.1.4) - 2026-10-01
 
 ### Added

@@ -56,6 +56,106 @@ async fn mux_cluster_conn() -> MultiplexedClusterClient {
         .expect("failed to connect to multiplexed cluster")
 }
 
+async fn setup_named_id(fixture: &ClusterFixture, index: usize, name: &str) -> String {
+    let clients = fixture.run_node(index, &["CLIENT", "LIST"]).await.unwrap();
+    let needle = format!("name={name}");
+    let line = clients
+        .lines()
+        .find(|line| line.split_whitespace().any(|field| field == needle))
+        .unwrap_or_else(|| panic!("node {index} has no physical connection named {name}"));
+    line.split_whitespace()
+        .find_map(|field| field.strip_prefix("id="))
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster"]
+async fn connection_setup_names_all_nodes_and_replacements() {
+    let fixture = ClusterFixture::start().await.unwrap();
+    let slot = 42;
+    let key = key_for_slot(slot);
+    let topology = fixture.topology().await.unwrap();
+    let master_index = topology.owner_of_slot(slot).unwrap().index;
+
+    let mut direct = ClusterConnection::builder(fixture.seed_addr())
+        .read_preference(ReadPreference::PreferReplica)
+        .client_name("setup-direct-736")
+        .connect()
+        .await
+        .unwrap();
+    for index in 0..6 {
+        setup_named_id(&fixture, index, "setup-direct-736").await;
+    }
+    direct.execute(Set::new(&key, "configured")).await.unwrap();
+    let old_id = setup_named_id(&fixture, master_index, "setup-direct-736").await;
+    fixture
+        .run_node(master_index, &["CLIENT", "KILL", "ID", &old_id])
+        .await
+        .unwrap();
+    assert!(direct.execute(Set::new(&key, "configured")).await.is_err());
+    direct.execute(Set::new(&key, "configured")).await.unwrap();
+    assert_ne!(
+        setup_named_id(&fixture, master_index, "setup-direct-736").await,
+        old_id
+    );
+    drop(direct);
+
+    let multiplexed = MultiplexedClusterClient::builder(fixture.seed_addr())
+        .read_preference(ReadPreference::PreferReplica)
+        .client_name("setup-mux-736")
+        .connect()
+        .await
+        .unwrap();
+    for index in 0..6 {
+        setup_named_id(&fixture, index, "setup-mux-736").await;
+    }
+    // Dedicated diagnostics use the same policy, not a one-time post-connect name.
+    for node in multiplexed
+        .topology()
+        .await
+        .master_addrs()
+        .into_iter()
+        .chain(multiplexed.topology().await.replica_addrs())
+    {
+        let mut connection = multiplexed.connect_to_node(node.clone()).await.unwrap();
+        assert_eq!(
+            connection
+                .execute(ClientGetName::new())
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(b"setup-mux-736".as_slice())
+        );
+    }
+    let old_id = setup_named_id(&fixture, master_index, "setup-mux-736").await;
+    fixture
+        .run_node(master_index, &["CLIENT", "KILL", "ID", &old_id])
+        .await
+        .unwrap();
+    // The idle worker may observe EOF and reconnect before a command discovers
+    // the killed socket. Assert a new named physical connection, not a raced error.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if multiplexed
+                .execute(Set::new(&key, "configured"))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("multiplexed worker did not reconnect");
+    assert_ne!(
+        setup_named_id(&fixture, master_index, "setup-mux-736").await,
+        old_id
+    );
+    multiplexed.shutdown().await;
+}
+
 #[tokio::test]
 #[ignore = "live: starts a dedicated Redis Cluster"]
 async fn diff_redis_rs_cluster_public_entry_point() {

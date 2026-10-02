@@ -14,6 +14,7 @@ use tokio_util::codec::Framed;
 use redis_tower_protocol::helpers::{array, bulk};
 use redis_tower_protocol::{Frame, RespCodec, RespLimits};
 
+use crate::ConnectionSetup;
 use crate::command::Command;
 use crate::error::RedisError;
 use crate::stream::RedisStream;
@@ -264,6 +265,7 @@ pub struct ConnectionConfig {
     connect_timeout: Option<Duration>,
     protocol: ProtocolVersion,
     resp_limits: RespLimits,
+    setup: ConnectionSetup,
 }
 
 impl Default for ConnectionConfig {
@@ -273,11 +275,36 @@ impl Default for ConnectionConfig {
             connect_timeout: None,
             protocol: ProtocolVersion::Auto,
             resp_limits: RespLimits::default(),
+            setup: ConnectionSetup::default(),
         }
     }
 }
 
 impl ConnectionConfig {
+    /// Set replayable connection-local setup for every fresh physical connection.
+    ///
+    /// Built-in reconnect factories and Cluster builders retain this policy.
+    /// See [`ConnectionSetup`] for ordering, fail-closed, and redaction rules.
+    #[must_use]
+    pub fn with_setup(mut self, setup: ConnectionSetup) -> Self {
+        self.setup = setup;
+        self
+    }
+
+    /// Set a client name that survives reconnects and Cluster topology changes.
+    ///
+    /// Equivalent to updating the name in this config's [`ConnectionSetup`].
+    #[must_use]
+    pub fn with_client_name(mut self, name: impl AsRef<[u8]>) -> Self {
+        self.setup = self.setup.with_client_name(name);
+        self
+    }
+
+    /// Return the replayable physical-connection setup policy.
+    pub fn setup(&self) -> &ConnectionSetup {
+        &self.setup
+    }
+
     /// Create a connection configuration with the default settings.
     #[must_use]
     pub fn new() -> Self {
@@ -353,6 +380,7 @@ pub struct PendingRedisConnection {
     connection: RedisConnection,
     url: RedisUrl,
     protocol: ProtocolVersion,
+    setup: ConnectionSetup,
 }
 
 impl PendingRedisConnection {
@@ -373,6 +401,7 @@ impl PendingRedisConnection {
             .post_connect_database(self.url.database)
             .await?;
         self.connection.negotiate_protocol(self.protocol).await?;
+        self.connection.apply_setup(&self.setup).await?;
         Ok(self.connection)
     }
 }
@@ -444,6 +473,7 @@ impl RedisConnection {
     ) -> Result<Self, RedisError> {
         let mut conn = Self::connect_raw(addr, config).await?;
         conn.negotiate_protocol(config.protocol).await?;
+        conn.apply_setup(&config.setup).await?;
         Ok(conn)
     }
 
@@ -546,6 +576,7 @@ impl RedisConnection {
     ) -> Result<Self, RedisError> {
         let mut conn = Self::connect_tls_raw(addr, hostname, tls_config, config).await?;
         conn.negotiate_protocol(config.protocol).await?;
+        conn.apply_setup(&config.setup).await?;
         Ok(conn)
     }
 
@@ -745,6 +776,7 @@ impl RedisConnection {
             connection,
             url: parsed.url,
             protocol: resolve_url_protocol(parsed.protocol, config.protocol),
+            setup: config.setup.clone(),
         })
     }
 
@@ -843,6 +875,7 @@ impl RedisConnection {
             connection,
             url: parsed.url,
             protocol: resolve_url_protocol(parsed.protocol, config.protocol),
+            setup: config.setup.clone(),
         })
     }
 
@@ -1131,6 +1164,46 @@ impl RedisConnection {
         }
 
         cmd.parse_response(response)
+    }
+
+    /// Apply replay-safe settings to an authenticated, negotiated connection.
+    ///
+    /// Built-in constructors call this before returning the connection. Custom
+    /// factories should call it only after authentication, database selection,
+    /// and protocol negotiation. Commands run sequentially in SETNAME,
+    /// NO-EVICT, NO-TOUCH order; a reply other than `+OK` stops setup immediately.
+    /// Failure or cancellation closes the transport. Returned connection errors
+    /// contain the failing command's name but no arguments or server reply text.
+    ///
+    /// This does not persist a policy on a borrowed connection: custom factories
+    /// must retain and replay their policy for every new socket. Bound the full
+    /// setup with a factory/reconnect timeout when a deadline is required;
+    /// [`ConnectionConfig::connect_timeout`] only bounds transport establishment.
+    pub async fn apply_setup(&mut self, setup: &ConnectionSetup) -> Result<(), RedisError> {
+        for (command, frame) in setup.commands() {
+            let reason = match self.execute_pipeline(vec![frame]).await {
+                Ok(replies) if matches!(replies.as_slice(), [Frame::SimpleString(ok)] if ok.as_ref() == b"OK") =>
+                {
+                    continue;
+                }
+                Ok(replies)
+                    if matches!(
+                        replies.as_slice(),
+                        [Frame::Error(_)] | [Frame::BlobError(_)]
+                    ) =>
+                {
+                    "server rejected command"
+                }
+                Ok(_) => "unexpected response",
+                Err(_) => "transport or protocol failure",
+            };
+            self.framed = None;
+            self.inflight = None;
+            return Err(RedisError::from(std::io::Error::other(format!(
+                "connection setup failed at {command}: {reason} (details redacted)"
+            ))));
+        }
+        Ok(())
     }
 
     /// Send multiple command frames and read all responses in a single roundtrip.

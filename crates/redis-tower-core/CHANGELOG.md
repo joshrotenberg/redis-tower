@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- redacted, typed `ConnectionSetup` policies and `ConnectionConfig::with_client_name`
+  for fail-closed setup after authentication, database selection, and RESP negotiation
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.2...redis-tower-core-v0.1.3) - 2026-10-01
 
 ### Added

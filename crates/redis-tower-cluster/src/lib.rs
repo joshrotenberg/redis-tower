@@ -22,6 +22,13 @@
 //!
 //! # Which client to use
 //!
+//! Configure persistent logical identity with either connection builder's
+//! `.client_name("redis-mcp")`, or `.connection_setup(policy)` for a
+//! [`redis_tower_core::ConnectionSetup`]. The policy applies to discovery,
+//! connected masters/replicas, redirect/topology-created sockets, dedicated
+//! node connections, and reconnects. A one-time `CLIENT SETNAME` on a borrowed
+//! socket is not replayed. See the policy's ordering and fail-closed contract.
+//!
 //! | You need... | Use |
 //! |---|---|
 //! | Simple one-task-at-a-time usage, lowest moving parts | [`ClusterClient`] |

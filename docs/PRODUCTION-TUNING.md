@@ -412,6 +412,66 @@ blocking caller-side readiness wait.
 
 ## Make reconnection replay connection state
 
+Configure logical client identity in `ConnectionConfig`, not with a one-time
+`CLIENT SETNAME` on a borrowed connection:
+
+```rust,no_run
+# async fn example() -> Result<(), redis_tower::RedisError> {
+use redis_tower::{ConnectionConfig, ResilientRedisClient};
+use redis_tower_cluster::MultiplexedClusterClient;
+
+let standalone = ResilientRedisClient::connect_url_with_connection_config(
+    "redis://127.0.0.1:6379/0",
+    ConnectionConfig::new().with_client_name("redis-mcp"),
+).await?;
+let cluster = MultiplexedClusterClient::builder("127.0.0.1:7000")
+    .client_name("redis-mcp")
+    .connect().await?;
+# let _ = (standalone, cluster);
+# Ok(())
+# }
+```
+
+For a richer policy use `ConnectionSetup::new().with_client_name(...)`,
+optionally `.with_client_no_evict(true)` (Redis 7.0+) or
+`.with_client_no_touch(true)` (Redis 7.2+), then attach it with
+`ConnectionConfig::with_setup` or either Cluster builder's `connection_setup`.
+Builder calls replace the corresponding setting; `connection_config` replaces
+the entire config, so put name/setup calls after it when overriding it.
+
+Built-in factories retain this policy across initial and replacement sockets.
+Both Cluster clients apply it to seed discovery, all connected masters and
+replicas, MOVED/ASK targets, topology-discovered nodes, and replacements.
+`MultiplexedClusterClient::connect_to_node` and its dedicated-session factories
+also inherit it. Setup does not create replica connections when the selected
+read preference only needs masters.
+
+The order is optional best-effort library `CLIENT SETINFO`, authentication,
+URL database selection, RESP negotiation, declared setup, then Cluster replica
+`READONLY`. Explicit setup is **not** best effort: SETNAME, NO-EVICT, and
+NO-TOUCH run sequentially, with each `+OK` checked before another is sent.
+Unsupported commands, ACL denial, unexpected replies, or transport/protocol
+failure close that socket and return `RedisError::Connection`. No ordinary
+traffic is sent on a partially configured socket. Setup cancellation also
+discards the socket. Already healthy Cluster nodes may continue serving while
+a new node fails setup; that failed node is never admitted unconfigured.
+
+Debug output redacts names, and setup errors show the failing command but omit
+arguments and server reply text (which can echo values). Names still appear in
+Redis `CLIENT LIST`; never include secrets. Grant `+client|setname` and only the
+other configured subcommands in the ACL. There is no silent downgrade on older
+servers. Bound full setup with a factory/reconnect timeout and configure a
+finite reconnect budget for persistent ACL/configuration failures; the socket
+connect timeout alone does not bound Redis setup replies.
+
+The typed policy intentionally excludes arbitrary commands: AUTH/SELECT/HELLO,
+transaction state, reply suppression, tracking, Pub/Sub, and blocking operations
+have separate lifecycle owners. Custom factories remain responsible for setup
+they add themselves and can call `RedisConnection::apply_setup` after completing
+their own handshake. One-time commands on a borrowed socket are not recorded
+for reconnect. Sentinel and topology-neutral client builders do not yet expose
+this policy; this contract covers the standalone and Cluster APIs above.
+
 Use a connection factory for long-running multiplexed clients. The factory is
 responsible for recreating all required session state on every connection:
 
@@ -431,6 +491,7 @@ use redis_tower::auto_pipeline::AutoPipelineReconnectConfig;
 use redis_tower::reconnect::{ReconnectConfig, UrlConnectionFactory};
 
 let connection_config = ConnectionConfig::new()
+    .with_client_name("redis-mcp")
     .with_connect_timeout(Some(Duration::from_secs(3)))
     .with_keepalive(
         KeepaliveConfig::new()

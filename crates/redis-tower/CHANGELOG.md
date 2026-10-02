@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- declarative connection-local setup retained by built-in address, URL, and
+  credential factories across standalone reconnects
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.3...redis-tower-v0.1.4) - 2026-10-01
 
 ### Added
