@@ -527,10 +527,10 @@ pub use search_api::{Search, SearchDoc, SearchResults, SortDir};
 
 // Re-export core types.
 pub use redis_tower_core::{
-    Command, ConnectionConfig, DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, Frame, FrameService,
-    FromRedisBytes, KeepaliveConfig, PendingRedisConnection, ProtocolVersion, RedisConnection,
-    RedisConvert, RedisError, RedisStream, RedisValueExt, RequestDeadline, RespCodec, RespLimits,
-    WithDeadline,
+    Command, ConnectionConfig, ConnectionSetup, DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, Frame,
+    FrameService, FromRedisBytes, KeepaliveConfig, PendingRedisConnection, ProtocolVersion,
+    RedisConnection, RedisConvert, RedisError, RedisStream, RedisValueExt, RequestDeadline,
+    RespCodec, RespLimits, WithDeadline,
 };
 
 // Re-export TLS config when a TLS backend is enabled.
