@@ -37,6 +37,7 @@ CLUSTER_CLIENTS = (
 CLIENT_VARIANTS = {
     "redis-tower": "RedisTower",
     "redis-tower-mux": "RedisTowerMux",
+    "redis-tower-mux-replica": "RedisTowerMuxReplica",
     "redis-rs-sync": "RedisRsSync",
     "redis-rs-async": "RedisRsAsync",
     "redis-rs-manager": "RedisRsManager",
