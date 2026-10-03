@@ -132,6 +132,11 @@ percentiles remain means of per-run percentiles, not pooled percentiles.
 
 Each comparison artifact also contains its `Cargo.lock`, exact `source-sha.txt`,
 Cargo/rustc/Redis versions, path-free `dependencies.json`, and stderr logs.
+Before measurement, `configuration.json` records the package, repeated runs,
+measured/warmup seconds, payload/concurrency lists, pipeline concurrency/depth
+and fixed client/workload policies. The gate reads these same expected inputs,
+not a matrix inferred from surviving rows. Configuration is allowlisted rather
+than an environment dump, and remains available if measurement fails.
 The lockfile is generated only when absent and is recorded before measurements;
 metadata and comparison commands use `--locked`. The dependency metadata is a
 sanitized **workspace-wide** resolution (names, versions, normalized sources and
@@ -149,8 +154,22 @@ The validator reuses the publication accounting and measured-window checks;
 it does not seal the archive or validate complete host/configuration provenance.
 Artifacts remain available on failure for investigation.
 
-Recheck an extracted weekly comparison artifact with its recorded configuration
-(the current workflow defaults are shown here):
+Recheck an extracted weekly comparison artifact from the source checkout named
+in its `source-sha.txt`:
+
+```bash
+python3 scripts/benchmarks/validate_weekly_results.py \
+  --recorded-config --result-dir /absolute/path/to/extracted-artifact \
+  --package standalone-bench
+```
+
+Recorded mode rejects missing/unsupported configuration, non-canonical numeric
+settings, policy drift and mixed explicit override flags. Fixed policies are
+checked against that source checkout. The file records expected inputs; it is
+not cryptographic evidence of execution or complete runtime/Redis/host provenance.
+
+For older artifacts without a configuration record, explicit validation remains
+available. Supply the original run's expected settings (current defaults shown):
 
 ```bash
 python3 scripts/benchmarks/validate_weekly_results.py \
@@ -164,6 +183,13 @@ JSON must be present. Use the original run's expected configuration, not a
 matrix inferred from whichever result rows survived. These counts and the
 depth-100 default describe validation inputs, not matched batching semantics
 across clients or new performance conclusions.
+
+To record expected inputs before a custom comparison, run the same explicit
+command with `--record-config --warmup 1` after creating a new result directory.
+It writes `configuration.json` and exits without measuring or validating results;
+it refuses to overwrite an existing record. The caller must pass those same
+settings to the benchmark binary. The weekly workflow does this using shared
+environment inputs, and runs `--recorded-config` validation after measurement.
 
 These are short hosted-runner saturation measurements, not fixed-load latency
 tests, verified manifests, complete host/configuration provenance or the sealed

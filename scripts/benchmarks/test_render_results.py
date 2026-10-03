@@ -1432,6 +1432,128 @@ class WeeklyResultValidationTests(unittest.TestCase):
                 validate_weekly_results.integer_csv(value)
 
 
+class WeeklyConfigurationTests(unittest.TestCase):
+    def command(self, root, package):
+        return [sys.executable, str(SCRIPT_DIR / "validate_weekly_results.py"),
+                "--result-dir", str(root), "--package", package]
+
+    def record(self, root, package, *extra):
+        command = self.command(root, package) + ["--record-config", "--payload-sizes",
+            "64,1024,16384", "--concurrency", "1,32,128", "--runs", "3", "--secs", "3",
+            "--warmup", "1", *extra]
+        return subprocess.run(command, capture_output=True, text=True, timeout=10)
+
+    def test_recorded_archive_roundtrip_including_replica(self):
+        for package in ("standalone-bench", "cluster-bench"):
+            with self.subTest(package=package), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                WeeklyResultValidationTests().write_fixtures(root)
+                result = self.record(root, package)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                config = validate_weekly_results.load_configuration(root, package)
+                self.assertEqual(config["clients"], list(render_results.STANDALONE_CLIENTS
+                    if package == "standalone-bench" else render_results.CLUSTER_CLIENTS))
+                self.assertEqual(config["replica_clients"], [] if package == "standalone-bench"
+                                 else ["redis-tower-mux", "redis-tower-mux-replica"])
+                result = subprocess.run(self.command(root, package) + ["--recorded-config"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = json.loads((root / f"{package}.json").read_text())
+                rows.pop()
+                (root / f"{package}.json").write_text(json.dumps(rows))
+                result = subprocess.run(self.command(root, package) + ["--recorded-config"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("matrix mismatch", result.stderr)
+
+    def test_records_overrides_zero_warmup_and_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            result = self.record(root, "standalone-bench", "--payload-sizes", "64",
+                "--concurrency", "2", "--runs", "2", "--secs", "1", "--warmup", "0",
+                "--pipeline-concurrency", "1,8", "--pipeline-commands", "7")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            path = root / "configuration.json"
+            original = path.read_bytes()
+            config = json.loads(original)
+            self.assertEqual(config["warmup_secs"], 0)
+            self.assertEqual(config["payload_sizes"], [64])
+            self.assertEqual(config["concurrencies"], [2])
+            self.assertEqual(config["runs"], 2)
+            self.assertEqual(config["measurement_secs"], 1)
+            self.assertEqual(config["pipeline_concurrencies"], [1, 8])
+            self.assertEqual(config["pipeline_commands"], 7)
+            self.assertEqual(self.record(root, "standalone-bench").returncode, 1)
+            self.assertEqual(path.read_bytes(), original)
+
+    def test_config_rejects_schema_types_missing_extra_and_policy_drift(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(self.record(root, "cluster-bench").returncode, 0)
+            config = json.loads((root / "configuration.json").read_text())
+            mutations = {
+                "schema": lambda c: c.update(schema_version=2),
+                "schema bool": lambda c: c.update(schema_version=True),
+                "package": lambda c: c.update(package="standalone-bench"),
+                "missing": lambda c: c.pop("warmup_secs"),
+                "extra": lambda c: c.update(secret="unexpected"),
+                "clients": lambda c: c["clients"].pop(),
+                "workloads": lambda c: c.update(workloads=["Get"]),
+                "replicas": lambda c: c.update(replica_clients=[]),
+                "replica workloads": lambda c: c.update(replica_workloads=["Set"]),
+            }
+            for field in ("runs", "measurement_secs", "pipeline_commands"):
+                for value in (0, -1, True, 3.0, "3", None, float("nan")):
+                    mutations[f"{field}={value!r}"] = lambda c, f=field, v=value: c.update({f: v})
+            for value in (-1, True, 1.0, "1", None):
+                mutations[f"warmup={value!r}"] = lambda c, v=value: c.update(warmup_secs=v)
+            for field in ("payload_sizes", "concurrencies", "pipeline_concurrencies"):
+                for value in ([], [1, 1], [0], [True], [1.0], "1", [None], [[1]]):
+                    mutations[f"{field}={value!r}"] = lambda c, f=field, v=value: c.update({f: v})
+            for reason, mutate in mutations.items():
+                with self.subTest(reason=reason):
+                    bad = copy.deepcopy(config)
+                    mutate(bad)
+                    with self.assertRaises(validate_weekly_results.render_results.ResultError):
+                        validate_weekly_results.validate_configuration(bad, "cluster-bench")
+            for bad in (None, [], 1, "not config"):
+                with self.subTest(root=bad), self.assertRaises(validate_weekly_results.render_results.ResultError):
+                    validate_weekly_results.validate_configuration(bad, "cluster-bench")
+
+    def test_recorded_cli_rejects_missing_malformed_and_ambiguous_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            command = self.command(root, "cluster-bench") + ["--recorded-config"]
+            for content in (None, "{", "[]", '{}', '{"schema_version":NaN}'):
+                with self.subTest(content=content):
+                    if content is not None:
+                        (root / "configuration.json").write_text(content)
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertIn("weekly validation failed", result.stderr)
+                    self.assertNotIn("Traceback", result.stderr)
+            for option, value in (("--runs", "3"), ("--secs", "3"), ("--warmup", "1"),
+                ("--payload-sizes", "64"), ("--concurrency", "1"),
+                ("--pipeline-concurrency", "1"), ("--pipeline-commands", "100")):
+                with self.subTest(option=option):
+                    result = subprocess.run(command + [option, value], capture_output=True,
+                                            text=True, timeout=10)
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("cannot be combined", result.stderr)
+            self.assertEqual(subprocess.run(command + ["--record-config"],
+                capture_output=True, timeout=10).returncode, 2)
+
+    def test_recorded_configuration_rejects_duplicate_json_fields(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.assertEqual(self.record(root, "cluster-bench").returncode, 0)
+            path = root / "configuration.json"
+            path.write_text('{"runs":99,' + path.read_text()[1:])
+            with self.assertRaisesRegex(validate_weekly_results.render_results.ResultError,
+                                        "duplicate field"):
+                validate_weekly_results.load_configuration(root, "cluster-bench")
+
+
 class WeeklyComparisonExecutionTests(unittest.TestCase):
     def run_step(self, package: str, *, existing_lock: bool = False, fail: bool = False,
                  corrupt: str | None = None):
@@ -1504,7 +1626,7 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
             environment.update({
                 "PATH": str(tools) + os.pathsep + environment["PATH"],
                 "FAIL_MEASUREMENT": "1" if fail else "0",
-                "BENCH_SECS": "3", "BENCH_RUNS": "3", "BENCH_PAYLOAD_SIZES": "64,1024,16384",
+                "BENCH_SECS": "3", "BENCH_WARMUP": "1", "BENCH_RUNS": "3", "BENCH_PAYLOAD_SIZES": "64,1024,16384",
                 "BENCH_CONCURRENCY": "1,32,128", "BENCH_PIPELINE_CONCURRENCY": "1",
                 "BENCH_PIPELINE_COMMANDS": "100",
             })
@@ -1552,7 +1674,7 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
                         rows = json.loads(artifacts[f"{name}.json"])
                         self.assertEqual(len(rows[0]["samples"]), 3)
                         self.assertIn(f"{name}.log", artifacts)
-                    self.assertEqual(len(artifacts), 6 + 2 * len(names))
+                    self.assertEqual(len(artifacts), 7 + 2 * len(names))
 
     def test_failed_measurement_retains_provenance_and_diagnostics(self):
         for package in ("standalone-bench", "cluster-bench"):
@@ -1563,6 +1685,28 @@ class WeeklyComparisonExecutionTests(unittest.TestCase):
                 self.assertIn(b"fixture measurement failure", artifacts[f"{package}.log"])
                 self.assertEqual(artifacts[f"{package}.json"], b"")
                 self.assertEqual(len([c for c in calls if c["args"][0] == "run"]), 1)
+
+    def test_weekly_configuration_survives_success_and_measurement_failure(self):
+        for package in ("standalone-bench", "cluster-bench"):
+            for fail in (False, True):
+                with self.subTest(package=package, fail=fail), mock.patch.dict(
+                    os.environ, {"UNRELATED_SECRET": "do-not-record", "BENCH_OTHER_PATH": "/private/secret"}
+                ):
+                    execution, artifacts, _ = self.run_step(package, existing_lock=True, fail=fail)
+                    self.assertEqual(execution.returncode, 23 if fail else 0, execution.stderr)
+                    recorded = artifacts["configuration.json"]
+                    config = json.loads(recorded)
+                    self.assertEqual(config["schema_version"], 1)
+                    self.assertEqual(config["package"], package)
+                    self.assertEqual(config["runs"], 3)
+                    self.assertEqual(config["measurement_secs"], 3)
+                    self.assertEqual(config["warmup_secs"], 1)
+                    self.assertEqual(config["payload_sizes"], [64, 1024, 16384])
+                    self.assertEqual(config["concurrencies"], [1, 32, 128])
+                    self.assertEqual(config["pipeline_concurrencies"], [1])
+                    self.assertEqual(config["pipeline_commands"], 100)
+                    self.assertNotIn(b"do-not-record", recorded)
+                    self.assertNotIn(b"/private/secret", recorded)
 
     def test_invalid_results_fail_workflow_gate_but_retain_artifacts(self):
         for name in ("standalone-bench", "cluster-bench", "cluster-bench-replica"):
@@ -1590,6 +1734,10 @@ class RunnerContractTests(unittest.TestCase):
             self.assertIn(f'--{option} "${variable}"', workflow)
         self.assertLess(workflow.index("validate_weekly_results.py"),
                         workflow.index("      - name: Upload benchmark results"))
+        self.assertLess(workflow.index("--record-config"),
+                        workflow.index("cargo run --locked -p ${{ matrix.package }}"))
+        self.assertIn('--warmup "$BENCH_WARMUP"', workflow)
+        self.assertIn("--recorded-config --result-dir benchmark-results", workflow)
 
     def test_weekly_benchmark_retains_failure_diagnostics(self) -> None:
         workflow = (

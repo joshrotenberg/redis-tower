@@ -81,6 +81,12 @@ jobs:
           cargo metadata --locked --format-version 1 \
             | python3 scripts/benchmarks/sanitize_metadata.py \
             > benchmark-results/dependencies.json
+          python3 scripts/benchmarks/validate_weekly_results.py \
+            --record-config --result-dir benchmark-results --package ${{ matrix.package }} \
+            --payload-sizes "$BENCH_PAYLOAD_SIZES" --concurrency "$BENCH_CONCURRENCY" \
+            --runs "$BENCH_RUNS" --secs "$BENCH_SECS" --warmup "$BENCH_WARMUP" \
+            --pipeline-concurrency "$BENCH_PIPELINE_CONCURRENCY" \
+            --pipeline-commands "$BENCH_PIPELINE_COMMANDS"
           cargo run --locked -p ${{ matrix.package }} --release -- --include-samples --json \
             > benchmark-results/${{ matrix.package }}.json \
             2> benchmark-results/${{ matrix.package }}.log
@@ -90,11 +96,7 @@ jobs:
               2> benchmark-results/cluster-bench-replica.log
           fi
           python3 scripts/benchmarks/validate_weekly_results.py \
-            --result-dir benchmark-results --package ${{ matrix.package }} \
-            --payload-sizes "$BENCH_PAYLOAD_SIZES" --concurrency "$BENCH_CONCURRENCY" \
-            --runs "$BENCH_RUNS" --secs "$BENCH_SECS" \
-            --pipeline-concurrency "$BENCH_PIPELINE_CONCURRENCY" \
-            --pipeline-commands "$BENCH_PIPELINE_COMMANDS"
+            --recorded-config --result-dir benchmark-results --package ${{ matrix.package }}
 
       - name: Upload benchmark results
         if: always()
