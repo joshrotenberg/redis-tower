@@ -168,15 +168,15 @@ count into three bounded categories:
 A payload violation in **any** window fails the campaign with a nonzero exit;
 it cannot disappear in warmup, acceptable outage errors, or an average of later
 recovered runs. Invalid-payload workers stop, all clients are shut down, and
-normal fixture ownership cleans up the managed Redis processes. Failed runs
-failing inside the churn driver emit a `churn_failure_diagnostics=` JSON record
-on stderr containing prior
-completed runs and the failed run's per-client, per-phase accounting; stdout
+normal fixture ownership cleans up the managed Redis processes. Runs failing
+inside the churn driver emit a `churn_failure_diagnostics=` JSON record on
+stderr containing prior completed runs and the failed run's per-client,
+per-phase accounting; stdout
 does not contain an ordinary successful campaign result. Retain stderr with
 the successful JSON outputs. Earlier fixture/seed/client setup failures retain
 their ordinary stderr but do not emit this driver diagnostic record.
-Worker panics and injection failures also fail
-the campaign rather than becoming ordinary successful results.
+Worker panics and injection failures also fail the campaign rather than
+becoming ordinary successful results.
 
 The current churn adapters use their normal protocol/socket/retry defaults:
 tower negotiates RESP automatically, while redis-rs starts from RESP2 seed
