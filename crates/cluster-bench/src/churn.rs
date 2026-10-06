@@ -1472,6 +1472,38 @@ mod tests {
             protocols
         }
 
+        async fn assert_get_protocols(
+            clients: &mut [ChurnClient],
+            key: &str,
+            addr: &str,
+            expected: &[u64],
+        ) {
+            // Topology refresh or health traffic can replace CLIENT LIST's
+            // last-command field between GET and observation. Repeat useful
+            // exact-payload work, but require both actual workload sockets.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+            let mut observations = Vec::new();
+            loop {
+                for client in clients.iter_mut() {
+                    client.execute(ChurnWorkload::Get, key).await.unwrap();
+                }
+                let protocols = observed_get_protocols(addr).await;
+                if protocols == expected {
+                    return;
+                }
+                assert!(
+                    protocols.iter().all(|p| expected.contains(p)),
+                    "unexpected wire protocol: {protocols:?}"
+                );
+                observations.push(protocols);
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "workload socket observation incomplete: {observations:?}, expected {expected:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
         for selection in [
             ChurnProtocol::ClientDefaults,
             ChurnProtocol::Resp2,
@@ -1510,23 +1542,11 @@ mod tests {
                     client.configured_protocol(),
                     selection.configured(client.kind())
                 );
-                client.execute(ChurnWorkload::Get, &key).await.unwrap();
             }
-            assert_eq!(
-                observed_get_protocols(&owner.addr).await,
-                expected,
-                "before handoff: {selection:?}"
-            );
+            assert_get_protocols(&mut clients, &key, &owner.addr, &expected).await;
             let guard = fixture.begin_reshard(slot, target.index).await.unwrap();
             assert_eq!(guard.complete().await.unwrap(), 1);
-            for client in &mut clients {
-                client.execute(ChurnWorkload::Get, &key).await.unwrap();
-            }
-            assert_eq!(
-                observed_get_protocols(&target.addr).await,
-                expected,
-                "after handoff: {selection:?}"
-            );
+            assert_get_protocols(&mut clients, &key, &target.addr, &expected).await;
             let writer = redis::Client::open(format!("redis://{}/", target.addr)).unwrap();
             let mut writer = writer.get_multiplexed_async_connection().await.unwrap();
             writer.set::<_, _, ()>(&key, "vAlue").await.unwrap();
