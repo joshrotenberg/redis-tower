@@ -47,8 +47,8 @@ use redis_server_wrapper::{RedisCluster, chaos};
 use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
 
 use crate::churn::{
-    AggregatedChurnReport, ChurnClient, ChurnConfig, ChurnEventReport, ChurnReport, ChurnScenario,
-    ChurnWorkload, aggregate_churn,
+    AggregatedChurnReport, ChurnClient, ChurnConfig, ChurnEventReport, ChurnProtocol, ChurnReport,
+    ChurnScenario, ChurnWorkload, aggregate_churn,
 };
 use crate::clients::{Client, ClientKind};
 use crate::runner::{AggregatedReport, BenchConfig, BenchReport, Workload, aggregate};
@@ -526,6 +526,14 @@ fn parse_clients(value: Option<&str>, defaults: &[ClientKind]) -> Result<Vec<Cli
 }
 
 async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), String> {
+    let protocol_value = match std::env::var("BENCH_CHURN_PROTOCOL") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "client-defaults".into(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("BENCH_CHURN_PROTOCOL must be valid Unicode".into());
+        }
+    };
+    let protocol = ChurnProtocol::parse(&protocol_value)?;
     let warmup = Duration::from_secs(env_parse("BENCH_WARMUP", 2_u64));
     let baseline = Duration::from_secs(env_parse("BENCH_BASELINE_SECS", 3_u64));
     let recovery = Duration::from_secs(env_parse("BENCH_RECOVERY_SECS", 3_u64));
@@ -593,8 +601,17 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
             .ok_or_else(|| format!("slot {slot} has no owner"))?;
         churn::seed_key(&old_owner.addr, &key).await?;
 
-        let tower_client = ChurnClient::connect_tower_mux(&seed).await?;
-        let redis_rs_client = match ChurnClient::connect_redis_rs(&seed_urls).await {
+        let tower_client = if protocol == ChurnProtocol::ClientDefaults {
+            ChurnClient::connect_tower_mux(&seed).await?
+        } else {
+            ChurnClient::connect_tower_mux_with_protocol(&seed, protocol).await?
+        };
+        let redis_rs_result = if protocol == ChurnProtocol::ClientDefaults {
+            ChurnClient::connect_redis_rs(&seed_urls).await
+        } else {
+            ChurnClient::connect_redis_rs_with_protocol(&seed_urls, protocol).await
+        };
+        let redis_rs_client = match redis_rs_result {
             Ok(client) => client,
             Err(error) => {
                 tower_client.shutdown().await;
