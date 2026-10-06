@@ -138,6 +138,10 @@ The churn report includes stable/churn p99 and p999, their deltas, dropped
 recovery after the final surfaced error, the first-to-last error window, and
 external topology-convergence time. A tail percentile and its delta are
 `null`/`n/a` when that phase has no successful samples.
+The first-success timestamp is a completion after the confirmed event marker:
+it can be an already-buffered pre-event reply, not proof of routing to the new
+owner. Use useful post-election work and final-error recovery observations when
+assessing recovery.
 Repeated-run output also reports how many runs reached a first success and how
 many erroring runs recovered. The corresponding timing mean is `null`/`n/a`
 unless every applicable run recovered, so one wedged run cannot disappear into
@@ -145,6 +149,37 @@ an average of the successful runs.
 For redis-tower it also reports ASK/MOVED counters and topology-refresh
 outcomes through the client's metrics hooks. redis-rs does not expose those
 hooks, so its redirect and refresh fields are `null`, not a misleading zero.
+
+### Churn correctness and failure accounting
+
+Churn JSON now declares `schema_version: 1` (previous churn output was
+unversioned). Existing counts and timings remain present. `stable_failures`,
+`churn_failures`, and `recovery_failures` partition each phase's legacy error
+count into three bounded categories:
+
+- `client`: a surfaced client error, without asserting equivalent internal
+  error/retry policies or emitting raw error messages or payloads.
+- `invalid_payload`: missing, wrong-length or equal-length corrupt GET content.
+  These are fatal correctness failures, never permitted outage errors.
+- `unresolved`: an in-flight request canceled at worker teardown. Redis
+  execution is unknown; cancellation does not prove the command did not execute.
+
+`warmup_failures` is diagnostic only, excluded from measured counts and latency.
+A payload violation in **any** window fails the campaign with a nonzero exit;
+it cannot disappear in warmup, acceptable outage errors, or an average of later
+recovered runs. Invalid-payload workers stop, all clients are shut down, and
+normal fixture ownership cleans up the managed Redis processes. Failed runs
+emit a `churn_failure_diagnostics=` JSON record on stderr containing prior
+completed runs and the failed run's per-client, per-phase accounting; stdout
+does not contain an ordinary successful campaign result. Retain stderr with
+the successful JSON outputs. Worker panics and injection failures also fail
+the campaign rather than becoming ordinary successful results.
+
+The current churn adapters use their normal protocol/socket/retry defaults:
+tower negotiates RESP automatically, while redis-rs starts from RESP2 seed
+URLs. These policies are not asserted matched; disclose them with results and
+do not infer a reliability or performance ranking from differing surfaced
+error counts alone.
 
 All timing and tail-latency values are informational. There are intentionally
 no pass/fail thresholds: local process scheduling and Redis election timing

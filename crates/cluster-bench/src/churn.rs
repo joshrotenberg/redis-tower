@@ -23,6 +23,82 @@ use serde::Serialize;
 use crate::clients::ClientKind;
 use crate::runner::{mean, new_histogram, record_latency, std_dev};
 
+/// First versioned churn schema; legacy counts and timing fields remain present.
+pub const CHURN_SCHEMA_VERSION: u64 = 1;
+
+/// Bounded categories, deliberately excluding raw client errors and payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FailureKind {
+    Client,
+    InvalidPayload,
+    Unresolved,
+}
+
+/// Failed operations partitioned without claiming equivalent internal errors.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+pub struct FailureCounts {
+    pub client: u64,
+    pub invalid_payload: u64,
+    /// A canceled in-flight request: execution at Redis is unknown.
+    pub unresolved: u64,
+}
+
+impl FailureCounts {
+    fn record(&mut self, kind: FailureKind) {
+        match kind {
+            FailureKind::Client => self.client += 1,
+            FailureKind::InvalidPayload => self.invalid_payload += 1,
+            FailureKind::Unresolved => self.unresolved += 1,
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.client += other.client;
+        self.invalid_payload += other.invalid_payload;
+        self.unresolved += other.unresolved;
+    }
+
+    fn total(self) -> u64 {
+        self.client + self.invalid_payload + self.unresolved
+    }
+}
+
+fn validate_payload(value: Option<&[u8]>) -> Result<(), FailureKind> {
+    if value == Some(b"value".as_slice()) {
+        Ok(())
+    } else {
+        Err(FailureKind::InvalidPayload)
+    }
+}
+
+/// A failed campaign retains the current run's accounting after client shutdown.
+#[derive(Debug)]
+pub struct ChurnRunError {
+    pub message: String,
+    pub reports: Vec<ChurnReport>,
+}
+
+impl From<String> for ChurnRunError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            reports: Vec::new(),
+        }
+    }
+}
+
+impl From<&str> for ChurnRunError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+impl std::fmt::Display for ChurnRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChurnScenario {
@@ -97,6 +173,7 @@ impl LatencyReport {
 pub struct PhaseReport {
     pub successes: u64,
     pub errors: u64,
+    pub failures: FailureCounts,
     pub latency: LatencyReport,
 }
 
@@ -127,6 +204,7 @@ pub struct ChurnEventReport {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ChurnReport {
+    pub schema_version: u64,
     pub scenario: ChurnScenario,
     pub client: String,
     pub workload: ChurnWorkload,
@@ -134,6 +212,8 @@ pub struct ChurnReport {
     pub stable: PhaseReport,
     pub churn: PhaseReport,
     pub recovery: PhaseReport,
+    /// Diagnostic-only warmup failures, excluded from measured counts/latency.
+    pub warmup_failures: FailureCounts,
     /// Failed operations after injection began.  These are reported rather
     /// than asserted on: local scheduler and Redis election timing vary.
     pub dropped_ops: u64,
@@ -160,8 +240,18 @@ pub struct ChurnReport {
     pub topology_refreshes: Option<TopologyRefreshReport>,
 }
 
+impl ChurnReport {
+    fn has_invalid_payload(&self) -> bool {
+        self.warmup_failures.invalid_payload > 0
+            || self.stable.failures.invalid_payload > 0
+            || self.churn.failures.invalid_payload > 0
+            || self.recovery.failures.invalid_payload > 0
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct AggregatedChurnReport {
+    pub schema_version: u64,
     pub scenario: ChurnScenario,
     pub client: String,
     pub workload: ChurnWorkload,
@@ -182,6 +272,10 @@ pub struct AggregatedChurnReport {
     pub churn_errors: u64,
     pub recovery_successes: u64,
     pub recovery_errors: u64,
+    pub warmup_failures: FailureCounts,
+    pub stable_failures: FailureCounts,
+    pub churn_failures: FailureCounts,
+    pub recovery_failures: FailureCounts,
     /// Error rate across the conservative churn and recovery phases.
     pub churn_error_rate_pct: f64,
     pub first_success_runs: usize,
@@ -204,6 +298,14 @@ pub struct AggregatedChurnReport {
 /// informational: the benchmark intentionally has no timing assertions.
 pub fn aggregate_churn(reports: &[ChurnReport]) -> AggregatedChurnReport {
     let first = reports.first().expect("at least one churn report per cell");
+    let sum_failures = |select: fn(&ChurnReport) -> FailureCounts| {
+        reports
+            .iter()
+            .fold(FailureCounts::default(), |mut total, report| {
+                total.merge(select(report));
+                total
+            })
+    };
     let values = |f: fn(&ChurnReport) -> f64| reports.iter().map(f).collect::<Vec<_>>();
     let optional_mean = |f: fn(&ChurnReport) -> Option<f64>| {
         let values = reports.iter().filter_map(f).collect::<Vec<_>>();
@@ -252,6 +354,7 @@ pub fn aggregate_churn(reports: &[ChurnReport]) -> AggregatedChurnReport {
             });
 
     AggregatedChurnReport {
+        schema_version: CHURN_SCHEMA_VERSION,
         scenario: first.scenario,
         client: first.client.clone(),
         workload: first.workload,
@@ -280,6 +383,10 @@ pub fn aggregate_churn(reports: &[ChurnReport]) -> AggregatedChurnReport {
         churn_errors: reports.iter().map(|r| r.churn.errors).sum(),
         recovery_successes: reports.iter().map(|r| r.recovery.successes).sum(),
         recovery_errors: reports.iter().map(|r| r.recovery.errors).sum(),
+        warmup_failures: sum_failures(|r| r.warmup_failures),
+        stable_failures: sum_failures(|r| r.stable.failures),
+        churn_failures: sum_failures(|r| r.churn.failures),
+        recovery_failures: sum_failures(|r| r.recovery.failures),
         churn_error_rate_pct: {
             let errors = reports.iter().map(|r| r.dropped_ops).sum::<u64>();
             let successes = reports
@@ -450,44 +557,30 @@ impl ChurnClient {
         }
     }
 
-    async fn execute(&mut self, workload: ChurnWorkload, key: &str) -> Result<(), ()> {
+    async fn execute(&mut self, workload: ChurnWorkload, key: &str) -> Result<(), FailureKind> {
         match self {
             Self::TowerMux { client, .. } => match workload {
                 ChurnWorkload::Get => client
                     .execute(TowerGet::new(key))
                     .await
-                    .and_then(|value| {
-                        (value.as_deref() == Some(b"value".as_slice()))
-                            .then_some(())
-                            .ok_or_else(|| {
-                                redis_tower_core::RedisError::Redis(
-                                    "benchmark key missing or corrupt".into(),
-                                )
-                            })
-                    })
-                    .map_err(|_| ()),
+                    .map_err(|_| FailureKind::Client)
+                    .and_then(|value| validate_payload(value.as_deref())),
                 ChurnWorkload::Set => client
                     .execute(TowerSet::new(key, "value"))
                     .await
                     .map(|_| ())
-                    .map_err(|_| ()),
+                    .map_err(|_| FailureKind::Client),
             },
             Self::RedisRsAsync(client) => match workload {
                 ChurnWorkload::Get => client
                     .get::<_, Option<Vec<u8>>>(key)
                     .await
-                    .and_then(|value| {
-                        (value.as_deref() == Some(b"value".as_slice()))
-                            .then_some(())
-                            .ok_or_else(|| {
-                                redis::RedisError::from((
-                                    redis::ErrorKind::UnexpectedReturnType,
-                                    "benchmark key missing or corrupt",
-                                ))
-                            })
-                    })
-                    .map_err(|_| ()),
-                ChurnWorkload::Set => client.set::<_, _, ()>(key, "value").await.map_err(|_| ()),
+                    .map_err(|_| FailureKind::Client)
+                    .and_then(|value| validate_payload(value.as_deref())),
+                ChurnWorkload::Set => client
+                    .set::<_, _, ()>(key, "value")
+                    .await
+                    .map_err(|_| FailureKind::Client),
             },
         }
     }
@@ -534,6 +627,7 @@ const PHASE_RECOVERY: u8 = 3;
 const PHASE_STOP: u8 = 4;
 
 struct WorkerStats {
+    warmup_failures: FailureCounts,
     stable: PhaseStats,
     churn: PhaseStats,
     recovery: PhaseStats,
@@ -562,6 +656,7 @@ struct WorkerState {
 impl WorkerStats {
     fn new() -> Self {
         Self {
+            warmup_failures: FailureCounts::default(),
             stable: PhaseStats::new(),
             churn: PhaseStats::new(),
             recovery: PhaseStats::new(),
@@ -578,19 +673,31 @@ impl WorkerStats {
         }
     }
 
-    fn record(&mut self, phase: u8, success: bool, latency: Duration, elapsed_ns: u64) {
+    fn record(
+        &mut self,
+        phase: u8,
+        outcome: Result<(), FailureKind>,
+        latency: Duration,
+        elapsed_ns: u64,
+    ) {
+        if phase == PHASE_WARMUP {
+            if let Err(kind) = outcome {
+                self.warmup_failures.record(kind);
+            }
+        }
         if let Some(window) = self.phase_mut(phase) {
-            window.record(success, latency);
+            window.record(outcome, latency);
             if matches!(phase, PHASE_CHURN | PHASE_RECOVERY) {
                 self.post_trigger_events.push(RecoveryEvent {
                     elapsed_ns,
-                    success,
+                    success: outcome.is_ok(),
                 });
             }
         }
     }
 
     fn merge(&mut self, other: &Self) {
+        self.warmup_failures.merge(other.warmup_failures);
         self.stable.merge(&other.stable);
         self.churn.merge(&other.churn);
         self.recovery.merge(&other.recovery);
@@ -652,12 +759,12 @@ impl WorkerState {
     fn complete_operation(
         &mut self,
         measured_phase: u8,
-        success: bool,
+        outcome: Result<(), FailureKind>,
         latency: Duration,
         elapsed_ns: u64,
     ) {
         self.stats
-            .record(measured_phase, success, latency, elapsed_ns);
+            .record(measured_phase, outcome, latency, elapsed_ns);
         self.in_flight_phase = None;
     }
 
@@ -666,8 +773,12 @@ impl WorkerState {
             return;
         };
         let measured_phase = completed_phase(started_phase, PHASE_STOP);
-        self.stats
-            .record(measured_phase, false, Duration::ZERO, elapsed_ns);
+        self.stats.record(
+            measured_phase,
+            Err(FailureKind::Unresolved),
+            Duration::ZERO,
+            elapsed_ns,
+        );
     }
 
     fn take_stats(&mut self) -> WorkerStats {
@@ -678,6 +789,7 @@ impl WorkerState {
 struct PhaseStats {
     successes: u64,
     errors: u64,
+    failures: FailureCounts,
     histogram: Histogram<u64>,
 }
 
@@ -686,31 +798,40 @@ impl PhaseStats {
         Self {
             successes: 0,
             errors: 0,
+            failures: FailureCounts::default(),
             histogram: new_histogram(),
         }
     }
 
-    fn record(&mut self, success: bool, latency: Duration) {
-        if success {
+    fn record(&mut self, outcome: Result<(), FailureKind>, latency: Duration) {
+        if let Err(kind) = outcome {
+            self.errors += 1;
+            self.failures.record(kind);
+        } else {
             self.successes += 1;
             record_latency(&mut self.histogram, latency);
-        } else {
-            self.errors += 1;
         }
     }
 
     fn merge(&mut self, other: &Self) {
         self.successes += other.successes;
         self.errors += other.errors;
+        self.failures.merge(other.failures);
         self.histogram
             .add(&other.histogram)
             .expect("matching churn latency histograms merge");
     }
 
     fn report(&self) -> PhaseReport {
+        assert_eq!(
+            self.errors,
+            self.failures.total(),
+            "failure counts must partition errors"
+        );
         PhaseReport {
             successes: self.successes,
             errors: self.errors,
+            failures: self.failures,
             latency: LatencyReport::from_histogram(&self.histogram),
         }
     }
@@ -734,7 +855,7 @@ async fn worker_loop(
             state.begin_operation(started_phase);
         }
         let started = Instant::now();
-        let success = client.execute(workload, &key).await.is_ok();
+        let outcome = client.execute(workload, &key).await;
         let finished = Instant::now();
         let finished_phase = phase.load(Ordering::Acquire);
         let measured_phase = completed_phase(started_phase, finished_phase);
@@ -743,12 +864,15 @@ async fn worker_loop(
             let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
             state.complete_operation(
                 measured_phase,
-                success,
+                outcome,
                 finished.duration_since(started),
                 elapsed_ns,
             );
         }
-        if !success {
+        if outcome == Err(FailureKind::InvalidPayload) {
+            return;
+        }
+        if outcome.is_err() {
             // A disconnected client can fail synchronously. A tiny fixed
             // backoff prevents a hot retry loop from monopolizing the runtime
             // and turning "dropped ops" into a CPU-speed benchmark.
@@ -854,7 +978,7 @@ pub async fn run_churn<F, Fut>(
     key: String,
     config: ChurnConfig,
     inject: F,
-) -> Result<Vec<ChurnReport>, String>
+) -> Result<Vec<ChurnReport>, ChurnRunError>
 where
     F: FnOnce(ChurnTrigger) -> Fut,
     Fut: Future<Output = Result<ChurnEventReport, String>>,
@@ -904,27 +1028,38 @@ where
         trigger_ns: trigger_ns.clone(),
         run_started,
     };
-    let injection = inject(trigger.clone()).await;
-    let mut event = match injection {
-        Ok(event) => event,
-        Err(error) => {
-            phase.store(PHASE_STOP, Ordering::Release);
-            abort_workers(client_handles).await;
-            return Err(error);
-        }
+    // Do not inject a topology fault after a warmup/baseline correctness failure.
+    let invalid_before_event = client_handles.iter().any(|client| {
+        client.workers.iter().any(|worker| {
+            let state = worker
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            state.stats.warmup_failures.invalid_payload > 0
+                || state.stats.stable.failures.invalid_payload > 0
+        })
+    });
+    let injection = if invalid_before_event {
+        Err("invalid GET payload before topology event".to_owned())
+    } else {
+        inject(trigger.clone()).await
+    };
+    let (mut event, mut campaign_error) = match injection {
+        Ok(event) => (event, None),
+        Err(error) => (ChurnEventReport::default(), Some(error)),
     };
     let event_started_ns = trigger_ns.load(Ordering::Acquire);
-    if event_started_ns == 0 {
-        phase.store(PHASE_STOP, Ordering::Release);
-        abort_workers(client_handles).await;
-        return Err("churn injector completed without marking the trigger".into());
+    if event_started_ns == 0 && campaign_error.is_none() {
+        campaign_error = Some("churn injector completed without marking the trigger".into());
     }
     if event.event_duration.is_zero() {
         event.event_duration = trigger.elapsed_since_trigger().unwrap_or_default();
     }
 
-    phase.store(PHASE_RECOVERY, Ordering::Release);
-    tokio::time::sleep(config.recovery).await;
+    if campaign_error.is_none() {
+        phase.store(PHASE_RECOVERY, Ordering::Release);
+        tokio::time::sleep(config.recovery).await;
+    }
     phase.store(PHASE_STOP, Ordering::Release);
 
     let mut runs = Vec::with_capacity(client_handles.len());
@@ -935,10 +1070,14 @@ where
         for worker in running.workers {
             match finalize_worker(worker, join_deadline, run_started).await {
                 Ok(stats) => merged.merge(&stats),
-                Err(error) => worker_errors.push(format!(
-                    "{} churn worker failed: {error}",
-                    running.kind.as_str()
-                )),
+                Err(error) => {
+                    merged.merge(&error.stats);
+                    worker_errors.push(format!(
+                        "{} churn worker failed: {}",
+                        running.kind.as_str(),
+                        error.message
+                    ));
+                }
             }
         }
         let after_metrics = running.client.metrics();
@@ -964,23 +1103,31 @@ where
         });
     }
 
-    if !worker_errors.is_empty() {
-        return Err(worker_errors.join("; "));
-    }
-
-    Ok(runs
+    let reports = runs
         .into_iter()
         .map(|run| build_report(scenario, config, event_started_ns, &event, run))
-        .collect())
+        .collect::<Vec<_>>();
+    if reports.iter().any(ChurnReport::has_invalid_payload) {
+        campaign_error = Some("invalid GET payload in churn campaign".into());
+    }
+    if !worker_errors.is_empty() {
+        campaign_error = Some(worker_errors.join("; "));
+    }
+    if let Some(message) = campaign_error {
+        Err(ChurnRunError { message, reports })
+    } else {
+        Ok(reports)
+    }
 }
 
-async fn abort_workers(clients: Vec<RunningClient>) {
-    for running in clients {
-        for worker in running.workers {
-            worker.handle.abort();
-            let _ = worker.handle.await;
-        }
-        running.client.shutdown().await;
+struct WorkerFinalizeError {
+    message: String,
+    stats: WorkerStats,
+}
+
+impl std::fmt::Debug for WorkerFinalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
     }
 }
 
@@ -988,23 +1135,23 @@ async fn finalize_worker(
     worker: RunningWorker,
     join_deadline: tokio::time::Instant,
     run_started: Instant,
-) -> Result<WorkerStats, String> {
+) -> Result<WorkerStats, WorkerFinalizeError> {
     let RunningWorker { state, mut handle } = worker;
-    let interrupted = if handle.is_finished() {
-        handle
-            .await
-            .map_err(|error| format!("task terminated unexpectedly: {error}"))?;
-        false
+    let (interrupted, task_error) = if handle.is_finished() {
+        match handle.await {
+            Ok(()) => (false, None),
+            Err(error) => (true, Some(format!("task terminated unexpectedly: {error}"))),
+        }
     } else {
         match tokio::time::timeout_at(join_deadline, &mut handle).await {
-            Ok(result) => {
-                result.map_err(|error| format!("task terminated unexpectedly: {error}"))?;
-                false
-            }
+            Ok(result) => match result {
+                Ok(()) => (false, None),
+                Err(error) => (true, Some(format!("task terminated unexpectedly: {error}"))),
+            },
             Err(_) => {
                 handle.abort();
                 let _ = handle.await;
-                true
+                (true, None)
             }
         }
     };
@@ -1017,7 +1164,12 @@ async fn finalize_worker(
         // dropped operation in the phase it crossed into.
         state.abort_in_flight(now);
     }
-    Ok(state.take_stats())
+    let stats = state.take_stats();
+    if let Some(message) = task_error {
+        Err(WorkerFinalizeError { message, stats })
+    } else {
+        Ok(stats)
+    }
 }
 
 fn build_report(
@@ -1030,7 +1182,11 @@ fn build_report(
     let stable = run.stats.stable.report();
     let churn = run.stats.churn.report();
     let recovery = run.stats.recovery.report();
-    let recovery_state = run.stats.recovery_state(event_started_ns);
+    let recovery_state = if event_started_ns == 0 {
+        RecoveryState::default()
+    } else {
+        run.stats.recovery_state(event_started_ns)
+    };
     let first_success_ns = recovery_state.first_success_ns;
     let delta =
         |current: &LatencyReport, baseline: &LatencyReport, select: fn(&LatencyReport) -> f64| {
@@ -1056,10 +1212,12 @@ fn build_report(
     };
 
     ChurnReport {
+        schema_version: CHURN_SCHEMA_VERSION,
         scenario,
         client: format!("{:?}", run.kind),
         workload: config.workload,
         concurrency: config.concurrency,
+        warmup_failures: run.stats.warmup_failures,
         dropped_ops: churn.errors + recovery.errors,
         time_to_first_success_ms: first_success_ns
             .map(|time| time.saturating_sub(event_started_ns) as f64 / 1_000_000.0),
@@ -1095,10 +1253,316 @@ fn build_report(
 mod tests {
     use super::*;
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_get_payload_integrity_actual_churn_adapters() {
+        use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
+
+        let fixture = ClusterFixture::start().await.unwrap();
+        let key = key_for_slot(42);
+        let owner = fixture
+            .topology()
+            .await
+            .unwrap()
+            .owner_of_slot(42)
+            .unwrap()
+            .clone();
+        let seed_urls = fixture
+            .node_addrs()
+            .into_iter()
+            .map(|a| format!("redis://{a}/"))
+            .collect::<Vec<_>>();
+        let seed = redis::Client::open(format!("redis://{}/", owner.addr)).unwrap();
+        let mut writer = seed.get_multiplexed_async_connection().await.unwrap();
+        let mut failures = Vec::new();
+        for payload in [None, Some("bad"), Some("vAlue"), Some("value")] {
+            if let Some(payload) = payload {
+                writer.set::<_, _, ()>(&key, payload).await.unwrap();
+            } else {
+                writer.del::<_, u64>(&key).await.unwrap();
+            }
+            for tower in [true, false] {
+                let client = if tower {
+                    ChurnClient::connect_tower_mux(&fixture.seed_addr())
+                        .await
+                        .unwrap()
+                } else {
+                    ChurnClient::connect_redis_rs(&seed_urls).await.unwrap()
+                };
+                let result = run_churn(
+                    ChurnScenario::Reshard,
+                    vec![client],
+                    key.clone(),
+                    ChurnConfig {
+                        warmup: Duration::ZERO,
+                        baseline: Duration::from_millis(30),
+                        recovery: Duration::from_millis(30),
+                        concurrency: 1,
+                        workload: ChurnWorkload::Get,
+                    },
+                    |trigger| async move {
+                        trigger.mark_churn_started();
+                        trigger.mark_triggered();
+                        Ok(ChurnEventReport {
+                            event_duration: Duration::from_millis(1),
+                            ..ChurnEventReport::default()
+                        })
+                    },
+                )
+                .await;
+                if payload == Some("value") {
+                    let reports = result.expect("valid payload campaign succeeds");
+                    assert!(reports.iter().all(|r| !r.has_invalid_payload()));
+                } else if result.is_ok() {
+                    failures.push(format!(
+                        "tower={tower}, payload={payload:?}: accepted invalid churn payload"
+                    ));
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.reports.len(), 1);
+                    let report = &error.reports[0];
+                    assert!(report.has_invalid_payload());
+                    let phases = [&report.stable, &report.churn, &report.recovery];
+                    for phase in phases {
+                        assert_eq!(phase.successes, 0);
+                        assert_eq!(phase.latency.samples, 0);
+                        assert_eq!(phase.errors, phase.failures.total());
+                    }
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+
+        // Corruption during the injected fault window must also be fatal for
+        // both real adapters, even after successful baseline work.
+        writer.set::<_, _, ()>(&key, "value").await.unwrap();
+        let clients = vec![
+            ChurnClient::connect_tower_mux(&fixture.seed_addr())
+                .await
+                .unwrap(),
+            ChurnClient::connect_redis_rs(&seed_urls).await.unwrap(),
+        ];
+        let fault_key = key.clone();
+        let error = run_churn(
+            ChurnScenario::Failover,
+            clients,
+            key,
+            ChurnConfig {
+                warmup: Duration::from_millis(20),
+                baseline: Duration::from_millis(30),
+                recovery: Duration::from_millis(30),
+                concurrency: 1,
+                workload: ChurnWorkload::Get,
+            },
+            |trigger| async move {
+                trigger.mark_churn_started();
+                writer
+                    .set::<_, _, ()>(&fault_key, "vAlue")
+                    .await
+                    .map_err(|e| e.to_string())?;
+                trigger.mark_triggered();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(ChurnEventReport {
+                    event_duration: Duration::from_millis(50),
+                    ..ChurnEventReport::default()
+                })
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.reports.len(), 2);
+        for report in error.reports {
+            assert!(report.has_invalid_payload());
+            assert_eq!(report.churn.failures.invalid_payload, 1);
+            assert_eq!(report.churn.errors, report.churn.failures.total());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_get_payload_integrity_churn_client_errors_are_not_payload_failures() {
+        use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
+        let fixture = ClusterFixture::start().await.unwrap();
+        let key = key_for_slot(42);
+        let owner = fixture
+            .topology()
+            .await
+            .unwrap()
+            .owner_of_slot(42)
+            .unwrap()
+            .clone();
+        let writer = redis::Client::open(format!("redis://{}/", owner.addr)).unwrap();
+        let mut writer = writer.get_multiplexed_async_connection().await.unwrap();
+        writer
+            .rpush::<_, _, usize>(&key, "wrongtype")
+            .await
+            .unwrap();
+        let urls = fixture
+            .node_addrs()
+            .into_iter()
+            .map(|a| format!("redis://{a}/"))
+            .collect::<Vec<_>>();
+        let clients = vec![
+            ChurnClient::connect_tower_mux(&fixture.seed_addr())
+                .await
+                .unwrap(),
+            ChurnClient::connect_redis_rs(&urls).await.unwrap(),
+        ];
+        let reports = run_churn(
+            ChurnScenario::Reshard,
+            clients,
+            key,
+            ChurnConfig {
+                warmup: Duration::from_millis(20),
+                baseline: Duration::from_millis(30),
+                recovery: Duration::from_millis(30),
+                concurrency: 1,
+                workload: ChurnWorkload::Get,
+            },
+            |trigger| async move {
+                trigger.mark_churn_started();
+                trigger.mark_triggered();
+                Ok(ChurnEventReport {
+                    event_duration: Duration::from_millis(1),
+                    ..ChurnEventReport::default()
+                })
+            },
+        )
+        .await
+        .unwrap();
+        for report in reports {
+            assert!(!report.has_invalid_payload());
+            assert!(
+                report.stable.failures.client
+                    + report.churn.failures.client
+                    + report.recovery.failures.client
+                    + report.warmup_failures.client
+                    > 0
+            );
+            for phase in [&report.stable, &report.churn, &report.recovery] {
+                assert_eq!(phase.errors, phase.failures.client);
+                assert_eq!(phase.successes, 0);
+                assert_eq!(phase.latency.samples, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn payload_validation_is_exact_and_missing_is_fatal() {
+        for value in [None, Some(b"bad".as_slice()), Some(b"vAlue".as_slice())] {
+            assert_eq!(validate_payload(value), Err(FailureKind::InvalidPayload));
+        }
+        assert_eq!(validate_payload(Some(b"value")), Ok(()));
+    }
+
+    #[test]
+    fn phase_failure_categories_partition_errors_without_success_latency() {
+        let mut stats = PhaseStats::new();
+        for outcome in [
+            Ok(()),
+            Err(FailureKind::Client),
+            Err(FailureKind::InvalidPayload),
+            Err(FailureKind::Unresolved),
+        ] {
+            stats.record(outcome, Duration::from_micros(12));
+        }
+        let report = stats.report();
+        assert_eq!(report.successes, 1);
+        assert_eq!(report.latency.samples, 1);
+        assert_eq!(report.errors, 3);
+        assert_eq!(report.failures.total(), report.errors);
+        assert_eq!(report.failures.client, 1);
+        assert_eq!(report.failures.invalid_payload, 1);
+        assert_eq!(report.failures.unresolved, 1);
+    }
+
+    #[test]
+    fn warmup_invalid_payload_survives_merge_but_not_measured_counts() {
+        let mut warmup = WorkerStats::new();
+        warmup.record(
+            PHASE_WARMUP,
+            Err(FailureKind::InvalidPayload),
+            Duration::ZERO,
+            1,
+        );
+        let mut merged = WorkerStats::new();
+        merged.merge(&warmup);
+        assert_eq!(merged.warmup_failures.invalid_payload, 1);
+        assert_eq!(
+            merged.stable.errors + merged.churn.errors + merged.recovery.errors,
+            0
+        );
+        let report = build_report(
+            ChurnScenario::Failover,
+            ChurnConfig {
+                warmup: Duration::ZERO,
+                baseline: Duration::ZERO,
+                recovery: Duration::ZERO,
+                concurrency: 1,
+                workload: ChurnWorkload::Get,
+            },
+            0,
+            &ChurnEventReport::default(),
+            ClientRun {
+                kind: ClientKind::RedisTowerMux,
+                metrics: None,
+                stats: merged,
+            },
+        );
+        assert!(report.has_invalid_payload());
+        assert!(report.time_to_first_success_ms.is_none());
+    }
+
+    #[test]
+    fn mixed_repeats_preserve_all_failure_categories() {
+        let first = report(1);
+        let mut second = report(2);
+        second.churn.failures = FailureCounts {
+            invalid_payload: 1,
+            unresolved: 1,
+            ..FailureCounts::default()
+        };
+        second.warmup_failures.invalid_payload = 1;
+        let aggregate = aggregate_churn(&[first, second]);
+        assert_eq!(aggregate.churn_errors, 3);
+        assert_eq!(aggregate.churn_failures.total(), 3);
+        assert_eq!(aggregate.churn_failures.client, 1);
+        assert_eq!(aggregate.churn_failures.invalid_payload, 1);
+        assert_eq!(aggregate.churn_failures.unresolved, 1);
+        assert_eq!(aggregate.warmup_failures.invalid_payload, 1);
+        assert_eq!(aggregate.dropped_ops, 3);
+        let json = serde_json::to_value(&aggregate).unwrap();
+        assert_eq!(json["schema_version"], CHURN_SCHEMA_VERSION);
+        assert_eq!(json["churn_failures"]["invalid_payload"], 1);
+    }
+
+    #[test]
+    fn crossing_and_canceled_requests_keep_their_outcome_category() {
+        let mut state = WorkerState::new();
+        state.begin_operation(PHASE_STABLE);
+        state.complete_operation(
+            completed_phase(PHASE_STABLE, PHASE_CHURN),
+            Err(FailureKind::Client),
+            Duration::ZERO,
+            1,
+        );
+        state.begin_operation(PHASE_RECOVERY);
+        state.abort_in_flight(2);
+        state.abort_in_flight(3); // Already accounted: never count a cancel twice.
+        assert_eq!(state.stats.churn.failures.client, 1);
+        assert_eq!(state.stats.recovery.failures.unresolved, 1);
+        assert_eq!(state.stats.recovery.errors, 1);
+        assert_eq!(state.stats.recovery.histogram.len(), 0);
+    }
+
     fn phase(p99: f64, p999: f64, successes: u64, errors: u64) -> PhaseReport {
         PhaseReport {
             successes,
             errors,
+            failures: FailureCounts {
+                client: errors,
+                ..FailureCounts::default()
+            },
             latency: LatencyReport {
                 samples: successes,
                 p50_us: p99 / 2.0,
@@ -1112,10 +1576,12 @@ mod tests {
 
     fn report(run: usize) -> ChurnReport {
         ChurnReport {
+            schema_version: CHURN_SCHEMA_VERSION,
             scenario: ChurnScenario::Reshard,
             client: "RedisTowerMux".into(),
             workload: ChurnWorkload::Get,
             concurrency: 8,
+            warmup_failures: FailureCounts::default(),
             stable: phase(100.0, 200.0, 1000, 0),
             churn: phase(200.0 + run as f64 * 20.0, 400.0, 800, run as u64),
             recovery: phase(110.0, 220.0, 900, 0),
@@ -1329,7 +1795,7 @@ mod tests {
             let mut state = state.lock().unwrap();
             state
                 .stats
-                .record(PHASE_STABLE, true, Duration::from_micros(7), 10);
+                .record(PHASE_STABLE, Ok(()), Duration::from_micros(7), 10);
             state.begin_operation(PHASE_CHURN);
         }
         let handle = tokio::spawn(std::future::pending::<()>());
@@ -1344,6 +1810,8 @@ mod tests {
 
         assert_eq!(stats.stable.successes, 1);
         assert_eq!(stats.churn.errors, 1);
+        assert_eq!(stats.churn.failures.unresolved, 1);
+        assert_eq!(stats.churn.failures.client, 0);
         assert_eq!(stats.post_trigger_events.len(), 1);
         assert!(!stats.post_trigger_events[0].success);
     }
@@ -1351,6 +1819,13 @@ mod tests {
     #[tokio::test]
     async fn panicking_worker_is_reported() {
         let state = Arc::new(Mutex::new(WorkerState::new()));
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .stats
+                .record(PHASE_STABLE, Ok(()), Duration::from_micros(2), 1);
+            state.begin_operation(PHASE_CHURN);
+        }
         let handle = tokio::spawn(async { panic!("synthetic worker panic") });
         let result = finalize_worker(
             RunningWorker { state, handle },
@@ -1363,8 +1838,10 @@ mod tests {
             Ok(_) => panic!("panicking worker unexpectedly finalized successfully"),
         };
 
-        assert!(error.contains("task terminated unexpectedly"));
-        assert!(error.contains("synthetic worker panic"));
+        assert!(error.message.contains("task terminated unexpectedly"));
+        assert!(error.message.contains("synthetic worker panic"));
+        assert_eq!(error.stats.stable.successes, 1);
+        assert_eq!(error.stats.churn.failures.unresolved, 1);
     }
 
     #[test]
