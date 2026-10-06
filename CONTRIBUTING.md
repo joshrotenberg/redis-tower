@@ -16,16 +16,20 @@ Run the same checks CI runs:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --lib --all-features
-cargo test --test '*' --all-features        # standalone integration tests
-cargo deny check                            # supply-chain policy
+cargo test --test '*' --all-features -- --test-threads=1  # standalone integration tests
+cargo deny check                                        # supply-chain policy
 ```
+
+Run integration tests serially, as CI does: tests within a suite share a Redis
+instance, and commands such as `FUNCTION FLUSH` modify global server state that
+unique key names cannot isolate.
 
 Cluster and sentinel integration tests are gated behind `#[ignore]` and run
 single-threaded:
 
 ```bash
-cargo test -p redis-tower-cluster  --test cluster_integration  -- --ignored
-cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored
+cargo test -p redis-tower-cluster  --test cluster_integration  -- --ignored --test-threads=1
+cargo test -p redis-tower-sentinel --test sentinel_integration -- --ignored --test-threads=1
 ```
 
 ## Definition of done
