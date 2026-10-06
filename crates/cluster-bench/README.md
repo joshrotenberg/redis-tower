@@ -117,6 +117,7 @@ Churn-specific configuration:
 | `BENCH_CHURN_HOLD_MS` | `1000` | Held ASK/post-convergence sampling windows |
 | `BENCH_CHURN_SLOT` | `42` | Exact Redis Cluster hash slot exercised |
 | `BENCH_CHURN_WORKLOAD` | `get` | Affected-slot `get` or `set` workload |
+| `BENCH_CHURN_PROTOCOL` | `client-defaults` | Configured policies: historical defaults, or explicit `resp2` / `resp3` for both clients |
 | `BENCH_CHURN_BASE_PORT` | `17800` | First of six fixture client ports |
 | `BENCH_CLUSTER_NODE_TIMEOUT_MS` | `1000` | Redis failure-detection timeout |
 | `BENCH_TOPOLOGY_TIMEOUT_SECS` | `15` | Bound for owner-change convergence |
@@ -178,11 +179,21 @@ their ordinary stderr but do not emit this driver diagnostic record.
 Worker panics and injection failures also fail the campaign rather than
 becoming ordinary successful results.
 
-The current churn adapters use their normal protocol/socket/retry defaults:
-tower negotiates RESP automatically, while redis-rs starts from RESP2 seed
-URLs. These policies are not asserted matched; disclose them with results and
-do not infer a reliability or performance ranking from differing surfaced
-error counts alone.
+By default, tower negotiates RESP automatically and redis-rs uses RESP2.
+Set `BENCH_CHURN_PROTOCOL=resp2` or `resp3` to explicitly select the same wire
+protocol for both churn adapters, including topology-created/reconnected
+connections. The selector is strict and validated before fixture startup;
+`client-defaults` preserves the historical comparison. Throughput and replica
+scenarios are unchanged.
+
+Churn schema version 1 adds `configured_protocol` to each raw success/failure
+report and aggregate: `auto`, `resp2`, or `resp3`. This records the policy passed
+to the adapter builder, not an observed negotiation; live socket observations
+are separate evidence. Mixed configured policies cannot be aggregated.
+Socket, timeout, retry and batching defaults remain unchanged and are not
+asserted equivalent even with an explicit protocol. Disclose those differences
+with results; do not infer a reliability or performance ranking from differing
+surfaced error counts alone.
 
 All timing and tail-latency values are informational. There are intentionally
 no pass/fail thresholds: local process scheduling and Redis election timing
