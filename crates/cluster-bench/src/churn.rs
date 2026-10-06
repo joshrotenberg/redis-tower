@@ -680,10 +680,10 @@ impl WorkerStats {
         latency: Duration,
         elapsed_ns: u64,
     ) {
-        if phase == PHASE_WARMUP {
-            if let Err(kind) = outcome {
-                self.warmup_failures.record(kind);
-            }
+        if phase == PHASE_WARMUP
+            && let Err(kind) = outcome
+        {
+            self.warmup_failures.record(kind);
         }
         if let Some(window) = self.phase_mut(phase) {
             window.record(outcome, latency);
@@ -1122,7 +1122,7 @@ where
 
 struct WorkerFinalizeError {
     message: String,
-    stats: WorkerStats,
+    stats: Box<WorkerStats>,
 }
 
 impl std::fmt::Debug for WorkerFinalizeError {
@@ -1166,7 +1166,10 @@ async fn finalize_worker(
     }
     let stats = state.take_stats();
     if let Some(message) = task_error {
-        Err(WorkerFinalizeError { message, stats })
+        Err(WorkerFinalizeError {
+            message,
+            stats: Box::new(stats),
+        })
     } else {
         Ok(stats)
     }
