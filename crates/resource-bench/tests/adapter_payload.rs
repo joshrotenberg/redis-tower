@@ -39,6 +39,11 @@ async fn enabled_adapters_validate_exact_returned_payload() {
             ProbeProfile::Baseline,
         )
         .await;
+        assert_payload_contract::<resource_bench::adapters::TowerConnection>(
+            &url.replacen("redis://", "valkey://", 1),
+            ProbeProfile::Baseline,
+        )
+        .await;
         assert_payload_contract::<resource_bench::adapters::TowerMuxConnection>(
             &url,
             ProbeProfile::MatchedMuxResp2,

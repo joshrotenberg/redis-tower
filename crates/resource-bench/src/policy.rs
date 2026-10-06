@@ -109,9 +109,9 @@ impl ProbePolicy {
         profile.validate_url(raw_url)?;
         let url = url::Url::parse(raw_url).map_err(|_| "invalid resource URL".to_owned())?;
         let transport = match url.scheme() {
-            "redis" => "tcp",
-            "rediss" => "tls",
-            "unix" | "redis+unix" => "unix",
+            "redis" | "valkey" => "tcp",
+            "rediss" | "valkeys" => "tls",
+            "unix" | "redis+unix" | "valkey+unix" => "unix",
             _ => return Err("unsupported resource transport".to_owned()),
         };
         let (path, nodelay, keepalive, baseline_policy) = match client {
@@ -234,5 +234,18 @@ mod tests {
         assert_eq!(policy.socket_policy, "not-applicable-unix");
         assert!(policy.tcp_nodelay.is_none());
         assert!(policy.keepalive.is_none());
+    }
+
+    #[test]
+    fn tower_baseline_preserves_valkey_transport_aliases() {
+        for (url, transport) in [
+            ("valkey://localhost/", "tcp"),
+            ("valkeys://localhost/", "tls"),
+            ("valkey+unix:///tmp/private.sock", "unix"),
+        ] {
+            let policy =
+                ProbePolicy::for_client("redis-tower", ProbeProfile::Baseline, 4, 2, url).unwrap();
+            assert_eq!(policy.transport, transport);
+        }
     }
 }
