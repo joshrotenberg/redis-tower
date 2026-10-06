@@ -37,6 +37,7 @@ captured panic message.
 | RedisJSON module replies | Independent JSON documents; compare `JSON.GET` and unordered `JSON.OBJKEYS` | JSON bytes agree and object-key order is the only normalization | Path-filtered per-PR and nightly module-enabled Redis 8; RESP2 and RESP3 | `RawCommand` | `Cmd` |
 | Queued cancellation | Cancel single and multi requests before the configured batch window closes | Cancelled queue entries never reach the socket | Deterministic in-memory/TCP fixture; no Redis process | `AutoPipelineService` | Not applicable: redis-tower lifecycle contract |
 | Lost non-idempotent reply | Fake server records an INCR-like request, applies it once, then closes before replying; replacement socket receives a probe | Caller gets an error, execution remains unknown, and reconnect never silently replays the write | Deterministic TCP fixture; no Redis process | factory-backed `AutoPipelineService` | Not applicable: redis-tower lifecycle contract |
+| Connected peer withholds replies | Fake peer applies one INCR-like write while keeping TCP open; single request gets no reply, multi request gets only its first reply | Explicit response timeout surfaces `CommandTimeout`; old socket closes, replacement probe stays aligned, and the write is not replayed | Bounded deterministic TCP fixture; no Redis process or packet-level partition | factory-backed `AutoPipelineService` | Not applicable: redis-tower lifecycle contract |
 
 The executable standalone cases live in
 [`differential_redis_rs.rs`](../crates/redis-tower/tests/differential_redis_rs.rs).
@@ -76,6 +77,13 @@ redis-tower removes cancelled queue entries before flushing and quarantines a
 connection whose reply alignment is no longer knowable. It does not replay the
 lost non-idempotent request on the replacement socket. Applications that retry
 an unknown-execution write must supply their own idempotency mechanism.
+
+An explicit `AutoPipelineConfig::response_timeout` also bounds a connected peer
+that stops replying, including after only part of a pipeline's responses arrive.
+The deterministic TCP regressions keep that socket open until the timeout is
+observed, then verify quarantine and useful replacement work without replay.
+This is a client response-stall fixture, not a real network-partition test; the
+default has no response deadline, so applications must configure one.
 
 ## Reproduction
 
