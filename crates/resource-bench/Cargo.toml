@@ -53,5 +53,7 @@ ctrlc = { version = "3.4", default-features = false, features = ["termination"],
 sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
-redis-server-wrapper = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }

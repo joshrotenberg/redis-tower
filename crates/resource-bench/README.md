@@ -71,7 +71,8 @@ adapter as redis-rs' multiplexed driver. Schema **4** live reports distinguish
 the adapter path, protocol selection, TCP policy, physical connections, per-socket
 in-flight limit, explicit runtime workers and measurement model. Baselines retain
 client/URL protocol defaults rather than claiming an observed negotiated protocol;
-Fred's baseline socket defaults are labeled uninspected, never matched.
+Fred's baseline socket defaults are labeled uninspected, never matched. Unix
+baselines record their transport and mark TCP settings inapplicable.
 
 For a matched comparison, run these separately against the same Redis instance:
 
@@ -90,7 +91,8 @@ unset RESOURCE_PROFILE
 ```
 
 This profile requires TCP with exactly one explicit `protocol=resp2` URL selector;
-TLS, Unix, missing/duplicate/conflicting protocol selectors and direct/Fred
+TLS, Unix, extra query parameters/fragments, missing/duplicate/conflicting
+protocol selectors and direct/Fred
 subjects are rejected before measurement. Both multiplexed paths use TCP_NODELAY
 and keepalive with 60-second idle, 10-second interval and three probes (probe count
 is unavailable on Windows). redis-rs is explicitly configured to match tower;

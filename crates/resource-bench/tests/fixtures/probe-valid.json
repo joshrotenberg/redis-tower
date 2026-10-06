@@ -20,6 +20,7 @@
     "runtime_workers": 2
   },
   "policy": {
+    "transport": "tcp",
     "client_path": "redis-tower-direct",
     "protocol_selection": "client-default-or-url",
     "socket_policy": "tower-default",

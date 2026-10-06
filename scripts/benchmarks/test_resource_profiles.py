@@ -19,6 +19,7 @@ def matched(client='redis-tower-mux'):
         'dependency_default_features': False,
         'dependency_features': ['tokio-comp'] if client == 'redis-rs' else []}
     report['policy'] = {
+        'transport': 'tcp',
         'client_path': 'redis-rs-multiplexed' if client == 'redis-rs' else 'redis-tower-multiplexed',
         'protocol_selection': 'resp2', 'socket_policy': 'matched-v1',
         'tcp_nodelay': True, 'keepalive': {'idle_secs': 60, 'interval_secs': 10, 'probes': 3},
@@ -40,6 +41,7 @@ class ResourceProfiles(unittest.TestCase):
     def test_rejects_policy_drift(self):
         original = matched()
         for section, field, value in [
+            ('policy', 'transport', 'unix'),
             ('policy', 'tcp_nodelay', False), ('policy', 'protocol_selection', 'resp3'),
             ('policy', 'client_path', 'redis-tower-direct'), ('policy', 'runtime_workers', 3),
             ('policy', 'physical_connections', 7), ('policy', 'inflight_per_socket', 2),
@@ -70,6 +72,30 @@ class ResourceProfiles(unittest.TestCase):
         report = matched()
         report['policy']['keepalive']['idle_secs'] = 1
         self.assertFalse(self.accepts(report))
+
+    def test_unix_baseline_has_no_tcp_options(self):
+        report = json.loads((ROOT / 'crates/resource-bench/tests/fixtures/probe-valid.json').read_text())
+        report['policy'].update(transport='unix', socket_policy='not-applicable-unix',
+                                tcp_nodelay=None, keepalive=None)
+        self.assertTrue(self.accepts(report))
+        report['policy']['tcp_nodelay'] = True
+        self.assertFalse(self.accepts(report))
+
+    def test_rejects_impossible_cpu_and_wall_drain_accounting(self):
+        for mutation in ('negative_cpu', 'short_wall', 'wrong_drain'):
+            report = matched()
+            cpu = report['cpu']
+            if mutation == 'negative_cpu':
+                cpu['process_cpu_seconds'] = -1
+                cpu['process_cpu_percent'] = -100 / cpu['wall_seconds']
+            elif mutation == 'short_wall':
+                cpu['wall_seconds'] = 0.1
+                cpu['achieved_ops_per_sec'] = cpu['successful_ops'] / 0.1
+                cpu['process_cpu_percent'] = 100 * cpu['process_cpu_seconds'] / 0.1
+            else:
+                cpu['drain_seconds'] = 1
+            with self.subTest(mutation=mutation):
+                self.assertFalse(self.accepts(report))
 
 
 if __name__ == '__main__':

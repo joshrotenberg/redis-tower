@@ -1,4 +1,5 @@
 //! Live exact-payload regressions against the adapters used by the binaries.
+#![cfg(unix)]
 #![cfg(any(
     feature = "client-redis-tower",
     feature = "client-redis-rs",

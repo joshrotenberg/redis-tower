@@ -317,6 +317,7 @@ pub fn run_client<C: ProbeConnection>(
         config.profile,
         config.connections,
         config.runtime_workers,
+        &config.redis_url,
     )?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(config.runtime_workers)
@@ -348,6 +349,7 @@ async fn measure<C: ProbeConnection>(
         config.profile,
         config.connections,
         config.runtime_workers,
+        &config.redis_url,
     )?;
     // Allocate and touch the fixture before the RSS baseline so its bytes are
     // not misattributed to the connection population.

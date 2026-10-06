@@ -72,6 +72,8 @@ pub struct KeepalivePolicy {
 /// multiplexed socket; it is not a shared-single-socket concurrency benchmark.
 #[derive(Clone, Debug, Serialize)]
 pub struct ProbePolicy {
+    /// Selected transport, without retaining endpoint information.
+    pub transport: &'static str,
     /// Selected connection implementation.
     pub client_path: &'static str,
     /// Explicit protocol selector, or uninspected baseline client/URL defaults.
@@ -99,10 +101,19 @@ impl ProbePolicy {
         profile: ProbeProfile,
         connections: usize,
         workers: usize,
+        raw_url: &str,
     ) -> Result<Self, String> {
         if connections == 0 || workers == 0 || workers > 256 {
             return Err("invalid connection/runtime population".to_owned());
         }
+        profile.validate_url(raw_url)?;
+        let url = url::Url::parse(raw_url).map_err(|_| "invalid resource URL".to_owned())?;
+        let transport = match url.scheme() {
+            "redis" => "tcp",
+            "rediss" => "tls",
+            "unix" | "redis+unix" => "unix",
+            _ => return Err("unsupported resource transport".to_owned()),
+        };
         let (path, nodelay, keepalive, baseline_policy) = match client {
             "redis-tower" => ("redis-tower-direct", Some(true), true, "tower-default"),
             "redis-tower-mux" => ("redis-tower-multiplexed", Some(true), true, "tower-default"),
@@ -122,19 +133,28 @@ impl ProbePolicy {
             );
         }
         Ok(Self {
+            transport,
             client_path: path,
             protocol_selection: if matched {
                 "resp2"
             } else {
                 "client-default-or-url"
             },
-            socket_policy: if matched {
+            socket_policy: if transport == "unix" {
+                "not-applicable-unix"
+            } else if matched {
                 "matched-v1"
             } else {
                 baseline_policy
             },
-            tcp_nodelay: if matched { Some(true) } else { nodelay },
-            keepalive: (matched || keepalive).then_some(KeepalivePolicy {
+            tcp_nodelay: if transport == "unix" {
+                None
+            } else if matched {
+                Some(true)
+            } else {
+                nodelay
+            },
+            keepalive: (transport != "unix" && (matched || keepalive)).then_some(KeepalivePolicy {
                 idle_secs: 60,
                 interval_secs: 10,
                 probes: if cfg!(windows) { None } else { Some(3) },
@@ -174,14 +194,45 @@ mod tests {
     #[test]
     fn direct_and_fred_cannot_claim_matched_mux_policy() {
         for client in ["redis-tower", "fred", "unknown"] {
-            assert!(ProbePolicy::for_client(client, ProbeProfile::MatchedMuxResp2, 4, 2).is_err());
+            assert!(
+                ProbePolicy::for_client(
+                    client,
+                    ProbeProfile::MatchedMuxResp2,
+                    4,
+                    2,
+                    "redis://localhost/?protocol=resp2"
+                )
+                .is_err()
+            );
         }
         for client in ["redis-tower-mux", "redis-rs"] {
-            let policy =
-                ProbePolicy::for_client(client, ProbeProfile::MatchedMuxResp2, 4, 2).unwrap();
+            let policy = ProbePolicy::for_client(
+                client,
+                ProbeProfile::MatchedMuxResp2,
+                4,
+                2,
+                "redis://localhost/?protocol=resp2",
+            )
+            .unwrap();
             assert_eq!(policy.tcp_nodelay, Some(true));
             assert_eq!(policy.keepalive.unwrap().idle_secs, 60);
             assert_eq!(policy.protocol_selection, "resp2");
         }
+    }
+
+    #[test]
+    fn unix_baseline_does_not_claim_tcp_socket_options() {
+        let policy = ProbePolicy::for_client(
+            "redis-tower",
+            ProbeProfile::Baseline,
+            4,
+            2,
+            "unix:///tmp/resource-private.sock",
+        )
+        .unwrap();
+        assert_eq!(policy.transport, "unix");
+        assert_eq!(policy.socket_policy, "not-applicable-unix");
+        assert!(policy.tcp_nodelay.is_none());
+        assert!(policy.keepalive.is_none());
     }
 }
