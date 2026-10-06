@@ -64,6 +64,57 @@ captured after runtime startup and amortizes fixed initialization over
 CPU is user plus system process time divided by wall time and can exceed 100%
 when work spans cores.
 
+## Matched multiplexed profile
+
+The direct `resource-redis-tower` baseline remains available. It is not the same
+adapter as redis-rs' multiplexed driver. Schema **4** live reports distinguish
+the adapter path, protocol selection, TCP policy, physical connections, per-socket
+in-flight limit, explicit runtime workers and measurement model. Baselines retain
+client/URL protocol defaults rather than claiming an observed negotiated protocol;
+Fred's baseline socket defaults are labeled uninspected, never matched. Unix
+baselines record their transport and mark TCP settings inapplicable.
+
+For a matched comparison, run these separately against the same Redis instance:
+
+```bash
+export REDIS_URL='redis://127.0.0.1:6481/?protocol=resp2'
+export RESOURCE_PROFILE=matched-mux-resp2-v1
+export RESOURCE_RUNTIME_WORKERS=2
+# Use the same RESOURCE_* workload settings from Live probes above.
+cargo run -p resource-bench --release --locked \
+  --no-default-features --features client-redis-tower \
+  --bin resource-redis-tower-mux -- --json
+cargo run -p resource-bench --release --locked \
+  --no-default-features --features client-redis-rs \
+  --bin resource-redis-rs -- --json
+unset RESOURCE_PROFILE
+```
+
+This profile requires TCP with exactly one explicit `protocol=resp2` URL selector;
+TLS, Unix, extra query parameters/fragments, missing/duplicate/conflicting
+protocol selectors and direct/Fred
+subjects are rejected before measurement. Both multiplexed paths use TCP_NODELAY
+and keepalive with 60-second idle, 10-second interval and three probes (probe count
+is unavailable on Windows). redis-rs is explicitly configured to match tower;
+the baseline redis-rs socket defaults are not silently presented as matched.
+Two runtime workers are the default for every live subject; the explicit
+`RESOURCE_RUNTIME_WORKERS` setting overrides any ambient `TOKIO_WORKER_THREADS`.
+
+Each worker still opens an independent physical connection and waits for each
+GET completion before its next scheduled operation. This is a completion-gated,
+staggered schedule, not an independent-arrival queue, latency histogram or maximum
+throughput measurement. It does not measure many concurrent callers sharing one
+socket. Repeat samples in alternating order, retain raw JSON/stderr, source,
+lockfile, dependency feature graph, Redis configuration, toolchain and host
+load/power conditions. Peak RSS is not a live allocation gauge. Shared-host smokes
+are diagnostics, not client rankings or proof of a regression.
+
+`validate-probe-result.jq` rejects unsupported/missing/misidentified policies and
+inconsistent accounting. Weekly CI retains both baselines and the matched pair,
+and also requires that the pair has identical workload/runtime/socket policies.
+The matched subject shares the tower dependency feature selection; the separate
+clean-build probe below continues to measure the original three baseline binaries.
+
 ## Clean builds and binary size
 
 The build probe resolves and fetches the workspace once outside the timer, then

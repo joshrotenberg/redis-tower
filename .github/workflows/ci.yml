@@ -137,13 +137,14 @@ jobs:
           scandir: scripts/benchmarks
 
       - name: Test evidence validation and resumability
-        run: python3 -m unittest scripts/benchmarks/test_render_results.py -v
+        run: python3 -m unittest discover -s scripts/benchmarks -p 'test_*.py' -v
 
       - name: Test benchmark binary contracts
         run: |
           cargo test -p standalone-bench --bin standalone-bench
           cargo test -p cluster-bench --bin cluster-bench
           cargo test -p soak-bench --lib --bin soak-bench
+          cargo test -p resource-bench --lib
 
   fuzz:
     name: Fuzz Targets

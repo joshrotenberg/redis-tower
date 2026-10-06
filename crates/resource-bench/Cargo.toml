@@ -8,13 +8,18 @@ publish = false
 [features]
 default = []
 client-redis-tower = ["dep:redis-tower"]
-client-redis-rs = ["dep:redis"]
+client-redis-rs = ["dep:redis", "dep:socket2"]
 client-fred = ["dep:fred"]
 build-measure = ["dep:ctrlc", "dep:sha2"]
 
 [[bin]]
 name = "resource-redis-tower"
 path = "src/bin/redis_tower.rs"
+required-features = ["client-redis-tower"]
+
+[[bin]]
+name = "resource-redis-tower-mux"
+path = "src/bin/redis_tower_mux.rs"
 required-features = ["client-redis-tower"]
 
 [[bin]]
@@ -37,6 +42,8 @@ async-trait = "0.1"
 libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+url = "2"
+socket2 = { version = "0.6", features = ["all"], optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 redis-tower = { workspace = true, default-features = false, optional = true }
@@ -47,3 +54,6 @@ sha2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+redis-server-wrapper = { workspace = true }

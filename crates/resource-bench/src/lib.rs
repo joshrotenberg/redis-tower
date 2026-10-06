@@ -15,6 +15,11 @@ use serde::Serialize;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, sleep_until, timeout_at};
 
+mod policy;
+pub use policy::{KeepalivePolicy, ProbePolicy, ProbeProfile};
+/// Feature-selected adapters shared by isolated binaries and live tests.
+pub mod adapters;
+
 /// Key used by every client implementation during the fixed-rate workload.
 pub const FIXTURE_KEY: &str = "resource-bench:payload";
 
@@ -56,11 +61,34 @@ pub trait ProbeConnection: Send + Sized + 'static {
     /// Open one independent physical connection.
     async fn connect(url: &str) -> Result<Self, String>;
 
+    /// Establish/re-establish a socket under the selected profile. Subject
+    /// defaults are unchanged unless the adapter overrides this method.
+    async fn connect_with_profile(url: &str, _profile: ProbeProfile) -> Result<Self, String> {
+        _profile.validate_url(url)?;
+        Self::connect(url).await
+    }
+
     /// Store the workload fixture.
     async fn set_fixture(&mut self, value: &str) -> Result<(), String>;
 
     /// Fetch and validate the workload fixture.
     async fn get_fixture(&mut self, expected: &[u8]) -> Result<(), String>;
+}
+
+/// Validate exact bytes; corrupt equal-length replies and misses cannot count
+/// as successful workload completions.
+///
+/// ```
+/// use resource_bench::validate_payload;
+/// assert!(validate_payload(Some(b"abcd"), b"abcd").is_ok());
+/// assert!(validate_payload(Some(b"wxyz"), b"abcd").is_err());
+/// ```
+pub fn validate_payload(value: Option<&[u8]>, expected: &[u8]) -> Result<(), String> {
+    match value {
+        Some(value) if value == expected => Ok(()),
+        Some(_) => Err("fixture payload content mismatch".to_owned()),
+        None => Err("fixture key is missing".to_owned()),
+    }
 }
 
 /// Environment-driven probe configuration.
@@ -84,6 +112,10 @@ pub struct ProbeConfig {
     pub drain_timeout_ms: u64,
     /// Expected value length for every successful GET.
     pub payload_bytes: usize,
+    /// Connection-policy profile, validated before runtime/socket creation.
+    pub profile: ProbeProfile,
+    /// Explicit Tokio worker count, independent of TOKIO_WORKER_THREADS.
+    pub runtime_workers: usize,
 }
 
 impl ProbeConfig {
@@ -100,6 +132,10 @@ impl ProbeConfig {
             duration_secs: positive_env("RESOURCE_DURATION_SECS", 10)?,
             drain_timeout_ms: positive_env("RESOURCE_DRAIN_TIMEOUT_MS", 1_000)?,
             payload_bytes: positive_env("RESOURCE_PAYLOAD_BYTES", 1_024)?,
+            profile: ProbeProfile::parse(
+                &env::var("RESOURCE_PROFILE").unwrap_or_else(|_| "baseline".to_owned()),
+            )?,
+            runtime_workers: positive_env("RESOURCE_RUNTIME_WORKERS", 2)?,
         };
 
         if config.target_ops_per_sec > 1_000_000_000 {
@@ -108,6 +144,10 @@ impl ProbeConfig {
         if config.drain_timeout_ms > 60_000 {
             return Err("RESOURCE_DRAIN_TIMEOUT_MS must not exceed 60000".to_owned());
         }
+        if config.runtime_workers > 256 {
+            return Err("RESOURCE_RUNTIME_WORKERS must not exceed 256".to_owned());
+        }
+        config.profile.validate_url(&config.redis_url)?;
         Ok(config)
     }
 }
@@ -130,6 +170,8 @@ fn serialized_config_for_url(raw: &str) -> String {
         duration_secs: 1,
         drain_timeout_ms: 100,
         payload_bytes: 1,
+        profile: ProbeProfile::Baseline,
+        runtime_workers: 2,
     };
     serde_json::to_string(&config).expect("serialize probe configuration")
 }
@@ -175,6 +217,8 @@ pub struct ProbeReport {
     pub arch: &'static str,
     /// Runtime configuration.
     pub config: ProbeConfig,
+    /// Declared adapter/socket/runtime and measurement policy.
+    pub policy: ProbePolicy,
     /// Peak-RSS measurements.
     pub rss: RssReport,
     /// Fixed-offered-rate CPU measurements.
@@ -262,13 +306,26 @@ struct WorkerOutcome<C> {
 
 /// Run one isolated client probe and print either JSON (`--json`) or a concise
 /// human-readable summary.
-pub async fn run_client<C: ProbeConnection>(
+pub fn run_client<C: ProbeConnection>(
     client: &'static str,
     client_features: ClientFeatureSet,
 ) -> Result<(), String> {
     let config = ProbeConfig::from_env()?;
+    // Reject an incompatible subject before allocating the runtime/sockets.
+    ProbePolicy::for_client(
+        client,
+        config.profile,
+        config.connections,
+        config.runtime_workers,
+        &config.redis_url,
+    )?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(config.runtime_workers)
+        .enable_all()
+        .build()
+        .map_err(|error| format!("create resource runtime: {error}"))?;
     let json = env::args().any(|arg| arg == "--json");
-    let report = measure::<C>(client, client_features, config).await?;
+    let report = runtime.block_on(measure::<C>(client, client_features, config))?;
 
     if json {
         println!(
@@ -287,6 +344,13 @@ async fn measure<C: ProbeConnection>(
     client_features: ClientFeatureSet,
     config: ProbeConfig,
 ) -> Result<ProbeReport, String> {
+    let policy = ProbePolicy::for_client(
+        client,
+        config.profile,
+        config.connections,
+        config.runtime_workers,
+        &config.redis_url,
+    )?;
     // Allocate and touch the fixture before the RSS baseline so its bytes are
     // not misattributed to the connection population.
     let payload = "x".repeat(config.payload_bytes);
@@ -295,7 +359,7 @@ async fn measure<C: ProbeConnection>(
 
     let mut connections = Vec::with_capacity(config.connections);
     for index in 0..config.connections {
-        let connection = C::connect(&config.redis_url)
+        let connection = C::connect_with_profile(&config.redis_url, config.profile)
             .await
             .map_err(|error| format!("open connection {index}: {error}"))?;
         connections.push(connection);
@@ -331,8 +395,14 @@ async fn measure<C: ProbeConnection>(
             WindowErrorMode::Fatal,
         )
         .await?;
-        connections =
-            restore_after_warmup(returned, &config.redis_url, &payload, drain_timeout).await?;
+        connections = restore_after_warmup(
+            returned,
+            &config.redis_url,
+            &payload,
+            drain_timeout,
+            config.profile,
+        )
+        .await?;
     }
 
     let cpu_before = usage_snapshot()?;
@@ -357,12 +427,13 @@ async fn measure<C: ProbeConnection>(
     let _connections = connections;
 
     Ok(ProbeReport {
-        schema_version: 3,
+        schema_version: 4,
         client,
         client_features,
         os: env::consts::OS,
         arch: env::consts::ARCH,
         config,
+        policy,
         rss: RssReport {
             baseline_peak_bytes: baseline.peak_rss_bytes,
             connected_peak_bytes: connected.peak_rss_bytes,
@@ -392,6 +463,7 @@ async fn restore_after_warmup<C: ProbeConnection>(
     redis_url: &str,
     expected: &[u8],
     operation_timeout: Duration,
+    profile: ProbeProfile,
 ) -> Result<Vec<C>, String> {
     let mut restored = Vec::with_capacity(connections.len());
     for (index, connection) in connections.into_iter().enumerate() {
@@ -405,10 +477,13 @@ async fn restore_after_warmup<C: ProbeConnection>(
             continue;
         }
 
-        let mut connection = tokio::time::timeout(operation_timeout, C::connect(redis_url))
-            .await
-            .map_err(|_| format!("replacement connection {index} timed out"))?
-            .map_err(|error| format!("replace warmup connection {index}: {error}"))?;
+        let mut connection = tokio::time::timeout(
+            operation_timeout,
+            C::connect_with_profile(redis_url, profile),
+        )
+        .await
+        .map_err(|_| format!("replacement connection {index} timed out"))?
+        .map_err(|error| format!("replace warmup connection {index}: {error}"))?;
         tokio::time::timeout(operation_timeout, connection.get_fixture(expected))
             .await
             .map_err(|_| format!("replacement connection {index} validation timed out"))?
@@ -599,6 +674,46 @@ fn print_human(report: &ProbeReport) {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[test]
+    fn payload_validation_rejects_missing_corrupt_and_different_lengths() {
+        assert!(validate_payload(Some(&[0, 255]), &[0, 255]).is_ok());
+        assert!(validate_payload(Some(b"wxyz"), b"abcd").is_err());
+        assert!(validate_payload(Some(b"abc"), b"abcd").is_err());
+        assert!(validate_payload(None, b"abcd").is_err());
+    }
+
+    struct ProfileConnection;
+    #[async_trait]
+    impl ProbeConnection for ProfileConnection {
+        async fn connect(_url: &str) -> Result<Self, String> {
+            panic!("replacement lost matched profile")
+        }
+        async fn connect_with_profile(_url: &str, profile: ProbeProfile) -> Result<Self, String> {
+            assert_eq!(profile, ProbeProfile::MatchedMuxResp2);
+            Ok(Self)
+        }
+        async fn set_fixture(&mut self, _value: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn get_fixture(&mut self, _expected: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn warmup_replacement_retains_matched_profile() {
+        let restored = restore_after_warmup::<ProfileConnection>(
+            vec![None],
+            "unused",
+            b"x",
+            Duration::from_secs(1),
+            ProbeProfile::MatchedMuxResp2,
+        )
+        .await
+        .unwrap();
+        assert_eq!(restored.len(), 1);
+    }
 
     struct FakeConnection;
 
@@ -861,6 +976,7 @@ mod tests {
             "redis://unused/",
             b"x",
             Duration::from_millis(100),
+            ProbeProfile::Baseline,
         )
         .await
         .expect("replace canceled warmup connection");
