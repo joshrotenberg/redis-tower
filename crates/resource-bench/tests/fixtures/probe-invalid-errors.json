@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "client": "redis-tower",
   "client_features": {
     "harness_feature": "client-redis-tower",
@@ -12,7 +12,21 @@
     "target_ops_per_sec": 1,
     "duration_secs": 1,
     "drain_timeout_ms": 1000,
-    "payload_bytes": 1
+    "payload_bytes": 1,
+    "profile": "baseline",
+    "runtime_workers": 2
+  },
+  "os": "linux",
+  "policy": {
+    "client_path": "redis-tower-direct",
+    "protocol_selection": "client-default-or-url",
+    "socket_policy": "tower-default",
+    "tcp_nodelay": true,
+    "keepalive": {"idle_secs": 60, "interval_secs": 10, "probes": 3},
+    "physical_connections": 1,
+    "inflight_per_socket": 1,
+    "runtime_workers": 2,
+    "measurement_model": "completion-gated-staggered-get"
   },
   "rss": {
     "baseline_peak_bytes": 1,

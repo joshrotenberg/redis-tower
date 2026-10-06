@@ -1821,7 +1821,7 @@ class RunnerContractTests(unittest.TestCase):
             workflow,
         )
         self.assertIn(
-            "python3 -m unittest scripts/benchmarks/test_render_results.py -v",
+            "python3 -m unittest discover -s scripts/benchmarks -p 'test_*.py' -v",
             workflow,
         )
         self.assertIn("cargo test -p standalone-bench --bin standalone-bench", workflow)
