@@ -658,7 +658,8 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
                         )),
                     })
                 })
-                .await?
+                .await
+                .map_err(|error| churn_failure(error, &by_client))?
             }
             ChurnScenario::Failover => {
                 let fixture_ref = &fixture;
@@ -690,7 +691,8 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
                         )),
                     })
                 })
-                .await?
+                .await
+                .map_err(|error| churn_failure(error, &by_client))?
             }
         };
 
@@ -717,6 +719,24 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
         print_churn_table(&reports);
     }
     Ok(())
+}
+
+/// Failure diagnostics never masquerade as ordinary successful stdout output.
+fn churn_failure(
+    error: churn::ChurnRunError,
+    prior: &BTreeMap<String, Vec<ChurnReport>>,
+) -> String {
+    eprintln!(
+        "churn_failure_diagnostics={}",
+        serde_json::json!({
+            "schema_version": churn::CHURN_SCHEMA_VERSION,
+            "record_type": "churn_failure",
+            "message": error.message,
+            "completed_runs": prior,
+            "failed_run": error.reports,
+        })
+    );
+    error.message
 }
 
 fn env_parse<T>(name: &str, default: T) -> T
