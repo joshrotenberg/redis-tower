@@ -278,6 +278,7 @@ every standalone test binary in the generated inventory.
 | Injected condition | Required observation | Cadence | Evidence |
 |---|---|---|---|
 | Redis command exceeds its deadline (`DEBUG SLEEP` or a blocking command) | A bounded `CommandTimeout` is surfaced before the slow command completes | Per PR | [resilience tests](../crates/redis-tower/tests/test_resilience_integration.rs), [standalone integration](../crates/redis-tower/tests/integration.rs) |
+| Connected TCP peer applies a write but withholds all or some pipeline replies | Explicit response timeout reports unknown execution, closes the old socket, and recovers on a replacement without replay or reply misalignment | Per PR, no Redis process | [auto-pipeline tests](../crates/redis-tower/src/auto_pipeline.rs) |
 | Refused TCP connections, then a healthy endpoint | Circuit opens at the configured threshold, rejects immediately, admits a half-open probe, and closes after recovery | Per PR | [resilience tests](../crates/redis-tower/tests/test_resilience_integration.rs) |
 | Managed standalone process stopped and restarted on the same port | The existing multiplexed client eventually resumes validated reads and writes against a fresh database | Per PR; deliberately bypassed in externally managed nightly service containers | [standalone integration](../crates/redis-tower/tests/integration.rs) |
 | Standalone `REPLICAOF` role changes and coordinated `FAILOVER` | Replication completes, roles change, and acknowledged data survives promotion | Per PR | [server integration](../crates/redis-tower/tests/test_server.rs) |
@@ -373,7 +374,9 @@ canonical matrix definition.
 - There is no automated true network partition, Docker pause, or Toxiproxy
   latency/jitter leg today. Current fault tests cover refused connects,
   connection kills, process SIGKILL/restart, role changes, resharding, and
-  command stalls.
+  command stalls. Deterministic connected-peer response-stall tests verify
+  explicit timeout, quarantine and no replay, but do not simulate packet-level
+  partitions or node-to-node quorum loss.
 - Valkey is exercised only through the standalone nightly suite. Cluster,
   Sentinel, module, and fault-injection parity are not claimed for Valkey.
 - The nightly version matrix is standalone-only; per-PR cluster and Sentinel

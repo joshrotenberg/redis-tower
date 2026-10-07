@@ -3318,6 +3318,172 @@ mod tests {
         server.await.unwrap();
     }
 
+    // Unlike the EOF fixture above, this peer keeps its first socket open
+    // after applying the write. In the multi case it sends only one of two
+    // replies, so both a completely missing reply and partial pipeline
+    // alignment must be quarantined by the explicit response deadline.
+    async fn assert_connected_reply_stall_is_bounded(partial_pipeline: bool) {
+        use futures::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::sync::{Notify, oneshot};
+        use tokio::task::JoinSet;
+        use tokio_util::codec::Framed;
+
+        fn replacement_reply(executions: usize) -> Frame {
+            Frame::Array(
+                vec![
+                    Frame::SimpleString(bytes::Bytes::from_static(b"REPLACEMENT")),
+                    Frame::Integer(executions as i64),
+                ]
+                .into(),
+            )
+        }
+
+        // JoinSet aborts the owned peer on panic or deadline expiry instead of
+        // detaching a task that retains the ephemeral listener or socket.
+        let mut peers = JoinSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let write = Frame::SimpleString(bytes::Bytes::from_static(b"INCR-NON-IDEMPOTENT"));
+            let probe = Frame::SimpleString(bytes::Bytes::from_static(b"READ-EXECUTION-COUNT"));
+            let executions = Arc::new(AtomicUsize::new(0));
+            let peer_executions = Arc::clone(&executions);
+            let peer_write = write.clone();
+            let peer_probe = probe.clone();
+            let (applied_tx, applied_rx) = oneshot::channel();
+            let (inspect_close_tx, inspect_close_rx) = oneshot::channel();
+            let (closed_tx, closed_rx) = oneshot::channel();
+            peers.spawn(async move {
+                let (first, _) = listener.accept().await.unwrap();
+                let mut first = Framed::new(
+                    redis_tower_core::RedisStream::Tcp(first),
+                    redis_tower_core::RespCodec::new(),
+                );
+                assert_eq!(first.next().await.unwrap().unwrap(), peer_write);
+                peer_executions.fetch_add(1, Ordering::SeqCst);
+                if partial_pipeline {
+                    assert_eq!(first.next().await.unwrap().unwrap(), peer_probe);
+                    first.send(Frame::Integer(1)).await.unwrap();
+                }
+                applied_tx.send(()).unwrap();
+                // Keep the socket open, sending neither a reply nor EOF until
+                // the caller has actually observed CommandTimeout.
+                inspect_close_rx.await.unwrap();
+                assert!(
+                    first.next().await.is_none(),
+                    "the timed-out socket was reused instead of quarantined"
+                );
+                drop(first);
+                closed_tx.send(()).unwrap();
+
+                let (second, _) = listener.accept().await.unwrap();
+                let mut second = Framed::new(
+                    redis_tower_core::RedisStream::Tcp(second),
+                    redis_tower_core::RespCodec::new(),
+                );
+                assert_eq!(
+                    second.next().await.unwrap().unwrap(),
+                    peer_probe,
+                    "the unknown-execution write was replayed on replacement"
+                );
+                second
+                    .send(replacement_reply(peer_executions.load(Ordering::SeqCst)))
+                    .await
+                    .unwrap();
+                assert!(second.next().await.is_none(), "shutdown retained a socket");
+            });
+
+            let connects = Arc::new(AtomicUsize::new(0));
+            let resume_reconnect = Arc::new(Notify::new());
+            let factory_connects = Arc::clone(&connects);
+            let factory_resume = Arc::clone(&resume_reconnect);
+            let factory = move || {
+                let connects = Arc::clone(&factory_connects);
+                let resume = Arc::clone(&factory_resume);
+                async move {
+                    if connects.fetch_add(1, Ordering::SeqCst) > 0 {
+                        // Hold recovery until the caller checks unhealthy
+                        // state and the peer verifies old-socket closure.
+                        resume.notified().await;
+                    }
+                    let stream = tokio::net::TcpStream::connect(addr)
+                        .await
+                        .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+                    Ok(RedisConnection::from_stream(
+                        redis_tower_core::RedisStream::Tcp(stream),
+                    ))
+                }
+            };
+            let reconnect = AutoPipelineReconnectConfig::new(ReconnectConfig {
+                max_retries: Some(3),
+                base_delay: Duration::ZERO,
+                max_delay: Duration::ZERO,
+                jitter: false,
+                connect_timeout: None,
+            });
+            let mut service = AutoPipelineService::with_factory(
+                factory,
+                AutoPipelineConfig {
+                    response_timeout: Some(Duration::from_millis(200)),
+                    ..AutoPipelineConfig::default()
+                },
+                reconnect,
+            )
+            .await
+            .unwrap();
+
+            futures::future::poll_fn(|cx| service.poll_ready(cx))
+                .await
+                .unwrap();
+            let (result, applied) = tokio::join!(
+                async {
+                    if partial_pipeline {
+                        service.call_pipeline(vec![write, probe.clone()]).await
+                    } else {
+                        service.call(write).await.map(|reply| vec![reply])
+                    }
+                },
+                applied_rx
+            );
+            applied.expect("peer never applied the non-idempotent write");
+            assert!(
+                matches!(result, Err(RedisError::CommandTimeout)),
+                "{result:?}"
+            );
+            assert!(!service.is_connection_healthy());
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+
+            inspect_close_tx.send(()).unwrap();
+            closed_rx.await.expect("old socket was not closed");
+            resume_reconnect.notify_one();
+            futures::future::poll_fn(|cx| service.poll_ready(cx))
+                .await
+                .unwrap();
+            assert_eq!(service.call(probe).await.unwrap(), replacement_reply(1));
+            assert!(service.is_connection_healthy());
+            assert_eq!(executions.load(Ordering::SeqCst), 1);
+            assert_eq!(connects.load(Ordering::SeqCst), 2);
+
+            service.shutdown().await;
+            peers.join_next().await.unwrap().unwrap();
+            assert!(peers.is_empty());
+            assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+        })
+        .await
+        .expect("connected reply-stall scenario or cleanup exceeded its bound");
+    }
+
+    #[tokio::test]
+    async fn connected_reply_stall_times_out_and_recovers_without_replay() {
+        assert_connected_reply_stall_is_bounded(false).await;
+    }
+
+    #[tokio::test]
+    async fn connected_reply_stall_partial_pipeline_is_quarantined_without_replay() {
+        assert_connected_reply_stall_is_bounded(true).await;
+    }
+
     #[test]
     fn is_readonly_frame_detects_readonly_errors_only() {
         use bytes::Bytes;
