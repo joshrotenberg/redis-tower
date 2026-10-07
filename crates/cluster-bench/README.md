@@ -118,6 +118,7 @@ Churn-specific configuration:
 | `BENCH_CHURN_SLOT` | `42` | Exact Redis Cluster hash slot exercised |
 | `BENCH_CHURN_WORKLOAD` | `get` | Affected-slot `get` or `set` workload |
 | `BENCH_CHURN_PROTOCOL` | `client-defaults` | Configured policies: historical defaults, or explicit `resp2` / `resp3` for both clients |
+| `BENCH_CHURN_PROFILE` | `client-defaults` | Historical settings, or fixed opt-in `socket-deadlines-v1`; strict selector, validated before startup |
 | `BENCH_CHURN_BASE_PORT` | `17800` | First of six fixture client ports |
 | `BENCH_CLUSTER_NODE_TIMEOUT_MS` | `1000` | Redis failure-detection timeout |
 | `BENCH_TOPOLOGY_TIMEOUT_SECS` | `15` | Bound for owner-change convergence |
@@ -190,10 +191,69 @@ Churn schema version 1 adds `configured_protocol` to each raw success/failure
 report and aggregate: `auto`, `resp2`, or `resp3`. This records the policy passed
 to the adapter builder, not an observed negotiation; live socket observations
 are separate evidence. Mixed configured policies cannot be aggregated.
-Socket, timeout, retry and batching defaults remain unchanged and are not
-asserted equivalent even with an explicit protocol. Disclose those differences
-with results; do not infer a reliability or performance ranking from differing
+Protocol selection alone leaves socket, timeout, retry and batching defaults
+unchanged. Do not infer a reliability or performance ranking from differing
 surfaced error counts alone.
+
+### Versioned socket/deadline profile
+
+```bash
+BENCH_CHURN_PROTOCOL=resp3 BENCH_CHURN_PROFILE=socket-deadlines-v1 \
+BENCH_WARMUP=1 BENCH_BASELINE_SECS=2 BENCH_RECOVERY_SECS=2 \
+BENCH_CHURN_CONCURRENCY=2 BENCH_CHURN_RUNS=2 \
+cargo run --release -p cluster-bench -- --failover --json
+```
+
+This diagnostic profile configures TCP_NODELAY=true, keepalive idle=60s,
+interval=10s and probes=3 (probe count unsupported on Windows), connect=1s
+and response=2s. Values are fixed; no numeric profile overrides are accepted.
+Keep protocol selection independent; `client-defaults` is still tower Auto
+and redis-rs RESP2. The existing primary route, five-byte validated GET payload,
+WAIT-confirmed seeding, fixture persistence and event/accounting are unchanged.
+
+These are **configured values, not observed kernel/socket attestation**. Both
+builders retain them for replacement and topology-created connections. The
+deadline boundaries are deliberately disclosed rather than labeled matched:
+
+| Policy | redis-tower mux | redis-rs ClusterClient async |
+|---|---|---|
+| Connect deadline | TCP connect only; excludes protocol/auth/TLS setup | Per-node connection establishment |
+| Response deadline | Batch `execute_pipeline` write/reply wait; excludes queue, reconnect and outer redirect loop | Each node request plus 2s overall request including retries, redirects and reconnections |
+| Overall command deadline | None added | 2s |
+| Unchanged retry policy | 5 redirects; 3 node reconnect retries, jittered 100ms base / 5s cap | Source-derived redis-rs 1.7.0 defaults: 16 cluster retries; jitter formula min1280ms/max655360ms/base2/factor10 |
+| Queue/batching | Queue1024, batch100, zero batch window | Internal driver details unavailable, reported as null |
+
+The 1s connect value is shorter than the 2s response value, but this is **not
+a fully matched failure policy or an end-to-end tower request budget**. Tower
+connection setup can still wait outside the TCP connect deadline, and repeated
+client-internal routing/reconnection can exceed a single batch deadline. No
+application retry is added, including around writes of unknown execution state.
+The default profile keeps tower connect/response deadlines absent and redis-rs
+connect=1s with response/overall deadlines absent; tower already uses NODELAY
+and 60s/10s/3 keepalive, while redis-rs defaults to NODELAY=false/no keepalive.
+Default disclosures are source-derived, not an independent client-version
+probe; retain the exact lockfile and revisions alongside experiment results.
+
+Each raw report (including failed campaign reports) and aggregate now retains
+`configured_policy`: profile identity, socket/deadline values and boundaries,
+retry/queue differences and `fully_matched_failure_policy: false`. Mixed policy
+identities **or values** cannot be aggregated. Disabled deadline fields and
+unavailable internal queue/driver metrics are null, not measured zero. Startup
+and campaign errors also emit a `churn_configuration_diagnostics=` JSON record
+with both clients' configured policies even when no workers/reports exist;
+campaign accounting remains in `churn_failure_diagnostics=`. Invalid selectors
+fail before starting a fixture.
+
+The live `live_get_payload_integrity` filter covers exact payloads and protocol
+after slot handoff for both profile modes. A controlled owned-primary
+`CLIENT PAUSE` test checks that both native response deadlines fire before the
+outer test guard, on initial, CLIENT KILL replacement and moved-slot sockets;
+the historical-default negative control reaches only the outer guard. These
+are bounded functional checks, not a real packet-loss/partition or long-soak
+qualification. Run with `--ignored --test-threads=1 --nocapture`. Keep raw
+repeated CLI reports/errors, source/lock/binary/toolchain, Redis topology and
+settings, cleanup and separate wire observations. Shared-host smokes do not
+support throughput, latency or reliability rankings.
 
 All timing and tail-latency values are informational. There are intentionally
 no pass/fail thresholds: local process scheduling and Redis election timing
