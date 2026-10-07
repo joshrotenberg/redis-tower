@@ -1571,8 +1571,20 @@ mod tests {
             let started = Instant::now();
             let (left, right) = clients.split_at_mut(1);
             let results = tokio::join!(
-                tokio::time::timeout(budget, left[0].execute(ChurnWorkload::Get, key)),
-                tokio::time::timeout(budget, right[0].execute(ChurnWorkload::Get, key)),
+                async {
+                    let started = Instant::now();
+                    let result =
+                        tokio::time::timeout(budget, left[0].execute(ChurnWorkload::Get, key))
+                            .await;
+                    (started.elapsed(), result)
+                },
+                async {
+                    let started = Instant::now();
+                    let result =
+                        tokio::time::timeout(budget, right[0].execute(ChurnWorkload::Get, key))
+                            .await;
+                    (started.elapsed(), result)
+                },
             );
             let elapsed = started.elapsed();
             // Attempt explicit release before assertions. Redis may defer the
@@ -1587,22 +1599,19 @@ mod tests {
                 "paused native deadline explicit={explicit} elapsed={:?} outcomes={results:?}",
                 elapsed
             );
-            if explicit {
-                assert_eq!(results.0.unwrap(), Err(FailureKind::Client));
-                assert_eq!(results.1.unwrap(), Err(FailureKind::Client));
-                assert!(
-                    elapsed >= Duration::from_millis(1_500),
-                    "failure was not the configured 2s response deadline"
-                );
-            } else {
-                assert!(
-                    results.0.is_err(),
-                    "historical tower unexpectedly acquired a deadline"
-                );
-                assert!(
-                    results.1.is_err(),
-                    "historical redis-rs unexpectedly acquired a deadline"
-                );
+            for (elapsed, result) in [results.0, results.1] {
+                if explicit {
+                    assert_eq!(result.unwrap(), Err(FailureKind::Client));
+                    assert!(
+                        elapsed >= Duration::from_millis(1_500) && elapsed < budget,
+                        "adapter failure was not the configured 2s native deadline: {elapsed:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "historical adapter unexpectedly acquired a deadline"
+                    );
+                }
             }
         }
 

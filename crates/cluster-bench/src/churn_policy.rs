@@ -103,7 +103,7 @@ impl ChurnProfile {
             response_boundary: if tower {
                 "auto-pipeline batch write/reply wait; excludes queueing/reconnect/redirect loop"
             } else {
-                "node request; overall request also bounded across retries/reconnections/redirects"
+                "node request; when enabled, overall request bounded across retries/reconnections/redirects"
             },
             overall_response_timeout_ms: (!tower && explicit)
                 .then_some(RESPONSE.as_millis() as u64),
@@ -216,6 +216,20 @@ mod tests {
                 tcp.keepalive().is_some(),
                 policy.keepalive_idle_ms.is_some()
             );
+            if profile == ChurnProfile::SocketDeadlinesV1 {
+                // TcpKeepalive has no value getters/PartialEq. Compare its
+                // structured Debug representation to independently fixed
+                // expected configuration, not claimed kernel observation.
+                let expected = redis::io::tcp::socket2::TcpKeepalive::new()
+                    .with_time(Duration::from_secs(60))
+                    .with_interval(Duration::from_secs(10));
+                #[cfg(not(windows))]
+                let expected = expected.with_retries(3);
+                assert_eq!(
+                    format!("{:?}", tcp.keepalive().unwrap()),
+                    format!("{expected:?}")
+                );
+            }
             assert!(!policy.fully_matched_failure_policy);
             assert!(policy.queue_capacity.is_none());
         }
