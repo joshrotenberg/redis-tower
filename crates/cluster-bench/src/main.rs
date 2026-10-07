@@ -37,6 +37,7 @@
 //! ```
 
 mod churn;
+mod churn_policy;
 mod clients;
 mod runner;
 
@@ -50,6 +51,7 @@ use crate::churn::{
     AggregatedChurnReport, ChurnClient, ChurnConfig, ChurnEventReport, ChurnProtocol, ChurnReport,
     ChurnScenario, ChurnWorkload, aggregate_churn,
 };
+use crate::churn_policy::ChurnProfile;
 use crate::clients::{Client, ClientKind};
 use crate::runner::{AggregatedReport, BenchConfig, BenchReport, Workload, aggregate};
 
@@ -534,6 +536,48 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
         }
     };
     let protocol = ChurnProtocol::parse(&protocol_value)?;
+    let profile_value = match std::env::var("BENCH_CHURN_PROFILE") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => "client-defaults".into(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("BENCH_CHURN_PROFILE must be valid Unicode".into());
+        }
+    };
+    let profile = ChurnProfile::parse(&profile_value)?;
+    run_topology_churn_configured(scenario, json, protocol, profile)
+        .await
+        .inspect_err(|error| {
+            // Includes failures before clients/workers exist; campaign accounting
+            // remains in the separate churn_failure_diagnostics record.
+            eprintln!(
+                "churn_configuration_diagnostics={}",
+                churn_configuration_diagnostics(protocol, profile, error)
+            );
+        })
+}
+
+fn churn_configuration_diagnostics(
+    protocol: ChurnProtocol,
+    profile: ChurnProfile,
+    message: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": churn::CHURN_SCHEMA_VERSION,
+        "record_type": "churn_configuration_failure",
+        "message": message,
+        "configured_clients": [
+            {"client": "RedisTowerMux", "configured_protocol": protocol.configured(ClientKind::RedisTowerMux), "configured_policy": profile.policy(ClientKind::RedisTowerMux)},
+            {"client": "RedisRsAsync", "configured_protocol": protocol.configured(ClientKind::RedisRsAsync), "configured_policy": profile.policy(ClientKind::RedisRsAsync)},
+        ],
+    })
+}
+
+async fn run_topology_churn_configured(
+    scenario: ChurnScenario,
+    json: bool,
+    protocol: ChurnProtocol,
+    profile: ChurnProfile,
+) -> Result<(), String> {
     let warmup = Duration::from_secs(env_parse("BENCH_WARMUP", 2_u64));
     let baseline = Duration::from_secs(env_parse("BENCH_BASELINE_SECS", 3_u64));
     let recovery = Duration::from_secs(env_parse("BENCH_RECOVERY_SECS", 3_u64));
@@ -601,16 +645,10 @@ async fn run_topology_churn(scenario: ChurnScenario, json: bool) -> Result<(), S
             .ok_or_else(|| format!("slot {slot} has no owner"))?;
         churn::seed_key(&old_owner.addr, &key).await?;
 
-        let tower_client = if protocol == ChurnProtocol::ClientDefaults {
-            ChurnClient::connect_tower_mux(&seed).await?
-        } else {
-            ChurnClient::connect_tower_mux_with_protocol(&seed, protocol).await?
-        };
-        let redis_rs_result = if protocol == ChurnProtocol::ClientDefaults {
-            ChurnClient::connect_redis_rs(&seed_urls).await
-        } else {
-            ChurnClient::connect_redis_rs_with_protocol(&seed_urls, protocol).await
-        };
+        let tower_client =
+            ChurnClient::connect_tower_mux_configured(&seed, protocol, profile).await?;
+        let redis_rs_result =
+            ChurnClient::connect_redis_rs_configured(&seed_urls, protocol, profile).await;
         let redis_rs_client = match redis_rs_result {
             Ok(client) => client,
             Err(error) => {
@@ -869,6 +907,28 @@ fn display_delta_us(value: Option<f64>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn setup_failure_keeps_both_configured_policies_without_raw_reports() {
+        let diagnostics = super::churn_configuration_diagnostics(
+            super::ChurnProtocol::Resp3,
+            super::ChurnProfile::SocketDeadlinesV1,
+            "controlled startup failure",
+        );
+        for (index, name) in ["RedisTowerMux", "RedisRsAsync"].into_iter().enumerate() {
+            let client = &diagnostics["configured_clients"][index];
+            assert_eq!(client["client"], name);
+            assert_eq!(client["configured_protocol"], "resp3");
+            assert_eq!(
+                client["configured_policy"]["profile"],
+                "socket-deadlines-v1"
+            );
+            assert_eq!(client["configured_policy"]["response_timeout_ms"], 2_000);
+            assert_eq!(
+                client["configured_policy"]["fully_matched_failure_policy"],
+                false
+            );
+        }
+    }
     use super::*;
 
     #[test]

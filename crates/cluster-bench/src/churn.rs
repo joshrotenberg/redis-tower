@@ -20,6 +20,7 @@ use redis_tower_cluster::MultiplexedClusterClient;
 use redis_tower_commands::{Get as TowerGet, Set as TowerSet};
 use serde::Serialize;
 
+use crate::churn_policy::{ChurnPolicy, ChurnProfile};
 use crate::clients::ClientKind;
 use crate::runner::{mean, new_histogram, record_latency, std_dev};
 
@@ -59,7 +60,7 @@ impl ChurnProtocol {
         }
     }
 
-    fn configured(self, kind: ClientKind) -> ConfiguredProtocol {
+    pub(crate) fn configured(self, kind: ClientKind) -> ConfiguredProtocol {
         match (self, kind) {
             (Self::ClientDefaults, ClientKind::RedisTowerMux) => ConfiguredProtocol::Auto,
             (Self::ClientDefaults | Self::Resp2, _) => ConfiguredProtocol::Resp2,
@@ -257,6 +258,7 @@ pub struct ChurnEventReport {
 pub struct ChurnReport {
     pub schema_version: u64,
     pub configured_protocol: ConfiguredProtocol,
+    pub configured_policy: ChurnPolicy,
     pub scenario: ChurnScenario,
     pub client: String,
     pub workload: ChurnWorkload,
@@ -305,6 +307,7 @@ impl ChurnReport {
 pub struct AggregatedChurnReport {
     pub schema_version: u64,
     pub configured_protocol: ConfiguredProtocol,
+    pub configured_policy: ChurnPolicy,
     pub scenario: ChurnScenario,
     pub client: String,
     pub workload: ChurnWorkload,
@@ -351,6 +354,12 @@ pub struct AggregatedChurnReport {
 /// informational: the benchmark intentionally has no timing assertions.
 pub fn aggregate_churn(reports: &[ChurnReport]) -> AggregatedChurnReport {
     let first = reports.first().expect("at least one churn report per cell");
+    assert!(
+        reports
+            .iter()
+            .all(|r| r.configured_policy == first.configured_policy),
+        "cannot aggregate mixed configured churn policies"
+    );
     assert!(
         reports
             .iter()
@@ -415,6 +424,7 @@ pub fn aggregate_churn(reports: &[ChurnReport]) -> AggregatedChurnReport {
     AggregatedChurnReport {
         schema_version: CHURN_SCHEMA_VERSION,
         configured_protocol: first.configured_protocol,
+        configured_policy: first.configured_policy.clone(),
         scenario: first.scenario,
         client: first.client.clone(),
         workload: first.workload,
@@ -579,24 +589,38 @@ pub enum ChurnClient {
         client: MultiplexedClusterClient,
         metrics: Arc<ChurnMetrics>,
         protocol: ConfiguredProtocol,
+        profile: ChurnProfile,
     },
     RedisRsAsync {
         client: redis::cluster_async::ClusterConnection,
         protocol: ConfiguredProtocol,
+        profile: ChurnProfile,
     },
 }
 
 impl ChurnClient {
+    #[cfg(test)]
     pub async fn connect_tower_mux(seed: &str) -> Result<Self, String> {
         Self::connect_tower_mux_with_protocol(seed, ChurnProtocol::ClientDefaults).await
     }
 
+    #[cfg(test)]
     pub async fn connect_tower_mux_with_protocol(
         seed: &str,
         selection: ChurnProtocol,
     ) -> Result<Self, String> {
+        Self::connect_tower_mux_configured(seed, selection, ChurnProfile::ClientDefaults).await
+    }
+
+    pub async fn connect_tower_mux_configured(
+        seed: &str,
+        selection: ChurnProtocol,
+        profile: ChurnProfile,
+    ) -> Result<Self, String> {
         let metrics = Arc::new(ChurnMetrics::default());
         let client = MultiplexedClusterClient::builder(seed)
+            .connection_config(profile.tower_connection())
+            .pipeline_config(profile.tower_pipeline())
             .protocol(selection.tower())
             .metrics_recorder(metrics.clone())
             .connect()
@@ -606,18 +630,30 @@ impl ChurnClient {
             client,
             metrics,
             protocol: selection.configured(ClientKind::RedisTowerMux),
+            profile,
         })
     }
 
+    #[cfg(test)]
     pub async fn connect_redis_rs(seed_urls: &[String]) -> Result<Self, String> {
         Self::connect_redis_rs_with_protocol(seed_urls, ChurnProtocol::ClientDefaults).await
     }
 
+    #[cfg(test)]
     pub async fn connect_redis_rs_with_protocol(
         seed_urls: &[String],
         selection: ChurnProtocol,
     ) -> Result<Self, String> {
-        let client = redis::cluster::ClusterClient::builder(seed_urls.to_vec())
+        Self::connect_redis_rs_configured(seed_urls, selection, ChurnProfile::ClientDefaults).await
+    }
+
+    pub async fn connect_redis_rs_configured(
+        seed_urls: &[String],
+        selection: ChurnProtocol,
+        profile: ChurnProfile,
+    ) -> Result<Self, String> {
+        let client = profile
+            .redis_rs_builder(seed_urls)
             .use_protocol(selection.redis_rs())
             .build()
             .map_err(|error| error.to_string())?;
@@ -627,6 +663,7 @@ impl ChurnClient {
             .map(|client| Self::RedisRsAsync {
                 client,
                 protocol: selection.configured(ClientKind::RedisRsAsync),
+                profile,
             })
             .map_err(|error| error.to_string())
     }
@@ -649,6 +686,13 @@ impl ChurnClient {
         match self {
             Self::TowerMux { protocol, .. } | Self::RedisRsAsync { protocol, .. } => *protocol,
         }
+    }
+
+    fn configured_policy(&self) -> ChurnPolicy {
+        let profile = match self {
+            Self::TowerMux { profile, .. } | Self::RedisRsAsync { profile, .. } => *profile,
+        };
+        profile.policy(self.kind())
     }
 
     async fn execute(&mut self, workload: ChurnWorkload, key: &str) -> Result<(), FailureKind> {
@@ -998,6 +1042,7 @@ fn completed_phase(started_phase: u8, finished_phase: u8) -> u8 {
 struct ClientRun {
     kind: ClientKind,
     protocol: ConfiguredProtocol,
+    policy: ChurnPolicy,
     metrics: Option<MetricsSnapshot>,
     stats: WorkerStats,
 }
@@ -1177,6 +1222,7 @@ where
         }
         let after_metrics = running.client.metrics();
         let protocol = running.client.configured_protocol();
+        let policy = running.client.configured_policy();
         running.client.shutdown().await;
         let metrics = match (running.before_metrics, after_metrics) {
             (Some(before), Some(after)) => Some(MetricsSnapshot {
@@ -1195,6 +1241,7 @@ where
         runs.push(ClientRun {
             kind: running.kind,
             protocol,
+            policy,
             metrics,
             stats: merged,
         });
@@ -1314,6 +1361,7 @@ fn build_report(
     ChurnReport {
         schema_version: CHURN_SCHEMA_VERSION,
         configured_protocol: run.protocol,
+        configured_policy: run.policy,
         scenario,
         client: format!("{:?}", run.kind),
         workload: config.workload,
@@ -1436,6 +1484,223 @@ mod tests {
         aggregate_churn(&[first, second]);
     }
 
+    #[test]
+    fn configured_policy_survives_success_failure_and_aggregate() {
+        for profile in [
+            ChurnProfile::ClientDefaults,
+            ChurnProfile::SocketDeadlinesV1,
+        ] {
+            for kind in [ClientKind::RedisTowerMux, ClientKind::RedisRsAsync] {
+                let mut raw = report(1);
+                raw.configured_policy = profile.policy(kind);
+                let expected = serde_json::to_value(&raw.configured_policy).unwrap();
+                assert_eq!(
+                    serde_json::to_value(&raw).unwrap()["configured_policy"],
+                    expected
+                );
+                let failed = ChurnRunError {
+                    message: "controlled error".into(),
+                    reports: vec![raw.clone()],
+                };
+                assert_eq!(
+                    serde_json::to_value(&failed.reports).unwrap()[0]["configured_policy"],
+                    expected
+                );
+                assert_eq!(
+                    serde_json::to_value(aggregate_churn(&[raw])).unwrap()["configured_policy"],
+                    expected
+                );
+                assert_eq!(expected["fully_matched_failure_policy"], false);
+                if kind == ClientKind::RedisRsAsync {
+                    assert!(expected["queue_capacity"].is_null());
+                    assert!(expected["max_batch_size"].is_null());
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot aggregate mixed configured churn policies")]
+    fn mixed_profiles_cannot_disappear_into_an_aggregate() {
+        let first = report(1);
+        let mut second = report(2);
+        second.configured_policy =
+            ChurnProfile::SocketDeadlinesV1.policy(ClientKind::RedisTowerMux);
+        aggregate_churn(&[first, second]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot aggregate mixed configured churn policies")]
+    fn same_profile_with_different_values_cannot_be_aggregated() {
+        let first = report(1);
+        let mut second = report(2);
+        second.configured_policy.response_timeout_ms = Some(999);
+        aggregate_churn(&[first, second]);
+    }
+
+    /// A connected owned primary withholds all command replies, not an EOF.
+    /// Exercise initial sockets, CLIENT KILL replacements and a moved slot.
+    /// The outer guard is a test budget; only a native client error passes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires redis-server and redis-cli on PATH"]
+    async fn live_get_payload_integrity_churn_deadlines_after_replacement_and_handoff() {
+        use redis_tower_test::cluster::{ClusterFixture, key_for_slot};
+
+        async fn paused_requests(
+            clients: &mut [ChurnClient],
+            key: &str,
+            addr: &str,
+            explicit: bool,
+        ) {
+            let admin = redis::Client::open(format!("redis://{addr}/")).unwrap();
+            let mut admin = admin
+                .get_multiplexed_async_connection_with_config(
+                    &redis::AsyncConnectionConfig::new()
+                        .set_response_timeout(Some(Duration::from_secs(15))),
+                )
+                .await
+                .unwrap();
+            redis::cmd("CLIENT")
+                .arg("PAUSE")
+                .arg(10_000)
+                .arg("ALL")
+                .query_async::<()>(&mut admin)
+                .await
+                .unwrap();
+            let budget = Duration::from_secs(if explicit { 5 } else { 3 });
+            let started = Instant::now();
+            let (left, right) = clients.split_at_mut(1);
+            let results = tokio::join!(
+                async {
+                    let started = Instant::now();
+                    let result =
+                        tokio::time::timeout(budget, left[0].execute(ChurnWorkload::Get, key))
+                            .await;
+                    (started.elapsed(), result)
+                },
+                async {
+                    let started = Instant::now();
+                    let result =
+                        tokio::time::timeout(budget, right[0].execute(ChurnWorkload::Get, key))
+                            .await;
+                    (started.elapsed(), result)
+                },
+            );
+            let elapsed = started.elapsed();
+            // Attempt explicit release before assertions. Redis may defer the
+            // control command during PAUSE ALL; the pause also expires at 10s.
+            // The admin budget exceeds that pause, unlike the default 500ms.
+            redis::cmd("CLIENT")
+                .arg("UNPAUSE")
+                .query_async::<()>(&mut admin)
+                .await
+                .unwrap();
+            println!(
+                "paused native deadline explicit={explicit} elapsed={:?} outcomes={results:?}",
+                elapsed
+            );
+            for (elapsed, result) in [results.0, results.1] {
+                if explicit {
+                    assert_eq!(result.unwrap(), Err(FailureKind::Client));
+                    assert!(
+                        elapsed >= Duration::from_millis(1_500) && elapsed < budget,
+                        "adapter failure was not the configured 2s native deadline: {elapsed:?}"
+                    );
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "historical adapter unexpectedly acquired a deadline"
+                    );
+                }
+            }
+        }
+
+        async fn useful_work(clients: &mut [ChurnClient], key: &str) {
+            for client in clients {
+                tokio::time::timeout(Duration::from_secs(8), async {
+                    loop {
+                        match client.execute(ChurnWorkload::Get, key).await {
+                            Ok(()) => break,
+                            Err(FailureKind::Client) => {
+                                tokio::time::sleep(Duration::from_millis(20)).await
+                            }
+                            other => {
+                                panic!("payload violation during useful-work recovery: {other:?}")
+                            }
+                        }
+                    }
+                })
+                .await
+                .expect("owned client did not recover exact-payload work");
+            }
+        }
+
+        let fixture = ClusterFixture::start().await.unwrap();
+        let slot = 42;
+        let key = key_for_slot(slot);
+        let topology = fixture.topology().await.unwrap();
+        let owner = topology.owner_of_slot(slot).unwrap();
+        let target = topology.masters().find(|n| n.index != owner.index).unwrap();
+        seed_key(&owner.addr, &key).await.unwrap();
+        let urls = fixture
+            .node_addrs()
+            .into_iter()
+            .map(|a| format!("redis://{a}/"))
+            .collect::<Vec<_>>();
+        // Defaults negative control first; profile deadlines must be opt-in.
+        for profile in [
+            ChurnProfile::ClientDefaults,
+            ChurnProfile::SocketDeadlinesV1,
+        ] {
+            let mut clients = vec![
+                ChurnClient::connect_tower_mux_configured(
+                    &fixture.seed_addr(),
+                    ChurnProtocol::Resp2,
+                    profile,
+                )
+                .await
+                .unwrap(),
+                ChurnClient::connect_redis_rs_configured(&urls, ChurnProtocol::Resp2, profile)
+                    .await
+                    .unwrap(),
+            ];
+            useful_work(&mut clients, &key).await;
+            paused_requests(
+                &mut clients,
+                &key,
+                &owner.addr,
+                profile == ChurnProfile::SocketDeadlinesV1,
+            )
+            .await;
+            useful_work(&mut clients, &key).await;
+            if profile == ChurnProfile::SocketDeadlinesV1 {
+                let admin = redis::Client::open(format!("redis://{}/", owner.addr)).unwrap();
+                let mut admin = admin.get_multiplexed_async_connection().await.unwrap();
+                let killed: u64 = redis::cmd("CLIENT")
+                    .arg("KILL")
+                    .arg("TYPE")
+                    .arg("normal")
+                    .arg("SKIPME")
+                    .arg("yes")
+                    .query_async(&mut admin)
+                    .await
+                    .unwrap();
+                assert!(killed >= 2, "both workload sockets must be replaced");
+                useful_work(&mut clients, &key).await;
+                paused_requests(&mut clients, &key, &owner.addr, true).await;
+                useful_work(&mut clients, &key).await;
+                let guard = fixture.begin_reshard(slot, target.index).await.unwrap();
+                assert_eq!(guard.complete().await.unwrap(), 1);
+                useful_work(&mut clients, &key).await;
+                paused_requests(&mut clients, &key, &target.addr, true).await;
+                useful_work(&mut clients, &key).await;
+            }
+            for client in clients {
+                client.shutdown().await;
+            }
+        }
+    }
+
     // Existing CI runs this live_get_payload_integrity filter on both Redis versions.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires redis-server and redis-cli on PATH"]
@@ -1504,10 +1769,12 @@ mod tests {
             }
         }
 
-        for selection in [
-            ChurnProtocol::ClientDefaults,
-            ChurnProtocol::Resp2,
-            ChurnProtocol::Resp3,
+        for (selection, profile) in [
+            (ChurnProtocol::ClientDefaults, ChurnProfile::ClientDefaults),
+            (ChurnProtocol::Resp2, ChurnProfile::ClientDefaults),
+            (ChurnProtocol::Resp3, ChurnProfile::ClientDefaults),
+            (ChurnProtocol::Resp2, ChurnProfile::SocketDeadlinesV1),
+            (ChurnProtocol::Resp3, ChurnProfile::SocketDeadlinesV1),
         ] {
             let fixture = ClusterFixture::start().await.unwrap();
             let slot = 42;
@@ -1525,10 +1792,10 @@ mod tests {
                 .map(|a| format!("redis://{a}/"))
                 .collect::<Vec<_>>();
             let mut clients = vec![
-                ChurnClient::connect_tower_mux_with_protocol(&fixture.seed_addr(), selection)
+                ChurnClient::connect_tower_mux_configured(&fixture.seed_addr(), selection, profile)
                     .await
                     .unwrap(),
-                ChurnClient::connect_redis_rs_with_protocol(&urls, selection)
+                ChurnClient::connect_redis_rs_configured(&urls, selection, profile)
                     .await
                     .unwrap(),
             ];
@@ -1575,6 +1842,7 @@ mod tests {
                 };
                 assert!(report.has_invalid_payload());
                 assert_eq!(report.configured_protocol, selection.configured(kind));
+                assert_eq!(report.configured_policy, profile.policy(kind));
             }
         }
     }
@@ -1832,6 +2100,7 @@ mod tests {
             ClientRun {
                 kind: ClientKind::RedisTowerMux,
                 protocol: ConfiguredProtocol::Auto,
+                policy: ChurnProfile::ClientDefaults.policy(ClientKind::RedisTowerMux),
                 metrics: None,
                 stats: merged,
             },
@@ -1905,6 +2174,7 @@ mod tests {
         ChurnReport {
             schema_version: CHURN_SCHEMA_VERSION,
             configured_protocol: ConfiguredProtocol::Auto,
+            configured_policy: ChurnProfile::ClientDefaults.policy(ClientKind::RedisTowerMux),
             scenario: ChurnScenario::Reshard,
             client: "RedisTowerMux".into(),
             workload: ChurnWorkload::Get,
