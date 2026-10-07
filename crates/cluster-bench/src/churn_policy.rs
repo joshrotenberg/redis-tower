@@ -97,7 +97,7 @@ impl ChurnProfile {
             connect_boundary: if tower {
                 "TCP connect only; excludes negotiation and TLS"
             } else {
-                "redis-rs node connection establishment"
+                "multiplexed socket/handshake creation; later cluster READONLY/PING use response timeout"
             },
             response_timeout_ms: explicit.then_some(RESPONSE.as_millis() as u64),
             response_boundary: if tower {

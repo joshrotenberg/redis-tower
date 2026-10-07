@@ -217,7 +217,7 @@ deadline boundaries are deliberately disclosed rather than labeled matched:
 
 | Policy | redis-tower mux | redis-rs ClusterClient async |
 |---|---|---|
-| Connect deadline | TCP connect only; excludes protocol/auth/TLS setup | Per-node connection establishment |
+| Connect deadline | TCP connect only; excludes protocol/auth/TLS setup | Multiplexed socket/handshake creation; subsequent cluster READONLY/PING use response deadlines |
 | Response deadline | Batch `execute_pipeline` write/reply wait; excludes queue, reconnect and outer redirect loop | Each node request plus 2s overall request including retries, redirects and reconnections |
 | Overall command deadline | None added | 2s |
 | Unchanged retry policy | 5 redirects; 3 node reconnect retries, jittered 100ms base / 5s cap | Source-derived redis-rs 1.7.0 defaults: 16 cluster retries; jitter formula min1280ms/max655360ms/base2/factor10 |
