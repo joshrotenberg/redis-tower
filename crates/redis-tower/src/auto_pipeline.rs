@@ -3329,6 +3329,16 @@ mod tests {
         use tokio::task::JoinSet;
         use tokio_util::codec::Framed;
 
+        fn replacement_reply(executions: usize) -> Frame {
+            Frame::Array(
+                vec![
+                    Frame::SimpleString(bytes::Bytes::from_static(b"REPLACEMENT")),
+                    Frame::Integer(executions as i64),
+                ]
+                .into(),
+            )
+        }
+
         // JoinSet aborts the owned peer on panic or deadline expiry instead of
         // detaching a task that retains the ephemeral listener or socket.
         let mut peers = JoinSet::new();
@@ -3378,7 +3388,7 @@ mod tests {
                     "the unknown-execution write was replayed on replacement"
                 );
                 second
-                    .send(Frame::Integer(peer_executions.load(Ordering::SeqCst) as i64))
+                    .send(replacement_reply(peer_executions.load(Ordering::SeqCst)))
                     .await
                     .unwrap();
                 assert!(second.next().await.is_none(), "shutdown retained a socket");
@@ -3450,7 +3460,7 @@ mod tests {
             futures::future::poll_fn(|cx| service.poll_ready(cx))
                 .await
                 .unwrap();
-            assert_eq!(service.call(probe).await.unwrap(), Frame::Integer(1));
+            assert_eq!(service.call(probe).await.unwrap(), replacement_reply(1));
             assert!(service.is_connection_healthy());
             assert_eq!(executions.load(Ordering::SeqCst), 1);
             assert_eq!(connects.load(Ordering::SeqCst), 2);
