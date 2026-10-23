@@ -32,9 +32,9 @@ redis-tower topology crates the application needs:
 redis = { version = "=1.7.0", features = ["tokio-comp", "cluster-async", "connection-manager"] }
 
 # After
-redis-tower = "0.1.3"
-redis-tower-cluster = "0.1.3"  # only for Redis Cluster
-redis-tower-sentinel = "0.1.3" # only for Sentinel
+redis-tower = "0.1.4"
+redis-tower-cluster = "0.1.4"  # only for Redis Cluster
+redis-tower-sentinel = "0.1.4" # only for Sentinel
 bytes = "1"
 tokio-stream = "0.1"           # only for stream APIs such as pub/sub
 ```
@@ -188,27 +188,23 @@ or protocol-dependent.
 
 ### Binary arguments
 
-The published 0.1.3 facade depends on `redis-tower-commands` 0.1.2, where many
-common typed builders—including `Get` and `Set`—accept UTF-8 strings. Use the
-binary-safe `RawCommand::arg` escape hatch for opaque keys and values:
+The published 0.1.4 facade depends on `redis-tower-commands` 0.1.3, where typed
+builders take keys and values as binary-safe `CommandArg` inputs. Byte slices,
+arrays, `Vec<u8>`, and `Bytes` pass through unchanged, so opaque data does not
+need the raw-command escape hatch:
 
 ```rust,ignore
-use redis_tower::commands::RawCommand;
+use redis_tower::commands::{Get, Set};
 
 let key = b"binary:\xff".as_slice();
 let payload = vec![0x00, 0xfe, 0xff];
-client
-    .execute(RawCommand::new("SET").arg(key).arg(payload))
-    .await?;
-let value: Option<bytes::Bytes> = client
-    .execute(RawCommand::new("GET").arg(key).query())
-    .await?;
+client.execute(Set::new(key, payload)).await?;
+let value: Option<bytes::Bytes> = client.execute(Get::new(key)).await?;
 ```
 
-Do not force opaque data through UTF-8. The evolving per-family inventory and
-ownership rules are tracked in
-[Binary data and typed arguments](BINARY-DATA.md); check the rustdoc for the
-exact published command version before replacing a raw path with a typed one.
+`RawCommand::arg` remains binary-safe for commands without a typed builder. Do
+not force opaque data through UTF-8. The per-family inventory and ownership
+rules are tracked in [Binary data and typed arguments](BINARY-DATA.md).
 
 ### Raw commands
 

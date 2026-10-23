@@ -8,13 +8,13 @@ actions. Merging ordinary code never publishes a package.
 
 The complete 13-crate public workspace is available on crates.io. These
 versions were verified against the workspace manifests, crates.io search, and
-GitHub releases on **2026-09-25**:
+GitHub releases on **2026-10-22**:
 
 | Package group | Published version |
 |---|---:|
-| `redis-tower-protocol`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.3 |
-| `redis-tower-core`, `redis-tower-commands`, `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives` | 0.1.2 |
-| `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.1 |
+| `redis-tower-protocol`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.4 |
+| `redis-tower-core`, `redis-tower-commands`, `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives` | 0.1.3 |
+| `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.2 |
 
 This is a dated status snapshot, not a version source of truth. Before a
 release, compare the manifests, crates.io, tags, GitHub releases, and each
