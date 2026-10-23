@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- release a connection's read and write buffers once they drain after a frame
+  larger than 1 MiB, instead of keeping the largest-ever allocation for the
+  life of the connection
 - report a peer that closes part-way through a frame as
   `ErrorKind::UnexpectedEof` from `RespCodec::decode_eof`, instead of the
   generic "bytes remaining on stream" error
