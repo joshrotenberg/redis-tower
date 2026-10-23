@@ -22,6 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example after restarting without `nodes.conf`) instead of committing it and
   pruning every node service, and keep the caller's seed as a last-resort
   discovery source so a client whose services are all gone can still recover
+- route `XINFO` and `XGROUP` subcommands by their stream key; they were hashed
+  by the subcommand name, costing a MOVED and a topology refresh per call and
+  failing outright on connections built with `max_redirects(0)`
+- recognize `HMSET`, `SDIFFCARD`, `SUNIONCARD`, `LMOVEM`, `BLMOVEM`, and the
+  `XREAD`/`XREADGROUP` `MAXCOUNT`, `MAXSIZE`, and `CLAIM` options in
+  `extract_keys`, so `common_slot` and pipeline routing no longer reject or
+  misroute them
 
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.3...redis-tower-cluster-v0.1.4) - 2026-10-01
 

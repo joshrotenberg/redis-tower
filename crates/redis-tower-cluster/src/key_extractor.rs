@@ -12,10 +12,10 @@
 //! | Family | Commands | First key |
 //! |---|---|---|
 //! | script / function | `EVAL[_RO]`, `EVALSHA[_RO]`, `FCALL[_RO]` | after `numkeys` at `argv[2]` |
-//! | numkeys-first | `LMPOP`, `ZMPOP`, `SINTERCARD`, `ZUNION`, `ZINTER`, `ZDIFF`, `MSETEX` | after `numkeys` at `argv[1]` |
+//! | numkeys-first | `LMPOP`, `ZMPOP`, `SINTERCARD`, `SDIFFCARD`, `SUNIONCARD`, `ZINTERCARD`, `ZUNION`, `ZINTER`, `ZDIFF`, `MSETEX` | after `numkeys` at `argv[1]` |
 //! | blocking numkeys | `BLMPOP`, `BZMPOP` | after `numkeys` at `argv[2]` |
 //! | streams | `XREAD`, `XREADGROUP` | first token after `STREAMS` |
-//! | subcommand + key | `OBJECT <sub> key`, `MEMORY USAGE key` | `argv[2]` |
+//! | subcommand + key | `OBJECT <sub> key`, `MEMORY USAGE key`, `XINFO <sub> key`, `XGROUP <sub> key` | `argv[2]` |
 //! | op + dest | `BITOP <op> dest src...` | `argv[2]` |
 //! | migration | `MIGRATE host port key ...`, `MIGRATE ... "" ... KEYS key...` | `argv[3]` or first key after `KEYS` |
 //!
@@ -238,7 +238,8 @@ pub fn extract_keys(frame: &Frame) -> Result<CommandKeys<'_>, KeyExtractionError
         }
 
         // numkeys key [key ...] [options].
-        b"LMPOP" | b"SINTERCARD" | b"ZDIFF" | b"ZINTER" | b"ZINTERCARD" | b"ZMPOP" | b"ZUNION" => {
+        b"LMPOP" | b"SDIFFCARD" | b"SINTERCARD" | b"SUNIONCARD" | b"ZDIFF" | b"ZINTER"
+        | b"ZINTERCARD" | b"ZMPOP" | b"ZUNION" => {
             CommandKeys::Known(keys_after_numkeys(items, command, 1, 2, false)?)
         }
         // timeout numkeys key [key ...] [options].
@@ -266,9 +267,9 @@ pub fn extract_keys(frame: &Frame) -> Result<CommandKeys<'_>, KeyExtractionError
         }
 
         // Commands with two fixed key arguments.
-        b"BLMOVE" | b"BRPOPLPUSH" | b"COPY" | b"GEOSEARCHSTORE" | b"LCS" | b"LMOVE" | b"RENAME"
-        | b"RENAMENX" | b"RPOPLPUSH" | b"SMOVE" | b"TS.CREATERULE" | b"TS.DELETERULE"
-        | b"ZRANGESTORE" => CommandKeys::Known(vec![
+        b"BLMOVE" | b"BLMOVEM" | b"BRPOPLPUSH" | b"COPY" | b"GEOSEARCHSTORE" | b"LCS"
+        | b"LMOVE" | b"LMOVEM" | b"RENAME" | b"RENAMENX" | b"RPOPLPUSH" | b"SMOVE"
+        | b"TS.CREATERULE" | b"TS.DELETERULE" | b"ZRANGESTORE" => CommandKeys::Known(vec![
             required_key(items, command, 1, "first key")?,
             required_key(items, command, 2, "second key")?,
         ]),
@@ -625,7 +626,13 @@ fn stream_read_keys<'a>(
     };
 
     while index < items.len() && !matches_token(items.get(index), b"STREAMS") {
-        if matches_token(items.get(index), b"COUNT") || matches_token(items.get(index), b"BLOCK") {
+        // MAXCOUNT/MAXSIZE (Redis 8.10) and XREADGROUP's CLAIM (8.4) each
+        // take one value, like COUNT and BLOCK.
+        let takes_value = [&b"COUNT"[..], b"BLOCK", b"MAXCOUNT", b"MAXSIZE"]
+            .iter()
+            .any(|token| matches_token(items.get(index), token))
+            || (grouped && matches_token(items.get(index), b"CLAIM"));
+        if takes_value {
             if items.get(index + 1).is_none() {
                 return Err(KeyExtractionError::MissingArgument {
                     command: command_display(command),
@@ -639,7 +646,7 @@ fn stream_read_keys<'a>(
         } else {
             return Err(invalid_layout(
                 command,
-                "expected COUNT, BLOCK, NOACK, or STREAMS",
+                "expected COUNT, BLOCK, MAXCOUNT, MAXSIZE, CLAIM, NOACK, or STREAMS",
             ));
         }
     }
@@ -832,7 +839,7 @@ fn is_known_single_key(command: &[u8]) -> bool {
         | b"TTL" | b"TYPE"
         | b"HDEL" | b"HEXISTS" | b"HEXPIRE" | b"HEXPIREAT" | b"HEXPIRETIME"
         | b"HGET" | b"HGETALL" | b"HGETDEL" | b"HGETEX" | b"HINCRBY"
-        | b"HINCRBYFLOAT" | b"HKEYS" | b"HLEN" | b"HMGET" | b"HPERSIST"
+        | b"HINCRBYFLOAT" | b"HKEYS" | b"HLEN" | b"HMGET" | b"HMSET" | b"HPERSIST"
         | b"HPEXPIRE" | b"HPEXPIREAT" | b"HPEXPIRETIME" | b"HPTTL"
         | b"HRANDFIELD" | b"HSCAN" | b"HSET" | b"HSETEX" | b"HSETNX"
         | b"HSTRLEN" | b"HTTL" | b"HVALS"
@@ -957,6 +964,14 @@ pub fn extract_key(frame: &Frame) -> Option<&[u8]> {
         // MEMORY DOCTOR/STATS/... have no key.
         b"FT.CURSOR" => as_key(items.get(2)?),
         b"OBJECT" => as_key(items.get(2)?),
+        // Every XINFO/XGROUP subcommand except HELP names the stream at argv[2].
+        b"XINFO" | b"XGROUP" => {
+            if matches_token(items.get(1), b"HELP") {
+                None
+            } else {
+                as_key(items.get(2)?)
+            }
+        }
         b"MEMORY" => {
             if matches_token(items.get(1), b"USAGE") {
                 as_key(items.get(2)?)
@@ -2537,5 +2552,91 @@ mod tests {
             bulk("LEFT"),
         ]));
         assert_eq!(extract_key(&frame), Some(b"list".as_slice()));
+    }
+
+    fn command(parts: &[&str]) -> Frame {
+        array(parts.iter().map(bulk).collect())
+    }
+
+    #[test]
+    fn extract_key_routes_xinfo_and_xgroup_by_stream_key() {
+        for parts in [
+            &["XINFO", "STREAM", "orders"][..],
+            &["XINFO", "GROUPS", "orders"],
+            &["XINFO", "CONSUMERS", "orders", "g"],
+            &["xgroup", "create", "orders", "g", "$", "MKSTREAM"],
+            &["XGROUP", "SETID", "orders", "g", "0"],
+            &["XGROUP", "DESTROY", "orders", "g"],
+            &["XGROUP", "CREATECONSUMER", "orders", "g", "c"],
+        ] {
+            assert_eq!(
+                extract_key(&command(parts)),
+                Some(b"orders".as_slice()),
+                "{parts:?}"
+            );
+        }
+        assert_eq!(extract_key(&command(&["XINFO", "HELP"])), None);
+        assert_eq!(extract_key(&command(&["XGROUP", "HELP"])), None);
+    }
+
+    #[test]
+    fn extract_keys_covers_redis_8_list_set_hash_and_stream_layouts() {
+        let cases: [(&[&str], &[&[u8]]); 7] = [
+            (&["HMSET", "{t}h", "f", "v"], &[b"{t}h"]),
+            (&["SDIFFCARD", "2", "{t}a", "{t}b"], &[b"{t}a", b"{t}b"]),
+            (&["SUNIONCARD", "2", "{t}a", "{t}b"], &[b"{t}a", b"{t}b"]),
+            (
+                &["LMOVEM", "{t}src", "{t}dst", "LEFT", "RIGHT"],
+                &[b"{t}src", b"{t}dst"],
+            ),
+            (
+                &[
+                    "BLMOVEM", "{t}src", "{t}dst", "LEFT", "RIGHT", "COUNT", "2", "0",
+                ],
+                &[b"{t}src", b"{t}dst"],
+            ),
+            (
+                &[
+                    "XREAD", "MAXCOUNT", "10", "MAXSIZE", "4096", "STREAMS", "{t}s", "0",
+                ],
+                &[b"{t}s"],
+            ),
+            (
+                &[
+                    "XREADGROUP",
+                    "GROUP",
+                    "g",
+                    "c",
+                    "CLAIM",
+                    "1000",
+                    "NOACK",
+                    "STREAMS",
+                    "{t}s",
+                    ">",
+                ],
+                &[b"{t}s"],
+            ),
+        ];
+        for (parts, expected) in cases {
+            match extract_keys(&command(parts)) {
+                Ok(CommandKeys::Known(keys)) => assert_eq!(keys, expected, "{parts:?}"),
+                other => panic!("{parts:?} -> {other:?}"),
+            }
+        }
+        // CLAIM belongs to XREADGROUP only.
+        assert!(extract_keys(&command(&["XREAD", "CLAIM", "1000", "STREAMS", "s", "0"])).is_err());
+
+        let transaction = [
+            command(&["HMSET", "{t}h", "f", "v"]),
+            command(&["SET", "{t}k", "v"]),
+        ];
+        assert_eq!(
+            common_slot(&transaction).unwrap(),
+            Some(slot_for_key(b"{t}h"))
+        );
+        assert_eq!(
+            pipeline_routing_slot(&command(&["SDIFFCARD", "2", "{t}a", "{t}b"])).unwrap(),
+            Some(slot_for_key(b"{t}a"))
+        );
     }
 }
