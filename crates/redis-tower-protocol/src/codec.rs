@@ -123,6 +123,22 @@ impl Decoder for RespCodec {
         src.advance(frame_len);
         Ok(Some(frame))
     }
+
+    /// Report a peer that closed part-way through a frame as
+    /// `ErrorKind::UnexpectedEof`, rather than tokio-util's generic
+    /// "bytes remaining on stream" error, so callers can classify it as a
+    /// lost connection.
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, ProtocolError> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() => Ok(None),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed before a complete RESP frame arrived",
+            )
+            .into()),
+        }
+    }
 }
 
 impl Encoder<Frame> for RespCodec {
@@ -158,6 +174,23 @@ mod tests {
                 "no reply may be mistaken for the next request's result"
             );
         }
+    }
+
+    #[test]
+    fn eof_inside_a_frame_is_an_unexpected_eof() {
+        let mut codec = RespCodec::new();
+        let mut partial = BytesMut::from(&b"*2\r\n+OK\r\n$5\r\nhel"[..]);
+        assert!(matches!(
+            codec.decode_eof(&mut partial),
+            Err(ProtocolError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+
+        let mut complete = BytesMut::from(&b"+OK\r\n"[..]);
+        assert_eq!(
+            codec.decode_eof(&mut complete).unwrap(),
+            Some(Frame::SimpleString(Bytes::from("OK")))
+        );
+        assert_eq!(codec.decode_eof(&mut complete).unwrap(), None);
     }
 
     #[test]

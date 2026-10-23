@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- report a peer that closes part-way through a frame as
+  `ErrorKind::UnexpectedEof` from `RespCodec::decode_eof`, instead of the
+  generic "bytes remaining on stream" error
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-protocol-v0.1.3...redis-tower-protocol-v0.1.4) - 2026-10-01
 
 ### Added

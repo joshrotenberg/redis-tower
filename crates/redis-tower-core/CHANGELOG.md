@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - redacted, typed `ConnectionSetup` policies and `ConnectionConfig::with_client_name`
   for fail-closed setup after authentication, database selection, and RESP negotiation
 
+### Fixed
+
+- classify socket failures surfaced through the codec (connection reset,
+  keepalive timeout, EOF part-way through a reply) as `RedisError::Connection`
+  instead of `RedisError::Protocol`, so `is_connection_error()`, reconnect
+  layers, and "outcome unknown" handling for dedicated connections see them;
+  rejected RESP3 constructs remain protocol errors
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.2...redis-tower-core-v0.1.3) - 2026-10-01
 
 ### Added
