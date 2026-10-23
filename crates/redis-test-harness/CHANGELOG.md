@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- require `redis-server-wrapper` 0.4.3, the first release with the
+  `RedisClusterHandle::cluster_base` API the managed Cluster fixture calls;
+  0.4.1 and 0.4.2 satisfied the old requirement but failed to compile
+
 ## [0.1.2](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-test-v0.1.1...redis-tower-test-v0.1.2) - 2026-10-01
 
 ### Added
