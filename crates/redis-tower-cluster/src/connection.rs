@@ -1123,16 +1123,21 @@ pub(crate) fn parse_redirect(frame: &Frame) -> Option<Redirect> {
         return None;
     }
 
+    // A slot outside 0..16384 is not a redirect this client can follow.
+    let slot = parts[1]
+        .parse::<u16>()
+        .ok()
+        .filter(|slot| *slot < crate::slot::SLOT_COUNT);
     match parts[0] {
         "MOVED" => {
-            let slot = parts[1].parse::<u16>().ok()?;
+            let slot = slot?;
             Some(Redirect::Moved {
                 slot,
                 addr: parts[2].to_string(),
             })
         }
         "ASK" => {
-            let slot = parts[1].parse::<u16>().ok()?;
+            let slot = slot?;
             Some(Redirect::Ask {
                 slot,
                 addr: parts[2].to_string(),
@@ -2853,6 +2858,19 @@ mod tests {
     fn parse_ask_invalid_slot() {
         let frame = Frame::Error(Bytes::from("ASK notanumber 127.0.0.1:7001"));
         assert!(parse_redirect(&frame).is_none());
+    }
+
+    #[test]
+    fn parse_redirect_rejects_slots_outside_the_slot_table() {
+        for message in ["MOVED 16384 127.0.0.1:7001", "ASK 20000 127.0.0.1:7001"] {
+            let frame = Frame::Error(Bytes::from(message));
+            assert!(parse_redirect(&frame).is_none(), "{message}");
+        }
+        let frame = Frame::Error(Bytes::from("MOVED 16383 127.0.0.1:7001"));
+        assert!(matches!(
+            parse_redirect(&frame),
+            Some(Redirect::Moved { slot: 16_383, .. })
+        ));
     }
 
     #[test]

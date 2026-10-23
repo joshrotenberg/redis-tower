@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   example after restarting without `nodes.conf`) instead of committing it and
   pruning every node service, and keep the caller's seed as a last-resort
   discovery source so a client whose services are all gone can still recover
+- reject out-of-range slots and ports in `CLUSTER SLOTS` and `MOVED`/`ASK`
+  replies instead of truncating them with `as u16`; a negative or ≥16384 slot
+  panicked while indexing the slot table, and port 70000 silently became 4464
 - route `XINFO` and `XGROUP` subcommands by their stream key; they were hashed
   by the subcommand name, costing a MOVED and a topology refresh per call and
   failing outright on connections built with `max_redirects(0)`
