@@ -379,7 +379,9 @@ async fn semaphore_enforces_capacity_and_release_recovers_it() {
 
 #[tokio::test]
 async fn semaphore_expiry_recovers_from_crashed_holder() {
-    let semaphore = semaphore(1, Duration::from_millis(60));
+    // The replacement lease must outlive its renew/release round trips on a
+    // loaded runner, so keep the TTL well above scheduling jitter.
+    let semaphore = semaphore(1, Duration::from_millis(300));
     let mut stale_connection = connection().await;
     let mut replacement_connection = connection().await;
     let stale = semaphore
@@ -388,7 +390,7 @@ async fn semaphore_expiry_recovers_from_crashed_holder() {
         .unwrap()
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    tokio::time::sleep(Duration::from_millis(450)).await;
     let replacement = semaphore
         .try_acquire(&mut replacement_connection)
         .await
@@ -530,23 +532,26 @@ async fn delayed_queue_preserves_binary_duplicates_and_deadlines() {
 
 #[tokio::test]
 async fn delayed_queue_reports_retention_pruning() {
-    let queue = delayed_queue(Duration::from_millis(50));
+    // Each claim lands at least 100ms past the boundary it depends on and
+    // several hundred milliseconds before the next one, so runner jitter
+    // cannot reorder "stale expired", "future due", and "future expired".
+    let queue = delayed_queue(Duration::from_millis(500));
     let mut connection = connection().await;
     queue
         .enqueue(&mut connection, b"stale", Duration::ZERO)
         .await
         .unwrap();
     queue
-        .enqueue(&mut connection, b"future", Duration::from_millis(200))
+        .enqueue(&mut connection, b"future", Duration::from_millis(1000))
         .await
         .unwrap();
 
-    tokio::time::sleep(Duration::from_millis(80)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
     let claim = queue.claim_due(&mut connection, 10).await.unwrap();
     assert_eq!(claim.expired(), 1);
     assert!(claim.payloads().is_empty());
 
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         queue
             .claim_due(&mut connection, 10)
