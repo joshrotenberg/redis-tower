@@ -467,6 +467,16 @@ impl RedisConnection {
     ///
     /// The configured RESP decode limits are installed before any server data
     /// is read, including `CLIENT SETINFO` and protocol-negotiation replies.
+    ///
+    /// This constructor does not authenticate. Any
+    /// [`ConnectionSetup`](crate::ConnectionSetup) in `config` runs right after
+    /// protocol negotiation, so on a server that requires `AUTH` it fails with
+    /// `NOAUTH`. When you authenticate on the returned connection yourself,
+    /// connect with `config.clone().with_setup(ConnectionSetup::default())`,
+    /// then call [`apply_setup`](Self::apply_setup) with `config.setup()` after
+    /// `AUTH`, `SELECT`, and protocol negotiation. URL constructors such as
+    /// [`connect_url_with_config`](Self::connect_url_with_config) authenticate
+    /// first and need no such step.
     pub async fn connect_with_config(
         addr: &str,
         config: &ConnectionConfig,
@@ -563,6 +573,16 @@ impl RedisConnection {
     /// The TCP connect timeout, keepalive policy, protocol negotiation, and
     /// RESP decode limits all come from `config`. The connect timeout covers
     /// the TCP handshake only, matching [`connect_tls_with_timeout`](Self::connect_tls_with_timeout).
+    ///
+    /// This constructor does not authenticate. Any
+    /// [`ConnectionSetup`](crate::ConnectionSetup) in `config` runs right after
+    /// protocol negotiation, so on a server that requires `AUTH` it fails with
+    /// `NOAUTH`. When you authenticate on the returned connection yourself,
+    /// connect with `config.clone().with_setup(ConnectionSetup::default())`,
+    /// then call [`apply_setup`](Self::apply_setup) with `config.setup()` after
+    /// `AUTH`, `SELECT`, and protocol negotiation. URL constructors such as
+    /// [`connect_url_with_config`](Self::connect_url_with_config) authenticate
+    /// first and need no such step.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     #[cfg_attr(
         docsrs,
@@ -962,7 +982,7 @@ impl RedisConnection {
     pub async fn hello(&mut self, version: u8) -> Result<Frame, RedisError> {
         let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
         let response = {
-            let framed = self.framed.as_mut().expect("connection not in flight");
+            let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
             framed.send(frame).await.map_err(RedisError::from)?;
             read_response_from(framed, &self.push_tx, &self.received_push_tx).await?
         };
@@ -1348,7 +1368,7 @@ impl RedisConnection {
     /// they mean the connection is unusable or its configured limits were
     /// violated, rather than that the optional command was rejected.
     async fn identify_client(&mut self) -> Result<(), RedisError> {
-        let framed = self.framed.as_mut().unwrap();
+        let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
         // CLIENT SETINFO LIB-NAME redis-tower
         framed
             .send(array(vec![
@@ -1376,7 +1396,7 @@ impl RedisConnection {
 
     /// Apply static URL authentication before the remaining URL setup.
     async fn post_connect_authentication(&mut self, url: &RedisUrl) -> Result<(), RedisError> {
-        let framed = self.framed.as_mut().expect("connection not in flight");
+        let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
 
         if let Some(ref password) = url.password {
             let mut auth_args = vec![bulk("AUTH")];
@@ -1403,7 +1423,7 @@ impl RedisConnection {
     /// Select the URL database after authentication and before negotiation.
     async fn post_connect_database(&mut self, database: Option<u16>) -> Result<(), RedisError> {
         if let Some(db) = database {
-            let framed = self.framed.as_mut().expect("connection not in flight");
+            let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
             framed
                 .send(array(vec![bulk("SELECT"), bulk(db.to_string())]))
                 .await
@@ -1552,6 +1572,29 @@ mod tests {
             let (server, _) = listener.accept().await.unwrap();
             (RedisStream::Tcp(client), RedisStream::Tcp(server))
         }
+    }
+
+    #[tokio::test]
+    async fn protocol_negotiation_on_a_closed_transport_returns_an_error() {
+        let (client, server) = stream_pair().await;
+        let server_task = tokio::spawn(async move {
+            // Read one command, then hang up without replying.
+            let mut framed = Framed::new(server, RespCodec::new());
+            let _ = framed.next().await;
+        });
+        let mut connection = RedisConnection::from_stream(client);
+        assert!(connection.execute(DummyCmd).await.is_err());
+        server_task.await.unwrap();
+
+        // The failed exchange consumed the transport; public negotiation must
+        // report that instead of panicking.
+        let negotiated =
+            tokio::spawn(
+                async move { connection.negotiate_protocol(ProtocolVersion::Resp3).await },
+            )
+            .await
+            .expect("negotiate_protocol must not panic on a closed transport");
+        assert!(matches!(negotiated, Err(RedisError::ConnectionClosed)));
     }
 
     async fn write_all(stream: &mut RedisStream, mut bytes: &[u8]) {
