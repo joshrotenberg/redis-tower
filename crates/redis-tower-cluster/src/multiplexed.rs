@@ -331,7 +331,12 @@ struct Inner {
     topology_changes: TopologyChangeTracker,
     masters: HashMap<String, AutoPipelineService>,
     replicas: HashMap<String, AutoPipelineService>,
+    /// Master that serves keyless commands. Re-pointed on every topology
+    /// commit; see [`Inner::default_master`].
     default_node: String,
+    /// Caller-supplied seed, kept as a last-resort discovery source so a
+    /// refresh can still run when every known node service is gone.
+    seed_addr: String,
     host_override: Option<String>,
     address_map: Option<HashMap<String, String>>,
     read_preference: ReadPreference,
@@ -343,6 +348,31 @@ struct Inner {
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     tls: Option<Arc<TlsConfig>>,
+}
+
+impl Inner {
+    /// The master service for keyless commands.
+    ///
+    /// Prefers `default_node`, then the first connected master in topology
+    /// order, then any connected master. A failover or scale-in can prune the
+    /// original default between commits; keyless traffic must follow the
+    /// surviving masters rather than fail until the client is rebuilt.
+    fn default_master(&self) -> Option<(String, AutoPipelineService)> {
+        if let Some(svc) = self.masters.get(&self.default_node) {
+            return Some((self.default_node.clone(), svc.clone()));
+        }
+        self.topology
+            .master_addrs()
+            .iter()
+            .map(|addr| addr.addr_string())
+            .find_map(|addr| self.masters.get(&addr).map(|svc| (addr, svc.clone())))
+            .or_else(|| {
+                self.masters
+                    .iter()
+                    .min_by(|(a, _), (b, _)| a.cmp(b))
+                    .map(|(addr, svc)| (addr.clone(), svc.clone()))
+            })
+    }
 }
 
 /// The narrow slice of cluster state needed by dedicated Pub/Sub sessions.
@@ -983,6 +1013,7 @@ impl MultiplexedClusterClient {
                 masters,
                 replicas,
                 default_node,
+                seed_addr: seed_addr.to_string(),
                 host_override,
                 address_map,
                 read_preference,
@@ -1125,15 +1156,12 @@ impl MultiplexedClusterClient {
                         })?;
                         (addr, service)
                     }
-                    None => {
-                        let addr = inner.default_node.clone();
-                        let service = inner.masters.get(&addr).cloned().ok_or_else(|| {
-                            RedisError::Redis(format!(
-                                "no connected default master service for pipeline ({addr})"
-                            ))
-                        })?;
-                        (addr, service)
-                    }
+                    None => inner.default_master().ok_or_else(|| {
+                        RedisError::Redis(format!(
+                            "no connected default master service for pipeline ({})",
+                            inner.default_node
+                        ))
+                    })?,
                 };
                 groups
                     .entry(addr)
@@ -1671,20 +1699,39 @@ impl MultiplexedClusterClient {
 
         // Run CLUSTER SLOTS against the first node that answers. The previous
         // seed (`masters.keys().next()`) could be the node that just died, so
-        // try every node we know about -- masters first, then replicas.
+        // try every node we know about -- masters first, then replicas, then
+        // the caller's original seed, so a refresh can still recover after
+        // every known node service has been pruned.
         let seeds: Vec<String> = {
             let inner = self.inner.read().await;
-            inner
+            let mut seeds: Vec<String> = inner
                 .masters
                 .keys()
                 .chain(inner.replicas.keys())
                 .cloned()
-                .collect()
+                .collect();
+            if !inner.seed_addr.is_empty() && !seeds.contains(&inner.seed_addr) {
+                seeds.push(inner.seed_addr.clone());
+            }
+            seeds
         };
         let mut discovered = None;
         let mut last_err = RedisError::ConnectionClosed;
         for seed in &seeds {
             match discover_from_seed(seed, &connector).await {
+                // A node that lost its cluster state (restarted without
+                // nodes.conf, or mid CLUSTER RESET) answers CLUSTER SLOTS with
+                // an empty map. Committing it would prune every service, so
+                // treat it as this seed failing and ask the next one.
+                Ok(t) if t.master_addrs().is_empty() => {
+                    tracing::debug!(
+                        seed,
+                        "cluster: seed reported no slot owners during topology refresh"
+                    );
+                    last_err = RedisError::Redis(format!(
+                        "cluster topology refresh: {seed} reported no slot owners"
+                    ));
+                }
                 Ok(t) => {
                     discovered = Some(t);
                     break;
@@ -1826,6 +1873,18 @@ impl MultiplexedClusterClient {
                 if let Some(svc) = inner.replicas.remove(addr) {
                     to_drain.push(svc);
                 }
+            }
+            // A failover or scale-in can prune the master that served keyless
+            // commands; move the default to a surviving one.
+            if let Some((addr, _)) = inner.default_master()
+                && addr != inner.default_node
+            {
+                tracing::info!(
+                    previous = %inner.default_node,
+                    current = %addr,
+                    "cluster: default node for keyless commands moved after topology refresh"
+                );
+                inner.default_node = addr;
             }
         }
 
@@ -2130,16 +2189,17 @@ impl MultiplexedClusterClient {
             }
         }
 
-        // Keyless command or no route: fall back to default node.
-        let default = inner.default_node.clone();
-        let svc = inner
-            .masters
-            .get(&default)
-            .cloned()
-            .ok_or(RedisError::ConnectionClosed)?;
+        // Keyless command or no route: fall back to the default master. With
+        // no connected master at all this fails before any dispatch, so no
+        // node error would schedule the refresh that can heal it.
+        let Some((addr, svc)) = inner.default_master() else {
+            drop(inner);
+            self.trigger_refresh();
+            return Err(RedisError::ConnectionClosed);
+        };
         Ok(Target {
             svc,
-            addr: default,
+            addr,
             replica: None,
         })
     }
@@ -3599,6 +3659,7 @@ mod observability_tests {
                 topology_changes: TopologyChangeTracker::new(),
                 masters,
                 replicas: HashMap::new(),
+                seed_addr: default_node.clone(),
                 default_node,
                 host_override: None,
                 address_map: None,

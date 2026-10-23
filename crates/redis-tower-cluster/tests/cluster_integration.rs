@@ -1671,6 +1671,86 @@ async fn mux_cluster_handles_ask_then_moved_during_live_reshard() {
         .expect("timed out shutting down reshard client");
 }
 
+/// A graceful failover of the first-listed master (the client's initial
+/// default for keyless commands) demotes it to a replica, and the next refresh
+/// prunes it. Keyless commands must move to a surviving master instead of
+/// failing with ConnectionClosed until the client is rebuilt.
+#[tokio::test]
+#[ignore = "live: starts a dedicated 3-master/3-replica cluster and fails over a master"]
+async fn mux_cluster_keyless_commands_survive_default_master_failover() {
+    let fixture = ClusterFixture::builder()
+        .base_port(18000)
+        .start()
+        .await
+        .expect("failed to start default-master failover fixture");
+    let before = fixture
+        .topology()
+        .await
+        .expect("failed to inspect initial topology");
+    let old_master = before
+        .owner_of_slot(0)
+        .expect("slot 0 should have a master")
+        .clone();
+    let replica = before
+        .replicas_of(&old_master.id)
+        .into_iter()
+        .next()
+        .expect("3x3 fixture should have one replica for the slot 0 owner")
+        .clone();
+
+    let client = MultiplexedClusterClient::connect(&fixture.seed_addr())
+        .await
+        .expect("failed to connect to failover fixture");
+    assert_eq!(
+        client.topology().await.master_addrs()[0].addr_string(),
+        old_master.addr,
+        "the slot 0 owner is the first-listed master, so it is the initial keyless default"
+    );
+    client.execute(RawCommand::new("PING")).await.unwrap();
+
+    fixture
+        .promote_replica(replica.index)
+        .await
+        .expect("CLUSTER FAILOVER failed");
+    fixture
+        .wait_for_slot_owner(0, &replica.id, Duration::from_secs(30))
+        .await
+        .expect("replica did not take over slot 0");
+
+    // Refreshes are rate limited; retry until the client has observed the
+    // promotion and pruned the demoted master.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let _ = client.refresh_topology().await;
+        let masters: Vec<String> = client
+            .topology()
+            .await
+            .master_addrs()
+            .iter()
+            .map(|addr| addr.addr_string())
+            .collect();
+        if masters.contains(&replica.addr) && !masters.contains(&old_master.addr) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "client never observed the promotion: masters={masters:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+    }
+
+    for command in ["PING", "DBSIZE", "INFO"] {
+        client
+            .execute(RawCommand::new(command))
+            .await
+            .unwrap_or_else(|error| panic!("keyless {command} after failover: {error:?}"));
+    }
+
+    tokio::time::timeout(Duration::from_secs(10), client.shutdown())
+        .await
+        .expect("timed out shutting down failover client");
+}
+
 /// Killing a master in a real 3x3 topology and issuing CLUSTER FAILOVER on its
 /// replica must lead to promotion and automatic replacement of the dead
 /// per-node worker in the client's slot map. The first successful post-kill
