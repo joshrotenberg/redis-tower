@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of `RedisError::Protocol`, so `is_connection_error()`, reconnect
   layers, and "outcome unknown" handling for dedicated connections see them;
   rejected RESP3 constructs remain protocol errors
+- read replies while `execute_pipeline` is still writing, so a batch mixing a
+  large reply with a large request no longer deadlocks against servers or
+  proxies that stop reading while their replies go unread; this also covers
+  `AutoPipelineService`, `MultiplexedClient`, and explicit pipelines
 - return `RedisError::ConnectionClosed` from `negotiate_protocol`, `hello`,
   and URL setup steps on a connection whose transport an earlier failure
   consumed, instead of panicking

@@ -3,8 +3,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::Sink;
 use futures::SinkExt;
+use futures::{Sink, Stream};
 use socket2::{Socket, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -116,6 +116,21 @@ fn apply_keepalive(stream: TcpStream, config: &KeepaliveConfig) -> Result<TcpStr
     Ok(TcpStream::from_std(std_stream)?)
 }
 
+/// Deliver a push frame to the registered channels.
+fn route_push(
+    frame: Frame,
+    push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    received_push_tx: &Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
+) {
+    let received_at = std::time::Instant::now();
+    if let Some(ref tx) = *push_tx {
+        let _ = tx.send(frame.clone());
+    }
+    if let Some(ref tx) = *received_push_tx {
+        let _ = tx.send(ReceivedPushFrame { received_at, frame });
+    }
+}
+
 /// Read the next non-push response frame, routing push frames to the channel.
 async fn read_response_from(
     framed: &mut Framed<RedisStream, RespCodec>,
@@ -130,18 +145,82 @@ async fn read_response_from(
             .map_err(RedisError::from)?;
 
         if let Frame::Push(_) = &frame {
-            let received_at = std::time::Instant::now();
-            if let Some(ref tx) = *push_tx {
-                let _ = tx.send(frame.clone());
-            }
-            if let Some(ref tx) = *received_push_tx {
-                let _ = tx.send(ReceivedPushFrame { received_at, frame });
-            }
+            route_push(frame, push_tx, received_push_tx);
             continue;
         }
 
         return Ok(frame);
     }
+}
+
+/// Write `frames` and read one non-push reply per frame, advancing both
+/// directions in every poll.
+///
+/// Writing a whole batch before reading any reply can deadlock against a peer
+/// that applies backpressure (managed services and proxies stop reading while
+/// their replies go unread): the client blocks writing a large value while the
+/// peer blocks writing replies to earlier commands. Draining replies while
+/// writes are pending keeps both sides moving.
+async fn exchange_pipeline(
+    framed: &mut Framed<RedisStream, RespCodec>,
+    frames: Vec<Frame>,
+    push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    received_push_tx: &Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
+) -> Result<Vec<Frame>, RedisError> {
+    let count = frames.len();
+    let mut unsent = frames.into_iter();
+    let mut next = unsent.next();
+    let mut flushed = count == 0;
+    let mut responses = Vec::with_capacity(count);
+
+    std::future::poll_fn(|cx| {
+        // Write side: hand frames to the sink while it has room, then flush.
+        while let Some(frame) = next.take() {
+            match Pin::new(&mut *framed).poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    if let Err(error) = Pin::new(&mut *framed).start_send(frame) {
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    next = unsent.next();
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Pending => {
+                    next = Some(frame);
+                    break;
+                }
+            }
+        }
+        if next.is_none() && !flushed {
+            match Pin::new(&mut *framed).poll_flush(cx) {
+                Poll::Ready(Ok(())) => flushed = true,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Pending => {}
+            }
+        }
+
+        // Read side: drain every reply that has already arrived.
+        while responses.len() < count {
+            match Pin::new(&mut *framed).poll_next(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Frame::Push(_) = &frame {
+                        route_push(frame, push_tx, received_push_tx);
+                    } else {
+                        responses.push(frame);
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(None) => return Poll::Ready(Err(RedisError::ConnectionClosed)),
+                Poll::Pending => break,
+            }
+        }
+
+        if flushed && responses.len() == count {
+            Poll::Ready(Ok(std::mem::take(&mut responses)))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// A single Redis connection implementing `tower::Service<Cmd>`.
@@ -1158,9 +1237,10 @@ impl RedisConnection {
     /// For values approaching 10MB or larger, the sequential send-then-read
     /// pattern can cause TCP backpressure issues on some managed Redis
     /// services (e.g., ElastiCache) if the write buffer fills before the
-    /// response starts being read. Consider using `AutoPipelineService`
-    /// for large-value workloads, or splitting large values across
-    /// multiple keys.
+    /// response starts being read. [`execute_pipeline`](Self::execute_pipeline),
+    /// and the `AutoPipelineService` built on it, read replies while writes
+    /// are still in progress; prefer them for large-value workloads, or split
+    /// large values across multiple keys.
     ///
     /// Cancelling this future after dispatch closes the connection. The
     /// transport is checked out of `self` until a complete response has been
@@ -1232,26 +1312,12 @@ impl RedisConnection {
     /// Cancelling before every response has been read closes the connection.
     pub async fn execute_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
         self.ensure_framed().await?;
-        let count = frames.len();
         let push_tx = self.push_tx.clone();
         let received_push_tx = self.received_push_tx.clone();
         let mut framed = self.framed.take().expect("framed transport was ensured");
 
-        // Send all frames, buffering writes.
-        for (i, frame) in frames.into_iter().enumerate() {
-            if i < count - 1 {
-                framed.feed(frame).await.map_err(RedisError::from)?;
-            } else {
-                framed.send(frame).await.map_err(RedisError::from)?;
-            }
-        }
-
-        // Read all responses, routing push frames to the channel.
-        let mut responses = Vec::with_capacity(count);
-        for _ in 0..count {
-            let response = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
-            responses.push(response);
-        }
+        // Write and read concurrently, routing push frames to the channel.
+        let responses = exchange_pipeline(&mut framed, frames, &push_tx, &received_push_tx).await?;
 
         self.framed = Some(framed);
         Ok(responses)
