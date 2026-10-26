@@ -33,6 +33,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ask nodes the topology lists without a connection (replicas under
   `ReadPreference::Master`) during a topology refresh in both clients; in a
   one-shard cluster whose master died, no other node was left to ask
+- stop `MultiplexedClusterClient::reauthenticate_all` from holding the routing
+  write lock while it sent `AUTH` to every node in turn: one slow node added
+  its latency to every command on every node, and a hung one stalled routing
+  indefinitely (redis-rs #2092). Nodes are now authenticated concurrently
+  from a snapshot, each bounded by 5 s; a worker that rejects the credential
+  or times out is dropped from routing only if a concurrent refresh has not
+  already replaced it
 - treat a `READONLY` reply from a master as stale topology in both clients:
   wait for a topology refresh that started after the reply, then re-send the
   command to the slot's (or keyless default's) current master. A write sent

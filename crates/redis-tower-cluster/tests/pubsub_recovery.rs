@@ -102,10 +102,7 @@ async fn sharded_session_follows_a_server_initiated_unsubscribe() {
         expect_payload(&mut session, "after", "slot migration").await;
         assert_eq!(session.current_node().port, b.port);
         assert!(
-            session
-                .subscriptions()
-                .shard_channels
-                .contains(CHANNEL),
+            session.subscriptions().shard_channels.contains(CHANNEL),
             "the dropped channel is tracked again"
         );
     }
