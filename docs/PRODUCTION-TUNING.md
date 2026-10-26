@@ -592,6 +592,20 @@ them.
 
 ## Decide whether to queue while offline
 
+A factory-backed `MultiplexedClient` (including `connect_lazy` and the
+per-node workers of the Cluster and Sentinel multiplexed clients) holds
+commands that were queued when the connection dropped for one reconnect
+attempt, so an immediate reconnect is transparent. Once an attempt fails, the
+outage is treated as real: queued commands and every command issued while the
+worker keeps retrying fail with `ConnectionClosed` instead of waiting behind a
+reconnect budget that, by default, never runs out. Reconnecting continues in
+the background. Because no connect or response timeout is set by default,
+configure `ReconnectConfig::connect_timeout` (otherwise a black-holed endpoint
+holds that first attempt for the OS TCP timeout) and
+`AutoPipelineConfig::response_timeout` (otherwise a server that stops answering
+is never detected). Use `MultiplexedClient::retry` for idempotent commands that
+should ride out a short outage; for Sentinel this includes the failover window.
+
 `ResilientRedisClient` fails later work while reconnecting by default. For a
 workload that benefits from waiting through a short outage, enable its bounded
 offline queue explicitly:

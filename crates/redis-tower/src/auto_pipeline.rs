@@ -783,6 +783,18 @@ impl AutoPipelineService {
     /// factory with exponential backoff governed by `reconnect`. Subsequent
     /// requests are served by the new connection.
     ///
+    /// Requests queued when the connection is lost wait for the first
+    /// reconnect attempt. If that attempt fails, they fail with
+    /// [`RedisError::ConnectionClosed`], and so does every request submitted
+    /// while the worker keeps retrying, rather than waiting for an outage
+    /// that may never end: the default [`ReconnectConfig`] retries forever.
+    /// The worker keeps reconnecting in the background, so callers (or a
+    /// [`RetryClient`](crate::RetryClient) for idempotent commands) can try
+    /// again. Set [`ReconnectConfig::connect_timeout`] so that first attempt
+    /// is bounded against a black-holed endpoint, and
+    /// [`AutoPipelineConfig::response_timeout`] so a server that stops
+    /// answering is detected at all.
+    ///
     /// The factory is also the right place to replay session setup
     /// (AUTH, SELECT, HELLO, READONLY) on every reconnect -- see
     /// [`UrlConnectionFactory`](crate::reconnect::UrlConnectionFactory)
@@ -1990,6 +2002,7 @@ async fn reconnect_worker_connection(
         shutdown,
         control,
         maintenance_enabled,
+        rx,
     )
     .await
     {
@@ -2258,8 +2271,24 @@ async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
     let _ = shutdown.changed().await;
 }
 
+/// Fail every request already waiting in the queue.
+fn fail_waiting_requests(rx: &mut mpsc::Receiver<WorkerRequest>) {
+    while let Ok(request) = rx.try_recv() {
+        request.fail(RedisError::ConnectionClosed);
+    }
+}
+
 /// Reconnect with exponential backoff until connected, exhausted, or the last
 /// public service handle requests worker shutdown.
+///
+/// Requests queued when the connection was lost wait for the first attempt,
+/// so a dropped socket that reconnects at once is transparent. Once an attempt
+/// fails the outage is real: those requests, and every request submitted
+/// while the campaign continues, fail with [`RedisError::ConnectionClosed`]
+/// instead of waiting behind a reconnect loop that may never end (the default
+/// budget is unlimited). Reconnecting continues in the background, and the
+/// first request after it succeeds is served normally.
+#[allow(clippy::too_many_arguments)]
 async fn reconnect_with_backoff(
     factory: &dyn ConnectionFactory,
     config: &ReconnectConfig,
@@ -2267,8 +2296,10 @@ async fn reconnect_with_backoff(
     shutdown: &mut watch::Receiver<bool>,
     control: &WorkerControl,
     maintenance_enabled: bool,
+    rx: &mut mpsc::Receiver<WorkerRequest>,
 ) -> ReconnectOutcome {
     let mut attempt: usize = 0;
+    let mut outage_confirmed = false;
     loop {
         if *shutdown.borrow() {
             return ReconnectOutcome::Shutdown;
@@ -2301,19 +2332,31 @@ async fn reconnect_with_backoff(
             return ReconnectOutcome::Shutdown;
         }
         if !delay.is_zero() {
-            tokio::select! {
-                biased;
-                () = wait_for_shutdown(shutdown) => return ReconnectOutcome::Shutdown,
-                () = tokio::time::sleep(delay) => {}
+            let sleep = tokio::time::sleep(delay);
+            tokio::pin!(sleep);
+            loop {
+                tokio::select! {
+                    biased;
+                    () = wait_for_shutdown(shutdown) => return ReconnectOutcome::Shutdown,
+                    () = &mut sleep => break,
+                    Some(request) = rx.recv(), if outage_confirmed => {
+                        request.fail(RedisError::ConnectionClosed);
+                    }
+                }
             }
         }
         attempt += 1;
         let connect = connect_and_prepare(factory, config.connect_timeout, maintenance_enabled);
         tokio::pin!(connect);
-        let result = tokio::select! {
-            biased;
-            () = wait_for_shutdown(shutdown) => return ReconnectOutcome::Shutdown,
-            result = &mut connect => result,
+        let result = loop {
+            tokio::select! {
+                biased;
+                () = wait_for_shutdown(shutdown) => return ReconnectOutcome::Shutdown,
+                result = &mut connect => break result,
+                Some(request) = rx.recv(), if outage_confirmed => {
+                    request.fail(RedisError::ConnectionClosed);
+                }
+            }
         };
         match result {
             Ok((conn, push_rx)) => {
@@ -2331,6 +2374,10 @@ async fn reconnect_with_backoff(
                 });
                 if active.is_none() {
                     return ReconnectOutcome::Shutdown;
+                }
+                if !outage_confirmed {
+                    outage_confirmed = true;
+                    fail_waiting_requests(rx);
                 }
                 continue;
             }
@@ -2649,6 +2696,7 @@ mod tests {
                 &mut shutdown,
                 &control,
                 false,
+                &mut mpsc::channel(1).1,
             )
             .await,
             ReconnectOutcome::Exhausted
@@ -2696,6 +2744,7 @@ mod tests {
                 &mut shutdown,
                 &control,
                 false,
+                &mut mpsc::channel(1).1,
             )
             .await,
             ReconnectOutcome::Exhausted
@@ -4134,6 +4183,165 @@ mod tests {
         assert_eq!(capture.drop_warnings(), 1, "{:?}", capture.messages);
         let _ = release_tx.send(());
         server.await.unwrap();
+    }
+
+    /// A RESP peer answering `+PONG` to everything, whose live connections are
+    /// all dropped when `kill` fires.
+    async fn pong_peer(
+        kill: Arc<tokio::sync::Notify>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        use futures::{SinkExt, StreamExt};
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let kill = Arc::clone(&kill);
+                tokio::spawn(async move {
+                    let mut framed = Framed::new(
+                        redis_tower_core::RedisStream::Tcp(stream),
+                        redis_tower_core::RespCodec::new(),
+                    );
+                    let serve = async {
+                        while let Some(Ok(_)) = framed.next().await {
+                            if framed
+                                .send(Frame::SimpleString(bytes::Bytes::from_static(b"PONG")))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    };
+                    tokio::select! {
+                        () = serve => {}
+                        () = kill.notified() => {}
+                    }
+                });
+            }
+        });
+        (addr, task)
+    }
+
+    /// With the default unlimited reconnect budget, a factory-backed worker
+    /// whose server stays down must fail queued and new requests promptly
+    /// instead of parking them behind the reconnect loop, then serve requests
+    /// again once the server is back (redis-rs #2298 / #2269).
+    #[tokio::test]
+    async fn requests_fail_fast_during_a_confirmed_outage_and_recover_after() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let kill = Arc::new(tokio::sync::Notify::new());
+        let (addr, server) = pong_peer(Arc::clone(&kill)).await;
+        let up = Arc::new(AtomicBool::new(true));
+        let factory_up = Arc::clone(&up);
+        let factory = move || {
+            let up = factory_up.load(Ordering::SeqCst);
+            async move {
+                if !up {
+                    return Err(RedisError::connection(
+                        addr.to_string(),
+                        std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+                    ));
+                }
+                let stream = tokio::net::TcpStream::connect(addr)
+                    .await
+                    .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+                Ok(RedisConnection::from_stream(
+                    redis_tower_core::RedisStream::Tcp(stream),
+                ))
+            }
+        };
+        let reconnect = AutoPipelineReconnectConfig::new(ReconnectConfig {
+            max_retries: None,
+            base_delay: Duration::from_millis(20),
+            max_delay: Duration::from_millis(100),
+            ..ReconnectConfig::default()
+        });
+        let mut service =
+            AutoPipelineService::with_factory(factory, AutoPipelineConfig::default(), reconnect)
+                .await
+                .unwrap();
+        let mut health = service.subscribe_connection_health();
+        call_frame(&mut service, ping()).await.unwrap();
+
+        up.store(false, Ordering::SeqCst);
+        kill.notify_waiters();
+        health.wait_for(|healthy| !healthy).await.unwrap();
+
+        // Queued behind the lost connection: fails once the first attempt does.
+        let queued = tokio::time::timeout(Duration::from_secs(2), call_frame(&mut service, ping()))
+            .await
+            .expect("a request queued during a confirmed outage was parked");
+        assert!(
+            matches!(queued, Err(RedisError::ConnectionClosed)),
+            "{queued:?}"
+        );
+        // Submitted while the campaign keeps retrying: fails at once.
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            let result = call_frame(&mut service, ping()).await;
+            assert!(
+                matches!(result, Err(RedisError::ConnectionClosed)),
+                "{result:?}"
+            );
+            assert!(started.elapsed() < Duration::from_millis(500));
+        }
+        assert!(
+            service.is_alive(),
+            "the worker keeps reconnecting in the background"
+        );
+
+        up.store(true, Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(2), health.wait_for(|healthy| *healthy))
+            .await
+            .expect("the background campaign reconnects once the server is back")
+            .unwrap();
+        assert_eq!(
+            call_frame(&mut service, ping()).await.unwrap(),
+            Frame::SimpleString(bytes::Bytes::from_static(b"PONG"))
+        );
+        service.shutdown().await;
+        server.abort();
+    }
+
+    /// A connection loss that reconnects on the first attempt stays
+    /// transparent: queued requests are served by the replacement.
+    #[tokio::test]
+    async fn requests_queued_through_a_transparent_reconnect_succeed() {
+        let kill = Arc::new(tokio::sync::Notify::new());
+        let (addr, server) = pong_peer(Arc::clone(&kill)).await;
+        let factory = move || async move {
+            let stream = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|error| RedisError::connection(addr.to_string(), error))?;
+            Ok::<_, RedisError>(RedisConnection::from_stream(
+                redis_tower_core::RedisStream::Tcp(stream),
+            ))
+        };
+        let reconnect = AutoPipelineReconnectConfig::new(ReconnectConfig {
+            base_delay: Duration::from_millis(100),
+            jitter: false,
+            ..ReconnectConfig::default()
+        });
+        let mut service =
+            AutoPipelineService::with_factory(factory, AutoPipelineConfig::default(), reconnect)
+                .await
+                .unwrap();
+        let mut health = service.subscribe_connection_health();
+        call_frame(&mut service, ping()).await.unwrap();
+
+        kill.notify_waiters();
+        health.wait_for(|healthy| !healthy).await.unwrap();
+        // The worker is sleeping before its first attempt; this request waits
+        // for it and is served by the replacement connection.
+        assert_eq!(
+            call_frame(&mut service, ping()).await.unwrap(),
+            Frame::SimpleString(bytes::Bytes::from_static(b"PONG"))
+        );
+        service.shutdown().await;
+        server.abort();
     }
 
     #[tokio::test]

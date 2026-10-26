@@ -330,7 +330,11 @@ impl MultiplexedClient<AutoPipelineService> {
     /// which makes it suitable for serverless initialization paths. The first
     /// command receives [`RedisError::ConnectionClosed`] if that deferred
     /// attempt fails. Later connection loss is handled using the default
-    /// reconnect policy.
+    /// reconnect policy: once a reconnect attempt fails, queued and new
+    /// commands fail with [`RedisError::ConnectionClosed`] while reconnecting
+    /// continues in the background (see [`Self::from_factory`]). The defaults
+    /// set no connect or response timeout; use [`Self::from_lazy_factory`] to
+    /// configure them.
     ///
     /// # Panics
     ///
@@ -401,6 +405,25 @@ impl MultiplexedClient<AutoPipelineService> {
     /// [`UrlConnectionFactory`] for
     /// AUTH+SELECT from a URL, or implement [`ConnectionFactory`] yourself
     /// for custom init.
+    ///
+    /// # During an outage
+    ///
+    /// Commands already written when the connection drops fail with
+    /// [`RedisError::ConnectionClosed`]. Commands still queued wait for the
+    /// first reconnect attempt, so a connection that comes straight back is
+    /// transparent. Once an attempt fails, queued commands and every command
+    /// issued while the worker keeps retrying fail immediately with
+    /// [`RedisError::ConnectionClosed`] instead of waiting for the outage to
+    /// end; the default [`ReconnectConfig`](crate::reconnect::ReconnectConfig)
+    /// retries forever in the background, and the first command after it
+    /// reconnects is served normally. Wrap the client with
+    /// [`retry`](Self::retry) to retry idempotent commands across a short
+    /// outage. The defaults set no connect timeout and no response timeout:
+    /// set [`ReconnectConfig::connect_timeout`](crate::reconnect::ReconnectConfig::connect_timeout)
+    /// so a black-holed endpoint cannot hold that first attempt for the
+    /// operating system's TCP timeout, and
+    /// [`AutoPipelineConfig::response_timeout`] so a server that stops
+    /// answering is detected.
     ///
     /// # Example
     ///

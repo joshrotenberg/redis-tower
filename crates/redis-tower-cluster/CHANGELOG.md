@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   holds clones can still tear the client down deterministically
   (redis-developer/redis-database-mcp-rs#125)
 
+### Changed
+
+- a per-node worker fails queued and new commands with `ConnectionClosed`
+  after its first failed reconnect attempt instead of holding them until its
+  reconnect budget runs out, so the topology refresh that heals a dead node
+  starts sooner
+
 ### Fixed
 
 - reject blocking commands and other commands that break a shared per-node

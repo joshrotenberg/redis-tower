@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `MultiplexedSentinelClient::connect_with_reconnect` fails queued and new
+  commands with `ConnectionClosed` once a ROLE-verified rediscovery attempt has
+  failed, instead of parking them for as long as the failover or outage lasts;
+  reconnecting continues in the background. Retry idempotent commands to ride
+  out a failover window
+
 ### Fixed
 
 - reject blocking commands and other commands that break a shared connection

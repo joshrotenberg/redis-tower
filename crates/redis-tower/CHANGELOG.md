@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   when a server stops answering and `response_timeout` is `None`
   (redis-developer/redis-database-mcp-rs#125)
 
+### Changed
+
+- a factory-backed `MultiplexedClient` (and `connect_lazy`, and the per-node
+  and Sentinel workers built on `AutoPipelineService::with_factory`) now fails
+  queued and new commands with `ConnectionClosed` once a reconnect attempt has
+  failed, while reconnecting continues in the background. With the default
+  unlimited retries and no connect or response timeout, callers were
+  previously parked until the server came back, unlike
+  `ResilientRedisClient`. Commands queued when the connection drops still wait
+  for the first attempt, so an immediate reconnect stays transparent
+  (redis-rs #2298, #2269)
+
 ### Fixed
 
 - reject commands that break a connection shared by every clone before they
