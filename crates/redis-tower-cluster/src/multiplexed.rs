@@ -71,7 +71,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 
-use futures::stream::{StreamExt, TryStreamExt};
+use futures::stream::StreamExt;
 use redis_tower::AutoPipelineService;
 use redis_tower::PipelineExecutor;
 use redis_tower::RedisExecutor;
@@ -1132,33 +1132,69 @@ impl MultiplexedClusterClient {
         // The handshakes run concurrently (bounded by MAX_CONCURRENT_CONNECTS);
         // a large cluster would otherwise serialize one connect round trip per
         // node before `connect` returns.
+        //
+        // Best-effort: a master that cannot be reached now (listed by CLUSTER
+        // SLOTS mid-failover, or restarting) gets no worker and is connected
+        // lazily when a command routes to it, so its outage does not stop the
+        // client from serving every other slot. Only a cluster with no
+        // reachable master fails to connect.
         let master_addrs = dedup_addrs(topology.master_addrs());
-        // Taken from the address list, not from completion order, so the
-        // default node stays the first master in topology order no matter
-        // which handshake finishes first.
-        let mut default_node = master_addrs.first().cloned().unwrap_or_default();
-        let mut masters: HashMap<String, AutoPipelineService> = build_node_services(
-            master_addrs,
+        let mut masters = HashMap::new();
+        let mut first_error = None;
+        for (addr, built) in build_node_services_reporting(
+            master_addrs.clone(),
             /* readonly = */ false,
             pipeline_config.clone(),
             reconnect_config.clone(),
             connector.clone(),
         )
-        .await?;
+        .await
+        {
+            match built {
+                Ok(service) => {
+                    masters.insert(addr, service);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        addr,
+                        %error,
+                        "cluster: master unreachable at connect; connecting lazily"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if masters.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
+        // Taken from the address list, not from completion order, so the
+        // default node stays the first reachable master in topology order no
+        // matter which handshake finishes first.
+        let mut default_node = master_addrs
+            .iter()
+            .find(|addr| masters.contains_key(*addr))
+            .cloned()
+            .unwrap_or_default();
 
-        // Connect to replicas if the read preference uses them.
+        // Connect to replicas if the read preference uses them. A replica
+        // that cannot be reached now is rebuilt by a later refresh, which a
+        // read for its slot schedules.
         let replicas: HashMap<String, AutoPipelineService> =
             if read_preference == ReadPreference::Master {
                 HashMap::new()
             } else {
-                build_node_services(
+                build_node_services_best_effort(
                     dedup_addrs(topology.replica_addrs()),
                     /* readonly = */ true,
                     pipeline_config.clone(),
                     reconnect_config.clone(),
                     connector.clone(),
                 )
-                .await?
+                .await
+                .into_iter()
+                .collect()
             };
 
         if default_node.is_empty() {
@@ -2465,6 +2501,14 @@ impl MultiplexedClusterClient {
                         replica: None,
                     });
                 }
+                // The owner has no worker: unreachable at connect or during
+                // a refresh, or dropped after a failed re-authentication.
+                // Connect it now rather than bouncing off the default node
+                // with a MOVED (which fails outright under max_redirects(0)).
+                // A failed connect schedules a refresh.
+                drop(inner);
+                self.ensure_master(&addr_str).await?;
+                return self.master_service(&addr_str).await;
             }
         }
 
@@ -2907,52 +2951,46 @@ fn dedup_addrs(addrs: Vec<&NodeAddr>) -> Vec<String> {
 }
 
 /// Build one [`AutoPipelineService`] per address, running up to
-/// [`MAX_CONCURRENT_CONNECTS`] handshakes at a time.
+/// [`MAX_CONCURRENT_CONNECTS`] handshakes at a time, and report each node's
+/// outcome.
 ///
-/// Fails on the first node that fails to connect; the remaining in-flight
-/// connects are dropped. Because the connects overlap, the error surfaced when
-/// several nodes are unreachable is whichever failed first in time, not
-/// whichever comes first in `addrs`.
-async fn build_node_services(
+/// A node can be legitimately unreachable mid-failover while still listed by
+/// `CLUSTER SLOTS`, so one failure never cancels the other connects. The
+/// pairs are in completion order, not `addrs` order; callers must not derive
+/// anything order-dependent from them.
+async fn build_node_services_reporting(
     addrs: Vec<String>,
     readonly: bool,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     connector: ClusterNodeConnector,
-) -> Result<HashMap<String, AutoPipelineService>, RedisError> {
+) -> Vec<(String, Result<AutoPipelineService, RedisError>)> {
     futures::stream::iter(addrs.into_iter().map(|addr| {
         let pipeline_config = pipeline_config.clone();
         let reconnect_config = reconnect_config.clone();
         let connector = connector.clone();
         async move {
-            let svc = build_node_service(
+            let built = build_node_service(
                 &addr,
                 readonly,
                 pipeline_config,
                 reconnect_config,
                 connector,
             )
-            .await?;
-            Ok((addr, svc))
+            .await;
+            (addr, built)
         }
     }))
     .buffer_unordered(MAX_CONCURRENT_CONNECTS)
-    .try_collect()
+    .collect()
     .await
 }
 
-/// Build one [`AutoPipelineService`] per address with the same bounded fan-out
-/// as [`build_node_services`], but keeping only the nodes that answered.
+/// [`build_node_services_reporting`], keeping only the nodes that answered.
 ///
-/// This is the topology-refresh counterpart: an address that fails to connect
-/// is logged at debug and dropped instead of failing the batch. A node can be
-/// legitimately unreachable mid-failover while still listed by `CLUSTER SLOTS`,
-/// and committing the reachable nodes makes progress that the next refresh
-/// builds on. Startup ([`build_node_services`]) wants the opposite -- a node it
-/// cannot reach is a failed connect -- so the two cannot share one helper.
-///
-/// The returned pairs are in completion order, not `addrs` order. Callers must
-/// not derive anything order-dependent from them.
+/// An address that fails to connect is logged at debug and dropped:
+/// committing the reachable nodes makes progress that the next refresh, or a
+/// lazy connect when a command routes there, builds on.
 async fn build_node_services_best_effort(
     addrs: Vec<String>,
     readonly: bool,
@@ -2961,37 +2999,28 @@ async fn build_node_services_best_effort(
     connector: ClusterNodeConnector,
 ) -> Vec<(String, AutoPipelineService)> {
     let role = if readonly { "replica" } else { "master" };
-    futures::stream::iter(addrs.into_iter().map(|addr| {
-        let pipeline_config = pipeline_config.clone();
-        let reconnect_config = reconnect_config.clone();
-        let connector = connector.clone();
-        async move {
-            match build_node_service(
-                &addr,
-                readonly,
-                pipeline_config,
-                reconnect_config,
-                connector,
-            )
-            .await
-            {
-                Ok(svc) => Some((addr, svc)),
-                Err(e) => {
-                    tracing::debug!(
-                        addr,
-                        role,
-                        error = %e,
-                        "cluster: node unreachable during refresh; skipping"
-                    );
-                    None
-                }
-            }
-        }
-    }))
-    .buffer_unordered(MAX_CONCURRENT_CONNECTS)
-    .filter_map(|built| async move { built })
-    .collect()
+    build_node_services_reporting(
+        addrs,
+        readonly,
+        pipeline_config,
+        reconnect_config,
+        connector,
+    )
     .await
+    .into_iter()
+    .filter_map(|(addr, built)| match built {
+        Ok(service) => Some((addr, service)),
+        Err(e) => {
+            tracing::debug!(
+                addr,
+                role,
+                error = %e,
+                "cluster: node unreachable; skipping"
+            );
+            None
+        }
+    })
+    .collect()
 }
 
 async fn build_node_service(
@@ -3335,7 +3364,7 @@ mod parallel_connect_tests {
         for _ in 0..count {
             addrs.push(spawn_fake_node(probe.clone()).await);
         }
-        let services = build_node_services(
+        let services = build_node_services_reporting(
             addrs,
             false,
             AutoPipelineConfig::default(),
@@ -3343,7 +3372,9 @@ mod parallel_connect_tests {
             connector(ConnectionConfig::default()),
         )
         .await
-        .expect("every fake node should connect");
+        .into_iter()
+        .map(|(addr, built)| (addr, built.expect("every fake node should connect")))
+        .collect();
         (services, probe.peak())
     }
 
@@ -3556,13 +3587,11 @@ mod parallel_connect_tests {
     /// The fail-fast sibling still fails fast: the same unreachable address
     /// that refresh skips must abort a startup build.
     #[tokio::test(flavor = "multi_thread")]
-    async fn startup_build_still_fails_on_an_unreachable_node() {
+    async fn startup_build_reports_each_unreachable_node_without_dropping_the_rest() {
         let probe = Arc::new(ConcurrencyProbe::default());
-        let addrs = vec![
-            spawn_fake_node(probe.clone()).await,
-            UNREACHABLE.to_string(),
-        ];
-        let result = build_node_services(
+        let reachable = spawn_fake_node(probe.clone()).await;
+        let addrs = vec![reachable.clone(), UNREACHABLE.to_string()];
+        let outcomes = build_node_services_reporting(
             addrs,
             false,
             AutoPipelineConfig::default(),
@@ -3571,10 +3600,14 @@ mod parallel_connect_tests {
         )
         .await;
 
-        assert!(
-            result.is_err(),
-            "startup must not silently drop a node it cannot reach"
-        );
+        assert_eq!(outcomes.len(), 2);
+        for (addr, built) in outcomes {
+            assert_eq!(
+                built.is_ok(),
+                addr == reachable,
+                "{addr}: each node's own outcome is reported"
+            );
+        }
     }
 
     #[test]

@@ -575,3 +575,70 @@ async fn host_less_redirects_resolve_to_the_replying_nodes_host() {
         "the pipelined entry followed the redirect"
     );
 }
+
+/// One unreachable master (still listed by CLUSTER SLOTS during a failover
+/// window, or restarting) made every new client fail to connect, including
+/// ones that only need healthy slots. Its slots are now connected lazily.
+#[tokio::test]
+async fn connect_tolerates_an_unreachable_master_and_connects_it_lazily() {
+    let cluster = Cluster::new();
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    let parked = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let late_port = parked.local_addr().unwrap().port();
+    drop(parked);
+    cluster.set(slots(vec![
+        (0, 8191, a.port, vec![]),
+        (8192, 16383, late_port, vec![]),
+    ]));
+    let healthy_key = key_in(0, 8191);
+    let late_key = key_in(8192, 16383);
+    let get = |key: &str| RawCommand::new("GET").arg(key);
+
+    let client = MultiplexedClusterClient::connect(&a.addr())
+        .await
+        .expect("multiplexed connect with one unreachable master");
+    let mut direct = ClusterConnection::builder(a.addr())
+        .max_redirects(0)
+        .connect()
+        .await
+        .expect("ClusterConnection connect with one unreachable master");
+    client.execute(get(&healthy_key)).await.unwrap();
+    direct.execute(get(&healthy_key)).await.unwrap();
+    for error in [
+        client.execute(get(&late_key)).await.unwrap_err(),
+        direct.execute(get(&late_key)).await.unwrap_err(),
+    ] {
+        assert!(
+            error.is_connection_error(),
+            "the unreachable owner's slots fail as a connection error: {error:?}"
+        );
+    }
+    assert_eq!(
+        a.received("GET"),
+        2,
+        "no MOVED detour through the default node"
+    );
+
+    // The master comes up: its slots work without reconnecting the client.
+    let late = fake_node_at(cluster.clone(), default_handler(), late_port).await;
+    client.execute(get(&late_key)).await.unwrap();
+    direct.execute(get(&late_key)).await.unwrap();
+    assert_eq!(late.received("GET"), 2);
+}
+
+/// With no master reachable, connecting still fails.
+#[tokio::test]
+async fn connect_fails_when_no_master_is_reachable() {
+    let cluster = Cluster::new();
+    let seed = fake_node(cluster.clone(), default_handler()).await;
+    let parked = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_port = parked.local_addr().unwrap().port();
+    drop(parked);
+    cluster.set(slots(vec![(0, 16383, dead_port, vec![])]));
+    assert!(
+        MultiplexedClusterClient::connect(&seed.addr())
+            .await
+            .is_err()
+    );
+    assert!(ClusterConnection::connect(&seed.addr()).await.is_err());
+}
