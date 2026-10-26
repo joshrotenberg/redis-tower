@@ -403,10 +403,13 @@ impl Command for SRandMember {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            // When called without count, Redis returns a single bulk string.
+            // When called without count, Redis returns a single bulk string,
+            // or null for a missing key (`$-1` in RESP2, `_` in RESP3).
             Frame::BulkString(Some(data)) => Ok(vec![data]),
-            Frame::BulkString(None) => Ok(vec![]),
-            Frame::Array(Some(frames)) => frames
+            Frame::BulkString(None) | Frame::Null | Frame::Array(None) => Ok(vec![]),
+            // With count, RESP2 replies with an array; RESP3 SPOP replies
+            // with a set.
+            Frame::Array(Some(frames)) | Frame::Set(frames) => frames
                 .into_iter()
                 .map(|f| match f {
                     Frame::BulkString(Some(data)) => Ok(data),
@@ -417,7 +420,7 @@ impl Command for SRandMember {
                 })
                 .collect(),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or array",
+                expected: "bulk string, array, set, or null",
                 actual: format!("{other:?}"),
             }),
         }
@@ -472,10 +475,13 @@ impl Command for SPop {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            // When called without count, Redis returns a single bulk string.
+            // When called without count, Redis returns a single bulk string,
+            // or null for a missing key (`$-1` in RESP2, `_` in RESP3).
             Frame::BulkString(Some(data)) => Ok(vec![data]),
-            Frame::BulkString(None) => Ok(vec![]),
-            Frame::Array(Some(frames)) => frames
+            Frame::BulkString(None) | Frame::Null | Frame::Array(None) => Ok(vec![]),
+            // With count, RESP2 replies with an array; RESP3 SPOP replies
+            // with a set.
+            Frame::Array(Some(frames)) | Frame::Set(frames) => frames
                 .into_iter()
                 .map(|f| match f {
                     Frame::BulkString(Some(data)) => Ok(data),
@@ -486,7 +492,7 @@ impl Command for SPop {
                 })
                 .collect(),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or array",
+                expected: "bulk string, array, set, or null",
                 actual: format!("{other:?}"),
             }),
         }

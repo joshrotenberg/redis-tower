@@ -785,8 +785,12 @@ impl Command for LTrim {
 /// LPOS key element \[RANK rank\] \[COUNT count\] \[MAXLEN maxlen\]
 ///
 /// Returns the index of matching elements inside a list. By default returns
-/// the position of the first match. Use the builder methods to set optional
-/// `RANK`, `COUNT`, and `MAXLEN` sub-commands.
+/// the position of the first match, or `None` when nothing matches. Use the
+/// builder methods to set the optional `RANK` and `MAXLEN` sub-commands.
+///
+/// `COUNT` changes the reply to a list of positions, which this command's
+/// `Option<i64>` response cannot hold. Finish the builder with
+/// [`LPos::with_count`] to get an [`LPosCount`] whose response is `Vec<i64>`.
 #[derive(Clone)]
 pub struct LPos {
     key: CommandArg,
@@ -817,9 +821,31 @@ impl LPos {
 
     /// Set the COUNT option. Limits the number of returned matches (0 means
     /// return all matches).
+    ///
+    /// Redis replies to `LPOS ... COUNT` with a list of positions, which this
+    /// command's `Option<i64>` response cannot represent, so the reply fails to
+    /// parse with an error that names [`LPos::with_count`]. Use
+    /// [`LPos::with_count`] instead.
     pub fn count(mut self, count: u64) -> Self {
         self.count = Some(count);
         self
+    }
+
+    /// Set the COUNT option and return every matching position.
+    ///
+    /// `count` limits the number of returned matches; 0 returns all of them.
+    /// The response is `Vec<i64>`, empty when nothing matches:
+    ///
+    /// ```
+    /// use redis_tower_commands::LPos;
+    /// use redis_tower_core::Command;
+    ///
+    /// let command = LPos::new("queue", "job").rank(-1).with_count(0);
+    /// assert_eq!(command.name(), "LPOS");
+    /// ```
+    pub fn with_count(mut self, count: u64) -> LPosCount {
+        self.count = Some(count);
+        LPosCount { command: self }
     }
 
     /// Set the MAXLEN option. Limits the scan to the first `maxlen` entries.
@@ -856,9 +882,59 @@ impl Command for LPos {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::Integer(n) => Ok(Some(n)),
-            Frame::Null => Ok(None),
+            // No match: `$-1` in RESP2, `_` in RESP3.
+            Frame::Null | Frame::BulkString(None) => Ok(None),
+            Frame::Array(_) if self.count.is_some() => Err(RedisError::UnexpectedResponse {
+                expected: "integer or null (LPOS with COUNT replies with a list; use LPos::with_count)",
+                actual: format!("{frame:?}"),
+            }),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "integer or null",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "LPOS"
+    }
+
+    fn idempotent(&self) -> bool {
+        true
+    }
+}
+
+/// LPOS key element \[RANK rank\] COUNT count \[MAXLEN maxlen\]
+///
+/// An [`LPos`] with `COUNT`, created by [`LPos::with_count`]. Returns the
+/// positions of the matching elements, empty when nothing matches.
+#[derive(Clone)]
+pub struct LPosCount {
+    command: LPos,
+}
+
+impl Command for LPosCount {
+    type Response = Vec<i64>;
+
+    fn to_frame(&self) -> Frame {
+        self.command.to_frame()
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    Frame::Integer(n) => Ok(n),
+                    other => Err(RedisError::UnexpectedResponse {
+                        expected: "integer position",
+                        actual: format!("{other:?}"),
+                    }),
+                })
+                .collect(),
+            Frame::Array(None) | Frame::Null => Ok(Vec::new()),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array of positions",
                 actual: format!("{other:?}"),
             }),
         }
@@ -1419,7 +1495,7 @@ mod tests {
 
     #[test]
     fn lpos_with_options_to_frame() {
-        let cmd = LPos::new("mylist", "val").rank(2).count(0).maxlen(100);
+        let cmd = LPos::new("mylist", "val").rank(2).maxlen(100).with_count(0);
         assert_eq!(
             cmd.to_frame(),
             array(vec![
@@ -1446,6 +1522,25 @@ mod tests {
     fn lpos_parse_null() {
         let cmd = LPos::new("mylist", "val");
         assert_eq!(cmd.parse_response(Frame::Null).unwrap(), None);
+        // RESP2 reports no match as a nil bulk string.
+        assert_eq!(cmd.parse_response(Frame::BulkString(None)).unwrap(), None);
+    }
+
+    #[test]
+    fn lpos_with_count_parses_positions() {
+        let cmd = LPos::new("mylist", "val").with_count(0);
+        let frame = array(vec![Frame::Integer(1), Frame::Integer(3)]);
+        assert_eq!(cmd.parse_response(frame).unwrap(), vec![1, 3]);
+        assert!(cmd.parse_response(array(vec![])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lpos_count_error_names_the_typed_variant() {
+        let cmd = LPos::new("mylist", "val").count(0);
+        let err = cmd
+            .parse_response(array(vec![Frame::Integer(1)]))
+            .unwrap_err();
+        assert!(err.to_string().contains("LPos::with_count"), "{err}");
     }
 
     // -- LInsert --
