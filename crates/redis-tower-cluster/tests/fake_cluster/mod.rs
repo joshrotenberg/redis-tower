@@ -77,6 +77,7 @@ pub struct FakeNode {
     /// Every command received, as upper-cased `argv[0]`.
     pub commands: Arc<Mutex<Vec<String>>>,
     kill: tokio::sync::watch::Sender<u64>,
+    pushes: tokio::sync::broadcast::Sender<Frame>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -88,6 +89,26 @@ impl FakeNode {
 
     pub fn addr(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Send `frame` unrequested to every open connection that has issued a
+    /// subscribe-family command (a Pub/Sub socket, never a command worker).
+    pub fn push(&self, frame: Frame) {
+        let _ = self.pushes.send(frame);
+    }
+
+    /// A handle that pushes from this node and outlives borrows of it.
+    pub fn pusher(&self) -> Pusher {
+        Pusher(self.pushes.clone())
+    }
+
+    /// Publish a shard message to this node's subscribers.
+    pub fn smessage(&self, channel: &str, payload: &str) {
+        self.push(Frame::Array(Some(vec![
+            bulk("smessage"),
+            bulk(channel),
+            bulk(payload),
+        ])));
     }
 
     /// How many times this node received `command` (upper-case).
@@ -105,6 +126,16 @@ impl Drop for FakeNode {
     fn drop(&mut self) {
         self.kill_connections();
         self.task.abort();
+    }
+}
+
+/// See [`FakeNode::push`].
+#[derive(Clone)]
+pub struct Pusher(tokio::sync::broadcast::Sender<Frame>);
+
+impl Pusher {
+    pub fn push(&self, frame: Frame) {
+        let _ = self.0.send(frame);
     }
 }
 
@@ -147,6 +178,8 @@ pub async fn fake_node_at(cluster: Arc<Cluster>, handler: Handler, port: u16) ->
     let commands = Arc::new(Mutex::new(Vec::new()));
     let (kill, _) = tokio::sync::watch::channel(0u64);
     let kill_tx = kill.clone();
+    let (pushes, _) = tokio::sync::broadcast::channel(64);
+    let pushes_tx = pushes.clone();
     let accepted_in_task = accepted.clone();
     let commands_in_task = commands.clone();
     let task = tokio::spawn(async move {
@@ -160,12 +193,23 @@ pub async fn fake_node_at(cluster: Arc<Cluster>, handler: Handler, port: u16) ->
             let commands = commands_in_task.clone();
             let mut kill_rx = kill_tx.subscribe();
             kill_rx.borrow_and_update();
+            let mut push_rx = pushes_tx.subscribe();
             tokio::spawn(async move {
                 let mut framed = Framed::new(RedisStream::Tcp(stream), RespCodec::new());
                 let mut readonly = false;
+                let mut subscriber = false;
                 loop {
                     let frame = tokio::select! {
                         _ = kill_rx.changed() => return,
+                        push = push_rx.recv() => {
+                            if let Ok(push) = push
+                                && subscriber
+                                && framed.send(push).await.is_err()
+                            {
+                                return;
+                            }
+                            continue;
+                        }
                         frame = framed.next() => frame,
                     };
                     let Some(Ok(Frame::Array(Some(parts)))) = frame else {
@@ -202,12 +246,16 @@ pub async fn fake_node_at(cluster: Arc<Cluster>, handler: Handler, port: u16) ->
                             b"PING" => Frame::SimpleString(Bytes::from_static(b"PONG")),
                             b"GET" => Frame::BulkString(None),
                             b"DBSIZE" => Frame::Integer(0),
+                            b"SUBSCRIBE" | b"PSUBSCRIBE" | b"SSUBSCRIBE" | b"SUNSUBSCRIBE" => {
+                                return Action::Replies(subscribe_acks(&args));
+                            }
                             _ => ok(),
                         })
                     });
                     match upper.as_slice() {
                         b"READONLY" => readonly = true,
                         b"READWRITE" => readonly = false,
+                        b"SUBSCRIBE" | b"PSUBSCRIBE" | b"SSUBSCRIBE" => subscriber = true,
                         _ => {}
                     }
                     let replies = match action {
@@ -237,8 +285,34 @@ pub async fn fake_node_at(cluster: Arc<Cluster>, handler: Handler, port: u16) ->
         accepted,
         commands,
         kill,
+        pushes,
         task,
     }
+}
+
+/// One `<kind> <name> <count>` acknowledgement per named channel.
+pub fn subscribe_acks(args: &[Vec<u8>]) -> Vec<Frame> {
+    let kind = String::from_utf8_lossy(&args[0]).to_ascii_lowercase();
+    args[1..]
+        .iter()
+        .enumerate()
+        .map(|(index, name)| {
+            Frame::Array(Some(vec![
+                bulk(&kind),
+                Frame::BulkString(Some(Bytes::copy_from_slice(name))),
+                Frame::Integer(index as i64 + 1),
+            ]))
+        })
+        .collect()
+}
+
+/// The server dropping a shard channel on its own.
+pub fn sunsubscribe_push(channel: &str) -> Frame {
+    Frame::Array(Some(vec![
+        bulk("sunsubscribe"),
+        bulk(channel),
+        Frame::Integer(0),
+    ]))
 }
 
 pub fn node_entry(port: u16) -> Frame {

@@ -411,6 +411,9 @@ struct Inner {
     max_redirects: usize,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
+    /// Retry policy for dedicated Pub/Sub sessions; see
+    /// [`MultiplexedClusterClientBuilder::pubsub_reconnect_config`].
+    pubsub_reconnect: Option<ReconnectConfig>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -455,7 +458,14 @@ pub(crate) struct ClusterPubSubBackend {
     cache_hooks: Weak<StdRwLock<Option<ClusterCacheHooks>>>,
     connector: ClusterNodeConnector,
     reconnect: ReconnectConfig,
+    pubsub_reconnect: ReconnectConfig,
     max_redirects: usize,
+    // Enough of the client to run a refresh on demand. None of these keep
+    // the node workers alive.
+    refresh_gate: Arc<RefreshGate>,
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    include_node_in_metrics: bool,
+    node_metric_labels: Arc<BoundedNodeMetricLabels>,
 }
 
 impl ClusterPubSubBackend {
@@ -463,8 +473,32 @@ impl ClusterPubSubBackend {
         self.inner.upgrade().ok_or(RedisError::ConnectionClosed)
     }
 
-    pub(crate) fn reconnect_config(&self) -> &ReconnectConfig {
-        &self.reconnect
+    /// A temporary client handle while the originating client is alive.
+    fn client(&self) -> Option<MultiplexedClusterClient> {
+        Some(MultiplexedClusterClient {
+            inner: self.inner.upgrade()?,
+            cache_hooks: self.cache_hooks.upgrade()?,
+            metrics_recorder: self.metrics_recorder.clone(),
+            include_node_in_metrics: self.include_node_in_metrics,
+            node_metric_labels: Arc::clone(&self.node_metric_labels),
+            refresh_gate: Arc::clone(&self.refresh_gate),
+        })
+    }
+
+    /// Wait for a topology refresh that started at or after `observed`, as
+    /// for a command that saw stale topology. Fails with
+    /// [`RedisError::ConnectionClosed`] once the client is gone.
+    pub(crate) async fn await_refresh_since(&self, observed: Instant) -> Result<(), RedisError> {
+        if await_refresh_since(&self.refresh_gate, observed, || self.client()).await {
+            Ok(())
+        } else {
+            Err(RedisError::ConnectionClosed)
+        }
+    }
+
+    /// Retry budget and backoff for re-establishing a Pub/Sub session.
+    pub(crate) fn pubsub_reconnect_config(&self) -> &ReconnectConfig {
+        &self.pubsub_reconnect
     }
 
     pub(crate) fn max_redirects(&self) -> usize {
@@ -627,6 +661,7 @@ pub struct MultiplexedClusterClientBuilder {
     pipeline_config: AutoPipelineConfig,
     include_node_in_metrics: bool,
     reconnect_config: AutoPipelineReconnectConfig,
+    pubsub_reconnect: Option<ReconnectConfig>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -725,6 +760,23 @@ impl MultiplexedClusterClientBuilder {
         self
     }
 
+    /// Set the retry policy for re-establishing dedicated Pub/Sub sessions
+    /// ([`pubsub_on`](MultiplexedClusterClient::pubsub_on),
+    /// [`sharded_pubsub`](MultiplexedClusterClient::sharded_pubsub), and their
+    /// binary forms) after their socket closes.
+    ///
+    /// Each failed attempt waits for a topology refresh before the next, so a
+    /// sharded session dials the slot's promoted master after a failover. The
+    /// default keeps [`reconnect_config`](Self::reconnect_config)'s backoff
+    /// and connect timeout but retries without limit: a failover takes at
+    /// least `cluster-node-timeout`, far longer than the node workers' small
+    /// retry budget. Set `max_retries` to make a session give up and return
+    /// [`RedisError::ReconnectFailed`] instead.
+    pub fn pubsub_reconnect_config(mut self, config: ReconnectConfig) -> Self {
+        self.pubsub_reconnect = Some(config);
+        self
+    }
+
     /// Authenticate every per-node connection using the given credential
     /// provider.
     ///
@@ -811,6 +863,7 @@ impl MultiplexedClusterClientBuilder {
             self.pipeline_config,
             self.include_node_in_metrics,
             self.reconnect_config,
+            self.pubsub_reconnect,
             self.credentials,
             self.connection_config,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -911,6 +964,7 @@ impl MultiplexedClusterClient {
             false,
             default_node_reconnect(),
             None,
+            None,
             ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
@@ -933,6 +987,7 @@ impl MultiplexedClusterClient {
             AutoPipelineConfig::default(),
             false,
             default_node_reconnect(),
+            None,
             None,
             ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -980,6 +1035,7 @@ impl MultiplexedClusterClient {
             pipeline_config: AutoPipelineConfig::default(),
             include_node_in_metrics: false,
             reconnect_config: default_node_reconnect(),
+            pubsub_reconnect: None,
             credentials: None,
             connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -998,6 +1054,7 @@ impl MultiplexedClusterClient {
         pipeline_config: AutoPipelineConfig,
         include_node_in_metrics: bool,
         reconnect_config: AutoPipelineReconnectConfig,
+        pubsub_reconnect: Option<ReconnectConfig>,
         credentials: Option<Arc<dyn CredentialProvider>>,
         connection_config: ConnectionConfig,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
@@ -1088,6 +1145,7 @@ impl MultiplexedClusterClient {
                 max_redirects,
                 pipeline_config,
                 reconnect_config,
+                pubsub_reconnect,
                 credentials,
                 connection_config,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -1805,8 +1863,11 @@ impl MultiplexedClusterClient {
         // Run CLUSTER SLOTS against the first node that answers. The previous
         // seed (`masters.keys().next()`) could be the node that just died, so
         // try every node we know about -- masters first, then replicas, then
-        // the caller's original seed, so a refresh can still recover after
-        // every known node service has been pruned.
+        // nodes the topology lists without a service (replicas are not
+        // connected under `ReadPreference::Master`, and in a one-shard
+        // cluster whose master died they are the only nodes left), then the
+        // caller's original seed, so a refresh can still recover after every
+        // known node service has been pruned.
         let seeds: Vec<String> = {
             let inner = self.inner.read().await;
             let mut seeds: Vec<String> = inner
@@ -1815,8 +1876,16 @@ impl MultiplexedClusterClient {
                 .chain(inner.replicas.keys())
                 .cloned()
                 .collect();
-            if !inner.seed_addr.is_empty() && !seeds.contains(&inner.seed_addr) {
-                seeds.push(inner.seed_addr.clone());
+            let listed = inner
+                .topology
+                .master_addrs()
+                .into_iter()
+                .chain(inner.topology.replica_addrs())
+                .map(NodeAddr::addr_string);
+            for addr in listed.chain(std::iter::once(inner.seed_addr.clone())) {
+                if !addr.is_empty() && !seeds.contains(&addr) {
+                    seeds.push(addr);
+                }
             }
             seeds
         };
@@ -2098,12 +2167,26 @@ impl MultiplexedClusterClient {
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             inner.tls.clone(),
         );
+        let reconnect = inner.reconnect_config.reconnect.clone();
+        // Node workers retry a few times and then exit so a refresh can heal
+        // routing. A Pub/Sub session re-resolves its node after a refresh on
+        // every attempt instead, so by default it keeps the node policy's
+        // backoff and connect timeout but does not give up.
+        let pubsub_reconnect = inner.pubsub_reconnect.clone().unwrap_or(ReconnectConfig {
+            max_retries: None,
+            ..reconnect.clone()
+        });
         ClusterPubSubBackend {
             inner: Arc::downgrade(&self.inner),
             cache_hooks: Arc::downgrade(&self.cache_hooks),
             connector,
-            reconnect: inner.reconnect_config.reconnect.clone(),
+            reconnect,
+            pubsub_reconnect,
             max_redirects: inner.max_redirects,
+            refresh_gate: Arc::clone(&self.refresh_gate),
+            metrics_recorder: self.metrics_recorder.clone(),
+            include_node_in_metrics: self.include_node_in_metrics,
+            node_metric_labels: Arc::clone(&self.node_metric_labels),
         }
     }
 
@@ -3849,6 +3932,7 @@ mod observability_tests {
                 max_redirects: 3,
                 pipeline_config: AutoPipelineConfig::default(),
                 reconnect_config: default_node_reconnect(),
+                pubsub_reconnect: None,
                 credentials: None,
                 connection_config: ConnectionConfig::default(),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]

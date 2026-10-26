@@ -205,6 +205,21 @@ pub const FIXTURE_PORT_RANGES: &[FixturePortRange] = &[
         start: 18120,
         len: 10,
     },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub migration)",
+        start: 18160,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub failover)",
+        start: 18180,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub owner killed)",
+        start: 18200,
+        len: 10,
+    },
 ];
 
 /// Fails clearly, naming both fixtures and the exact overlapping ports, if
