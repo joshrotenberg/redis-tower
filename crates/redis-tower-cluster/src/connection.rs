@@ -1160,8 +1160,18 @@ impl ClusterConnection {
                 addr.clone(),
             )
         });
-        if !self.seed_addr.is_empty() && !candidates.contains(&self.seed_addr) {
-            candidates.push(self.seed_addr.clone());
+        // Then listed nodes without a socket (replicas are not connected under
+        // `ReadPreference::Master`), then the original seed.
+        let listed = self
+            .topology
+            .master_addrs()
+            .into_iter()
+            .chain(self.topology.replica_addrs())
+            .map(NodeAddr::addr_string);
+        for addr in listed.chain(std::iter::once(self.seed_addr.clone())) {
+            if !addr.is_empty() && !candidates.contains(&addr) {
+                candidates.push(addr);
+            }
         }
 
         let mut last_error = RedisError::ConnectionClosed;

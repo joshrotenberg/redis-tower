@@ -11,9 +11,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - connection-setup/client-name builder policies replayed on discovery, masters,
   replicas, redirected/topology-created nodes, dedicated sockets, and replacements
+- `MultiplexedClusterClientBuilder::pubsub_reconnect_config`, the retry policy
+  for re-establishing dedicated Pub/Sub sessions. It defaults to the node
+  reconnect backoff and connect timeout with no retry limit
 
 ### Fixed
 
+- resubscribe a sharded Pub/Sub session on the slot's new owner when the old
+  owner drops the subscription itself (slot migration, graceful failover). The
+  socket stays open in that case, so the session previously went silent
+  forever unless other traffic happened to refresh the topology
+- refresh the topology between Pub/Sub reconnect attempts and retry under
+  `pubsub_reconnect_config` instead of the node workers' ~1.5 s budget: a
+  sharded session kept dialing a killed owner from its cached topology and gave
+  up long before any failover could finish. A regular session pinned to a node
+  survives the node's restart and ends with an error once the node has left the
+  topology instead of retrying forever
+- make sharded Pub/Sub recovery cancel-safe: a topology change observed by a
+  `next_message` call that was then cancelled (for example by a caller's
+  timeout) was marked seen and lost, leaving the session on the old owner
+- ask nodes the topology lists without a connection (replicas under
+  `ReadPreference::Master`) during a topology refresh in both clients; in a
+  one-shard cluster whose master died, no other node was left to ask
 - treat a `READONLY` reply from a master as stale topology in both clients:
   wait for a topology refresh that started after the reply, then re-send the
   command to the slot's (or keyless default's) current master. A write sent

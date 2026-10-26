@@ -2338,9 +2338,7 @@ async fn cluster_pool_exhaustion_and_recovery() {
 
 mod cluster_pubsub {
     use super::*;
-    use redis_tower::{
-        Command, MessageKind, NodeAddr, PubSubConnection, PubSubMessage, RedisConnection,
-    };
+    use redis_tower::{Command, MessageKind, NodeAddr, PubSubMessage};
     use std::future::Future;
 
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
@@ -3019,21 +3017,21 @@ mod cluster_pubsub {
         assert_eq!(subscriber.current_node().addr_string(), target.addr);
         assert_eq!(subscriber.slot(), slot);
         assert!(subscriber.subscriptions().shard_channels.contains(&channel));
-        let target_subscriber_id = shard_subscriber_client_id(&fixture, target.index).await;
 
-        // Move the slot back without refreshing the client, then break the
-        // active Pub/Sub socket. The reconnect first reaches the stale owner;
-        // its replayed SSUBSCRIBE returns MOVED, which must update shared
-        // routing and continue the same reconnect campaign on the new owner.
+        // Move the slot back without refreshing the client. The old owner
+        // drops the subscription with an unrequested `sunsubscribe` while its
+        // socket stays open; the session must follow the slot to its new
+        // owner on that signal alone. (Replay-time MOVED during a reconnect
+        // to a stale owner is covered by the fake-node suite.)
         let source_subscribe_calls =
             node_commandstat_calls(&fixture, source.index, "ssubscribe").await;
         let (message, ()) = bounded(
-            "following a replay-time Pub/Sub MOVED",
+            "following a server-initiated shard unsubscribe",
             Duration::from_secs(45),
             async {
                 tokio::join!(
                     bounded(
-                        "receiving after replay-time Pub/Sub MOVED",
+                        "receiving after the slot moved back",
                         RECOVERY_TIMEOUT,
                         subscriber.next_message(),
                     ),
@@ -3052,38 +3050,6 @@ mod cluster_pubsub {
                         )
                         .await
                         .expect("restored shard owner was not advertised");
-                        let stale = RedisConnection::connect(&target.addr)
-                            .await
-                            .expect("failed to connect to stale shard owner");
-                        let mut stale = PubSubConnection::from_connection(stale)
-                            .expect("failed to open stale-owner Pub/Sub connection");
-                        let stale_error = bounded(
-                            "probing stale-owner SSUBSCRIBE redirect",
-                            OPERATION_TIMEOUT,
-                            stale.ssubscribe(&[&channel]),
-                        )
-                        .await
-                        .expect_err("stale shard owner unexpectedly accepted SSUBSCRIBE");
-                        assert!(
-                            stale_error.is_moved(),
-                            "stale shard owner returned {stale_error} instead of MOVED"
-                        );
-                        let target_subscriber_id = target_subscriber_id.to_string();
-                        let killed = bounded(
-                            "breaking the stale-owner Pub/Sub socket",
-                            OPERATION_TIMEOUT,
-                            fixture.run_node(
-                                target.index,
-                                &["CLIENT", "KILL", "ID", &target_subscriber_id],
-                            ),
-                        )
-                        .await
-                        .expect("failed to break stale-owner Pub/Sub socket");
-                        assert_eq!(
-                            killed.trim(),
-                            "1",
-                            "exact stale-owner Pub/Sub socket was not killed"
-                        );
                         wait_for_commandstat(
                             &fixture,
                             source.index,
@@ -3094,26 +3060,28 @@ mod cluster_pubsub {
                         wait_for_shard_subscribers(&fixture, source.index, &channel, 1).await;
 
                         let receivers = bounded(
-                            "publishing after replay-time Pub/Sub MOVED",
+                            "publishing after the slot moved back",
                             OPERATION_TIMEOUT,
-                            client.execute(SPublish::new(&channel, "after-replay-moved")),
+                            client.execute(SPublish::new(&channel, "after-move-back")),
                         )
                         .await
-                        .expect("sharded publish after replay-time MOVED failed");
+                        .expect("sharded publish after the slot moved back failed");
                         assert_eq!(receivers, 1);
                     }
                 )
             },
         )
         .await;
-        let message = message.expect("replay-time MOVED did not yield a message");
+        let message = message.expect("moved-back subscription did not yield a message");
         assert_message(
             &message,
             MessageKind::SMessage,
             &channel,
-            b"after-replay-moved",
+            b"after-move-back",
         );
         assert_eq!(subscriber.current_node().addr_string(), source.addr);
+        // Exactly one socket holds the subscription: the old one was replaced.
+        shard_subscriber_client_id(&fixture, source.index).await;
 
         drop(subscriber);
         bounded(
@@ -3255,6 +3223,128 @@ mod failover_recovery {
                 other => panic!("strict replica read after failover: {other:?}"),
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+    /// Publish from an independent client until `subscriber` receives one
+    /// message, then return it.
+    async fn receive_while_publishing(
+        subscriber: &mut redis_tower_cluster::BinaryShardedClusterPubSubConnection,
+        publisher: &MultiplexedClusterClient,
+        channel: &str,
+        scenario: &str,
+    ) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let task = {
+            let publisher = publisher.clone();
+            let channel = channel.to_string();
+            let stop = stop.clone();
+            tokio::spawn(async move {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = publisher
+                        .execute(SPublish::new(&channel, "after-change"))
+                        .await;
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+        };
+        let received =
+            tokio::time::timeout(Duration::from_secs(30), subscriber.next_message()).await;
+        stop.store(true, Ordering::SeqCst);
+        task.await.unwrap();
+        match received {
+            Ok(Ok(message)) => assert_eq!(message.payload.as_ref(), b"after-change", "{scenario}"),
+            Ok(Err(error)) => panic!("{scenario}: subscriber failed: {error}"),
+            Err(_) => panic!(
+                "{scenario}: no message for 30s; subscriber still on {}",
+                subscriber.current_node()
+            ),
+        }
+    }
+
+    /// The three ways a sharded subscription's owner changes without the
+    /// subscriber's client issuing any other command: a slot migration and a
+    /// graceful failover (the old owner stays up and drops the subscription
+    /// with an unrequested `sunsubscribe`), and a killed owner (the socket
+    /// closes and the cached topology still names the dead node).
+    #[tokio::test]
+    #[ignore = "live: starts three dedicated 3-master/3-replica clusters"]
+    async fn sharded_pubsub_follows_owner_changes_without_other_traffic() {
+        for (scenario, base_port) in [
+            ("slot migration", 18160),
+            ("graceful failover", 18180),
+            ("owner killed", 18200),
+        ] {
+            let fixture = ClusterFixture::builder()
+                .base_port(base_port)
+                .cluster_node_timeout(2000)
+                .start()
+                .await
+                .unwrap_or_else(|error| panic!("{scenario}: fixture: {error}"));
+            let before = fixture.topology().await.unwrap();
+            let slot = 42;
+            let source = before.owner_of_slot(slot).unwrap().clone();
+            let replica = before.replicas_of(&source.id)[0].clone();
+            let channel = format!("{}:resubscribe", key_for_slot(slot));
+            let client = MultiplexedClusterClient::connect(&fixture.seed_addr())
+                .await
+                .unwrap();
+            let publisher = MultiplexedClusterClient::connect(&fixture.seed_addr())
+                .await
+                .unwrap();
+            let mut subscriber = client
+                .sharded_pubsub_bytes(&[channel.as_bytes()])
+                .await
+                .unwrap();
+            assert_eq!(
+                publisher
+                    .execute(SPublish::new(&channel, "baseline"))
+                    .await
+                    .unwrap(),
+                1
+            );
+            let baseline = subscriber.next_message().await.unwrap();
+            assert_eq!(baseline.payload.as_ref(), b"baseline");
+
+            match scenario {
+                "slot migration" => {
+                    let target = before
+                        .masters()
+                        .find(|node| node.id != source.id)
+                        .unwrap()
+                        .clone();
+                    fixture.reshard_slot(slot, target.index).await.unwrap();
+                    fixture
+                        .wait_for_slot_owner(slot, &target.id, Duration::from_secs(10))
+                        .await
+                        .unwrap();
+                }
+                "graceful failover" => {
+                    fixture.promote_replica(replica.index).await.unwrap();
+                    fixture
+                        .wait_for_slot_owner(slot, &replica.id, Duration::from_secs(20))
+                        .await
+                        .unwrap();
+                }
+                _ => {
+                    fixture.kill_slot_owner(slot).await.unwrap();
+                    fixture.promote_replica(replica.index).await.unwrap();
+                    fixture
+                        .wait_for_slot_owner(slot, &replica.id, Duration::from_secs(30))
+                        .await
+                        .unwrap();
+                }
+            }
+
+            receive_while_publishing(&mut subscriber, &publisher, &channel, scenario).await;
+            assert_ne!(
+                subscriber.current_node().addr_string(),
+                source.addr,
+                "{scenario}: subscriber moved off the old owner"
+            );
+            drop(subscriber);
+            tokio::time::timeout(Duration::from_secs(10), client.shutdown())
+                .await
+                .expect("timed out shutting down");
         }
     }
 }

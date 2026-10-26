@@ -390,3 +390,36 @@ async fn cluster_connection_backs_off_a_replica_whose_reconnect_fails() {
         .await
         .expect("replica reads resume once it accepts connections again");
 }
+
+/// Under `ReadPreference::Master` replicas have no connection, and a refresh
+/// only asked nodes with one plus the seed. In a one-shard cluster whose
+/// master (also the seed) died, nobody was left to ask.
+#[tokio::test]
+async fn refresh_asks_listed_replicas_when_every_connected_node_is_gone() {
+    let cluster = Cluster::new();
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    let b = fake_node(cluster.clone(), default_handler()).await;
+    cluster.set(slots(vec![(0, 16383, a.port, vec![b.port])]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+
+    drop(a);
+    cluster.set(slots(vec![(0, 16383, b.port, vec![])]));
+    client
+        .refresh_topology()
+        .await
+        .expect("multiplexed refresh through the listed replica");
+    direct
+        .refresh_topology()
+        .await
+        .expect("ClusterConnection refresh through the listed replica");
+    client
+        .execute(RawCommand::new("SET").arg("k").arg("v"))
+        .await
+        .unwrap();
+    direct
+        .execute(RawCommand::new("SET").arg("k").arg("v"))
+        .await
+        .unwrap();
+    assert_eq!(b.received("SET"), 2);
+}
