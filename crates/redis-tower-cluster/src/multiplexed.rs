@@ -103,8 +103,9 @@ use crate::connection::ReplicaRoutingOutcome;
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
     ReplicaRoutingAttempt, RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError,
-    parse_cluster_url, parse_redirect, remap_topology, remap_topology_with_map,
-    replica_outcome_for_result, replica_unavailable, strict_replica_read_slot,
+    is_readonly_reply, parse_cluster_url, parse_redirect, redis_error_from_reply, remap_topology,
+    remap_topology_with_map, replica_outcome_for_result, replica_unavailable,
+    strict_replica_read_slot,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
@@ -195,16 +196,22 @@ impl NodeMetricLabel<'_> {
 
 /// Coordinates background topology refreshes: single-flight (only one at a
 /// time) and rate-limited (at most one per `min_interval`).
-struct RefreshGate {
+pub(crate) struct RefreshGate {
     in_flight: AtomicBool,
     last_start: Mutex<Option<Instant>>,
+    /// Start time of the newest refresh that has finished, successfully or
+    /// not. A caller holding stale-topology evidence from time `t` waits for a
+    /// refresh that started at or after `t`; see
+    /// [`MultiplexedClusterClient::await_refresh_since`].
+    last_finished_start: Mutex<Option<Instant>>,
     min_interval: Duration,
     idle: Notify,
 }
 
 /// Releases a claimed refresh gate even if its task is cancelled or unwinds.
-struct RefreshPermit {
+pub(crate) struct RefreshPermit {
     gate: Arc<RefreshGate>,
+    started: Instant,
 }
 
 /// Owns a background refresh's internal client clone and gate permit in the
@@ -238,7 +245,7 @@ impl Drop for RefreshTaskGuard {
 
 impl Drop for RefreshPermit {
     fn drop(&mut self) {
-        self.gate.finish();
+        self.gate.finish(self.started);
     }
 }
 
@@ -247,6 +254,7 @@ impl RefreshGate {
         Self {
             in_flight: AtomicBool::new(false),
             last_start: Mutex::new(None),
+            last_finished_start: Mutex::new(None),
             min_interval,
             idle: Notify::new(),
         }
@@ -258,25 +266,56 @@ impl RefreshGate {
     /// task cancellation and panic unwinding. `None` means a refresh is already
     /// in flight or one ran too recently.
     fn try_begin(self: &Arc<Self>) -> Option<RefreshPermit> {
+        self.begin(true)
+    }
+
+    /// Like [`try_begin`](Self::try_begin), but ignores the rate limit. Still
+    /// single-flight: `None` means a refresh is already running.
+    fn try_begin_unthrottled(self: &Arc<Self>) -> Option<RefreshPermit> {
+        self.begin(false)
+    }
+
+    fn begin(self: &Arc<Self>, throttled: bool) -> Option<RefreshPermit> {
         // Single-flight: bail if another refresh is already running.
         if self.in_flight.swap(true, Ordering::AcqRel) {
             return None;
         }
         // Rate-limit: bail if we refreshed within the last `min_interval`.
         let mut last = self.last_start.lock().unwrap();
-        if let Some(t) = *last
+        if throttled
+            && let Some(t) = *last
             && t.elapsed() < self.min_interval
         {
-            self.finish();
+            self.release();
             return None;
         }
-        *last = Some(Instant::now());
+        let started = Instant::now();
+        *last = Some(started);
         Some(RefreshPermit {
             gate: Arc::clone(self),
+            started,
         })
     }
 
-    fn finish(&self) {
+    /// Whether a refresh that started at or after `observed` has finished.
+    fn finished_since(&self, observed: Instant) -> bool {
+        self.last_finished_start
+            .lock()
+            .unwrap()
+            .is_some_and(|started| started >= observed)
+    }
+
+    fn finish(&self, started: Instant) {
+        {
+            let mut finished = self.last_finished_start.lock().unwrap();
+            if finished.is_none_or(|previous| previous < started) {
+                *finished = Some(started);
+            }
+        }
+        self.release();
+    }
+
+    fn release(&self) {
         self.in_flight.store(false, Ordering::Release);
         self.idle.notify_waiters();
     }
@@ -291,6 +330,34 @@ impl RefreshGate {
             }
             notified.await;
         }
+    }
+}
+
+/// Wait until a refresh that started at or after `observed` has finished,
+/// starting one through `client` whenever none is running.
+///
+/// `client` is called once per round and its clone is dropped before waiting,
+/// so a dedicated Pub/Sub session (which holds only weak client state) never
+/// keeps a client alive across the wait; the spawned refresh owns its own
+/// guarded clone. Returns `false` when `client` reports the client is gone.
+async fn await_refresh_since(
+    gate: &Arc<RefreshGate>,
+    observed: Instant,
+    client: impl Fn() -> Option<MultiplexedClusterClient>,
+) -> bool {
+    loop {
+        if gate.finished_since(observed) {
+            return true;
+        }
+        {
+            let Some(client) = client() else {
+                return false;
+            };
+            if let Some(permit) = gate.try_begin_unthrottled() {
+                client.spawn_refresh(permit);
+            }
+        }
+        gate.wait_until_idle().await;
     }
 }
 
@@ -1208,6 +1275,13 @@ impl MultiplexedClusterClient {
             }
         }
 
+        // READONLY is returned to the caller as that entry's raw reply, like
+        // any other command error, but it proves a master was demoted: heal
+        // routing for later commands.
+        if ordered.iter().flatten().any(is_readonly_reply) {
+            self.trigger_refresh();
+        }
+
         // Successful entries are final. Only entries that explicitly asked us
         // to redirect are retried, each as its own raw frame so a successful
         // neighbor in the original node batch can never be replayed.
@@ -1538,6 +1612,37 @@ impl MultiplexedClusterClient {
                         }
                         tracing::debug!(?transient, "transient cluster error; retrying");
                         tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        continue;
+                    }
+                    if target.replica.is_none() && is_readonly_reply(&response) {
+                        // A master answering READONLY has been demoted with
+                        // its socket intact (failover): keyless commands skip
+                        // the MOVED check, and managed services answer keyed
+                        // writes this way too. Redis rejects the command
+                        // before executing it, so re-sending is safe even for
+                        // a non-idempotent write. Wait for a refresh that
+                        // started after this reply -- re-routing on the stale
+                        // snapshot would hit the same node again.
+                        self.notify_cache_node_loss(&target.addr);
+                        effective_dispatch_mode = CacheDispatchMode::Plain;
+                        tracing::warn!(
+                            command = cmd.name(),
+                            attempt,
+                            node = %target.addr,
+                            "cluster: master answered READONLY; refreshing topology"
+                        );
+                        if followups_used >= max_redirects {
+                            return Err(redis_error_from_reply(&response));
+                        }
+                        followups_used += 1;
+                        self.await_refresh_since(Instant::now()).await;
+                        let previous = std::mem::take(&mut target.addr);
+                        target = self.route_command(&cmd_frame).await?;
+                        send_asking = false;
+                        if target.addr == previous {
+                            // The refresh has not observed the promotion yet.
+                            tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        }
                         continue;
                     }
                     if let Frame::Error(ref e) = response {
@@ -1915,11 +2020,35 @@ impl MultiplexedClusterClient {
         let Some(permit) = self.refresh_gate.try_begin() else {
             return;
         };
+        self.spawn_refresh(permit);
+    }
+
+    /// Run one refresh in the background under an already claimed permit.
+    ///
+    /// The task owns its client clone through [`RefreshTaskGuard`], so a
+    /// caller that stops waiting (a cancelled command) does not abort the
+    /// refresh, and [`shutdown`](Self::shutdown) still sees the clone released
+    /// before the gate reports idle.
+    fn spawn_refresh(&self, permit: RefreshPermit) {
         let client = self.clone();
         tokio::spawn(async move {
             let guard = RefreshTaskGuard::new(client, permit);
             let _ = guard.client().refresh_topology().await;
         });
+    }
+
+    /// Wait until a topology refresh that started at or after `observed` has
+    /// finished, starting one if none is running.
+    ///
+    /// For replies that prove the routing snapshot is stale and that would
+    /// fail identically if re-sent before the refresh lands (`READONLY` from a
+    /// demoted master). [`trigger_refresh`](Self::trigger_refresh) is not
+    /// enough there: its rate limit can drop the request, and a refresh that
+    /// was already running may have read `CLUSTER SLOTS` before the failover.
+    /// Concurrent callers share one refresh. The refresh's own outcome is not
+    /// reported; callers re-route from whatever it committed.
+    async fn await_refresh_since(&self, observed: Instant) {
+        await_refresh_since(&self.refresh_gate, observed, || Some(self.clone())).await;
     }
 
     /// Get a snapshot of the current cluster topology.
@@ -2901,6 +3030,35 @@ mod diff_tests {
         drop(permit);
         // Not in flight, but within the min interval -> denied.
         assert!(gate.try_begin().is_none());
+    }
+
+    #[test]
+    fn unthrottled_claim_ignores_the_rate_limit_but_stays_single_flight() {
+        let gate = Arc::new(RefreshGate::new(Duration::from_secs(60)));
+        drop(gate.try_begin().unwrap());
+        assert!(gate.try_begin().is_none(), "rate limited");
+        let permit = gate
+            .try_begin_unthrottled()
+            .expect("stale-topology evidence bypasses the rate limit");
+        assert!(
+            gate.try_begin_unthrottled().is_none(),
+            "still single-flight"
+        );
+        drop(permit);
+    }
+
+    #[test]
+    fn finished_since_requires_a_refresh_that_started_after_the_observation() {
+        let gate = Arc::new(RefreshGate::new(Duration::from_millis(0)));
+        let earlier = gate.try_begin().unwrap();
+        let observed = Instant::now();
+        drop(earlier);
+        assert!(
+            !gate.finished_since(observed),
+            "a refresh that started before the evidence may have read stale CLUSTER SLOTS"
+        );
+        drop(gate.try_begin().unwrap());
+        assert!(gate.finished_since(observed));
     }
 
     #[tokio::test]
