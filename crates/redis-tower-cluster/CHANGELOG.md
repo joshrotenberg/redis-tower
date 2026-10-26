@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ask nodes the topology lists without a connection (replicas under
   `ReadPreference::Master`) during a topology refresh in both clients; in a
   one-shard cluster whose master died, no other node was left to ask
+- resolve an empty or NULL endpoint in `CLUSTER SLOTS` to the node that was
+  asked, as Redis documents: a single-node cluster reports `""` for itself and
+  `cluster-preferred-endpoint-type unknown-endpoint` reports NULL, so neither
+  client could connect to such a cluster. Host-less redirects
+  (`MOVED 3999 :6381`) likewise resolve to the replying node's host, including
+  pipelined and Pub/Sub redirects. An endpoint of `?` is rejected as unknown,
+  and the public `topology::discover_topology`, which does not know the
+  queried address, now rejects empty/NULL endpoints instead of producing
+  unusable `:port` addresses
 - stop `MultiplexedClusterClient::reauthenticate_all` from holding the routing
   write lock while it sent `AUTH` to every node in turn: one slow node added
   its latency to every command on every node, and a hung one stalled routing

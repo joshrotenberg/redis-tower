@@ -3347,4 +3347,74 @@ mod failover_recovery {
                 .expect("timed out shutting down");
         }
     }
+    /// A single-node cluster reports `""` as its own endpoint in CLUSTER SLOTS
+    /// (it does not know its IP), and `cluster-preferred-endpoint-type
+    /// unknown-endpoint` reports NULL. Both mean "the node you asked"; neither
+    /// client could connect to such a cluster.
+    #[tokio::test]
+    #[ignore = "live: starts two single-node clusters"]
+    async fn single_node_clusters_with_unknown_endpoints_connect() {
+        use redis_server_wrapper::RedisServer;
+
+        for (port, endpoint_type) in [(18220, None), (18221, Some("unknown-endpoint"))] {
+            let mut server = RedisServer::new()
+                .port(port)
+                .cluster_enabled(true)
+                .save(false)
+                .appendonly(false);
+            if let Some(endpoint_type) = endpoint_type {
+                server = server.cluster_preferred_endpoint_type(endpoint_type);
+            }
+            let server = server.start().await.expect("start single-node cluster");
+            let mut admin = redis_tower::RedisConnection::connect(&server.addr())
+                .await
+                .unwrap();
+            admin
+                .execute(
+                    RawCommand::new("CLUSTER")
+                        .arg("ADDSLOTSRANGE")
+                        .arg("0")
+                        .arg("16383"),
+                )
+                .await
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let info = admin
+                    .execute(RawCommand::new("CLUSTER").arg("INFO"))
+                    .await
+                    .unwrap();
+                let ready = match &info {
+                    redis_tower_core::Frame::BulkString(Some(text))
+                    | redis_tower_core::Frame::VerbatimString(_, text) => {
+                        text.windows(16).any(|window| window == b"cluster_state:ok")
+                    }
+                    _ => false,
+                };
+                if ready {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "cluster never became ready: {info:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let client = MultiplexedClusterClient::connect(&server.addr())
+                .await
+                .unwrap_or_else(|error| panic!("{endpoint_type:?}: multiplexed connect: {error}"));
+            client.execute(Set::new("k", "v")).await.unwrap();
+            let mut direct = ClusterConnection::connect(&server.addr())
+                .await
+                .unwrap_or_else(|error| {
+                    panic!("{endpoint_type:?}: ClusterConnection connect: {error}")
+                });
+            assert_eq!(
+                direct.execute(Get::new("k")).await.unwrap(),
+                Some(Bytes::from_static(b"v"))
+            );
+            client.shutdown().await;
+        }
+    }
 }

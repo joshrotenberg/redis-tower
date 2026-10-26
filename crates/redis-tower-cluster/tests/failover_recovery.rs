@@ -487,3 +487,91 @@ async fn reauthentication_does_not_block_commands_to_other_nodes() {
         }
     }
 }
+
+/// Redis reports an empty (single-node cluster) or NULL
+/// (`cluster-preferred-endpoint-type unknown-endpoint`) endpoint for a node
+/// that does not know its own address, meaning "the node you asked". Neither
+/// client could connect to such a cluster.
+#[tokio::test]
+async fn clusters_reporting_unknown_endpoints_are_usable() {
+    for (label, host) in [("empty", bulk("")), ("null", Frame::BulkString(None))] {
+        let cluster = Cluster::new();
+        let a = fake_node(cluster.clone(), default_handler()).await;
+        cluster.set(Frame::Array(Some(vec![Frame::Array(Some(vec![
+            Frame::Integer(0),
+            Frame::Integer(16383),
+            node_entry_with_host(host, a.port),
+        ]))])));
+
+        let client = MultiplexedClusterClient::connect(&a.addr())
+            .await
+            .unwrap_or_else(|error| panic!("{label}: multiplexed connect: {error}"));
+        client
+            .execute(RawCommand::new("SET").arg("k").arg("v"))
+            .await
+            .unwrap();
+        client.refresh_topology().await.unwrap();
+        let mut direct = ClusterConnection::builder(a.addr())
+            .max_redirects(0)
+            .connect()
+            .await
+            .unwrap_or_else(|error| panic!("{label}: ClusterConnection connect: {error}"));
+        direct
+            .execute(RawCommand::new("SET").arg("k").arg("v"))
+            .await
+            .unwrap();
+        direct.refresh_topology().await.unwrap();
+        assert_eq!(a.received("SET"), 2, "{label}");
+        client.shutdown().await;
+    }
+}
+
+/// `MOVED <slot> :<port>` (no host) is what such a node sends as a redirect;
+/// the target is on the replying node's host.
+#[tokio::test]
+async fn host_less_redirects_resolve_to_the_replying_nodes_host() {
+    let cluster = Cluster::new();
+    let target_port = Arc::new(AtomicU16::new(0));
+    let handler: Handler = {
+        let target_port = target_port.clone();
+        Arc::new(move |request| {
+            let target = target_port.load(Ordering::SeqCst);
+            (request.port != target && (request.is(b"GET") || request.is(b"SET"))).then(|| {
+                let slot = redis_tower_cluster::slot_for_key(&request.args[1]);
+                Action::Reply(err(&format!("MOVED {slot} :{target}")))
+            })
+        })
+    };
+    let a = fake_node(cluster.clone(), handler.clone()).await;
+    let b = fake_node(cluster.clone(), handler).await;
+    target_port.store(b.port, Ordering::SeqCst);
+    cluster.set(slots(vec![(0, 16383, a.port, vec![])]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+
+    client
+        .execute(RawCommand::new("GET").arg("k"))
+        .await
+        .unwrap();
+    direct
+        .execute(RawCommand::new("GET").arg("k"))
+        .await
+        .unwrap();
+    let mut pipeline = client.clone();
+    redis_tower::PipelineExecutor::execute_pipeline(
+        &mut pipeline,
+        vec![redis_tower_protocol::helpers::array(vec![
+            redis_tower_protocol::helpers::bulk("SET"),
+            redis_tower_protocol::helpers::bulk("other"),
+            redis_tower_protocol::helpers::bulk("v"),
+        ])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(b.received("GET"), 2);
+    assert_eq!(
+        b.received("SET"),
+        1,
+        "the pipelined entry followed the redirect"
+    );
+}

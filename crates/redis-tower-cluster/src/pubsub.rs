@@ -571,7 +571,7 @@ impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
                         )));
                     }
                     redirects += 1;
-                    let target = self.backend.remap_redirect(&address).await?;
+                    let target = self.backend.remap_redirect(&address, &self.node).await?;
                     self.backend.commit_moved(self.slot, target.clone()).await?;
                     self.replace_at(target, None).await?;
                 }
@@ -592,7 +592,7 @@ impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
                         self.slot
                     )));
                 }
-                let target = self.backend.remap_redirect(&address).await?;
+                let target = self.backend.remap_redirect(&address, &self.node).await?;
                 self.backend.commit_moved(self.slot, target.clone()).await?;
                 self.replace_at(target, Some(channels)).await
             }
@@ -653,7 +653,7 @@ impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
                                 self.slot
                             )));
                         }
-                        let target = self.backend.remap_redirect(&address).await?;
+                        let target = self.backend.remap_redirect(&address, &target).await?;
                         self.backend.commit_moved(self.slot, target).await?;
                     } else {
                         tracing::debug!(
@@ -722,7 +722,7 @@ impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
                         return Err(error);
                     }
                     redirects += 1;
-                    let target = self.backend.remap_redirect(&address).await?;
+                    let target = self.backend.remap_redirect(&address, &self.node).await?;
                     self.backend.commit_moved(self.slot, target).await?;
                 }
             }

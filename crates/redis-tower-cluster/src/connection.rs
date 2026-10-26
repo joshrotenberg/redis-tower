@@ -19,7 +19,7 @@ use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor;
 use crate::slot::slot_for_key;
-use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at, host_of};
 
 /// Strategy for selecting which replica to read from.
 ///
@@ -413,6 +413,34 @@ pub(crate) enum Redirect {
     Ask { slot: u16, addr: String },
 }
 
+impl Redirect {
+    /// Resolve the target against `from`, the node that sent the redirect:
+    /// see [`resolve_redirect_addr`].
+    pub(crate) fn resolved_against(self, from: &str) -> Self {
+        match self {
+            Self::Moved { slot, addr } => Self::Moved {
+                slot,
+                addr: resolve_redirect_addr(&addr, from),
+            },
+            Self::Ask { slot, addr } => Self::Ask {
+                slot,
+                addr: resolve_redirect_addr(&addr, from),
+            },
+        }
+    }
+}
+
+/// A redirect target with an empty host (`MOVED 3999 :6381`) names a node on
+/// the host that sent the redirect. Redis sends that form when the node does
+/// not know its own endpoint: a single-node cluster, or
+/// `cluster-preferred-endpoint-type unknown-endpoint`.
+pub(crate) fn resolve_redirect_addr(addr: &str, from: &str) -> String {
+    match addr.strip_prefix(':') {
+        Some(port) => format!("{}:{port}", host_of(from)),
+        None => addr.to_string(),
+    }
+}
+
 impl ClusterConnection {
     #[cfg(test)]
     pub(crate) fn empty_for_test() -> Self {
@@ -549,7 +577,7 @@ impl ClusterConnection {
             tls.clone(),
         );
         let mut seed_conn = connector.connect(seed_addr, false).await?;
-        let mut topology = discover_topology(&mut seed_conn).await?;
+        let mut topology = discover_topology_at(&mut seed_conn, seed_addr).await?;
 
         if let Some(ref map) = address_map {
             remap_topology_with_map(&mut topology, map);
@@ -733,7 +761,8 @@ impl ClusterConnection {
                 attempt.finish(ReplicaRoutingOutcome::Success);
             }
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|redirect| redirect.resolved_against(&target_node))
+            {
                 Some(Redirect::Moved { slot, addr }) => {
                     tracing::debug!(slot, from_addr = %target_node, to_addr = %addr, kind = "MOVED", "cluster redirect");
                     if let Some(request_slot) = strict_replica_slot {
@@ -1180,14 +1209,14 @@ impl ClusterConnection {
             // completed; otherwise open a short-lived one.
             let result = match self.nodes.remove(&addr) {
                 Some(mut socket) => {
-                    let result = discover_topology(&mut socket.conn).await;
+                    let result = discover_topology_at(&mut socket.conn, &addr).await;
                     if result.is_ok() {
                         self.nodes.insert(addr.clone(), socket);
                     }
                     result
                 }
                 None => match self.connector().connect(&addr, false).await {
-                    Ok(mut conn) => discover_topology(&mut conn).await,
+                    Ok(mut conn) => discover_topology_at(&mut conn, &addr).await,
                     Err(error) => Err(error),
                 },
             };
@@ -1271,7 +1300,9 @@ impl redis_tower::TransactionExecutor for ClusterConnection {
             // future transaction before surfacing the original error.
             if let Err(RedisError::Redis(message)) = &result {
                 let redirect = Frame::Error(message.clone().into());
-                if let Some(Redirect::Moved { slot, addr }) = parse_redirect(&redirect) {
+                if let Some(Redirect::Moved { slot, addr }) =
+                    parse_redirect(&redirect).map(|redirect| redirect.resolved_against(&node))
+                {
                     let addr = self.remap_addr(&addr);
                     self.update_slot_owner(slot, &addr);
                 }
