@@ -146,6 +146,9 @@ impl SentinelConnectionBuilder {
     }
 
     /// Connect to the Redis master discovered via sentinel.
+    ///
+    /// The node each sentinel names is checked with `ROLE`; a node reporting
+    /// a non-master role is skipped and the next sentinel is asked.
     pub async fn connect(self) -> Result<SentinelConnection, RedisError> {
         SentinelConnection::connect_with_config(
             self.sentinel_addrs,
@@ -264,7 +267,9 @@ impl SentinelConnection {
     /// Connect to the Redis master discovered via Sentinel.
     ///
     /// Uses plain TCP connections to both sentinel and master without
-    /// authentication. For auth or TLS, use [`Self::builder`].
+    /// authentication. For auth or TLS, use [`Self::builder`]. A node that a
+    /// sentinel names but that reports a non-master `ROLE` is skipped in
+    /// favor of the next sentinel's answer.
     pub async fn connect(
         sentinel_addrs: &[impl AsRef<str>],
         master_name: &str,
@@ -291,16 +296,10 @@ impl SentinelConnection {
         read_preference: ReadPreference,
         read_routing: Option<Arc<dyn ReadRoutingStrategy>>,
     ) -> Result<Self, RedisError> {
-        let master_addr =
-            discovery::discover_master_with_config(&addrs, &master_name, &config).await?;
-        let conn = discovery::connect_hop(
-            &master_addr,
-            config.node_credentials.as_ref(),
-            config.resp_limits,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            config.node_tls.as_ref(),
-        )
-        .await?;
+        // Verify ROLE here too: a stale first sentinel must not bind this
+        // connection to a replica that only fails later with READONLY.
+        let (conn, master_addr) =
+            discovery::connect_verified_master_once(&addrs, &master_name, &config).await?;
 
         let (replicas, replica_addrs) = if read_preference == ReadPreference::Master {
             (HashMap::new(), Vec::new())

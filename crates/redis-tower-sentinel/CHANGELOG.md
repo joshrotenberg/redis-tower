@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - strip IPv6 brackets from the TLS server name for sentinel connections, as
   core and Cluster already do; a bracketed literal such as `[::1]` was passed
   to the TLS library, which rejects it
+- verify `ROLE` on initial connects (`SentinelConnection::connect`, its
+  builder, `MultiplexedSentinelClient::connect`, and the builder's `connect`),
+  not only on reconnect, so a stale first sentinel that names a replica no
+  longer binds the client to it and fails writes with READONLY (redis-rs #2427)
+- ask the next sentinel within the same attempt when the node a sentinel
+  names reports a non-master role; ROLE-verified reconnects previously
+  re-asked the first answering sentinel on every backoff attempt and failed
+  permanently when that one sentinel was stale. An address already rejected in
+  the pass is not dialed again
+- accept a node whose `ROLE` call is refused (for example an ACL user without
+  the `role` command) on the sentinel's word instead of treating it as a
+  replica, which previously made every ROLE-verified reconnect fail for such
+  users
 
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sentinel-v0.1.3...redis-tower-sentinel-v0.1.4) - 2026-10-01
 
