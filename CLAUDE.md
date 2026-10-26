@@ -179,7 +179,7 @@ cargo test --test test_strings --all-features
 cargo test --test '*' --all-features   # all standalone integration tests
 ```
 
-Test files: `integration.rs`, `client_side_caching_v2.rs`, `redis_8x_commands.rs`, `test_acl.rs`, `test_auth.rs`, `test_bitmap.rs`, `test_bloom.rs`, `test_errors.rs`, `test_exotic.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_large_values.rs`, `test_lists.rs`, `test_maintenance.rs`, `test_monitor.rs`, `test_object.rs`, `test_pool.rs`, `test_resilience_integration.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
+Test files: `integration.rs`, `client_side_caching_v2.rs`, `redis_8x_commands.rs`, `test_acl.rs`, `test_auth.rs`, `test_bitmap.rs`, `test_bloom.rs`, `test_errors.rs`, `test_exotic.rs`, `test_geo.rs`, `test_hashes.rs`, `test_hyperloglog.rs`, `test_infrastructure.rs`, `test_keys.rs`, `test_large_values.rs`, `test_lists.rs`, `test_maintenance.rs`, `test_monitor.rs`, `test_object.rs`, `test_pool.rs`, `test_resilience_integration.rs`, `test_scan_stream.rs`, `test_scripting.rs`, `test_server.rs`, `test_sets.rs`, `test_shared_connection.rs`, `test_multiplexed_lifecycle.rs`, `test_sorted_sets.rs`, `test_streams.rs`, `test_strings.rs`
 
 The admin-command fixtures stay in this tier rather than requiring Docker.
 `test_acl.rs` provisions an `aclfile`-backed Redis process and verifies the
@@ -381,6 +381,10 @@ integration tests remain `#[ignore]` and need Redis Stack (`-- --ignored`).
 **What's been hardened:**
 - Circuit breaker, command/connect timeouts, pool acquisition timeout
 - TCP keepalive, reconnect backoff jitter, graceful shutdown across `MultiplexedClient`, `MultiplexedClusterClient::shutdown()`, and `ConnectionPool::close()` (the SIGTERM drain path)
+- Clone-independent teardown: `AutoPipelineShutdownHandle` and `ClusterShutdownHandle` (`MultiplexedClusterClient::shutdown_handle()`, which tracks every per-node worker) stop admission on every clone; `shutdown_timeout(grace)`/`abort()` bound teardown when a server stops answering
+- Shared-connection guards in `auto_pipeline.rs` (`shared_connection.rs`): subscriptions, MONITOR, SYNC/PSYNC, RESET, HELLO, QUIT, CLIENT REPLY, blocking commands (and typed `is_blocking()`), and stand-alone MULTI/EXEC/DISCARD/WATCH are rejected before the wire; AUTH stays allowed for re-auth
+- Factory-backed workers fail queued/new work with `ConnectionClosed` after the first failed reconnect attempt instead of parking callers under the unlimited default budget
+- Happy Eyeballs-style address racing in `open_tcp`; Sentinel discovery ROLE-verifies on every connect path and moves on to the next sentinel when one names a replica
 - Non-idempotent write retry guard, structured reconnect/MOVED/ASK/failover logs
 - Dead pool connection replacement after health check failure
 - Cluster MOVED/ASK refresh, CROSSSLOT errors, eager sentinel rediscovery on failover
