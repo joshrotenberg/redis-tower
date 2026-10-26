@@ -883,8 +883,26 @@ in flight. For clone-heavy or trait-erased hosts, call the retained
 `AutoPipelineShutdownHandle::shutdown().await` instead. It atomically stops new
 admission across all clones, drains already accepted work while the connection
 is usable, cancels reconnect/backoff work, and joins the worker. Surviving
-client clones then return `ConnectionClosed` and can be dropped without the
-unfinished-worker warning.
+client clones then return `ConnectionClosed` and can be dropped quietly. The
+unfinished-worker warning fires only when the last handle goes away while
+requests are still queued or in flight, never for an idle client.
+
+`MultiplexedClusterClient::shutdown_handle()` is the cluster equivalent: its
+`ClusterShutdownHandle` stops admission on every clone, keeps background and
+explicit topology refreshes from installing new node services, and drains and
+joins every per-node worker, including ones a refresh replaced and is still
+draining.
+
+Draining waits for replies to requests that were already written. A batch whose
+callers all gave up is abandoned during shutdown, because nobody can receive
+its replies. A reply that a caller is still waiting for is bounded only by
+`AutoPipelineConfig::response_timeout`; without one, a node that stops
+answering can hold `shutdown()` open indefinitely. Hosts that must finish
+teardown on a deadline should call `shutdown_timeout(grace)` on either handle.
+It drains for up to `grace`, then aborts: everything still queued or awaiting a
+reply fails with `ConnectionClosed`, and commands already written have unknown
+outcomes. It returns `ShutdownOutcome::Drained` or `ShutdownOutcome::Aborted`.
+`abort()` skips the drain entirely.
 
 ## A repeatable tuning loop
 

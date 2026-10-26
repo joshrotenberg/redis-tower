@@ -523,7 +523,9 @@ impl MultiplexedClient<AutoPipelineService> {
     /// Retain this before cloning the client into a router or erasing its type.
     /// Calling [`AutoPipelineShutdownHandle::shutdown`] stops admission across
     /// every clone, drains accepted work, and joins the worker without needing
-    /// to recover and consume the final concrete client value.
+    /// to recover and consume the final concrete client value. Use
+    /// [`AutoPipelineShutdownHandle::shutdown_timeout`] when teardown must be
+    /// bounded even if the server stops answering.
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {

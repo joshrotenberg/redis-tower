@@ -265,7 +265,9 @@ pub use connection::{
     ClusterConnection, ClusterConnectionBuilder, FirstReplicaRouting, RandomRouting,
     ReadPreference, ReadRoutingStrategy, ReplicaRoutingOutcome, RoundRobinRouting,
 };
-pub use multiplexed::{MultiplexedClusterClient, MultiplexedClusterClientBuilder};
+pub use multiplexed::{
+    ClusterShutdownHandle, MultiplexedClusterClient, MultiplexedClusterClientBuilder,
+};
 pub use pipeline::ClusterPipeline;
 pub use pubsub::{
     BinaryClusterPubSubConnection, BinaryShardedClusterPubSubConnection, ClusterPubSubConnection,

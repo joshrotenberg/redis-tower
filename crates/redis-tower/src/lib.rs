@@ -458,7 +458,9 @@ pub mod json_api;
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod search_api;
 
-pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService, AutoPipelineShutdownHandle};
+pub use auto_pipeline::{
+    AutoPipelineConfig, AutoPipelineService, AutoPipelineShutdownHandle, ShutdownOutcome,
+};
 pub use cache_layer::{CacheConfig, CacheLayer, CacheService, ReleaseReadiness};
 pub use cache_state::{CacheState, CacheStatistics};
 pub use caching::{CacheTrackingMode, CachedClient, CachedClientConfig};
