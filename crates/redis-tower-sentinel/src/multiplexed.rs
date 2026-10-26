@@ -806,6 +806,12 @@ where
     S::Future: Send + 'static,
     Cmd: Command,
 {
+    // The master and replica workers are shared by every clone, exactly as in
+    // `MultiplexedClient`; their frame services reject the other
+    // connection-breaking commands.
+    if cmd.is_blocking() {
+        return Err(redis_tower::shared_connection_support::reject_blocking_command(cmd.name()));
+    }
     let operation = async move {
         std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
             .await?;

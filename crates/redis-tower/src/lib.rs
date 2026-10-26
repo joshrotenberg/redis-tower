@@ -434,6 +434,7 @@ mod resilient;
 pub mod retry;
 pub mod scan_stream;
 pub mod script;
+mod shared_connection;
 pub mod tracing_layer;
 pub mod transaction;
 
@@ -449,6 +450,16 @@ pub mod cache_support {
         parse_invalidation,
     };
     pub use crate::caching::validate_cached_user_command;
+}
+
+/// Shared-connection command checks reused by sibling workspace clients.
+///
+/// Not part of the stable user-facing API; public only so the cluster and
+/// Sentinel multiplexed clients reject the same commands as
+/// [`MultiplexedClient`].
+#[doc(hidden)]
+pub mod shared_connection_support {
+    pub use crate::shared_connection::reject_blocking_command;
 }
 
 #[cfg(feature = "serde")]

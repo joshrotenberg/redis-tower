@@ -46,6 +46,7 @@ use crate::reconnect::{
     ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionFactory,
     ReconnectConfig, connect_with_timeout,
 };
+use crate::shared_connection::{validate_shared_batch, validate_shared_request};
 
 /// Configuration for the auto-pipelining service.
 #[derive(Clone)]
@@ -280,6 +281,24 @@ impl WorkerRequest {
 ///    or `max_batch_size` requests
 /// 3. The background task sends all collected frames via `execute_pipeline`
 /// 4. Each response is routed back via the corresponding oneshot sender
+///
+/// # Shared-connection safety
+///
+/// Every clone shares one socket and replies are paired with requests by
+/// position, so commands that break that pairing or the shared session are
+/// rejected with a [`RedisError::Redis`] message before anything is written:
+/// `SUBSCRIBE`/`PSUBSCRIBE`/`SSUBSCRIBE` and their `UNSUBSCRIBE` forms (use
+/// [`PubSubConnection`](crate::PubSubConnection)), `MONITOR` (use
+/// [`MonitorStream`](crate::MonitorStream)), `SYNC`/`PSYNC`, `RESET`, `HELLO`,
+/// `QUIT`, `CLIENT REPLY`, the blocking list/sorted-set pops and moves,
+/// `XREAD`/`XREADGROUP` with `BLOCK`, and `MULTI`/`EXEC`/`DISCARD`/`WATCH`
+/// sent on their own (use [`Transaction`](crate::Transaction)). A
+/// [`call_pipeline`](Self::call_pipeline) batch may contain a complete
+/// `WATCH`/`MULTI`/`EXEC` sequence, including blocking commands queued inside
+/// `MULTI`, but not one that leaves `MULTI` or `WATCH` open. `AUTH` is
+/// allowed so credential rotation can re-authenticate the shared worker.
+/// Run anything else that needs exclusive connection state on a dedicated
+/// [`RedisConnection`].
 ///
 /// Compose with [`CommandAdapter`](crate::CommandAdapter) for typed commands:
 ///
@@ -1010,6 +1029,7 @@ impl AutoPipelineService {
         if frames.is_empty() {
             return Ok(Vec::new());
         }
+        validate_shared_batch(&frames)?;
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = WorkerRequest::Multi {
             frames,
@@ -1072,6 +1092,10 @@ impl AutoPipelineService {
             // worker request to fill it with.
             self.release_reservation();
             return Box::pin(async { Ok(Vec::new()) });
+        }
+        if let Err(error) = validate_shared_batch(&frames) {
+            self.release_reservation();
+            return Box::pin(async move { Err(error) });
         }
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -2348,6 +2372,11 @@ impl Service<Frame> for AutoPipelineService {
     }
 
     fn call(&mut self, frame: Frame) -> Self::Future {
+        if let Err(error) = validate_shared_request(&frame) {
+            // Return the back-pressure slot reserved by `poll_ready`.
+            let _ = self.poll_tx.abort_send();
+            return Box::pin(async move { Err(error) });
+        }
         let (resp_tx, resp_rx) = oneshot::channel();
         let request = WorkerRequest::Single {
             frame,

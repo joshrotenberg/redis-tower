@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- reject blocking commands and other commands that break a shared per-node
+  connection (subscriptions, `MONITOR`, `RESET`, `HELLO`, `QUIT`, `CLIENT
+  REPLY`, stand-alone `MULTI`/`EXEC`/`WATCH`) in `MultiplexedClusterClient`
+  before dispatch, as the standalone multiplexed client now does
 - move `MultiplexedClusterClient`'s keyless-command default node to a surviving
   master when a topology refresh prunes it; previously a failover or scale-in
   of the first-listed master made PING, INFO, DBSIZE, and other keyless
