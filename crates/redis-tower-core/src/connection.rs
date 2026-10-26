@@ -1,9 +1,11 @@
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures::SinkExt;
+use futures::stream::FuturesUnordered;
 use futures::{Sink, Stream};
 use socket2::{Socket, TcpKeepalive};
 use tokio::net::TcpStream;
@@ -91,6 +93,91 @@ impl KeepaliveConfig {
     pub fn with_probes(mut self, probes: u32) -> Self {
         self.probes = probes;
         self
+    }
+}
+
+/// How long one address attempt runs alone before the next resolved address
+/// is raced alongside it (the RFC 8305 "Connection Attempt Delay").
+const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
+
+/// Resolve `addr` and connect to the first address that accepts.
+///
+/// A hostname can resolve to several addresses, and the first one can be
+/// black-holed (an unrouted IPv6 path drops SYNs instead of refusing them).
+/// Trying addresses strictly in order would spend the whole connect budget on
+/// that one. Instead, attempts are staggered Happy Eyeballs style: address
+/// families alternate, each attempt gets `attempt_delay` to itself before the
+/// next starts alongside it, a refused attempt starts the next immediately,
+/// and the first established stream wins while the rest are dropped.
+async fn connect_resolved(addr: &str, attempt_delay: Duration) -> Result<TcpStream, RedisError> {
+    let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr)
+        .await
+        .map_err(|error| RedisError::connection(addr, error))?
+        .collect();
+    connect_addrs(addr, interleave_address_families(resolved), attempt_delay).await
+}
+
+async fn connect_addrs(
+    target: &str,
+    addrs: Vec<SocketAddr>,
+    attempt_delay: Duration,
+) -> Result<TcpStream, RedisError> {
+    let mut remaining = addrs.into_iter();
+    let mut attempts = FuturesUnordered::new();
+    let mut last_error = None;
+    loop {
+        if attempts.is_empty() {
+            match remaining.next() {
+                Some(next) => attempts.push(TcpStream::connect(next)),
+                None => {
+                    let error = last_error.unwrap_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "could not resolve to any address",
+                        )
+                    });
+                    return Err(RedisError::connection(target, error));
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            Some(result) = attempts.next() => match result {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    last_error = Some(error);
+                    if let Some(next) = remaining.next() {
+                        attempts.push(TcpStream::connect(next));
+                    }
+                }
+            },
+            () = tokio::time::sleep(attempt_delay), if remaining.len() > 0 => {
+                if let Some(next) = remaining.next() {
+                    attempts.push(TcpStream::connect(next));
+                }
+            }
+        }
+    }
+}
+
+/// Reorder resolved addresses so the two families alternate, starting with
+/// the resolver's first choice (RFC 8305 section 4).
+fn interleave_address_families(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let Some(first) = addrs.first() else {
+        return addrs;
+    };
+    let preferred_v6 = first.is_ipv6();
+    let (preferred, other): (Vec<_>, Vec<_>) = addrs
+        .into_iter()
+        .partition(|addr| addr.is_ipv6() == preferred_v6);
+    let mut interleaved = Vec::with_capacity(preferred.len() + other.len());
+    let mut preferred = preferred.into_iter();
+    let mut other = other.into_iter();
+    loop {
+        match (preferred.next(), other.next()) {
+            (None, None) => return interleaved,
+            (a, b) => interleaved.extend(a.into_iter().chain(b)),
+        }
     }
 }
 
@@ -401,7 +488,11 @@ impl ConnectionConfig {
     ///
     /// `None` uses the operating system's connection timeout. `Some` applies
     /// to the TCP or Unix-socket connect operation; a TLS handshake is not
-    /// included in this timeout.
+    /// included in this timeout. For a hostname that resolves to several
+    /// addresses, the timeout covers resolution and every address attempt
+    /// together. Attempts are staggered rather than sequential, so an address
+    /// that silently drops packets delays a working one by a fraction of a
+    /// second instead of consuming the whole budget.
     #[must_use]
     pub fn with_connect_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.connect_timeout = timeout;
@@ -516,17 +607,17 @@ impl RedisConnection {
     }
 
     /// Open a TCP stream and apply the configured timeout and keepalive.
+    ///
+    /// The timeout bounds name resolution plus the whole address race in
+    /// [`connect_resolved`], not one address at a time.
     async fn open_tcp(addr: &str, config: &ConnectionConfig) -> Result<TcpStream, RedisError> {
-        let stream = if let Some(timeout) = config.connect_timeout {
-            match tokio::time::timeout(timeout, TcpStream::connect(addr)).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(error)) => return Err(RedisError::connection(addr, error)),
+        let connect = connect_resolved(addr, CONNECTION_ATTEMPT_DELAY);
+        let stream = match config.connect_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, connect).await {
+                Ok(result) => result?,
                 Err(_elapsed) => return Err(RedisError::ConnectTimeout),
-            }
-        } else {
-            TcpStream::connect(addr)
-                .await
-                .map_err(|error| RedisError::connection(addr, error))?
+            },
+            None => connect.await?,
         };
         let stream = apply_keepalive(stream, &config.keepalive)?;
         stream.set_nodelay(true)?;
@@ -2021,6 +2112,196 @@ mod tests {
             }
             Ok(_) => panic!("connecting to a reserved port should fail"),
         }
+    }
+
+    /// Bind `addr` with a one-slot backlog, never accept, and fill the accept
+    /// queue so later SYNs are dropped rather than refused. Returns `None`
+    /// when the platform refuses instead, leaving nothing to black-hole.
+    #[cfg(unix)]
+    fn black_hole(addr: SocketAddr) -> Option<(SocketAddr, Socket, Vec<std::net::TcpStream>)> {
+        let domain = if addr.is_ipv6() {
+            socket2::Domain::IPV6
+        } else {
+            socket2::Domain::IPV4
+        };
+        let socket = Socket::new(domain, socket2::Type::STREAM, None).ok()?;
+        if addr.is_ipv6() {
+            socket.set_only_v6(true).ok()?;
+        }
+        socket.bind(&addr.into()).ok()?;
+        socket.listen(1).ok()?;
+        let addr = socket.local_addr().ok()?.as_socket()?;
+        let mut held = Vec::new();
+        for _ in 0..64 {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+                Ok(stream) => held.push(stream),
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    return Some((addr, socket, held));
+                }
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    async fn accepting_listener(addr: SocketAddr) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                held.push(stream);
+            }
+        });
+        (addr, task)
+    }
+
+    #[test]
+    fn address_families_alternate_from_the_resolver_choice() {
+        let v4 = |port| SocketAddr::from(([127, 0, 0, 1], port));
+        let v6 = |port| SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+        assert_eq!(
+            interleave_address_families(vec![v6(1), v6(2), v4(3), v4(4), v4(5)]),
+            vec![v6(1), v4(3), v6(2), v4(4), v4(5)]
+        );
+        assert_eq!(
+            interleave_address_families(vec![v4(1), v6(2), v4(3)]),
+            vec![v4(1), v6(2), v4(3)]
+        );
+        assert!(interleave_address_families(Vec::new()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_falls_back_past_a_black_holed_first_address() {
+        let Some((hole, _socket, _held)) = black_hole(SocketAddr::from(([127, 0, 0, 1], 0))) else {
+            eprintln!("skipping: this platform refuses instead of dropping SYNs");
+            return;
+        };
+        let (working, server) = accepting_listener(SocketAddr::from(([127, 0, 0, 1], 0))).await;
+
+        let started = std::time::Instant::now();
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_addrs(
+                "test-host:6379",
+                vec![hole, working],
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("the black-holed first address consumed the whole budget")
+        .expect("the second address accepts connections");
+        assert_eq!(stream.peer_addr().unwrap(), working);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn refused_address_starts_the_next_attempt_immediately() {
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let (working, server) = accepting_listener(SocketAddr::from(([127, 0, 0, 1], 0))).await;
+
+        // The stagger delay is far longer than the test budget, so success
+        // proves the refusal itself started the next attempt.
+        let stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_addrs(
+                "test-host:6379",
+                vec![refused, working],
+                Duration::from_secs(60),
+            ),
+        )
+        .await
+        .expect("a refused first address must not wait out the stagger delay")
+        .unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), working);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn every_refused_address_reports_the_target() {
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap()
+        };
+        let error = connect_addrs("test-host:6379", vec![refused, refused], Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert_eq!(error.connection_addr(), Some("test-host:6379"));
+        let error = connect_addrs("test-host:6379", Vec::new(), Duration::ZERO)
+            .await
+            .unwrap_err();
+        assert_eq!(error.connection_addr(), Some("test-host:6379"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn connect_timeout_bounds_a_black_holed_address() {
+        let Some((hole, _socket, _held)) = black_hole(SocketAddr::from(([127, 0, 0, 1], 0))) else {
+            eprintln!("skipping: this platform refuses instead of dropping SYNs");
+            return;
+        };
+        let config = ConnectionConfig::new().with_connect_timeout(Some(Duration::from_millis(300)));
+        let started = std::time::Instant::now();
+        let result = RedisConnection::connect_with_config(&hole.to_string(), &config).await;
+        assert!(
+            matches!(result, Err(RedisError::ConnectTimeout)),
+            "{:?}",
+            result.err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    /// End to end through name resolution: when `localhost` resolves to both
+    /// families, black-holing the first must not prevent reaching the second
+    /// within the connect timeout (redis-rs #2161).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dual_stack_hostname_falls_back_to_the_second_family() {
+        use std::net::ToSocketAddrs;
+
+        let resolved: Vec<SocketAddr> = match ("localhost", 0).to_socket_addrs() {
+            Ok(addrs) => addrs.collect(),
+            Err(_) => return,
+        };
+        let Some(first) = resolved.first().copied() else {
+            return;
+        };
+        let Some(second) = resolved
+            .iter()
+            .copied()
+            .find(|a| a.is_ipv6() != first.is_ipv6())
+        else {
+            eprintln!("skipping: localhost resolves to a single address family");
+            return;
+        };
+        let (working, server) = match tokio::net::TcpListener::bind(second).await {
+            Ok(listener) => {
+                drop(listener);
+                accepting_listener(second).await
+            }
+            Err(_) => return,
+        };
+        let mut first = first;
+        first.set_port(working.port());
+        let Some((_hole, _socket, _held)) = black_hole(first) else {
+            eprintln!("skipping: could not black-hole {first}");
+            server.abort();
+            return;
+        };
+
+        let config = ConnectionConfig::new()
+            .with_connect_timeout(Some(Duration::from_secs(2)))
+            .with_protocol(ProtocolVersion::Resp2);
+        let stream = RedisConnection::open_tcp(&format!("localhost:{}", working.port()), &config)
+            .await
+            .expect("the black-holed first family consumed the whole connect timeout");
+        assert_eq!(stream.peer_addr().unwrap(), working);
+        server.abort();
     }
 
     #[tokio::test]
