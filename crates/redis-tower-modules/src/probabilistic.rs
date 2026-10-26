@@ -35,7 +35,7 @@ use redis_tower_commands::{
     TdigestMerge, TdigestMin, TdigestQuantile, TdigestRank, TdigestReset, TdigestRevRank,
     TdigestTrimmedMean, TopkAdd, TopkCount, TopkIncrBy, TopkInfo, TopkList, TopkQuery, TopkReserve,
 };
-use redis_tower_core::{Frame, RedisError};
+use redis_tower_core::{Frame, FromFrame, RedisError};
 
 // ---------------------------------------------------------------------------
 // Private helpers
@@ -121,22 +121,8 @@ fn get_i64(map: &HashMap<String, Frame>, field: &str) -> Result<i64, RedisError>
 
 fn get_f64(map: &HashMap<String, Frame>, field: &str) -> Result<f64, RedisError> {
     match map.get(field) {
-        Some(Frame::Double(v)) => Ok(*v),
-        Some(Frame::BulkString(Some(b))) => {
-            let s = std::str::from_utf8(b).map_err(|_| RedisError::UnexpectedResponse {
-                expected: "valid UTF-8",
-                actual: format!("{b:?}"),
-            })?;
-            s.parse::<f64>()
-                .map_err(|_| RedisError::UnexpectedResponse {
-                    expected: "float",
-                    actual: s.to_string(),
-                })
-        }
-        Some(other) => Err(RedisError::UnexpectedResponse {
-            expected: "double or bulk string",
-            actual: format!("{other:?}"),
-        }),
+        // Doubles, special floats (`inf`/`nan` in RESP3), and float strings.
+        Some(frame) => f64::from_frame(frame.clone()),
         None => Err(RedisError::UnexpectedResponse {
             expected: "field present in response",
             actual: format!("field `{field}` not found"),
@@ -1164,5 +1150,43 @@ mod tests {
         assert_eq!(info.unmerged_weight, 0.0);
         assert_eq!(info.total_compressions, 1);
         assert_eq!(info.memory_usage, 9136);
+    }
+
+    #[tokio::test]
+    async fn tdigest_info_reads_integer_weights_in_both_protocols() {
+        // Redis 8 reports weights as integers: RESP2 flat array with simple
+        // string keys, RESP3 map.
+        let pairs = [
+            ("Compression", 100),
+            ("Capacity", 610),
+            ("Merged nodes", 0),
+            ("Unmerged nodes", 0),
+            ("Merged weight", 0),
+            ("Unmerged weight", 0),
+            ("Observations", 0),
+            ("Total compressions", 0),
+            ("Memory usage", 9840),
+        ];
+        let key = |k: &str| Frame::SimpleString(Bytes::from(k.to_string()));
+        let resp2 = Frame::Array(Some(
+            pairs
+                .iter()
+                .flat_map(|(k, v)| [key(k), Frame::Integer(*v)])
+                .collect(),
+        ));
+        let resp3 = Frame::Map(
+            pairs
+                .iter()
+                .map(|(k, v)| (key(k), Frame::Integer(*v)))
+                .collect(),
+        );
+        let mut mock = MockExecutor::new(vec![resp2, resp3]);
+        let mut td = TDigest::new(&mut mock, "td");
+        for _ in 0..2 {
+            let info = td.info().await.unwrap();
+            assert_eq!(info.capacity, 610);
+            assert_eq!(info.merged_weight, 0.0);
+            assert_eq!(info.memory_usage, 9840);
+        }
     }
 }

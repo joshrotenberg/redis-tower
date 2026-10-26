@@ -397,24 +397,29 @@ fn parse_json_response<T: DeserializeOwned>(bytes: &[u8], path: &str) -> Result<
     }
 }
 
+/// Decode one JSONPath match as an optional integer.
+///
+/// RedisJSON reports a match of the wrong type as null, which RESP2 sends as
+/// a nil bulk string (`$-1`) and RESP3 as `_`.
+fn parse_optional_i64(frame: Frame) -> Result<Option<i64>, RedisError> {
+    match frame {
+        Frame::Integer(n) => Ok(Some(n)),
+        Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(None),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "integer or null",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
 /// Parse a `Frame` as `Vec<Option<i64>>`.
 ///
 /// Used for commands like `JSON.ARRAPPEND` that return an array of integer
 /// lengths, where `null` indicates a path that did not exist.
 fn parse_optional_i64_array(frame: Frame) -> Result<Vec<Option<i64>>, RedisError> {
     match frame {
-        Frame::Array(Some(frames)) => frames
-            .into_iter()
-            .map(|f| match f {
-                Frame::Integer(n) => Ok(Some(n)),
-                Frame::Null => Ok(None),
-                other => Err(RedisError::UnexpectedResponse {
-                    expected: "integer or null",
-                    actual: format!("{other:?}"),
-                }),
-            })
-            .collect(),
-        Frame::Null => Ok(vec![]),
+        Frame::Array(Some(frames)) => frames.into_iter().map(parse_optional_i64).collect(),
+        Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(vec![]),
         Frame::Integer(n) => Ok(vec![Some(n)]),
         other => Err(RedisError::UnexpectedResponse {
             expected: "array of integers",
@@ -431,21 +436,11 @@ fn parse_optional_i64_array(frame: Frame) -> Result<Vec<Option<i64>>, RedisError
 fn parse_first_optional_i64(frame: Frame) -> Result<Option<i64>, RedisError> {
     match frame {
         Frame::Integer(n) => Ok(Some(n)),
-        Frame::Null => Ok(None),
-        Frame::Array(Some(mut frames)) => {
-            if frames.is_empty() {
-                return Ok(None);
-            }
-            match frames.swap_remove(0) {
-                Frame::Integer(n) => Ok(Some(n)),
-                Frame::Null => Ok(None),
-                other => Err(RedisError::UnexpectedResponse {
-                    expected: "integer or null",
-                    actual: format!("{other:?}"),
-                }),
-            }
-        }
-        Frame::Array(None) => Ok(None),
+        Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(None),
+        Frame::Array(Some(frames)) => match frames.into_iter().next() {
+            Some(first) => parse_optional_i64(first),
+            None => Ok(None),
+        },
         other => Err(RedisError::UnexpectedResponse {
             expected: "integer, null, or array",
             actual: format!("{other:?}"),
@@ -480,20 +475,22 @@ fn parse_obj_keys(frame: Frame) -> Result<Vec<String>, RedisError> {
     }
 
     match frame {
-        Frame::Null => Ok(vec![]),
-        Frame::Array(None) => Ok(vec![]),
+        Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(vec![]),
         Frame::Array(Some(frames)) => {
-            // Determine whether this is a $ response (outer = array of arrays)
-            // or a legacy response (outer = array of bulk strings).
+            // Determine whether this is a $ response (outer = array of arrays,
+            // with null for a match that is not an object) or a legacy
+            // response (outer = array of bulk strings, which are never null).
             match frames.first() {
-                Some(Frame::Array(_)) => {
+                Some(Frame::Array(_) | Frame::Null | Frame::BulkString(None)) => {
                     // $ path: outer array contains inner arrays of keys.
                     // Take the first match.
                     match frames.into_iter().next() {
                         Some(Frame::Array(Some(inner))) => {
                             inner.into_iter().map(bulk_to_string).collect()
                         }
-                        Some(Frame::Array(None)) | Some(Frame::Null) | None => Ok(vec![]),
+                        Some(Frame::Array(None) | Frame::Null | Frame::BulkString(None)) | None => {
+                            Ok(vec![])
+                        }
                         Some(other) => Err(RedisError::UnexpectedResponse {
                             expected: "array of keys",
                             actual: format!("{other:?}"),
@@ -741,5 +738,48 @@ mod tests {
         let mut json = JsonClient::new(&mut mock);
         let exists = json.path_exists("user:1", "$.missing").await.unwrap();
         assert!(!exists);
+    }
+
+    // --- RESP2 / RESP3 null matches -----------------------------------------
+    //
+    // A JSONPath match of the wrong type is null: `$-1` in RESP2, `_` in RESP3.
+
+    #[tokio::test]
+    async fn arr_append_reads_both_null_forms() {
+        let mut mock = MockRedis::new(vec![
+            Frame::Array(Some(vec![Frame::BulkString(None), Frame::Integer(3)])),
+            Frame::Array(Some(vec![Frame::Null, Frame::Integer(3)])),
+        ]);
+        let mut json = JsonClient::new(&mut mock);
+        let resp2 = json.arr_append("j", "$..b", &[1]).await.unwrap();
+        let resp3 = json.arr_append("j", "$..b", &[1]).await.unwrap();
+        assert_eq!(resp2, vec![None, Some(3)]);
+        assert_eq!(resp2, resp3);
+    }
+
+    #[tokio::test]
+    async fn str_len_and_arr_len_read_both_null_forms() {
+        let mut mock = MockRedis::new(vec![
+            Frame::Array(Some(vec![Frame::BulkString(None)])),
+            Frame::Array(Some(vec![Frame::Null])),
+            Frame::Array(Some(vec![Frame::BulkString(None), Frame::BulkString(None)])),
+            Frame::Array(Some(vec![Frame::Null, Frame::Null])),
+        ]);
+        let mut json = JsonClient::new(&mut mock);
+        assert_eq!(json.str_len("j", "$.n").await.unwrap(), None);
+        assert_eq!(json.str_len("j", "$.n").await.unwrap(), None);
+        assert_eq!(json.arr_len("j", "$..s").await.unwrap(), None);
+        assert_eq!(json.arr_len("j", "$..s").await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn obj_keys_reads_both_null_forms() {
+        let mut mock = MockRedis::new(vec![
+            Frame::Array(Some(vec![Frame::BulkString(None)])),
+            Frame::Array(Some(vec![Frame::Null])),
+        ]);
+        let mut json = JsonClient::new(&mut mock);
+        assert!(json.obj_keys("j", "$.a").await.unwrap().is_empty());
+        assert!(json.obj_keys("j", "$.a").await.unwrap().is_empty());
     }
 }

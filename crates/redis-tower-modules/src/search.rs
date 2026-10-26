@@ -597,6 +597,8 @@ fn frame_to_string(frame: &Frame) -> Result<String, RedisError> {
         }
         Frame::Integer(n) => Ok(n.to_string()),
         Frame::Double(d) => Ok(d.to_string()),
+        // RESP3 `inf`, `-inf`, and `nan` doubles.
+        Frame::SpecialFloat(data) => Ok(String::from_utf8_lossy(data).into_owned()),
         other => Err(RedisError::UnexpectedResponse {
             expected: "string-like frame",
             actual: format!("{other:?}"),

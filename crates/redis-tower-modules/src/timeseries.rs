@@ -35,7 +35,7 @@
 
 use bytes::Bytes;
 use redis_tower::RedisExecutor;
-use redis_tower_core::{Frame, RedisError};
+use redis_tower_core::{Frame, FromFrame, RedisError};
 
 // Low-level command builders
 use redis_tower::commands::{
@@ -324,22 +324,11 @@ fn frame_to_i64(frame: Frame) -> Result<i64, RedisError> {
     }
 }
 
+/// Decode a sample value. RESP2 sends values as simple strings (`+1.5`,
+/// `+NaN`); RESP3 sends doubles, with `nan` and the infinities arriving as
+/// special floats. `f64::from_frame` accepts every one of those forms.
 fn frame_to_f64(frame: Frame) -> Result<f64, RedisError> {
-    match frame {
-        Frame::Double(value) => Ok(value),
-        Frame::BulkString(Some(b)) => {
-            let s = std::str::from_utf8(&b).map_err(|_| RedisError::TypeMismatch {
-                expected: "f64 as UTF-8",
-            })?;
-            s.parse::<f64>()
-                .map_err(|_| RedisError::TypeMismatch { expected: "f64" })
-        }
-        Frame::Integer(n) => Ok(n as f64),
-        other => Err(RedisError::UnexpectedResponse {
-            expected: "double, integer, or bulk string (f64)",
-            actual: format!("{other:?}"),
-        }),
-    }
+    f64::from_frame(frame)
 }
 
 fn frame_to_string(frame: Frame) -> Result<String, RedisError> {
@@ -1375,5 +1364,48 @@ mod tests {
                 Bytes::from_static(b"sensors:humidity"),
             ]
         );
+    }
+
+    // --- RESP2 / RESP3 sample values ----------------------------------------
+
+    #[tokio::test]
+    async fn get_reads_resp2_simple_string_and_resp3_special_float() {
+        // RESP2: `*2 :2000 +NaN`. RESP3: `*2 :2000 ,nan`.
+        let mut mock = MockRedis::new(vec![
+            Frame::Array(Some(vec![
+                int(2_000),
+                Frame::SimpleString(Bytes::from("NaN")),
+            ])),
+            Frame::Array(Some(vec![
+                int(2_000),
+                Frame::SpecialFloat(Bytes::from("nan")),
+            ])),
+        ]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+        for _ in 0..2 {
+            let sample = ts.get("ts").await.unwrap().expect("sample");
+            assert_eq!(sample.timestamp, 2_000);
+            assert!(sample.value.is_nan());
+        }
+    }
+
+    #[tokio::test]
+    async fn range_reads_resp2_simple_string_values() {
+        // RESP2: `+1.5`. RESP3: `,1.5`.
+        let mut mock = MockRedis::new(vec![
+            Frame::Array(Some(vec![Frame::Array(Some(vec![
+                int(1_000),
+                Frame::SimpleString(Bytes::from("1.5")),
+            ]))])),
+            Frame::Array(Some(vec![Frame::Array(Some(vec![
+                int(1_000),
+                Frame::Double(1.5),
+            ]))])),
+        ]);
+        let mut ts = TimeSeriesClient::new(&mut mock);
+        let resp2 = ts.range("ts", TsRangeQuery::all()).await.unwrap();
+        let resp3 = ts.range("ts", TsRangeQuery::all()).await.unwrap();
+        assert_eq!(resp2, resp3);
+        assert_eq!(resp2[0].value, 1.5);
     }
 }
