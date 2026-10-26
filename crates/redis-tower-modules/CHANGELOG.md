@@ -14,6 +14,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the element's highest layer down to layer 0, and `None` for a missing set or
   element. It previously failed on every reply.
 
+### Fixed
+
+- read `TimeSeriesClient` sample values in both protocols: RESP2 simple
+  strings (`+1.5`, `+NaN`), which failed every RESP2 sample read, and RESP3
+  `nan`/`inf` special floats
+- accept RESP2 nil bulk entries (`$-1`) in the JSONPath match arrays decoded by
+  `JsonClient::arr_append`, `arr_len`, `str_len`, and `obj_keys`
+- decode `TDigest::info` and the other probabilistic info float fields from
+  integer replies (Redis 8 reports T-Digest weights as integers) and RESP3
+  special floats
+- render RESP3 special floats in `SearchClient` scalar fields
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-modules-v0.1.2...redis-tower-modules-v0.1.3) - 2026-10-01
 
 ### Changed
