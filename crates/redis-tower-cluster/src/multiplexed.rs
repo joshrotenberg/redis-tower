@@ -53,6 +53,21 @@
 //! [`MultiplexedClusterClientBuilder::include_node_in_metrics`] and bounded to
 //! 64 concrete addresses plus `_OTHER`.
 //!
+//! # Node-scoped commands
+//!
+//! Keyless commands run on one default master, except those whose effect or
+//! answer covers only the node that runs them. `DBSIZE` (summed), `FLUSHALL`,
+//! `FLUSHDB`, `SAVE`, `BGSAVE`, and `FUNCTION LOAD`/`FLUSH`/`DELETE`/`RESTORE`
+//! run on every master; `SCRIPT LOAD`/`FLUSH`/`EXISTS` and
+//! `CONFIG SET`/`RESETSTAT`/`REWRITE` also run on the connected replicas.
+//! Their replies are combined (one reply once every node succeeded, a sum, or
+//! an element-wise AND for `SCRIPT EXISTS`). A fan-out is not atomic: the
+//! first error is returned after every node was attempted, and other nodes
+//! may have applied the command. Node-local diagnostics (`INFO`,
+//! `CONFIG GET`, `CLIENT LIST`, ...) still run on the default node; use
+//! [`MultiplexedClusterClient::connect_to_node`] to address one node. Explicit
+//! pipelines do not fan out.
+//!
 //! # Transactions
 //!
 //! This client does **not** support MULTI/EXEC. Keyless transaction commands
@@ -108,6 +123,7 @@ use crate::connection::{
     resolve_redirect_addr, strict_replica_read_slot,
 };
 use crate::key_extractor;
+use crate::node_scope::{self, FanOut, NodeTargets};
 use crate::slot::slot_for_key;
 use crate::topology::changes::{TopologyChange, TopologyChangeTracker, TopologySnapshot};
 use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at};
@@ -1645,6 +1661,10 @@ impl MultiplexedClusterClient {
         observe_metrics: bool,
         last_node: &mut Option<String>,
     ) -> Result<Cmd::Response, RedisError> {
+        if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
+            let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
+            return cmd.parse_response(reply);
+        }
         let strict_replica_slot = {
             let inner = self.inner.read().await;
             strict_replica_read_slot(inner.read_preference, &cmd_frame)
@@ -1810,6 +1830,95 @@ impl MultiplexedClusterClient {
         Err(RedisError::Redis(format!(
             "too many redirects ({max_redirects})"
         )))
+    }
+
+    /// Run a node-scoped command on every node of its scope and combine the
+    /// replies; see [`node_scope`].
+    ///
+    /// A master answering READONLY was demoted by a failover: after a refresh
+    /// that started after the reply, the command runs on the masters that
+    /// have not answered yet (the promoted replica among them), within the
+    /// redirect budget. Nodes that already answered are not re-sent.
+    async fn execute_fan_out(&self, frame: &Frame, fan_out: FanOut) -> Result<Frame, RedisError> {
+        let max_redirects = self.inner.read().await.max_redirects;
+        let mut replies: BTreeMap<String, Result<Frame, RedisError>> = BTreeMap::new();
+        let mut rounds = 0usize;
+        loop {
+            let (masters, replicas) = {
+                let inner = self.inner.read().await;
+                let masters = dedup_addrs(inner.topology.master_addrs());
+                let replicas: Vec<(String, AutoPipelineService)> = match fan_out.targets {
+                    NodeTargets::Masters => Vec::new(),
+                    NodeTargets::MastersAndReplicas => inner
+                        .replicas
+                        .iter()
+                        .filter(|(_, service)| service.is_alive())
+                        .map(|(addr, service)| (addr.clone(), service.clone()))
+                        .collect(),
+                };
+                (masters, replicas)
+            };
+            let mut targets = Vec::new();
+            let pending: Vec<String> = masters
+                .into_iter()
+                .filter(|addr| !replies.contains_key(addr))
+                .collect();
+            for addr in pending {
+                // A master without a worker is connected here, as for keyed
+                // routing; one that cannot be reached fails the command.
+                match self.ensure_master(&addr).await {
+                    Ok(()) => match self.master_service(&addr).await {
+                        Ok(target) => targets.push((addr, true, target.svc)),
+                        Err(error) => {
+                            replies.insert(addr, Err(error));
+                        }
+                    },
+                    Err(error) => {
+                        replies.insert(addr, Err(error));
+                    }
+                }
+            }
+            targets.extend(
+                replicas
+                    .into_iter()
+                    .filter(|(addr, _)| !replies.contains_key(addr))
+                    .map(|(addr, service)| (addr, false, service)),
+            );
+
+            let calls = targets.into_iter().map(|(addr, master, mut service)| {
+                let frame = frame.clone();
+                async move {
+                    let reply = call_service(&mut service, frame).await;
+                    (addr, master, reply)
+                }
+            });
+            let mut demoted = Vec::new();
+            for (addr, master, reply) in futures::future::join_all(calls).await {
+                match &reply {
+                    Ok(frame) if master && is_readonly_reply(frame) => {
+                        demoted.push((addr, reply));
+                        continue;
+                    }
+                    Err(error) => self.observe_node_error(&addr, error),
+                    Ok(_) => {}
+                }
+                replies.insert(addr, reply);
+            }
+            if demoted.is_empty() {
+                break;
+            }
+            if rounds >= max_redirects {
+                replies.extend(demoted);
+                break;
+            }
+            rounds += 1;
+            tracing::warn!(
+                nodes = ?demoted.iter().map(|(addr, _)| addr.as_str()).collect::<Vec<_>>(),
+                "cluster: master answered READONLY to a node-scoped command; refreshing topology"
+            );
+            self.await_refresh_since(Instant::now()).await;
+        }
+        node_scope::aggregate(fan_out.aggregate, replies)
     }
 
     fn record_command_completion(

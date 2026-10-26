@@ -18,6 +18,7 @@ use redis_tower_core::{
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor;
+use crate::node_scope::{self, FanOut, NodeTargets};
 use crate::slot::slot_for_key;
 use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at, host_of};
 
@@ -187,7 +188,11 @@ pub use redis_tower::ReadPreference;
 /// then maintains connections to masters (and optionally replicas).
 ///
 /// Handles MOVED and ASK redirects automatically. Supports read
-/// preference for routing read-only commands to replicas.
+/// preference for routing read-only commands to replicas. Node-scoped
+/// keyless commands (`DBSIZE`, `FLUSHALL`, `SCRIPT LOAD`, `CONFIG SET`, ...)
+/// run on every master, and where accepted on the connected replicas, with
+/// combined replies, exactly as described for
+/// [`MultiplexedClusterClient`](crate::MultiplexedClusterClient).
 ///
 /// # Concurrency
 ///
@@ -729,6 +734,10 @@ impl ClusterConnection {
         cmd: Cmd,
     ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
+        if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
+            let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
+            return cmd.parse_response(reply);
+        }
         let strict_replica_slot = strict_replica_read_slot(self.read_preference, &cmd_frame);
         let initial_route = self.route_command(&cmd_frame)?;
 
@@ -889,6 +898,78 @@ impl ClusterConnection {
             "too many redirects ({})",
             self.max_redirects
         )))
+    }
+
+    /// Run a node-scoped command on every node of its scope and combine the
+    /// replies; see `node_scope`. As in the multiplexed client, a master
+    /// answering READONLY triggers a refresh and the command then runs on the
+    /// masters that have not answered yet. Replicas are best-effort: one that
+    /// cannot be connected is skipped.
+    async fn execute_fan_out(
+        &mut self,
+        frame: &Frame,
+        fan_out: FanOut,
+    ) -> Result<Frame, RedisError> {
+        let mut replies: std::collections::BTreeMap<String, Result<Frame, RedisError>> =
+            std::collections::BTreeMap::new();
+        let mut rounds = 0usize;
+        loop {
+            let masters = dedup_node_addrs(self.topology.master_addrs());
+            let replicas = if fan_out.targets == NodeTargets::MastersAndReplicas
+                && self.read_preference != ReadPreference::Master
+            {
+                dedup_node_addrs(self.topology.replica_addrs())
+            } else {
+                Vec::new()
+            };
+            let targets: Vec<(String, bool)> = masters
+                .into_iter()
+                .map(|addr| (addr, false))
+                .chain(replicas.into_iter().map(|addr| (addr, true)))
+                .filter(|(addr, _)| !replies.contains_key(addr))
+                .collect();
+
+            let mut demoted = Vec::new();
+            for (addr, replica) in targets {
+                if let Err(error) = self.ensure_connection(&addr, replica).await {
+                    if replica {
+                        self.note_replica_reconnect_failure(&addr);
+                    } else {
+                        replies.insert(addr, Err(error));
+                    }
+                    continue;
+                }
+                let reply = self
+                    .execute_pipeline_on_node(&addr, vec![frame.clone()])
+                    .await
+                    .and_then(|replies| {
+                        replies
+                            .into_iter()
+                            .next()
+                            .ok_or(RedisError::ConnectionClosed)
+                    });
+                if !replica && matches!(&reply, Ok(frame) if is_readonly_reply(frame)) {
+                    demoted.push((addr, reply));
+                    continue;
+                }
+                replies.insert(addr, reply);
+            }
+            if demoted.is_empty() {
+                break;
+            }
+            if rounds >= self.max_redirects {
+                replies.extend(demoted);
+                break;
+            }
+            rounds += 1;
+            tracing::warn!(
+                "cluster: master answered READONLY to a node-scoped command; refreshing topology"
+            );
+            if let Err(error) = self.refresh_topology().await {
+                tracing::debug!(%error, "cluster: refresh after READONLY failed");
+            }
+        }
+        node_scope::aggregate(fan_out.aggregate, replies)
     }
 
     /// Run a pipeline on one node while making cancellation quarantine-safe.

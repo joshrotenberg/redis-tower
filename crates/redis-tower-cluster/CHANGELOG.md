@@ -15,6 +15,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for re-establishing dedicated Pub/Sub sessions. It defaults to the node
   reconnect backoff and connect timeout with no retry limit
 
+### Changed
+
+- run node-scoped keyless commands on every node of their scope with combined
+  replies in both clients, instead of on the single keyless default master
+  where they returned a normal-looking but partial reply (redis-rs #2474):
+  `DBSIZE` is summed across masters; `FLUSHALL`, `FLUSHDB`, `SAVE`, `BGSAVE`,
+  and `FUNCTION LOAD`/`FLUSH`/`DELETE`/`RESTORE` run on every master; and
+  `SCRIPT LOAD`/`FLUSH`/`EXISTS` and `CONFIG SET`/`RESETSTAT`/`REWRITE` also
+  run on connected replicas (`SCRIPT EXISTS` is ANDed element-wise). A master
+  that answers `READONLY` is replaced by the promoted one after a refresh. A
+  fan-out is not atomic: the first error is returned after every node was
+  attempted. Other keyless commands, including node-local diagnostics, still
+  use the default node, and explicit pipelines do not fan out
+
 ### Fixed
 
 - resubscribe a sharded Pub/Sub session on the slot's new owner when the old

@@ -27,9 +27,10 @@ fn readonly_after_demotion(
     })
 }
 
-/// A keyless write (keyless commands bypass the MOVED check) sent to the
-/// demoted default master is rejected with READONLY. The client must refresh
-/// and re-send it to a current master instead of failing forever.
+/// A keyless write (keyless commands bypass the MOVED check) sent to a
+/// demoted master is rejected with READONLY. The client must refresh and
+/// re-send it to the promoted master instead of failing forever. FLUSHALL is
+/// node-scoped, so it runs on every master: only the demoted one is re-sent.
 #[tokio::test]
 async fn multiplexed_keyless_write_on_demoted_default_master_is_rerouted() {
     let cluster = Cluster::new();
@@ -65,6 +66,7 @@ async fn multiplexed_keyless_write_on_demoted_default_master_is_rerouted() {
         "one rejected attempt on the demoted node"
     );
     assert_eq!(b.received("FLUSHALL"), 1, "re-sent to the promoted master");
+    assert_eq!(c.received("FLUSHALL"), 2, "the other master is not re-sent");
 }
 
 /// redis-rs #2115: a keyed write answered with READONLY instead of MOVED (a
@@ -641,4 +643,137 @@ async fn connect_fails_when_no_master_is_reachable() {
             .is_err()
     );
     assert!(ClusterConnection::connect(&seed.addr()).await.is_err());
+}
+
+/// redis-rs #2474: node-scoped commands reached only the keyless default
+/// master and returned a normal-looking reply -- one master's DBSIZE, one
+/// master flushed, a script cached where EVALSHA for other slots cannot find
+/// it. They now run on every node of their scope with combined replies.
+#[tokio::test]
+async fn node_scoped_commands_run_on_every_master() {
+    let cluster = Cluster::new();
+    let handler: Handler = Arc::new(|request| {
+        if request.is(b"DBSIZE") {
+            return Some(Action::Reply(Frame::Integer(i64::from(
+                request.port % 7 + 1,
+            ))));
+        }
+        if request.is(b"SCRIPT") && request.args[1].eq_ignore_ascii_case(b"EXISTS") {
+            // Every node knows the first script; only even ports the second.
+            let second = i64::from(request.port % 2 == 0);
+            return Some(Action::Reply(Frame::Array(Some(vec![
+                Frame::Integer(1),
+                Frame::Integer(second),
+            ]))));
+        }
+        if request.is(b"SCRIPT") {
+            return Some(Action::Reply(bulk("sha")));
+        }
+        None
+    });
+    let a = fake_node(cluster.clone(), handler.clone()).await;
+    let b = fake_node(cluster.clone(), handler.clone()).await;
+    let r = fake_node(cluster.clone(), handler).await;
+    cluster.set(slots(vec![
+        (0, 8191, a.port, vec![r.port]),
+        (8192, 16383, b.port, vec![]),
+    ]));
+    let expected_size = i64::from(a.port % 7 + 1) + i64::from(b.port % 7 + 1);
+    let expected_second = i64::from(a.port % 2 == 0 && b.port % 2 == 0 && r.port % 2 == 0);
+
+    let client = MultiplexedClusterClient::builder(a.addr())
+        .read_preference(ReadPreference::PreferReplica)
+        .connect()
+        .await
+        .unwrap();
+    let mut direct = ClusterConnection::builder(a.addr())
+        .read_preference(ReadPreference::PreferReplica)
+        .connect()
+        .await
+        .unwrap();
+    let script_exists = || RawCommand::new("SCRIPT").arg("EXISTS").arg("x").arg("y");
+    let script_load = || RawCommand::new("SCRIPT").arg("LOAD").arg("return 1");
+    let replies = [
+        (
+            client.execute(RawCommand::new("DBSIZE")).await.unwrap(),
+            client.execute(script_exists()).await.unwrap(),
+            client.execute(script_load()).await.unwrap(),
+        ),
+        (
+            direct.execute(RawCommand::new("DBSIZE")).await.unwrap(),
+            direct.execute(script_exists()).await.unwrap(),
+            direct.execute(script_load()).await.unwrap(),
+        ),
+    ];
+    for (size, exists, sha) in replies {
+        assert_eq!(
+            size,
+            Frame::Integer(expected_size),
+            "DBSIZE sums the masters"
+        );
+        assert_eq!(
+            exists,
+            Frame::Array(Some(vec![
+                Frame::Integer(1),
+                Frame::Integer(expected_second)
+            ])),
+            "SCRIPT EXISTS is true only where every node has the script"
+        );
+        assert_eq!(sha, bulk("sha"));
+    }
+    client.execute(RawCommand::new("FLUSHALL")).await.unwrap();
+    direct.execute(RawCommand::new("FLUSHALL")).await.unwrap();
+
+    for (node, master) in [(&a, true), (&b, true), (&r, false)] {
+        let expected = if master { 2 } else { 0 };
+        assert_eq!(node.received("DBSIZE"), expected, "{}", node.port);
+        assert_eq!(node.received("FLUSHALL"), expected, "{}", node.port);
+        assert_eq!(
+            node.received("SCRIPT"),
+            4,
+            "{}: SCRIPT reaches connected replicas too",
+            node.port
+        );
+    }
+    client.shutdown().await;
+}
+
+/// A fan-out is not atomic: one failing master fails the command with the
+/// server's error, after every master was attempted.
+#[tokio::test]
+async fn node_scoped_command_fails_when_any_master_fails() {
+    let cluster = Cluster::new();
+    let failing = Arc::new(AtomicU16::new(0));
+    let handler: Handler = {
+        let failing = failing.clone();
+        Arc::new(move |request| {
+            (request.is(b"FLUSHALL") && request.port == failing.load(Ordering::SeqCst))
+                .then(|| Action::Reply(err("ERR flush refused")))
+        })
+    };
+    let a = fake_node(cluster.clone(), handler.clone()).await;
+    let b = fake_node(cluster.clone(), handler).await;
+    failing.store(b.port, Ordering::SeqCst);
+    cluster.set(slots(vec![
+        (0, 8191, a.port, vec![]),
+        (8192, 16383, b.port, vec![]),
+    ]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+    for error in [
+        client
+            .execute(RawCommand::new("FLUSHALL"))
+            .await
+            .unwrap_err(),
+        direct
+            .execute(RawCommand::new("FLUSHALL"))
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, redis_tower_core::RedisError::Redis(text) if text == "ERR flush refused"),
+            "{error:?}"
+        );
+    }
+    assert_eq!(a.received("FLUSHALL"), 2, "the healthy master still ran it");
 }
