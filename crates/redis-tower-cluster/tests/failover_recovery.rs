@@ -777,3 +777,221 @@ async fn node_scoped_command_fails_when_any_master_fails() {
     }
     assert_eq!(a.received("FLUSHALL"), 2, "the healthy master still ran it");
 }
+
+/// `ClusterConnection` discarded the ASKING reply and returned whatever the
+/// migrated command answered without the migration flag (redis-rs #2305).
+#[tokio::test]
+async fn rejected_asking_is_surfaced() {
+    let cluster = Cluster::new();
+    let target_port = Arc::new(AtomicU16::new(0));
+    let handler: Handler = {
+        let target_port = target_port.clone();
+        Arc::new(move |request| {
+            let target = target_port.load(Ordering::SeqCst);
+            if request.port != target && request.is(b"GET") {
+                let slot = redis_tower_cluster::slot_for_key(&request.args[1]);
+                return Some(Action::Reply(err(&format!(
+                    "ASK {slot} 127.0.0.1:{target}"
+                ))));
+            }
+            if request.port == target && request.is(b"ASKING") {
+                return Some(Action::Reply(err("ERR ASKING failed")));
+            }
+            if request.port == target && request.is(b"GET") {
+                return Some(Action::Reply(bulk("unexpected-success")));
+            }
+            None
+        })
+    };
+    let a = fake_node(cluster.clone(), handler.clone()).await;
+    let b = fake_node(cluster.clone(), handler).await;
+    target_port.store(b.port, Ordering::SeqCst);
+    cluster.set(slots(vec![(0, 16383, a.port, vec![])]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+    for error in [
+        client
+            .execute(RawCommand::new("GET").arg("key"))
+            .await
+            .unwrap_err(),
+        direct
+            .execute(RawCommand::new("GET").arg("key"))
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(&error, redis_tower_core::RedisError::Redis(text) if text == "ERR ASKING failed"),
+            "{error:?}"
+        );
+    }
+}
+
+/// Exhausting the redirect budget replaced the server's reply with "too many
+/// redirects (N)", hiding whether the slot moved or the cluster was down.
+/// Under `max_redirects(0)`, the first consumer's setting, that was every
+/// redirect.
+#[tokio::test]
+async fn exhausted_redirect_budget_returns_the_servers_reply() {
+    let cluster = Cluster::new();
+    let handler: Handler = Arc::new(|request| {
+        if request.is(b"GET") {
+            let slot = redis_tower_cluster::slot_for_key(&request.args[1]);
+            return Some(Action::Reply(err(&format!(
+                "MOVED {slot} 127.0.0.1:{}",
+                request.port
+            ))));
+        }
+        request
+            .is(b"SET")
+            .then(|| Action::Reply(err("CLUSTERDOWN The cluster is down")))
+    });
+    let a = fake_node(cluster.clone(), handler).await;
+    cluster.set(slots(vec![(0, 16383, a.port, vec![])]));
+    let client = MultiplexedClusterClient::builder(a.addr())
+        .max_redirects(0)
+        .connect()
+        .await
+        .unwrap();
+    let mut direct = ClusterConnection::builder(a.addr())
+        .max_redirects(0)
+        .connect()
+        .await
+        .unwrap();
+    let moved = [
+        client
+            .execute(RawCommand::new("GET").arg("k"))
+            .await
+            .unwrap_err(),
+        direct
+            .execute(RawCommand::new("GET").arg("k"))
+            .await
+            .unwrap_err(),
+    ];
+    for error in moved {
+        assert!(error.is_moved(), "{error:?}");
+    }
+    let down = [
+        client
+            .execute(RawCommand::new("SET").arg("k").arg("v"))
+            .await
+            .unwrap_err(),
+        direct
+            .execute(RawCommand::new("SET").arg("k").arg("v"))
+            .await
+            .unwrap_err(),
+    ];
+    for error in down {
+        assert!(error.to_string().contains("CLUSTERDOWN"), "{error:?}");
+    }
+}
+
+/// Redis Cluster has only database 0: `SELECT n` and a `/n` URL path were
+/// passed through or silently ignored.
+#[tokio::test]
+async fn nonzero_databases_are_rejected() {
+    let cluster = Cluster::new();
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    cluster.set(slots(vec![(0, 16383, a.port, vec![])]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+    client
+        .execute(RawCommand::new("SELECT").arg("0"))
+        .await
+        .expect("SELECT 0 is a no-op");
+    for error in [
+        client
+            .execute(RawCommand::new("SELECT").arg("1"))
+            .await
+            .unwrap_err(),
+        direct
+            .execute(RawCommand::new("select").arg("2"))
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("only database 0"), "{error}");
+    }
+    let mut pipeline = client.clone();
+    assert!(
+        redis_tower::PipelineExecutor::execute_pipeline(
+            &mut pipeline,
+            vec![redis_tower_protocol::helpers::array(vec![
+                redis_tower_protocol::helpers::bulk("SELECT"),
+                redis_tower_protocol::helpers::bulk("3"),
+            ])],
+        )
+        .await
+        .is_err(),
+        "pipelines reject it before any I/O"
+    );
+    assert_eq!(a.received("SELECT"), 1, "only SELECT 0 reached the node");
+
+    for url in [
+        format!("redis://127.0.0.1:{}/2", a.port),
+        format!("redis://127.0.0.1:{}/15", a.port),
+    ] {
+        assert!(
+            matches!(
+                MultiplexedClusterClient::connect_url(&url).await,
+                Err(redis_tower_core::RedisError::InvalidUrl(_))
+            ),
+            "{url}"
+        );
+        assert!(
+            matches!(
+                ClusterConnection::connect_url(&url).await,
+                Err(redis_tower_core::RedisError::InvalidUrl(_))
+            ),
+            "{url}"
+        );
+    }
+    MultiplexedClusterClient::connect_url(&format!("redis://127.0.0.1:{}/0", a.port))
+        .await
+        .expect("/0 is database 0");
+}
+
+/// A pipeline whose slot has no known owner failed before any I/O, so no node
+/// error scheduled the refresh that would learn the owner.
+#[tokio::test]
+async fn pipeline_planning_failure_schedules_a_refresh() {
+    let cluster = Cluster::new();
+    let handler: Handler = Arc::new(|request| {
+        request.is(b"MGET").then(|| {
+            Action::Reply(Frame::Array(Some(vec![
+                Frame::BulkString(None);
+                request.args.len() - 1
+            ])))
+        })
+    });
+    let a = fake_node(cluster.clone(), handler).await;
+    // Slots 8192..16383 are unowned.
+    cluster.set(slots(vec![(0, 8191, a.port, vec![])]));
+    let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+    let before = cluster.refreshes();
+    let orphan = key_in(8192, 16383);
+    let mut pipeline = client.clone();
+    let result = redis_tower::PipelineExecutor::execute_pipeline(
+        &mut pipeline,
+        vec![redis_tower_protocol::helpers::array(vec![
+            redis_tower_protocol::helpers::bulk("GET"),
+            redis_tower_protocol::helpers::bulk(orphan.as_str()),
+        ])],
+    )
+    .await;
+    assert!(result.is_err());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while cluster.refreshes() == before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no refresh was scheduled"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Once the cluster reports an owner, the same pipeline works.
+    cluster.set(slots(vec![(0, 16383, a.port, vec![])]));
+    client.refresh_topology().await.unwrap();
+    assert_eq!(
+        client.mget_split([orphan.as_str()]).await.unwrap(),
+        vec![None]
+    );
+}
