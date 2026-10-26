@@ -334,7 +334,10 @@ impl ClusterConnectionBuilder {
     /// The initial node attempt is always made, including when `max` is zero.
     /// Each followed redirect is another round-trip, so this bounds the worst
     /// case latency of one command during a resharding. Transient cluster
-    /// replies share the same follow-up budget. Defaults to 5.
+    /// replies (and `READONLY` from a demoted master) share the same
+    /// follow-up budget. Once it is spent, the server's last reply -- `MOVED`,
+    /// `ASK`, `TRYAGAIN`, `CLUSTERDOWN`, `READONLY` -- is returned as the error.
+    /// Defaults to 5.
     pub fn max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
         self
@@ -734,6 +737,7 @@ impl ClusterConnection {
         cmd: Cmd,
     ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
+        reject_nonzero_select(&cmd_frame)?;
         if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
             let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
             return cmd.parse_response(reply);
@@ -746,7 +750,7 @@ impl ClusterConnection {
         let mut send_asking = false;
         let mut followups_used = 0usize;
 
-        loop {
+        let exhausted = loop {
             let attempt = target_replica.clone().map(|replica| {
                 ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
             });
@@ -779,14 +783,20 @@ impl ClusterConnection {
             let response = if send_asking {
                 // ASKING is connection-local and one-shot, so keep it in the
                 // same checked-out exchange as the migrated command.
-                self.execute_pipeline_on_node(
-                    &target_node,
-                    vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
-                )
-                .await?
-                .into_iter()
-                .nth(1)
-                .ok_or(RedisError::ConnectionClosed)?
+                let mut replies = self
+                    .execute_pipeline_on_node(
+                        &target_node,
+                        vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
+                    )
+                    .await?
+                    .into_iter();
+                // A rejected ASKING leaves the command to run without the
+                // migration flag; its reply is not the answer to trust.
+                parse_setup_ok(
+                    replies.next().ok_or(RedisError::ConnectionClosed)?,
+                    "ASKING OK response",
+                )?;
+                replies.next().ok_or(RedisError::ConnectionClosed)?
             } else {
                 self.execute_pipeline_on_node(&target_node, vec![cmd_frame.clone()])
                     .await?
@@ -811,7 +821,7 @@ impl ClusterConnection {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= self.max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     let addr = self.remap_addr(&addr);
@@ -830,7 +840,7 @@ impl ClusterConnection {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= self.max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     let addr = self.remap_addr(&addr);
@@ -844,7 +854,7 @@ impl ClusterConnection {
                     // budget rather than surfacing on first occurrence.
                     if let Some(transient) = TransientError::from_frame(&response) {
                         if followups_used >= self.max_redirects {
-                            break;
+                            break response;
                         }
                         followups_used += 1;
                         if transient == TransientError::ClusterDown {
@@ -892,12 +902,15 @@ impl ClusterConnection {
                     return cmd.parse_response(response);
                 }
             }
-        }
+        };
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({})",
-            self.max_redirects
-        )))
+        // Return the server's own reply (MOVED, ASK, TRYAGAIN, CLUSTERDOWN,
+        // ...) so callers can classify it; the budget is a client limit.
+        tracing::warn!(
+            max_redirects = self.max_redirects,
+            "cluster: redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&exhausted))
     }
 
     /// Run a node-scoped command on every node of its scope and combine the
@@ -1574,6 +1587,48 @@ pub(crate) fn is_readonly_reply(frame: &Frame) -> bool {
     }
 }
 
+/// Check a setup reply (`ASKING`, `READONLY`) is `OK`.
+pub(crate) fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError> {
+    match frame {
+        Frame::SimpleString(value) if value.as_ref() == b"OK" => Ok(()),
+        Frame::Error(error) => Err(RedisError::Redis(
+            String::from_utf8_lossy(&error).into_owned(),
+        )),
+        other => Err(RedisError::UnexpectedResponse {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Reject `SELECT` of any database but 0 before it reaches a node.
+///
+/// Redis Cluster has only database 0. On a server that accepts other
+/// databases in cluster mode, a `SELECT` would switch one node's shared
+/// connection -- every caller's traffic through it -- while other nodes stay
+/// on database 0. `SELECT 0` is a no-op and still allowed.
+pub(crate) fn reject_nonzero_select(frame: &Frame) -> Result<(), RedisError> {
+    let Frame::Array(Some(items)) = frame else {
+        return Ok(());
+    };
+    let is_select = matches!(
+        items.first(),
+        Some(Frame::BulkString(Some(name)) | Frame::SimpleString(name))
+            if name.eq_ignore_ascii_case(b"SELECT")
+    );
+    let selects_zero = matches!(
+        items.get(1),
+        Some(Frame::BulkString(Some(db)) | Frame::SimpleString(db)) if db.as_ref() == b"0"
+    );
+    if is_select && !(items.len() == 2 && selects_zero) {
+        return Err(RedisError::Redis(
+            "ERR SELECT is not allowed in cluster mode: Redis Cluster has only database 0"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The server's error text as a [`RedisError::Redis`].
 pub(crate) fn redis_error_from_reply(frame: &Frame) -> RedisError {
     match frame {
@@ -1698,6 +1753,15 @@ pub(crate) fn parse_cluster_url(
         return Err(RedisError::InvalidUrl(
             "unix socket URLs are not supported for cluster connections".to_string(),
         ));
+    }
+    // Every cluster node has only database 0, so a `/db` path cannot be
+    // honored; ignoring it would silently use database 0.
+    if let Some(database) = parsed.database
+        && database != 0
+    {
+        return Err(RedisError::InvalidUrl(format!(
+            "Redis Cluster has only database 0; remove /{database} from the URL"
+        )));
     }
     let seed = format!("{}:{}", parsed.host, parsed.port);
     let credentials = parsed.password.map(|password| match parsed.username {

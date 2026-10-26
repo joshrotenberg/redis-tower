@@ -118,9 +118,9 @@ use crate::connection::ReplicaRoutingOutcome;
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
     ReplicaRoutingAttempt, RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError,
-    is_readonly_reply, parse_cluster_url, parse_redirect, redis_error_from_reply, remap_topology,
-    remap_topology_with_map, replica_outcome_for_result, replica_unavailable,
-    resolve_redirect_addr, strict_replica_read_slot,
+    is_readonly_reply, parse_cluster_url, parse_redirect, parse_setup_ok, redis_error_from_reply,
+    reject_nonzero_select, remap_topology, remap_topology_with_map, replica_outcome_for_result,
+    replica_unavailable, resolve_redirect_addr, strict_replica_read_slot,
 };
 use crate::key_extractor;
 use crate::node_scope::{self, FanOut, NodeTargets};
@@ -753,7 +753,10 @@ impl MultiplexedClusterClientBuilder {
     /// The initial node attempt is always made, including when `max` is zero.
     /// Each followed redirect is another round-trip, so this bounds the worst
     /// case latency of one command during a resharding. Transient cluster
-    /// replies share the same follow-up budget. Defaults to 5.
+    /// replies (and `READONLY` from a demoted master) share the same
+    /// follow-up budget. Once it is spent, the server's last reply -- `MOVED`,
+    /// `ASK`, `TRYAGAIN`, `CLUSTERDOWN`, `READONLY` -- is returned as the error.
+    /// Defaults to 5.
     pub fn max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
         self
@@ -1346,10 +1349,30 @@ impl MultiplexedClusterClient {
         let routing_slots = frames
             .iter()
             .map(|frame| {
+                reject_nonzero_select(frame)?;
                 key_extractor::pipeline_routing_slot(frame)
                     .map_err(|error| RedisError::Redis(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Connect any slot owner without a worker first, as keyed routing
+        // does; planning below must not fail on a node that is reachable.
+        let missing: Vec<String> = {
+            let inner = self.inner.read().await;
+            let mut missing: Vec<String> = routing_slots
+                .iter()
+                .flatten()
+                .filter_map(|slot| inner.topology.master_for_slot(*slot))
+                .map(NodeAddr::addr_string)
+                .filter(|addr| !inner.masters.contains_key(addr))
+                .collect();
+            missing.sort();
+            missing.dedup();
+            missing
+        };
+        for addr in missing {
+            self.ensure_master(&addr).await?;
+        }
 
         let mut groups: HashMap<String, (AutoPipelineService, Vec<(usize, Frame)>)> =
             HashMap::new();
@@ -1366,15 +1389,20 @@ impl MultiplexedClusterClient {
                 .zip(routing_slots.iter().copied())
                 .enumerate()
             {
+                // Each failure here is a routing gap that only a topology
+                // refresh can close, and nothing reached a node to schedule
+                // one: do it before failing.
                 let (addr, service) = match slot {
                     Some(slot) => {
                         let owner = inner.topology.master_for_slot(slot).ok_or_else(|| {
+                            self.trigger_refresh();
                             RedisError::Redis(format!(
                                 "no cluster master owns pipeline slot {slot}"
                             ))
                         })?;
                         let addr = owner.addr_string();
                         let service = inner.masters.get(&addr).cloned().ok_or_else(|| {
+                            self.trigger_refresh();
                             RedisError::Redis(format!(
                                 "no connected master service for pipeline slot {slot} ({addr})"
                             ))
@@ -1382,6 +1410,7 @@ impl MultiplexedClusterClient {
                         (addr, service)
                     }
                     None => inner.default_master().ok_or_else(|| {
+                        self.trigger_refresh();
                         RedisError::Redis(format!(
                             "no connected default master service for pipeline ({})",
                             inner.default_node
@@ -1446,7 +1475,8 @@ impl MultiplexedClusterClient {
         // Successful entries are final. Only entries that explicitly asked us
         // to redirect are retried, each as its own raw frame so a successful
         // neighbor in the original node batch can never be replayed.
-        let mut redirected_by_slot: BTreeMap<u16, Vec<(usize, Frame, Redirect)>> = BTreeMap::new();
+        let mut redirected_by_slot: BTreeMap<u16, Vec<(usize, Frame, Redirect, Frame)>> =
+            BTreeMap::new();
         for (index, response) in ordered.iter().enumerate() {
             let Some(redirect) = response
                 .as_ref()
@@ -1466,6 +1496,7 @@ impl MultiplexedClusterClient {
                 index,
                 frames[index].clone(),
                 redirect,
+                response.clone().unwrap_or(Frame::Null),
             ));
         }
 
@@ -1477,8 +1508,10 @@ impl MultiplexedClusterClient {
             let client = self.clone();
             async move {
                 let mut completed = Vec::with_capacity(entries.len());
-                for (index, frame, redirect) in entries {
-                    let response = client.follow_pipeline_redirect(frame, redirect).await?;
+                for (index, frame, redirect, reply) in entries {
+                    let response = client
+                        .follow_pipeline_redirect(frame, redirect, reply)
+                        .await?;
                     completed.push((index, response));
                 }
                 Ok::<_, RedisError>(completed)
@@ -1520,6 +1553,7 @@ impl MultiplexedClusterClient {
         &self,
         frame: Frame,
         mut redirect: Redirect,
+        mut last_reply: Frame,
     ) -> Result<Frame, RedisError> {
         let max_redirects = self.inner.read().await.max_redirects;
         self.record_pipeline_redirect(&redirect);
@@ -1583,14 +1617,18 @@ impl MultiplexedClusterClient {
                 Some(next) => {
                     self.record_pipeline_redirect(&next);
                     redirect = next;
+                    last_reply = response;
                 }
                 None => return Ok(response),
             }
         }
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({max_redirects})"
-        )))
+        // As for single commands, surface the server's last redirect.
+        tracing::warn!(
+            max_redirects,
+            "cluster: pipelined redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&last_reply))
     }
 
     async fn dispatch_to_target(
@@ -1661,6 +1699,7 @@ impl MultiplexedClusterClient {
         observe_metrics: bool,
         last_node: &mut Option<String>,
     ) -> Result<Cmd::Response, RedisError> {
+        reject_nonzero_select(&cmd_frame)?;
         if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
             let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
             return cmd.parse_response(reply);
@@ -1676,7 +1715,7 @@ impl MultiplexedClusterClient {
         let mut effective_dispatch_mode = dispatch_mode;
         let mut followups_used = 0usize;
 
-        loop {
+        let exhausted = loop {
             if observe_metrics {
                 *last_node = Some(target.addr.clone());
             }
@@ -1717,7 +1756,7 @@ impl MultiplexedClusterClient {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     self.ensure_master(&addr).await?;
@@ -1753,7 +1792,7 @@ impl MultiplexedClusterClient {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     self.ensure_master(&addr).await?;
@@ -1771,7 +1810,7 @@ impl MultiplexedClusterClient {
                         self.notify_cache_node_loss(&target.addr);
                         effective_dispatch_mode = CacheDispatchMode::Plain;
                         if followups_used >= max_redirects {
-                            break;
+                            break response;
                         }
                         followups_used += 1;
                         if transient == TransientError::ClusterDown {
@@ -1825,11 +1864,16 @@ impl MultiplexedClusterClient {
                     return cmd.parse_response(response);
                 }
             }
-        }
+        };
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({max_redirects})"
-        )))
+        // Return the server's own reply (MOVED, ASK, TRYAGAIN, CLUSTERDOWN,
+        // ...) so callers can classify it; the budget is a client limit.
+        tracing::warn!(
+            command = cmd.name(),
+            max_redirects,
+            "cluster: redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&exhausted))
     }
 
     /// Run a node-scoped command on every node of its scope and combine the
@@ -2905,19 +2949,6 @@ fn parse_prefixed_response(
         command.parse_response(response)?;
     }
     responses.next().ok_or(RedisError::ConnectionClosed)
-}
-
-fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError> {
-    match frame {
-        Frame::SimpleString(value) if value.as_ref() == b"OK" => Ok(()),
-        Frame::Error(error) => Err(RedisError::Redis(
-            String::from_utf8_lossy(&error).into_owned(),
-        )),
-        other => Err(RedisError::UnexpectedResponse {
-            expected,
-            actual: format!("{other:?}"),
-        }),
-    }
 }
 
 fn pick_replica(inner: &Inner, slot: u16) -> Option<(String, NodeAddr)> {
@@ -5065,7 +5096,10 @@ mod observability_tests {
             .execute(Get::new("key"))
             .await
             .expect_err("one redirect budget followed ASK and MOVED");
-        assert!(error.to_string().contains("too many redirects (1)"));
+        assert!(
+            error.is_moved(),
+            "the exhausted budget surfaces the server's MOVED: {error}"
+        );
         assert_eq!(
             *recorder.redirects.lock().unwrap(),
             vec![ClusterRedirectKind::Ask, ClusterRedirectKind::Moved]

@@ -47,6 +47,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ask nodes the topology lists without a connection (replicas under
   `ReadPreference::Master`) during a topology refresh in both clients; in a
   one-shard cluster whose master died, no other node was left to ask
+- check the `ASKING` reply in `ClusterConnection` before trusting the
+  migrated command's reply (redis-rs #2305); a rejected `ASKING` was ignored
+- return the server's own last reply (`MOVED ...`, `ASK ...`, `TRYAGAIN ...`,
+  `CLUSTERDOWN ...`) when the redirect budget is exhausted, in commands,
+  pipelines, and sharded Pub/Sub subscribes, instead of replacing it with
+  "too many redirects (N)"; under `max_redirects(0)` that was every redirect,
+  and callers could not tell a moved slot from a down cluster
+- schedule a topology refresh when a pipeline (including `mget_split`,
+  `mset_split`, and `del_split`) fails during planning because a slot has no
+  known owner, and connect an owner that has no worker before planning; the
+  failure happened before any I/O, so nothing healed it
+- reject `SELECT` of a database other than 0, and a `/db` URL path other than
+  `/0` in `connect_url`, in both clients: Redis Cluster has only database 0.
+  The URL path was silently ignored, and a server that accepts other databases
+  in cluster mode would have switched one node's shared connection
 - connect both clients best-effort: a master that is unreachable at connect
   time (still listed by `CLUSTER SLOTS` mid-failover, or restarting) no
   longer fails `connect()` for the whole cluster. Its slots fail with a

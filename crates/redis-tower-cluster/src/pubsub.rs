@@ -566,9 +566,8 @@ impl<N: PubSubName> NamedShardedClusterPubSubConnection<N> {
                         )));
                     }
                     if redirects >= self.backend.max_redirects() {
-                        return Err(RedisError::Redis(format!(
-                            "too many cluster Pub/Sub redirects ({redirects})"
-                        )));
+                        // The server's own MOVED, as for commands.
+                        return Err(error);
                     }
                     redirects += 1;
                     let target = self.backend.remap_redirect(&address, &self.node).await?;
