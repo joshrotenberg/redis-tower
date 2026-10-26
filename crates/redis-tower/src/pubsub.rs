@@ -135,14 +135,18 @@ pub struct PubSubConnection {
     inner: NamedPubSubConnection<String>,
     // Preserve the concrete public text subscription type and borrowed getter.
     subscriptions: Subscriptions,
+    /// `inner.server_revision` when `subscriptions` was last copied.
+    seen_server_revision: u64,
 }
 
 impl From<NamedPubSubConnection<String>> for PubSubConnection {
     fn from(inner: NamedPubSubConnection<String>) -> Self {
         let subscriptions = inner.subscriptions().into();
+        let seen_server_revision = inner.server_revision;
         Self {
             inner,
             subscriptions,
+            seen_server_revision,
         }
     }
 }
@@ -253,9 +257,16 @@ impl PubSubConnection {
 impl Stream for PubSubConnection {
     type Item = Result<PubSubMessage, RedisError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.inner)
+        let poll = Pin::new(&mut self.inner)
             .poll_next(cx)
-            .map(|message| message.map(|message| message.map(Into::into)))
+            .map(|message| message.map(|message| message.map(Into::into)));
+        // A server-initiated shard unsubscribe changes tracking while
+        // streaming; keep the borrowed getter in step.
+        if self.inner.server_revision != self.seen_server_revision {
+            self.seen_server_revision = self.inner.server_revision;
+            self.subscriptions = self.inner.subscriptions().into();
+        }
+        poll
     }
 }
 
@@ -277,6 +288,28 @@ pub struct NamedPubSubMessage<N> {
     /// The message payload.
     pub payload: Bytes,
 }
+
+/// One item read from a Pub/Sub connection by
+/// [`NamedPubSubConnection::next_event`]: a published message, or a
+/// subscription the server ended without being asked.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum NamedPubSubEvent<N> {
+    /// A published message, exactly as yielded by the connection's `Stream`.
+    Message(NamedPubSubMessage<N>),
+    /// The server dropped this shard channel subscription on its own.
+    ///
+    /// Redis sends an unrequested `sunsubscribe` when a shard channel's hash
+    /// slot leaves the node: a slot migration, or a failover that demotes it.
+    /// The channel has already been removed from
+    /// [`subscriptions`](NamedPubSubConnection::subscriptions), so a reconnect
+    /// does not replay it. Subscribe again, on the slot's current owner, to
+    /// keep receiving it. The `Stream` implementation skips these events.
+    ShardChannelUnsubscribed(N),
+}
+
+/// A [`NamedPubSubEvent`] preserving exact channel bytes.
+pub type BinaryPubSubEvent = NamedPubSubEvent<Bytes>;
 
 /// The kind of pub/sub message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -468,6 +501,9 @@ pub struct NamedPubSubConnection<N> {
     buffered_frames: VecDeque<Frame>,
     /// Active subscriptions, tracked so they can be replayed after a reconnect.
     subs: NamedSubscriptions<N>,
+    /// Bumped whenever the server, rather than a caller's request, removes a
+    /// tracked subscription.
+    server_revision: u64,
 }
 
 impl<N: PubSubName> NamedPubSubConnection<N> {
@@ -494,6 +530,7 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
                 patterns: BTreeSet::new(),
                 shard_channels: BTreeSet::new(),
             },
+            server_revision: 0,
         })
     }
 
@@ -514,7 +551,7 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
             .send(array(args))
             .await
             .map_err(RedisError::from)?;
-        self.await_confirmations(&names, kind).await
+        self.await_confirmations(&names, kind, false).await
     }
 
     /// Subscribe to one or more channels.
@@ -623,6 +660,13 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
 
     /// Byte-oriented `SUNSUBSCRIBE`; names and acknowledgements retain exact bytes.
     pub async fn sunsubscribe_bytes(&mut self, channels: &[&[u8]]) -> Result<(), RedisError> {
+        if channels.is_empty() {
+            // A no-argument SUNSUBSCRIBE is acknowledged once per channel the
+            // server still holds. Apply server-initiated drops already read
+            // off the wire first, or the wait would expect an
+            // acknowledgement the server will never send.
+            self.apply_buffered_server_unsubscribes();
+        }
         let tracked: Vec<N> = self.subs.shard_channels.iter().cloned().collect();
         self.send_unsubscribe("SUNSUBSCRIBE", channels, "sunsubscribe", &tracked)
             .await?;
@@ -758,6 +802,7 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
             framed: conn.into_framed()?,
             buffered_frames: VecDeque::new(),
             subs: self.subs.clone(),
+            server_revision: self.server_revision,
         };
         replacement.resubscribe().await?;
         self.framed = replacement.framed;
@@ -787,16 +832,17 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
             .map_err(RedisError::from)?;
 
         if !unique_names.is_empty() {
-            return self.await_confirmations(&unique_names, kind).await;
+            return self.await_confirmations(&unique_names, kind, false).await;
         }
 
         // With no arguments Redis acknowledges every subscription of this
         // family. Match those names instead of waiting for a total count of
         // zero: subscriptions in the other two families contribute to that
-        // count and may intentionally remain active.
+        // count and may intentionally remain active. A null-name
+        // acknowledgement means the server held none of them after all.
         if !tracked.is_empty() {
             let names: Vec<&[u8]> = tracked.iter().map(PubSubName::name_bytes).collect();
-            return self.await_confirmations(&names, kind).await;
+            return self.await_confirmations(&names, kind, true).await;
         }
 
         // Redis still emits one acknowledgement with a null name when there
@@ -841,10 +887,13 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
     /// Frames that are valid confirmations for the right `kind` but whose
     /// channel name does not match any expected channel are buffered so they
     /// can be consumed by a subsequent confirmation loop or the message stream.
+    /// With `null_ack_completes`, an unsubscribe acknowledgement with a null
+    /// name (the server held nothing of this family) ends the wait early.
     async fn await_confirmations(
         &mut self,
         names: &[&[u8]],
         expected_kind: &str,
+        null_ack_completes: bool,
     ) -> Result<(), RedisError> {
         let mut pending: HashSet<&[u8]> = names.iter().copied().collect();
         let mut deferred = VecDeque::new();
@@ -858,6 +907,9 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
                 Ok(frame) => frame,
                 Err(error) => break Err(error),
             };
+            if null_ack_completes && Self::is_null_unsubscribe_ack(&frame, expected_kind) {
+                break Ok(());
+            }
 
             match Self::extract_confirmation_channel(&frame, expected_kind) {
                 Some(Ok(channel)) => {
@@ -903,6 +955,107 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
 
         self.buffered_frames.extend(deferred);
         result
+    }
+
+    /// Whether `frame` is an unsubscribe acknowledgement of `expected_kind`
+    /// with a null name.
+    fn is_null_unsubscribe_ack(frame: &Frame, expected_kind: &str) -> bool {
+        let (Frame::Array(Some(items)) | Frame::Push(items)) = frame else {
+            return false;
+        };
+        items.len() >= 3
+            && matches!(&items[0], Frame::BulkString(Some(kind)) | Frame::SimpleString(kind) if kind.as_ref() == expected_kind.as_bytes())
+            && matches!(&items[1], Frame::Null | Frame::BulkString(None))
+    }
+
+    /// The channel named by a `sunsubscribe` frame read outside any
+    /// confirmation wait. Every request this connection sends awaits its own
+    /// acknowledgements, so such a frame is the server dropping the channel
+    /// on its own (slot migration or demotion), or a late duplicate of an
+    /// acknowledgement for a channel that is no longer tracked.
+    fn server_shard_unsubscribe(frame: &Frame) -> Option<N> {
+        let (Frame::Array(Some(items)) | Frame::Push(items)) = frame else {
+            return None;
+        };
+        if items.len() != 3 {
+            return None;
+        }
+        match &items[0] {
+            Frame::BulkString(Some(kind)) | Frame::SimpleString(kind)
+                if kind.as_ref() == b"sunsubscribe" => {}
+            _ => return None,
+        }
+        match &items[1] {
+            Frame::BulkString(Some(name)) | Frame::SimpleString(name) => {
+                Some(N::from_name_bytes(name))
+            }
+            _ => None,
+        }
+    }
+
+    /// Forget tracked shard channels whose server-initiated `sunsubscribe` is
+    /// buffered but not yet read by the stream. The frames stay buffered;
+    /// the stream skips them once their channel is no longer tracked.
+    fn apply_buffered_server_unsubscribes(&mut self) {
+        let dropped: Vec<N> = self
+            .buffered_frames
+            .iter()
+            .filter_map(Self::server_shard_unsubscribe)
+            .collect();
+        for channel in dropped {
+            if self.subs.shard_channels.remove(&channel) {
+                self.server_revision = self.server_revision.wrapping_add(1);
+            }
+        }
+    }
+
+    /// Receive the next message or server-initiated subscription change.
+    ///
+    /// Unlike the `Stream` implementation, which yields only messages, this
+    /// reports a [`NamedPubSubEvent::ShardChannelUnsubscribed`] when the
+    /// server drops a tracked shard channel by itself -- the only signal a
+    /// sharded subscriber gets that its slot moved while the old node stays
+    /// up. Returns `None` when the transport closes. Cancel-safe: a future
+    /// dropped before completion loses no frame.
+    pub async fn next_event(&mut self) -> Option<Result<NamedPubSubEvent<N>, RedisError>> {
+        std::future::poll_fn(|cx| self.poll_next_event(cx)).await
+    }
+
+    /// Poll form of [`next_event`](Self::next_event).
+    pub fn poll_next_event(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<NamedPubSubEvent<N>, RedisError>>> {
+        loop {
+            // Drain any buffered frames before reading from the transport.
+            let frame = if let Some(frame) = self.buffered_frames.pop_front() {
+                frame
+            } else {
+                match Pin::new(&mut self.framed).poll_next(cx) {
+                    Poll::Ready(Some(Ok(frame))) => frame,
+                    Poll::Ready(Some(Err(e))) => {
+                        return Poll::Ready(Some(Err(pubsub_stream_error(e))));
+                    }
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Pending => return Poll::Pending,
+                }
+            };
+
+            if let Some(channel) = Self::server_shard_unsubscribe(&frame) {
+                if self.subs.shard_channels.remove(&channel) {
+                    self.server_revision = self.server_revision.wrapping_add(1);
+                    return Poll::Ready(Some(Ok(NamedPubSubEvent::ShardChannelUnsubscribed(
+                        channel,
+                    ))));
+                }
+                continue;
+            }
+            match Self::parse_message(frame) {
+                Ok(Some(msg)) => return Poll::Ready(Some(Ok(NamedPubSubEvent::Message(msg)))),
+                Ok(None) => continue, // skip confirmations
+                Err(e) => return Poll::Ready(Some(Err(e))),
+            }
+        }
     }
 
     /// Try to extract the channel name from a subscribe confirmation frame.
@@ -1073,30 +1226,21 @@ fn pubsub_stream_error(error: ProtocolError) -> RedisError {
     }
 }
 
+/// Yields published messages only. A server-initiated shard unsubscribe still
+/// updates [`subscriptions`](NamedPubSubConnection::subscriptions) but is
+/// otherwise skipped; use [`NamedPubSubConnection::next_event`] to observe it.
 impl<N: PubSubName> Stream for NamedPubSubConnection<N> {
     type Item = Result<NamedPubSubMessage<N>, RedisError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            // Drain any buffered frames before reading from the transport.
-            let frame = if let Some(frame) = self.buffered_frames.pop_front() {
-                frame
-            } else {
-                match Pin::new(&mut self.framed).poll_next(cx) {
-                    Poll::Ready(Some(Ok(frame))) => frame,
-                    Poll::Ready(Some(Err(e))) => {
-                        return Poll::Ready(Some(Err(pubsub_stream_error(e))));
-                    }
-                    Poll::Ready(None) => return Poll::Ready(None),
-                    Poll::Pending => return Poll::Pending,
-                }
+            return match self.poll_next_event(cx) {
+                Poll::Ready(Some(Ok(NamedPubSubEvent::Message(msg)))) => Poll::Ready(Some(Ok(msg))),
+                Poll::Ready(Some(Ok(NamedPubSubEvent::ShardChannelUnsubscribed(_)))) => continue,
+                Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
             };
-
-            match Self::parse_message(frame) {
-                Ok(Some(msg)) => return Poll::Ready(Some(Ok(msg))),
-                Ok(None) => continue, // skip confirmations
-                Err(e) => return Poll::Ready(Some(Err(e))),
-            }
         }
     }
 }
@@ -1702,6 +1846,183 @@ mod tests {
 
         let buffered = pubsub.next().await.unwrap().unwrap();
         assert_eq!(buffered.payload.as_ref(), b"before-null-ack");
+    }
+
+    async fn binary_pubsub_pair() -> (
+        BinaryPubSubConnection,
+        Framed<RedisStream, redis_tower_protocol::RespCodec>,
+    ) {
+        let (client, server) = redis_stream_pair().await;
+        let pubsub =
+            BinaryPubSubConnection::from_connection(RedisConnection::from_stream(client)).unwrap();
+        (
+            pubsub,
+            Framed::new(server, redis_tower_protocol::RespCodec::new()),
+        )
+    }
+
+    fn push(items: Vec<Frame>) -> Frame {
+        Frame::Push(items)
+    }
+
+    /// Redis drops a shard subscription by itself when the channel's slot
+    /// leaves the node. That `sunsubscribe` used to be discarded as an
+    /// ordinary confirmation: tracking kept the channel and a later no-arg
+    /// SUNSUBSCRIBE waited forever for an acknowledgement the server never
+    /// sends.
+    #[tokio::test]
+    async fn server_initiated_sunsubscribe_is_reported_and_untracked() {
+        let (mut pubsub, mut server) = binary_pubsub_pair().await;
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SSUBSCRIBE"), bulk("{s}a")])
+            );
+            for frame in [
+                push(vec![bulk("ssubscribe"), bulk("{s}a"), Frame::Integer(1)]),
+                push(vec![bulk("sunsubscribe"), bulk("{s}a"), Frame::Integer(0)]),
+                push(vec![bulk("smessage"), bulk("{s}a"), bulk("late")]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUNSUBSCRIBE")])
+            );
+            server
+                .send(push(vec![
+                    bulk("sunsubscribe"),
+                    Frame::Null,
+                    Frame::Integer(0),
+                ]))
+                .await
+                .unwrap();
+            server
+        });
+        pubsub.ssubscribe_bytes(&[b"{s}a"]).await.unwrap();
+
+        match pubsub.next_event().await.unwrap().unwrap() {
+            NamedPubSubEvent::ShardChannelUnsubscribed(channel) => {
+                assert_eq!(channel, Bytes::from_static(b"{s}a"));
+            }
+            other => panic!("expected the server-initiated drop, got {other:?}"),
+        }
+        assert!(pubsub.subscriptions().shard_channels.is_empty());
+        match pubsub.next_event().await.unwrap().unwrap() {
+            NamedPubSubEvent::Message(message) => assert_eq!(message.payload.as_ref(), b"late"),
+            other => panic!("expected the message, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(1), pubsub.sunsubscribe_bytes(&[]))
+            .await
+            .expect("no-arg SUNSUBSCRIBE hung after a server-initiated drop")
+            .unwrap();
+        let _server = server_task.await.unwrap();
+    }
+
+    /// The message `Stream` skips the drop but keeps both trackers in step,
+    /// including the text wrapper's borrowed copy.
+    #[tokio::test]
+    async fn stream_skips_server_unsubscribe_but_updates_text_tracking() {
+        let (mut pubsub, mut server) = pubsub_pair().await;
+        let server_task = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            for frame in [
+                push(vec![bulk("ssubscribe"), bulk("{s}a"), Frame::Integer(1)]),
+                push(vec![bulk("ssubscribe"), bulk("{s}b"), Frame::Integer(2)]),
+                push(vec![bulk("sunsubscribe"), bulk("{s}a"), Frame::Integer(1)]),
+                push(vec![bulk("smessage"), bulk("{s}b"), bulk("kept")]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            server
+        });
+        pubsub.ssubscribe(&["{s}a", "{s}b"]).await.unwrap();
+        let message = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(message.payload.as_ref(), b"kept");
+        assert_eq!(
+            pubsub.subscriptions().shard_channels,
+            BTreeSet::from(["{s}b".to_string()])
+        );
+        let _server = server_task.await.unwrap();
+    }
+
+    /// A drop read off the wire during another request's confirmation wait is
+    /// buffered, not yet seen by the stream. A no-arg SUNSUBSCRIBE must not
+    /// wait for that channel's acknowledgement.
+    #[tokio::test]
+    async fn no_arg_sunsubscribe_applies_a_buffered_server_drop() {
+        let (mut pubsub, mut server) = binary_pubsub_pair().await;
+        let server_task = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            server
+                .send(push(vec![
+                    bulk("ssubscribe"),
+                    bulk("{s}a"),
+                    Frame::Integer(1),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SSUBSCRIBE"), bulk("{s}b")])
+            );
+            for frame in [
+                push(vec![bulk("sunsubscribe"), bulk("{s}a"), Frame::Integer(0)]),
+                push(vec![bulk("ssubscribe"), bulk("{s}b"), Frame::Integer(1)]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUNSUBSCRIBE")])
+            );
+            server
+                .send(push(vec![
+                    bulk("sunsubscribe"),
+                    bulk("{s}b"),
+                    Frame::Integer(0),
+                ]))
+                .await
+                .unwrap();
+            server
+        });
+        pubsub.ssubscribe_bytes(&[b"{s}a"]).await.unwrap();
+        pubsub.ssubscribe_bytes(&[b"{s}b"]).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), pubsub.sunsubscribe_bytes(&[]))
+            .await
+            .expect("no-arg SUNSUBSCRIBE waited for a channel the server already dropped")
+            .unwrap();
+        assert!(pubsub.subscriptions().shard_channels.is_empty());
+        let _server = server_task.await.unwrap();
+    }
+
+    /// If tracking still claims channels the server no longer holds, the
+    /// server's null-name acknowledgement ends the no-arg wait.
+    #[tokio::test]
+    async fn no_arg_sunsubscribe_completes_on_a_null_ack_despite_stale_tracking() {
+        let (mut pubsub, mut server) = binary_pubsub_pair().await;
+        NamedSubscriptions::add(&mut pubsub.subs.shard_channels, &[b"{s}stale"]);
+        let server_task = tokio::spawn(async move {
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SUNSUBSCRIBE")])
+            );
+            server
+                .send(push(vec![
+                    bulk("sunsubscribe"),
+                    Frame::BulkString(None),
+                    Frame::Integer(0),
+                ]))
+                .await
+                .unwrap();
+            server
+        });
+        tokio::time::timeout(Duration::from_secs(1), pubsub.sunsubscribe_bytes(&[]))
+            .await
+            .expect("no-arg SUNSUBSCRIBE ignored the null acknowledgement")
+            .unwrap();
+        assert!(pubsub.subscriptions().shard_channels.is_empty());
+        let _server = server_task.await.unwrap();
     }
 
     #[tokio::test]
