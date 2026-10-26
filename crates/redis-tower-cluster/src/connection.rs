@@ -151,6 +151,21 @@ impl NodeSocket {
     }
 }
 
+/// First wait before routing to a replica again after reconnecting to it
+/// failed; doubles per consecutive failure up to
+/// [`REPLICA_RECONNECT_MAX_BACKOFF`].
+const REPLICA_RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Upper bound for [`REPLICA_RECONNECT_BACKOFF`] growth.
+const REPLICA_RECONNECT_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A replica whose last reconnect attempt failed: routing skips it until
+/// `retry_at`.
+struct ReplicaBackoff {
+    retry_at: Instant,
+    failures: u32,
+}
+
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
 
@@ -213,6 +228,11 @@ pub struct ClusterConnection {
     default_node: String,
     /// Caller-supplied seed, kept as a last-resort discovery source.
     seed_addr: String,
+    /// Replicas whose socket is gone and whose last reconnect failed. A
+    /// replica without a socket is otherwise reconnected lazily the next time
+    /// routing picks it, so one dropped reply does not disable replica reads
+    /// for its slots.
+    replica_backoff: HashMap<String, ReplicaBackoff>,
     /// Host override for Docker/proxy environments.
     host_override: Option<String>,
     /// Per-address mapping for NAT/Kubernetes environments.
@@ -401,6 +421,7 @@ impl ClusterConnection {
             topology: ClusterTopology::new(Vec::new()),
             default_node: String::new(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -579,6 +600,7 @@ impl ClusterConnection {
             topology,
             default_node,
             seed_addr: seed_addr.to_string(),
+            replica_backoff: HashMap::new(),
             host_override,
             address_map,
             read_preference,
@@ -663,12 +685,32 @@ impl ClusterConnection {
             let attempt = target_replica.clone().map(|replica| {
                 ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
             });
-            // A previous command deadline may have quarantined this node's
-            // socket while a reply was outstanding, or a failover may have
-            // changed the role its socket was opened for. Reconnect lazily
-            // before routing the next command to it.
-            self.ensure_connection(&target_node, target_replica.is_some())
-                .await?;
+            // A previous command deadline or I/O error may have quarantined
+            // this node's socket, or a failover may have changed the role its
+            // socket was opened for. Reconnect lazily before routing the next
+            // command to it.
+            if let Err(error) = self
+                .ensure_connection(&target_node, target_replica.is_some())
+                .await
+            {
+                if target_replica.is_none() {
+                    return Err(error);
+                }
+                // Back this replica off and route again: another replica,
+                // the master (PreferReplica), or replica_unavailable. Each
+                // failure removes one candidate, so this terminates.
+                tracing::debug!(
+                    replica = %target_node,
+                    %error,
+                    "cluster: replica reconnect failed; routing around it"
+                );
+                self.note_replica_reconnect_failure(&target_node);
+                drop(attempt);
+                let route = self.route_command(&cmd_frame)?;
+                target_node = route.addr;
+                target_replica = route.replica;
+                continue;
+            }
             let response = if send_asking {
                 // ASKING is connection-local and one-shot, so keep it in the
                 // same checked-out exchange as the migrated command.
@@ -903,33 +945,53 @@ impl ClusterConnection {
     /// Pick a replica for a given slot using the configured read routing strategy.
     fn pick_replica(&self, slot: u16) -> Option<RoutedNode> {
         let replicas = self.topology.replicas_for_slot(slot).unwrap_or(&[]);
-        let is_connected = |replica: &NodeAddr| {
-            self.nodes
-                .get(&replica.addr_string())
-                .is_some_and(|socket| socket.readonly)
+        let now = Instant::now();
+        // A replica without a usable socket stays eligible -- execute
+        // reconnects it -- unless its last reconnect failed recently.
+        let is_eligible = |replica: &NodeAddr| {
+            let addr = replica.addr_string();
+            self.nodes.get(&addr).is_some_and(|socket| socket.readonly)
+                || self
+                    .replica_backoff
+                    .get(&addr)
+                    .is_none_or(|backoff| backoff.retry_at <= now)
         };
-        let available = if replicas.iter().all(&is_connected) {
+        let available = if replicas.iter().all(&is_eligible) {
             Cow::Borrowed(replicas)
         } else {
-            // A direct connection is removed after an I/O failure while the
-            // last topology snapshot can still list it. Never expose those
-            // stale entries to a caller-provided routing strategy.
+            // Never expose a replica in reconnect backoff to a
+            // caller-provided routing strategy.
             Cow::Owned(
                 replicas
                     .iter()
-                    .filter(|replica| is_connected(replica))
+                    .filter(|replica| is_eligible(replica))
                     .cloned()
                     .collect(),
             )
         };
         let selected = self.read_routing.select_replica(slot, &available)?.clone();
-        let selected_addr = selected.addr_string();
-        self.nodes
-            .get_key_value(&selected_addr)
-            .map(|(addr, _connection)| RoutedNode {
-                addr: addr.clone(),
-                replica: Some(selected),
-            })
+        Some(RoutedNode {
+            addr: selected.addr_string(),
+            replica: Some(selected),
+        })
+    }
+
+    /// Record a failed replica reconnect, growing its routing backoff.
+    fn note_replica_reconnect_failure(&mut self, addr: &str) {
+        let failures = self
+            .replica_backoff
+            .get(addr)
+            .map_or(1, |backoff| backoff.failures.saturating_add(1));
+        let delay = REPLICA_RECONNECT_BACKOFF
+            .saturating_mul(1u32 << failures.saturating_sub(1).min(16))
+            .min(REPLICA_RECONNECT_MAX_BACKOFF);
+        self.replica_backoff.insert(
+            addr.to_string(),
+            ReplicaBackoff {
+                retry_at: Instant::now() + delay,
+                failures,
+            },
+        );
     }
 
     /// Remap an address using the address map or host override.
@@ -975,6 +1037,7 @@ impl ClusterConnection {
             return Ok(());
         }
         let conn = self.connector().connect(addr, readonly).await?;
+        self.replica_backoff.remove(addr);
         self.nodes
             .insert(addr.to_string(), NodeSocket { conn, readonly });
         Ok(())
@@ -1038,6 +1101,8 @@ impl ClusterConnection {
         };
         self.nodes
             .retain(|addr, _| masters.contains(addr) || replicas.contains(addr));
+        self.replica_backoff
+            .retain(|addr, _| replicas.contains(addr));
 
         let connector = self.connector();
         for (addrs, readonly) in [(&masters, false), (&replicas, true)] {
@@ -1051,10 +1116,14 @@ impl ClusterConnection {
                 }
                 match connector.connect(addr, readonly).await {
                     Ok(conn) => {
+                        self.replica_backoff.remove(addr);
                         self.nodes
                             .insert(addr.clone(), NodeSocket { conn, readonly });
                     }
                     Err(error) => {
+                        if readonly {
+                            self.note_replica_reconnect_failure(addr);
+                        }
                         tracing::debug!(
                             addr,
                             readonly,
@@ -1824,7 +1893,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn strict_replica_skips_unconnected_topology_replica_on_direct_connection() {
+    async fn strict_replica_skips_replica_in_reconnect_backoff_on_direct_connection() {
         let master_addr = "127.0.0.1:7000";
         let connected_replica_addr = "127.0.0.1:7002";
         let (master_client, mut master_server) = tokio::net::UnixStream::pair().unwrap();
@@ -1849,6 +1918,8 @@ mod tests {
             ))),
         );
         cluster.read_preference = ReadPreference::Replica;
+        // 7001 has no socket and its last reconnect failed.
+        cluster.note_replica_reconnect_failure("127.0.0.1:7001");
         let routing_calls = Arc::new(AtomicUsize::new(0));
         let routing_candidates = Arc::new(Mutex::new(Vec::new()));
         cluster.read_routing = Arc::new(RecordingRouting {
@@ -2439,6 +2510,7 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: Some("127.0.0.1".to_string()),
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2459,6 +2531,7 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2489,6 +2562,7 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: Some(map),
             read_preference: ReadPreference::Master,
@@ -2520,6 +2594,7 @@ mod tests {
             topology: make_topology(),
             default_node: String::new(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: Some("127.0.0.1".to_string()),
             address_map: Some(map),
             read_preference: ReadPreference::Master,
@@ -2611,6 +2686,7 @@ mod tests {
             topology: make_topology(),
             default_node: "10.0.0.1:7000".to_string(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2638,6 +2714,7 @@ mod tests {
             topology: make_topology(),
             default_node: "10.0.0.1:7000".to_string(),
             seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,

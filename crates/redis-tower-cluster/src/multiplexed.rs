@@ -2289,6 +2289,13 @@ impl MultiplexedClusterClient {
             if inner.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
+                // A replica worker that gave up reconnecting (or was never
+                // built) is only rebuilt by a topology refresh. Reads route
+                // around it, so no node error would ever schedule one; do it
+                // here, behind the refresh rate limit.
+                if replica_needs_rebuild(&inner, slot) {
+                    self.trigger_refresh();
+                }
                 if let Some((addr, replica)) = pick_replica(&inner, slot)
                     && let Some(svc) = inner.replicas.get(&addr)
                     && replica_service_is_usable(svc)
@@ -2648,6 +2655,22 @@ fn pick_replica(inner: &Inner, slot: u16) -> Option<(String, NodeAddr)> {
 
 fn replica_service_is_usable(service: &AutoPipelineService) -> bool {
     service.is_alive() && service.is_connection_healthy()
+}
+
+/// Whether an advertised replica of `slot` has no worker or a dead one. A
+/// worker that is merely reconnecting is left to its own retry loop.
+fn replica_needs_rebuild(inner: &Inner, slot: u16) -> bool {
+    inner
+        .topology
+        .replicas_for_slot(slot)
+        .unwrap_or(&[])
+        .iter()
+        .any(|replica| {
+            inner
+                .replicas
+                .get(&replica.addr_string())
+                .is_none_or(|service| !service.is_alive())
+        })
 }
 
 /// Counts reported when a topology refresh completes successfully.

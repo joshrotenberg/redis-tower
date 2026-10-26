@@ -251,3 +251,142 @@ async fn cluster_connection_refresh_survives_a_dead_seed_and_moves_the_default()
     );
     assert_eq!(b.received("PING"), 1);
 }
+
+/// A replica restarts and stays down longer than its worker's reconnect
+/// budget, so the worker exits. Reads route around a dead worker, so nothing
+/// scheduled the refresh that rebuilds it: strict replica reads failed
+/// forever and PreferReplica reads silently stayed on the master.
+#[tokio::test]
+async fn multiplexed_replica_reads_recover_after_the_replica_restarts() {
+    for preference in [ReadPreference::Replica, ReadPreference::PreferReplica] {
+        let cluster = Cluster::new();
+        let a = fake_node(cluster.clone(), default_handler()).await;
+        let b = fake_node(cluster.clone(), default_handler()).await;
+        let b_port = b.port;
+        cluster.set(slots(vec![(0, 16383, a.port, vec![b_port])]));
+        let client = MultiplexedClusterClient::builder(a.addr())
+            .read_preference(preference)
+            .connect()
+            .await
+            .unwrap();
+        client
+            .execute(RawCommand::new("GET").arg("k"))
+            .await
+            .unwrap();
+        assert_eq!(b.received("GET"), 1);
+
+        // Connections closed and the port refusing for longer than the
+        // worker's bounded reconnect budget.
+        drop(b);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let b = fake_node_at(cluster.clone(), default_handler(), b_port).await;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let result = client.execute(RawCommand::new("GET").arg("k")).await;
+            if result.is_ok() && b.received("GET") > 0 {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{preference:?}: replica reads never returned to the restarted replica \
+                 (last result {result:?})"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        client.shutdown().await;
+    }
+}
+
+/// `ClusterConnection` dropped a replica socket after one I/O error and never
+/// reconnected it, disabling replica reads for its slots permanently.
+#[tokio::test]
+async fn cluster_connection_reconnects_a_replica_after_one_io_error() {
+    let cluster = Cluster::new();
+    let replica_port = Arc::new(AtomicU16::new(0));
+    let dropped_once = Arc::new(AtomicBool::new(false));
+    let handler: Handler = {
+        let replica_port = replica_port.clone();
+        let dropped_once = dropped_once.clone();
+        Arc::new(move |request| {
+            (request.port == replica_port.load(Ordering::SeqCst)
+                && request.is(b"GET")
+                && !dropped_once.swap(true, Ordering::SeqCst))
+            .then_some(Action::Close)
+        })
+    };
+    let a = fake_node(cluster.clone(), handler.clone()).await;
+    let b = fake_node(cluster.clone(), handler).await;
+    replica_port.store(b.port, Ordering::SeqCst);
+    cluster.set(slots(vec![(0, 16383, a.port, vec![b.port])]));
+    let mut conn = ClusterConnection::builder(a.addr())
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .unwrap();
+
+    assert!(conn.execute(RawCommand::new("GET").arg("k")).await.is_err());
+    conn.execute(RawCommand::new("GET").arg("k"))
+        .await
+        .expect("the replica socket is reconnected on the next read");
+    assert_eq!(b.accepted.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        a.received("GET"),
+        0,
+        "strict replica reads never use the master"
+    );
+}
+
+/// A replica whose reconnect fails is skipped for a growing backoff rather
+/// than costing a connect attempt on every read, then retried.
+#[tokio::test]
+async fn cluster_connection_backs_off_a_replica_whose_reconnect_fails() {
+    let cluster = Cluster::new();
+    let reject_setup = Arc::new(AtomicBool::new(false));
+    let handler: Handler = {
+        let reject_setup = reject_setup.clone();
+        Arc::new(move |request| {
+            (request.is(b"READONLY") && reject_setup.load(Ordering::SeqCst))
+                .then_some(Action::Close)
+        })
+    };
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    let b = fake_node(cluster.clone(), handler).await;
+    cluster.set(slots(vec![(0, 16383, a.port, vec![b.port])]));
+    let mut conn = ClusterConnection::builder(a.addr())
+        .read_preference(ReadPreference::Replica)
+        .connect()
+        .await
+        .unwrap();
+    let get = || RawCommand::new("GET").arg("k");
+
+    // The replica's socket dies, and reconnecting to it now fails.
+    reject_setup.store(true, Ordering::SeqCst);
+    b.kill_connections();
+    assert!(conn.execute(get()).await.is_err(), "the dead socket");
+    assert!(conn.execute(get()).await.is_err(), "the failed reconnect");
+    let attempts = b.accepted.load(Ordering::SeqCst);
+    assert_eq!(attempts, 2, "startup plus one reconnect");
+    let error = conn.execute(get()).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("ReadPreference::Replica requires"),
+        "{error}"
+    );
+    assert_eq!(
+        b.accepted.load(Ordering::SeqCst),
+        attempts,
+        "no reconnect inside the backoff"
+    );
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(conn.execute(get()).await.is_err());
+    assert_eq!(b.accepted.load(Ordering::SeqCst), attempts + 1, "retried");
+
+    reject_setup.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    conn.execute(get())
+        .await
+        .expect("replica reads resume once it accepts connections again");
+}
