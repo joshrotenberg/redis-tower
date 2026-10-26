@@ -18,7 +18,7 @@
 //!
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#raw-custom-and-module-replies
 
-use crate::CommandArg;
+use crate::{CommandArg, SetStatus};
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -36,6 +36,11 @@ pub enum JsonSetCondition {
 ///
 /// Sets the JSON value at `path` in the key. Creates the key if it does not
 /// exist. Returns `Ok(())` on success.
+///
+/// With [`JsonSet::nx`] or [`JsonSet::xx`], Redis replies with null when the
+/// condition fails, and this command still returns `Ok(())`. Finish the
+/// builder with [`JsonSet::with_outcome`] to learn whether the write was
+/// applied.
 #[derive(Clone)]
 pub struct JsonSet {
     key: CommandArg,
@@ -70,6 +75,58 @@ impl JsonSet {
         self.condition = Some(JsonSetCondition::Xx);
         self
     }
+
+    /// Report whether Redis applied the write.
+    ///
+    /// The response is [`SetStatus::NotApplied`] when an `NX` or `XX`
+    /// condition failed and [`SetStatus::Applied`] otherwise, in both RESP2
+    /// and RESP3:
+    ///
+    /// ```
+    /// use redis_tower_commands::JsonSet;
+    /// use redis_tower_core::Command;
+    ///
+    /// let command = JsonSet::new("doc", "$.owner", r#""worker-1""#).nx().with_outcome();
+    /// assert_eq!(command.name(), "JSON.SET");
+    /// ```
+    pub fn with_outcome(self) -> JsonSetWithOutcome {
+        JsonSetWithOutcome { command: self }
+    }
+}
+
+/// A [`JsonSet`] command whose response is a [`SetStatus`].
+///
+/// Create this command by calling [`JsonSet::with_outcome`] after configuring
+/// the condition.
+#[derive(Clone)]
+pub struct JsonSetWithOutcome {
+    command: JsonSet,
+}
+
+impl Command for JsonSetWithOutcome {
+    type Response = SetStatus;
+
+    fn to_frame(&self) -> Frame {
+        self.command.to_frame()
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::SimpleString(s) if &s[..] == b"OK" => Ok(SetStatus::Applied),
+            // Unmet NX/XX condition: `$-1` in RESP2, `_` in RESP3.
+            Frame::Null | Frame::BulkString(None) if self.command.condition.is_some() => {
+                Ok(SetStatus::NotApplied)
+            }
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "OK, or null for a conditional JSON.SET",
+                actual: format!("{other:?}"),
+            }),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.SET"
+    }
 }
 
 impl Command for JsonSet {
@@ -93,7 +150,8 @@ impl Command for JsonSet {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
-            Frame::Null => Ok(()),
+            // Unmet NX/XX condition: `$-1` in RESP2, `_` in RESP3.
+            Frame::Null | Frame::BulkString(None) => Ok(()),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "OK or null",
                 actual: format!("{other:?}"),
@@ -358,7 +416,13 @@ impl Command for JsonType {
 /// JSON.NUMINCRBY key path value
 ///
 /// Increments the numeric value at `path` by `value`. Returns the new value
-/// as a string.
+/// as JSON text: a JSON array with one entry per match for a `$` JSONPath
+/// (`null` for a match that is not a number), or the bare number for a legacy
+/// path.
+///
+/// RESP2 replies with that text directly. RESP3 replies with typed values,
+/// which are rendered into the same text, so the response does not depend on
+/// the negotiated protocol.
 #[derive(Clone)]
 pub struct JsonNumIncrBy {
     key: CommandArg,
@@ -391,9 +455,22 @@ impl Command for JsonNumIncrBy {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
+            // RESP2: the new value(s) as JSON text.
             Frame::BulkString(Some(data)) => Ok(data),
+            // RESP3: one typed value per match, for legacy paths too.
+            Frame::Array(Some(values)) => {
+                let rendered = values
+                    .iter()
+                    .map(json_number_text)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let text = match rendered.as_slice() {
+                    [single] if !self.path.starts_with('$') => single.clone(),
+                    _ => format!("[{}]", rendered.join(",")),
+                };
+                Ok(Bytes::from(text))
+            }
             other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string",
+                expected: "bulk string (RESP2) or array (RESP3)",
                 actual: format!("{other:?}"),
             }),
         }
@@ -401,6 +478,23 @@ impl Command for JsonNumIncrBy {
 
     fn name(&self) -> &str {
         "JSON.NUMINCRBY"
+    }
+}
+
+/// Render one RESP3 `JSON.NUMINCRBY` match as the JSON text RESP2 returns.
+fn json_number_text(frame: &Frame) -> Result<String, RedisError> {
+    match frame {
+        Frame::Integer(n) => Ok(n.to_string()),
+        // `{:?}` keeps a fractional part on whole floats (`2.0`), as JSON does.
+        Frame::Double(d) => Ok(format!("{d:?}")),
+        Frame::SpecialFloat(text) | Frame::BulkString(Some(text)) => {
+            Ok(String::from_utf8_lossy(text).into_owned())
+        }
+        Frame::Null | Frame::BulkString(None) => Ok("null".to_string()),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "number or null",
+            actual: format!("{other:?}"),
+        }),
     }
 }
 
@@ -686,7 +780,13 @@ impl Command for JsonArrIndex {
 /// JSON.ARRPOP key \[path \[index\]\]
 ///
 /// Removes and returns the element at `index` from the array at `path`.
-/// Defaults to the last element (-1).
+/// Defaults to the last element (-1). Returns `None` when there was nothing to
+/// pop.
+///
+/// A `$` JSONPath replies with one entry per match. This command returns the
+/// single match's value, and errors when the path matched more than one array
+/// (each of which Redis has already popped). Use [`JsonArrPop::all_matches`]
+/// for paths that can match several arrays.
 #[derive(Clone)]
 pub struct JsonArrPop {
     key: CommandArg,
@@ -715,6 +815,64 @@ impl JsonArrPop {
         self.index = Some(index);
         self
     }
+
+    /// Return the popped value for every array the path matched.
+    ///
+    /// The response has one entry per match, `None` for a match that is not
+    /// an array or is empty. A legacy path's single value is returned as a
+    /// one-element list:
+    ///
+    /// ```
+    /// use redis_tower_commands::JsonArrPop;
+    /// use redis_tower_core::Command;
+    ///
+    /// let command = JsonArrPop::new("doc").path("$..queue").all_matches();
+    /// assert_eq!(command.name(), "JSON.ARRPOP");
+    /// ```
+    pub fn all_matches(self) -> JsonArrPopAll {
+        JsonArrPopAll { command: self }
+    }
+}
+
+/// Decode one `JSON.ARRPOP` value: the popped JSON text, or null when there
+/// was nothing to pop (`$-1` in RESP2, `_` in RESP3).
+fn parse_arrpop_value(frame: Frame) -> Result<Option<Bytes>, RedisError> {
+    match frame {
+        Frame::BulkString(data) => Ok(data),
+        Frame::Null => Ok(None),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "bulk string or null",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// A [`JsonArrPop`] whose response holds one value per JSONPath match.
+///
+/// Create this command with [`JsonArrPop::all_matches`].
+#[derive(Clone)]
+pub struct JsonArrPopAll {
+    command: JsonArrPop,
+}
+
+impl Command for JsonArrPopAll {
+    type Response = Vec<Option<Bytes>>;
+
+    fn to_frame(&self) -> Frame {
+        self.command.to_frame()
+    }
+
+    fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
+        match frame {
+            Frame::Array(Some(matches)) => matches.into_iter().map(parse_arrpop_value).collect(),
+            Frame::Array(None) => Ok(Vec::new()),
+            single => Ok(vec![parse_arrpop_value(single)?]),
+        }
+    }
+
+    fn name(&self) -> &str {
+        "JSON.ARRPOP"
+    }
 }
 
 impl Command for JsonArrPop {
@@ -733,12 +891,22 @@ impl Command for JsonArrPop {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::BulkString(data) => Ok(data),
-            Frame::Null => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or null",
-                actual: format!("{other:?}"),
-            }),
+            // `$` JSONPath: one entry per matched array.
+            Frame::Array(Some(matches)) => {
+                if matches.len() > 1 {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "at most one JSONPath match (use JsonArrPop::all_matches for several)",
+                        actual: format!("{} matches", matches.len()),
+                    });
+                }
+                match matches.into_iter().next() {
+                    Some(value) => parse_arrpop_value(value),
+                    None => Ok(None),
+                }
+            }
+            Frame::Array(None) => Ok(None),
+            // Legacy path: the popped value itself.
+            single => parse_arrpop_value(single),
         }
     }
 

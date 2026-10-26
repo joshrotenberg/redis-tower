@@ -19,6 +19,7 @@
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#typed-commands-and-response-shapes
 
 use crate::CommandArg;
+use crate::reply;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -189,24 +190,7 @@ impl Command for GeoDist {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(&data);
-                let dist = s
-                    .parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })?;
-                Ok(Some(dist))
-            }
-            Frame::Double(d) => Ok(Some(d)),
-            Frame::BulkString(None) | Frame::Null => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string, double, or null",
-                actual: format!("{other:?}"),
-            }),
-        }
+        reply::optional_double(&frame)
     }
 
     fn name(&self) -> &str {
@@ -326,27 +310,9 @@ impl GeoPos {
                 actual: format!("array of length {}", frames.len()),
             });
         }
-        let lon = Self::parse_f64(&frames[0])?;
-        let lat = Self::parse_f64(&frames[1])?;
+        let lon = reply::double(&frames[0])?;
+        let lat = reply::double(&frames[1])?;
         Ok((lon, lat))
-    }
-
-    fn parse_f64(frame: &Frame) -> Result<f64, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(data);
-                s.parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })
-            }
-            Frame::Double(d) => Ok(*d),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or double",
-                actual: format!("{other:?}"),
-            }),
-        }
     }
 }
 

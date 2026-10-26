@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Pre-1.0 source compatibility:** `VectorSetClient::links` returns
+  `Option<Vec<Vec<SimilarityResult>>>`: one list per HNSW layer, ordered from
+  the element's highest layer down to layer 0, and `None` for a missing set or
+  element. It previously failed on every reply.
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-modules-v0.1.2...redis-tower-modules-v0.1.3) - 2026-10-01
 
 ### Changed
