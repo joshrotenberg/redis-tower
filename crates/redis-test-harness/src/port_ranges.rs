@@ -220,6 +220,11 @@ pub const FIXTURE_PORT_RANGES: &[FixturePortRange] = &[
         start: 18200,
         len: 10,
     },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (single-node clusters)",
+        start: 18220,
+        len: 2,
+    },
 ];
 
 /// Fails clearly, naming both fixtures and the exact overlapping ports, if

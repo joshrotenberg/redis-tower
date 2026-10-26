@@ -105,12 +105,12 @@ use crate::connection::{
     ReplicaRoutingAttempt, RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError,
     is_readonly_reply, parse_cluster_url, parse_redirect, redis_error_from_reply, remap_topology,
     remap_topology_with_map, replica_outcome_for_result, replica_unavailable,
-    strict_replica_read_slot,
+    resolve_redirect_addr, strict_replica_read_slot,
 };
 use crate::key_extractor;
 use crate::slot::slot_for_key;
 use crate::topology::changes::{TopologyChange, TopologyChangeTracker, TopologySnapshot};
-use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at};
 
 /// A high-concurrency, multiplexed Redis Cluster client.
 ///
@@ -583,7 +583,12 @@ impl ClusterPubSubBackend {
 
     /// Apply the same address-map/host-override policy used by ordinary
     /// command redirects to an address advertised in a Pub/Sub MOVED reply.
-    pub(crate) async fn remap_redirect(&self, addr: &str) -> Result<NodeAddr, RedisError> {
+    pub(crate) async fn remap_redirect(
+        &self,
+        addr: &str,
+        from: &NodeAddr,
+    ) -> Result<NodeAddr, RedisError> {
+        let addr = &resolve_redirect_addr(addr, &from.addr_string());
         let inner = self.inner()?;
         let inner = inner.read().await;
         let remapped = if let Some(mapped) = inner
@@ -1113,7 +1118,7 @@ impl MultiplexedClusterClient {
         // before CLUSTER SLOTS so the discovery itself works against an
         // ACL-protected cluster.
         let mut seed_conn = connector.connect(seed_addr, false).await?;
-        let mut topology = discover_topology(&mut seed_conn).await?;
+        let mut topology = discover_topology_at(&mut seed_conn, seed_addr).await?;
         drop(seed_conn);
 
         if let Some(ref map) = address_map {
@@ -1353,13 +1358,15 @@ impl MultiplexedClusterClient {
                 if let Err(error) = &response {
                     client.observe_node_error(&addr, error);
                 }
-                (entries, response)
+                (addr, entries, response)
             }
         });
         let batches = futures::future::join_all(batches).await;
 
         let mut ordered = vec![None; frames.len()];
-        for (entries, response) in batches {
+        // The node each entry went to, to resolve host-less redirects.
+        let mut sent_to = vec![String::new(); frames.len()];
+        for (addr, entries, response) in batches {
             let responses = response?;
             if responses.len() != entries.len() {
                 return Err(RedisError::UnexpectedResponse {
@@ -1373,6 +1380,7 @@ impl MultiplexedClusterClient {
             }
             for ((index, _), response) in entries.into_iter().zip(responses) {
                 ordered[index] = Some(response);
+                sent_to[index].clone_from(&addr);
             }
         }
 
@@ -1388,7 +1396,11 @@ impl MultiplexedClusterClient {
         // neighbor in the original node batch can never be replayed.
         let mut redirected_by_slot: BTreeMap<u16, Vec<(usize, Frame, Redirect)>> = BTreeMap::new();
         for (index, response) in ordered.iter().enumerate() {
-            let Some(redirect) = response.as_ref().and_then(parse_redirect) else {
+            let Some(redirect) = response
+                .as_ref()
+                .and_then(parse_redirect)
+                .map(|redirect| redirect.resolved_against(&sent_to[index]))
+            else {
                 continue;
             };
             let redirect_slot = match &redirect {
@@ -1464,7 +1476,7 @@ impl MultiplexedClusterClient {
         // exactly one redirect, so max_redirects=1 permits one replay.
         for redirect_number in 1..=max_redirects {
             let attempt = redirect_number.saturating_add(1);
-            let response = match redirect {
+            let (response, replied_from) = match redirect {
                 Redirect::Moved { slot, addr } => {
                     self.notify_cache_node_loss(&addr);
                     let addr = self.remap_addr(&addr).await;
@@ -1480,13 +1492,15 @@ impl MultiplexedClusterClient {
                     self.update_slot_owner(slot, &addr).await;
                     self.trigger_refresh();
                     let mut target = self.master_service(&addr).await?;
-                    self.dispatch_to_target(
-                        &mut target,
-                        frame.clone(),
-                        CacheDispatchMode::Plain,
-                        false,
-                    )
-                    .await?
+                    let response = self
+                        .dispatch_to_target(
+                            &mut target,
+                            frame.clone(),
+                            CacheDispatchMode::Plain,
+                            false,
+                        )
+                        .await?;
+                    (response, addr)
                 }
                 Redirect::Ask { slot, addr } => {
                     self.notify_cache_node_loss(&addr);
@@ -1501,17 +1515,19 @@ impl MultiplexedClusterClient {
                     );
                     self.ensure_master(&addr).await?;
                     let mut target = self.master_service(&addr).await?;
-                    self.dispatch_to_target(
-                        &mut target,
-                        frame.clone(),
-                        CacheDispatchMode::Plain,
-                        true,
-                    )
-                    .await?
+                    let response = self
+                        .dispatch_to_target(
+                            &mut target,
+                            frame.clone(),
+                            CacheDispatchMode::Plain,
+                            true,
+                        )
+                        .await?;
+                    (response, addr)
                 }
             };
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|next| next.resolved_against(&replied_from)) {
                 Some(next) => {
                     self.record_pipeline_redirect(&next);
                     redirect = next;
@@ -1618,7 +1634,8 @@ impl MultiplexedClusterClient {
                 .await?;
             let attempt = followups_used.saturating_add(1);
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|redirect| redirect.resolved_against(&target.addr))
+            {
                 Some(Redirect::Moved { slot, addr }) => {
                     // A MOVED reply proves the routing snapshot is stale. Close
                     // cache use synchronously before any address remapping or
@@ -2868,7 +2885,7 @@ async fn discover_from_seed(
     connector: &ClusterNodeConnector,
 ) -> Result<ClusterTopology, RedisError> {
     let mut conn = connector.connect(seed_addr, false).await?;
-    discover_topology(&mut conn).await
+    discover_topology_at(&mut conn, seed_addr).await
 }
 
 /// Collect node addresses as strings, dropping duplicates and preserving
