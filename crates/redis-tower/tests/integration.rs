@@ -3517,13 +3517,13 @@ async fn multiplexed_response_timeout_trips_on_slow_command() {
     };
     let client = MultiplexedClient::from_connection_with_config(conn, config);
 
-    // BLPOP on an empty key blocks this connection for up to 5s (it does not
-    // block the whole server). The 150ms response deadline must trip first and
-    // surface CommandTimeout rather than stalling the worker.
-    let k = key("mux_timeout", "blpop");
-    client.execute(Del::new(&k)).await.unwrap();
+    // WAIT for a replica that does not exist holds this connection for up to
+    // 5s (it does not block the whole server). The 150ms response deadline
+    // must trip first and surface CommandTimeout rather than stalling the
+    // worker. (Blocking pops such as BLPOP are rejected before they reach a
+    // shared multiplexed connection.)
     let err = client
-        .execute(RawCommand::new("BLPOP").arg(&k).arg("5"))
+        .execute(RawCommand::new("WAIT").arg("1").arg("5000"))
         .await
         .unwrap_err();
     assert!(

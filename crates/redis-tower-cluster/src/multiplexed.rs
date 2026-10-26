@@ -1208,6 +1208,13 @@ impl MultiplexedClusterClient {
         dispatch_mode: CacheDispatchMode,
     ) -> Result<Cmd::Response, RedisError> {
         self.lifecycle.ensure_running()?;
+        // Per-node workers are shared by every clone; their frame services
+        // reject the other connection-breaking commands.
+        if cmd.is_blocking() {
+            return Err(
+                redis_tower::shared_connection_support::reject_blocking_command(cmd.name()),
+            );
+        }
         let deadline = cmd.deadline();
         let observation = self
             .metrics_recorder

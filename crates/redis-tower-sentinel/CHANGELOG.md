@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- reject blocking commands and other commands that break a shared connection
+  (subscriptions, `MONITOR`, `RESET`, `HELLO`, `QUIT`, `CLIENT REPLY`,
+  stand-alone `MULTI`/`EXEC`/`WATCH`) in `MultiplexedSentinelClient`, whose
+  master and replica workers are shared by every clone
 - strip IPv6 brackets from the TLS server name for sentinel connections, as
   core and Cluster already do; a bracketed literal such as `[::1]` was passed
   to the TLS library, which rejects it

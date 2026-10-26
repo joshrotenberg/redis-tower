@@ -26,15 +26,23 @@ Client choice has a larger effect than most numeric knobs:
 | Repeated master-routed Cluster reads with bounded staleness | `CachedMultiplexedClusterClient` | One slot-aware shared cache with complete per-master RESP3 invalidation coverage |
 | Sentinel-managed primary with failover | `MultiplexedSentinelClient::connect_with_reconnect` | Re-discovers and verifies the primary after failure or READONLY |
 
-Never send `BLPOP`, `BRPOP`, blocking `XREAD` / `XREADGROUP`, or another
-blocking command through a shared `MultiplexedClient`. One blocked Redis
-connection stalls its pipeline worker and every clone. Isolate blocking traffic
-on dedicated or pooled connections, and ensure the pool has enough independent
-slots for the maximum intended number of simultaneous blockers.
+Blocking commands cannot share a multiplexed connection: one blocked Redis
+connection would stall its pipeline worker and every clone. Standalone, Cluster,
+and Sentinel multiplexed clients therefore reject `BLPOP`, `BRPOP`, `BLMOVE`,
+the other blocking pops, `XREAD` / `XREADGROUP` with `BLOCK`, and any typed
+command whose `is_blocking()` is true, before anything is sent. Isolate blocking
+traffic on dedicated or pooled connections, and ensure the pool has enough
+independent slots for the maximum intended number of simultaneous blockers.
 
 Likewise, keep `PubSubConnection` and `MonitorStream` dedicated. Redis changes
 the connection's mode for pub/sub and MONITOR, and MONITOR itself has a large
-server-side throughput cost.
+server-side throughput cost. Multiplexed clients reject the commands that would
+otherwise corrupt the shared session for every clone: subscriptions, `MONITOR`,
+`SYNC`/`PSYNC`, `RESET`, `HELLO`, `QUIT`, `CLIENT REPLY`, and stand-alone
+`MULTI`/`EXEC`/`DISCARD`/`WATCH` (use `Transaction`, whose batch stays
+contiguous). `AUTH` remains allowed so credential rotation can re-authenticate
+the shared worker. `SELECT` and `CLIENT SETNAME` are allowed but apply to every
+clone and are reverted by a reconnect; put them in the connection factory.
 
 ## Plan for Smart Client Handoff maintenance
 
