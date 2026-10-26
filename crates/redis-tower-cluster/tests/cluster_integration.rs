@@ -3357,8 +3357,20 @@ mod failover_recovery {
         use redis_server_wrapper::RedisServer;
 
         for (port, endpoint_type) in [(18220, None), (18221, Some("unknown-endpoint"))] {
+            // A fresh directory per run: a nodes.conf left by an earlier run
+            // would already own every slot.
+            let dir = std::env::temp_dir().join(format!(
+                "redis-tower-single-node-{port}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
             let mut server = RedisServer::new()
                 .port(port)
+                .dir(&dir)
                 .cluster_enabled(true)
                 .save(false)
                 .appendonly(false);
@@ -3415,6 +3427,8 @@ mod failover_recovery {
                 Some(Bytes::from_static(b"v"))
             );
             client.shutdown().await;
+            drop(server);
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
     /// redis-rs #2474: node-scoped commands used to reach only the keyless
