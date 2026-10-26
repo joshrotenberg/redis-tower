@@ -976,11 +976,24 @@ impl Command for Restore {
     }
 }
 
-/// Authentication used by [`Migrate`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Authentication used by [`Migrate`]. `Debug` output redacts passwords.
+#[derive(Clone, PartialEq, Eq)]
 enum MigrateAuth {
     Password(Bytes),
     UsernamePassword(Bytes, Bytes),
+}
+
+impl std::fmt::Debug for MigrateAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Password(_) => f.debug_tuple("Password").field(&"[REDACTED]").finish(),
+            Self::UsernamePassword(username, _) => f
+                .debug_tuple("UsernamePassword")
+                .field(username)
+                .field(&"[REDACTED]")
+                .finish(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1817,6 +1830,18 @@ mod tests {
     use redis_tower_core::Command;
     use redis_tower_protocol::Frame;
     use redis_tower_protocol::helpers::{array, bulk};
+
+    #[test]
+    fn migrate_debug_redacts_destination_passwords() {
+        for migrate in [
+            Migrate::new("10.0.0.2", 6379, "key", 0, 1000).auth("hunter2-secret"),
+            Migrate::new("10.0.0.2", 6379, "key", 0, 1000).auth2("admin", "hunter2-secret"),
+        ] {
+            let rendered = format!("{migrate:?}");
+            assert!(!rendered.contains("hunter2-secret"), "{rendered}");
+            assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        }
+    }
 
     // -- Del --
 

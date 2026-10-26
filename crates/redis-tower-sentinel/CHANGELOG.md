@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- strip IPv6 brackets from the TLS server name for sentinel connections, as
+  core and Cluster already do; a bracketed literal such as `[::1]` was passed
+  to the TLS library, which rejects it
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-sentinel-v0.1.3...redis-tower-sentinel-v0.1.4) - 2026-10-01
 
 ### Added

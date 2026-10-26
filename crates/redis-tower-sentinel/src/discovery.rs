@@ -88,12 +88,8 @@ pub(crate) async fn connect_hop(
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
     let conn = match tls {
         Some(tls_cfg) => {
-            let hostname = addr
-                .rsplit_once(':')
-                .map(|(h, _)| h)
-                .unwrap_or(addr)
-                .to_string();
-            RedisConnection::connect_tls_with_config(addr, &hostname, tls_cfg, &connection_config)
+            let hostname = tls_server_name(addr);
+            RedisConnection::connect_tls_with_config(addr, hostname, tls_cfg, &connection_config)
                 .await?
         }
         None => RedisConnection::connect_with_config(addr, &connection_config).await?,
@@ -102,6 +98,16 @@ pub(crate) async fn connect_hop(
     let conn = RedisConnection::connect_with_config(addr, &connection_config).await?;
 
     finish_hop_setup(conn, credentials).await
+}
+
+/// The TLS server name for a `host:port` address. IPv6 literals arrive
+/// bracketed (`[::1]:26379`), and TLS libraries reject the brackets.
+#[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+fn tls_server_name(addr: &str) -> &str {
+    let host = addr.rsplit_once(':').map(|(host, _)| host).unwrap_or(addr);
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 async fn finish_hop_setup(
@@ -574,6 +580,22 @@ pub(crate) async fn connect_verified_master_with_config(
 mod tests {
     use super::*;
     use bytes::Bytes;
+
+    #[test]
+    #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+    fn tls_server_names_strip_only_ipv6_brackets() {
+        assert_eq!(tls_server_name("[::1]:26379"), "::1");
+        assert_eq!(tls_server_name("[fe80::1]:26379"), "fe80::1");
+        assert_eq!(tls_server_name("127.0.0.1:26379"), "127.0.0.1");
+        assert_eq!(
+            tls_server_name("sentinel.example.com:26379"),
+            "sentinel.example.com"
+        );
+        assert_eq!(
+            tls_server_name("sentinel.example.com"),
+            "sentinel.example.com"
+        );
+    }
 
     #[tokio::test]
     #[cfg(unix)]

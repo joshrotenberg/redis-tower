@@ -12,6 +12,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - redacted, typed `ConnectionSetup` policies and `ConnectionConfig::with_client_name`
   for fail-closed setup after authentication, database selection, and RESP negotiation
 
+### Fixed
+
+- classify socket failures surfaced through the codec (connection reset,
+  keepalive timeout, EOF part-way through a reply) as `RedisError::Connection`
+  instead of `RedisError::Protocol`, so `is_connection_error()`, reconnect
+  layers, and "outcome unknown" handling for dedicated connections see them;
+  rejected RESP3 constructs remain protocol errors
+- read replies while `execute_pipeline` is still writing, so a batch mixing a
+  large reply with a large request no longer deadlocks against servers or
+  proxies that stop reading while their replies go unread; this also covers
+  `AutoPipelineService`, `MultiplexedClient`, and explicit pipelines
+- return `RedisError::ConnectionClosed` from `negotiate_protocol`, `hello`,
+  and URL setup steps on a connection whose transport an earlier failure
+  consumed, instead of panicking
+- end URL userinfo at the last `@`, so a raw `@` in a password no longer turns
+  part of the password into the host shown in connection errors and spans
+- stop echoing raw port, path-database, and IPv6 text in `InvalidUrl` errors,
+  and redact the password in `RedisUrl`'s `Debug` output
+
+### Documentation
+
+- `connect_with_config` and `connect_tls_with_config` apply `ConnectionSetup`
+  before a caller can authenticate; document clearing the policy and calling
+  `apply_setup` after manual `AUTH`
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-core-v0.1.2...redis-tower-core-v0.1.3) - 2026-10-01
 
 ### Added

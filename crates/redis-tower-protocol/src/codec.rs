@@ -77,7 +77,24 @@ impl Default for RespLimits {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RespCodec {
     limits: RespLimits,
+    /// A frame larger than [`RECLAIM_THRESHOLD`] was decoded; replace the
+    /// read buffer once it drains.
+    reclaim_read: bool,
+    /// A frame larger than [`RECLAIM_THRESHOLD`] was encoded; replace the
+    /// write buffer before the next encode into an empty buffer.
+    reclaim_write: bool,
 }
+
+/// Frames above this size grow a connection's buffers to their size, and
+/// `BytesMut` keeps that allocation for the life of the connection. After such
+/// a frame the codec swaps the drained buffer for a fresh one, so a long-lived
+/// connection does not pin its largest-ever frame. Smaller frames keep their
+/// allocation to avoid regrowing it on every reply.
+const RECLAIM_THRESHOLD: usize = 1024 * 1024;
+
+/// Capacity of a reclaimed buffer, matching tokio-util's initial `Framed`
+/// buffer so reads after reclamation are not issued in tiny increments.
+const RECLAIMED_CAPACITY: usize = 8 * 1024;
 
 impl RespCodec {
     /// A codec with the default limits.
@@ -87,7 +104,10 @@ impl RespCodec {
 
     /// A codec with explicit decode limits.
     pub fn with_limits(limits: RespLimits) -> Self {
-        Self { limits }
+        Self {
+            limits,
+            ..Self::default()
+        }
     }
 
     /// The limits this codec enforces while decoding.
@@ -121,7 +141,28 @@ impl Decoder for RespCodec {
             return Err(resp_rs::ParseError::InvalidFormat.into());
         }
         src.advance(frame_len);
+        self.reclaim_read |= frame_len > RECLAIM_THRESHOLD;
+        if self.reclaim_read && src.is_empty() {
+            *src = BytesMut::with_capacity(RECLAIMED_CAPACITY);
+            self.reclaim_read = false;
+        }
         Ok(Some(frame))
+    }
+
+    /// Report a peer that closed part-way through a frame as
+    /// `ErrorKind::UnexpectedEof`, rather than tokio-util's generic
+    /// "bytes remaining on stream" error, so callers can classify it as a
+    /// lost connection.
+    fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, ProtocolError> {
+        match self.decode(src)? {
+            Some(frame) => Ok(Some(frame)),
+            None if src.is_empty() => Ok(None),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed before a complete RESP frame arrived",
+            )
+            .into()),
+        }
     }
 }
 
@@ -129,7 +170,12 @@ impl Encoder<Frame> for RespCodec {
     type Error = ProtocolError;
 
     fn encode(&mut self, item: Frame, dst: &mut BytesMut) -> Result<(), ProtocolError> {
+        if self.reclaim_write && dst.is_empty() {
+            *dst = BytesMut::with_capacity(RECLAIMED_CAPACITY);
+            self.reclaim_write = false;
+        }
         let serialized = resp3::frame_to_bytes(&item);
+        self.reclaim_write |= serialized.len() > RECLAIM_THRESHOLD;
         dst.extend_from_slice(&serialized);
         Ok(())
     }
@@ -158,6 +204,59 @@ mod tests {
                 "no reply may be mistaken for the next request's result"
             );
         }
+    }
+
+    #[test]
+    fn drained_buffers_are_reclaimed_after_a_large_frame() {
+        let big = 4 * RECLAIM_THRESHOLD;
+        let mut codec = RespCodec::new();
+
+        let mut wire = BytesMut::new();
+        wire.extend_from_slice(format!("${big}\r\n").as_bytes());
+        wire.extend_from_slice(&vec![b'v'; big]);
+        wire.extend_from_slice(b"\r\n+OK\r\n");
+        assert!(codec.decode(&mut wire).unwrap().is_some());
+        // Another frame is still buffered: nothing is reclaimed yet.
+        assert!(!wire.is_empty());
+        assert_eq!(
+            codec.decode(&mut wire).unwrap(),
+            Some(Frame::SimpleString(Bytes::from("OK")))
+        );
+        // `capacity()` hides consumed bytes; reserving exposes a retained
+        // allocation, while a reclaimed buffer stays small.
+        wire.reserve(RECLAIMED_CAPACITY);
+        assert!(wire.capacity() <= RECLAIM_THRESHOLD, "{}", wire.capacity());
+
+        let mut out = BytesMut::new();
+        codec
+            .encode(
+                Frame::BulkString(Some(Bytes::from(vec![b'x'; big]))),
+                &mut out,
+            )
+            .unwrap();
+        out.clear();
+        codec
+            .encode(Frame::SimpleString(Bytes::from("PING")), &mut out)
+            .unwrap();
+        assert_eq!(out.as_ref(), b"+PING\r\n");
+        assert!(out.capacity() <= RECLAIM_THRESHOLD, "{}", out.capacity());
+    }
+
+    #[test]
+    fn eof_inside_a_frame_is_an_unexpected_eof() {
+        let mut codec = RespCodec::new();
+        let mut partial = BytesMut::from(&b"*2\r\n+OK\r\n$5\r\nhel"[..]);
+        assert!(matches!(
+            codec.decode_eof(&mut partial),
+            Err(ProtocolError::Io(error)) if error.kind() == std::io::ErrorKind::UnexpectedEof
+        ));
+
+        let mut complete = BytesMut::from(&b"+OK\r\n"[..]);
+        assert_eq!(
+            codec.decode_eof(&mut complete).unwrap(),
+            Some(Frame::SimpleString(Bytes::from("OK")))
+        );
+        assert_eq!(codec.decode_eof(&mut complete).unwrap(), None);
     }
 
     #[test]

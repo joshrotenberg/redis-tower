@@ -12,6 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - connection-setup/client-name builder policies replayed on discovery, masters,
   replicas, redirected/topology-created nodes, dedicated sockets, and replacements
 
+### Fixed
+
+- move `MultiplexedClusterClient`'s keyless-command default node to a surviving
+  master when a topology refresh prunes it; previously a failover or scale-in
+  of the first-listed master made PING, INFO, DBSIZE, and other keyless
+  commands fail with `ConnectionClosed` until the client was rebuilt
+- reject a topology refresh in which a node reports no slot owners (for
+  example after restarting without `nodes.conf`) instead of committing it and
+  pruning every node service, and keep the caller's seed as a last-resort
+  discovery source so a client whose services are all gone can still recover
+- reject out-of-range slots and ports in `CLUSTER SLOTS` and `MOVED`/`ASK`
+  replies instead of truncating them with `as u16`; a negative or ≥16384 slot
+  panicked while indexing the slot table, and port 70000 silently became 4464
+- route `XINFO` and `XGROUP` subcommands by their stream key; they were hashed
+  by the subcommand name, costing a MOVED and a topology refresh per call and
+  failing outright on connections built with `max_redirects(0)`
+- recognize `HMSET`, `SDIFFCARD`, `SUNIONCARD`, `LMOVEM`, `BLMOVEM`, and the
+  `XREAD`/`XREADGROUP` `MAXCOUNT`, `MAXSIZE`, and `CLAIM` options in
+  `extract_keys`, so `common_slot` and pipeline routing no longer reject or
+  misroute them
+
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-cluster-v0.1.3...redis-tower-cluster-v0.1.4) - 2026-10-01
 
 ### Added

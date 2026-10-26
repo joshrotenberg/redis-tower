@@ -38,7 +38,9 @@ struct UrlQuery {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Clone)]
+///
+/// `Debug` output redacts the password.
+#[derive(Clone)]
 pub struct RedisUrl {
     /// Host to connect to.
     ///
@@ -72,6 +74,21 @@ pub struct RedisUrl {
     /// [`parse_redis_url`] returns [`RedisError::InvalidUrl`] rather than
     /// replacing invalid bytes.
     pub path: Option<String>,
+}
+
+impl std::fmt::Debug for RedisUrl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RedisUrl")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("database", &self.database)
+            .field("tls", &self.tls)
+            .field("unix", &self.unix)
+            .field("path", &self.path)
+            .finish()
+    }
 }
 
 impl Default for RedisUrl {
@@ -209,7 +226,10 @@ pub(crate) fn parse_connection_url(url: &str) -> Result<ParsedRedisUrl, RedisErr
     let (rest, query) = split_query(rest);
     let query = parse_query(query, false)?;
 
-    let (auth, host_part) = if let Some((auth, rest)) = rest.split_once('@') {
+    // Userinfo ends at the last `@`, as in WHATWG URLs and redis-rs: a raw `@`
+    // in a password must not turn part of the password into the host, where
+    // it would reach connection errors, logs, and tracing spans.
+    let (auth, host_part) = if let Some((auth, rest)) = rest.rsplit_once('@') {
         (Some(auth), rest)
     } else {
         (None, rest)
@@ -242,7 +262,7 @@ pub(crate) fn parse_connection_url(url: &str) -> Result<ParsedRedisUrl, RedisErr
         .filter(|s| !s.is_empty())
         .map(|s| {
             s.parse::<u16>()
-                .map_err(|_| RedisError::InvalidUrl(format!("invalid database: {s}")))
+                .map_err(|_| RedisError::InvalidUrl("invalid database number in URL path".into()))
         })
         .transpose()?;
 
@@ -346,9 +366,7 @@ fn parse_host_port(host_port: &str) -> Result<(String, u16), RedisError> {
         }
         format!("[{}]:0", &ipv6[..close])
             .parse::<std::net::SocketAddrV6>()
-            .map_err(|_| {
-                RedisError::InvalidUrl(format!("invalid IPv6 address: {}", &ipv6[..close]))
-            })?;
+            .map_err(|_| RedisError::InvalidUrl("invalid IPv6 address".into()))?;
 
         // Keep brackets on the parsed host: `host:port` remains a valid
         // socket address, while `RedisUrl::tls_server_name` supplies the
@@ -380,9 +398,11 @@ fn parse_host_port(host_port: &str) -> Result<(String, u16), RedisError> {
     }
 }
 
+// Errors for components that may hold userinfo bytes (a raw `?`, `/`, or `@`
+// in a password shifts it into the port, path, or host) never echo the input.
 fn parse_port(port: &str) -> Result<u16, RedisError> {
     port.parse::<u16>()
-        .map_err(|_| RedisError::InvalidUrl(format!("invalid port: {port}")))
+        .map_err(|_| RedisError::InvalidUrl("invalid port".into()))
 }
 
 /// Decode percent-encoded (`%XX`) sequences in a URL component.
@@ -799,6 +819,39 @@ mod tests {
         let url = parse_redis_url("redis://mytoken@localhost").unwrap();
         assert!(url.username.is_none());
         assert_eq!(url.password.as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn userinfo_ends_at_the_last_at_sign() {
+        let url = parse_redis_url("redis://app:sec@ret@redis.example.com:6380/0").unwrap();
+        assert_eq!(url.host, "redis.example.com");
+        assert_eq!(url.port, 6380);
+        assert_eq!(url.username.as_deref(), Some("app"));
+        assert_eq!(url.password.as_deref(), Some("sec@ret"));
+    }
+
+    #[test]
+    fn invalid_url_errors_do_not_echo_password_fragments() {
+        for input in [
+            // A raw `?` ends the authority early, so the password lands in the
+            // port position.
+            "redis://app:s3cr3tpw?x@redis.example.com:6379/0",
+            // A raw `/` without `@` puts the password tail in the database path.
+            "redis://s3cr3t/pw2",
+            "redis://[s3cr3tpw]:6379",
+        ] {
+            let error = parse_redis_url(input).unwrap_err().to_string();
+            assert!(!error.contains("s3cr3t"), "{input} -> {error}");
+        }
+    }
+
+    #[test]
+    fn debug_output_redacts_the_password() {
+        let url = parse_redis_url("redis://app:topsecret@redis.example.com:6379/0").unwrap();
+        let rendered = format!("{url:?}");
+        assert!(!rendered.contains("topsecret"), "{rendered}");
+        assert!(rendered.contains("[REDACTED]"), "{rendered}");
+        assert!(rendered.contains("app"), "{rendered}");
     }
 
     #[test]
