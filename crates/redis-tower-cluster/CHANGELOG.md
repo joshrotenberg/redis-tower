@@ -30,6 +30,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the original seed until one reports slot owners, skip (and later connect
   lazily) nodes it cannot reach instead of failing, close sockets for departed
   nodes, and move the keyless default node to a current master
+- rebuild dead replica workers in `MultiplexedClusterClient`: a replica read
+  whose slot has an advertised replica with no worker, or one that exhausted
+  its reconnect budget, now schedules a (rate-limited) topology refresh. Reads
+  route around such workers, so nothing scheduled the refresh that rebuilds
+  them; strict replica reads failed forever and `PreferReplica` reads stayed
+  on the master after a replica restart (redis-rs #2120)
+- reconnect `ClusterConnection` replica sockets lazily: a replica whose
+  socket was dropped after one I/O error or a deadline was filtered out of
+  replica selection forever. It is now reconnected the next time routing
+  picks it; a replica whose reconnect fails is skipped for a backoff that
+  starts at 250 ms and doubles up to 5 s, and the command is re-routed to
+  another replica, the master (`PreferReplica`), or the strict-replica error
 - route `ClusterConnection` keyed commands to the slot owner even when its
   socket was dropped, reconnecting lazily; they were sent to the default node
   and bounced with `MOVED`, which failed outright under `max_redirects(0)`
