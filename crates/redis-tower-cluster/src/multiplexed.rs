@@ -361,6 +361,17 @@ async fn await_refresh_since(
     }
 }
 
+/// Upper bound on one node's `AUTH` reply during
+/// [`MultiplexedClusterClient::reauthenticate_all`].
+const REAUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether two handles drive the same auto-pipeline worker. Each worker owns
+/// one connection-health channel, so channel identity is worker identity.
+fn same_worker(a: &AutoPipelineService, b: &AutoPipelineService) -> bool {
+    a.subscribe_connection_health()
+        .same_channel(&b.subscribe_connection_health())
+}
+
 /// Minimum interval between background self-healing refreshes.
 const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1000);
 
@@ -876,56 +887,88 @@ impl MultiplexedClusterClientBuilder {
 impl MultiplexedClusterClient {
     /// Re-authenticate every established master and replica worker.
     ///
-    /// Each `AUTH` is serialized through its node's auto-pipeline worker. A
-    /// worker that rejects the replacement credential is removed from routing
-    /// so the next command reconnects through the configured provider.
+    /// Each `AUTH` is serialized through its node's auto-pipeline worker, and
+    /// all nodes are authenticated concurrently, each bounded by a 5 second
+    /// timeout. Routing is never locked across this I/O,
+    /// so one slow or hung node delays only its own traffic. A worker that
+    /// rejects the replacement credential, or does not answer in time, is
+    /// removed from routing so the next command to that node connects afresh
+    /// through the configured provider -- unless a concurrent topology refresh
+    /// already replaced it. Every node is attempted before the first error is
+    /// returned.
     pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
-        // Gate routing and topology replacement for the duration of the pass.
-        // Besides preventing mixed old/new routing after this method returns,
-        // this ensures an AUTH failure cannot remove a newer worker that a
-        // concurrent topology refresh installed at the same address.
-        let mut inner = self.inner.write().await;
-        let services: Vec<(String, bool, AutoPipelineService)> = inner
-            .masters
-            .iter()
-            .map(|(address, service)| (address.clone(), false, service.clone()))
-            .chain(
-                inner
-                    .replicas
-                    .iter()
-                    .map(|(address, service)| (address.clone(), true, service.clone())),
-            )
-            .collect();
+        let services: Vec<(String, bool, AutoPipelineService)> = {
+            let inner = self.inner.read().await;
+            inner
+                .masters
+                .iter()
+                .map(|(address, service)| (address.clone(), false, service.clone()))
+                .chain(
+                    inner
+                        .replicas
+                        .iter()
+                        .map(|(address, service)| (address.clone(), true, service.clone())),
+                )
+                .collect()
+        };
 
-        let auth = credentials.auth_command();
-        let frame = auth.to_frame();
-        let mut failed = Vec::new();
+        let frame = credentials.auth_command().to_frame();
+        let attempts = services.into_iter().map(|(address, replica, mut service)| {
+            let frame = frame.clone();
+            async move {
+                let reply =
+                    tokio::time::timeout(REAUTHENTICATE_TIMEOUT, call_service(&mut service, frame))
+                        .await;
+                let result = match reply {
+                    Ok(Ok(Frame::SimpleString(value))) if &value[..] == b"OK" => Ok(()),
+                    Ok(Ok(Frame::Error(error))) => Err(RedisError::Redis(
+                        String::from_utf8_lossy(&error).into_owned(),
+                    )),
+                    Ok(Ok(other)) => Err(RedisError::UnexpectedResponse {
+                        expected: "OK",
+                        actual: format!("{other:?}"),
+                    }),
+                    Ok(Err(error)) => Err(error),
+                    Err(_elapsed) => Err(RedisError::CommandTimeout),
+                };
+                (address, replica, service, result)
+            }
+        });
+        let outcomes = futures::future::join_all(attempts).await;
+
         let mut first_error = None;
-        for (address, replica, mut service) in services {
-            let result = match call_service(&mut service, frame.clone()).await {
-                Ok(Frame::SimpleString(value)) if &value[..] == b"OK" => Ok(()),
-                Ok(Frame::Error(error)) => Err(RedisError::Redis(
-                    String::from_utf8_lossy(&error).into_owned(),
-                )),
-                Ok(other) => Err(RedisError::UnexpectedResponse {
-                    expected: "OK",
-                    actual: format!("{other:?}"),
-                }),
-                Err(error) => Err(error),
-            };
+        let mut failed = Vec::new();
+        for (address, replica, service, result) in outcomes {
             if let Err(error) = result {
-                failed.push((address, replica));
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                tracing::warn!(
+                    node = %address,
+                    replica,
+                    %error,
+                    "cluster: re-authentication failed; dropping the node's worker"
+                );
+                failed.push((address, replica, service));
+                first_error.get_or_insert(error);
             }
         }
-
-        for (address, replica) in failed {
-            if replica {
-                inner.replicas.remove(&address);
-            } else {
-                inner.masters.remove(&address);
+        if !failed.is_empty() {
+            let mut inner = self.inner.write().await;
+            for (address, replica, service) in failed {
+                let workers = if replica {
+                    &mut inner.replicas
+                } else {
+                    &mut inner.masters
+                };
+                // A refresh may have installed a newer worker at this address
+                // meanwhile; that one authenticated through the provider.
+                if workers
+                    .get(&address)
+                    .is_some_and(|current| same_worker(current, &service))
+                {
+                    workers.remove(&address);
+                    if !replica {
+                        self.notify_cache_node_loss(&address);
+                    }
+                }
             }
         }
 
@@ -3964,6 +4007,18 @@ mod observability_tests {
             (target_addr, target_service),
         ]);
         test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[tokio::test]
+    async fn same_worker_distinguishes_replaced_workers() {
+        let (_, first, _, first_server) = quiet_service().await;
+        let (_, second, _, second_server) = quiet_service().await;
+        assert!(same_worker(&first, &first.clone()));
+        assert!(!same_worker(&first, &second));
+        first.shutdown().await;
+        second.shutdown().await;
+        first_server.await.unwrap();
+        second_server.await.unwrap();
     }
 
     #[tokio::test]

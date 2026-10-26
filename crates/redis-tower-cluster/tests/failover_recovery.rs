@@ -423,3 +423,67 @@ async fn refresh_asks_listed_replicas_when_every_connected_node_is_gone() {
         .unwrap();
     assert_eq!(b.received("SET"), 2);
 }
+
+/// redis-rs #2092: `reauthenticate_all` sent AUTH to every node in turn while
+/// holding the routing write lock, so one node slow to answer stalled every
+/// command to every node, and a hung one stalled them indefinitely.
+#[tokio::test]
+async fn reauthentication_does_not_block_commands_to_other_nodes() {
+    let hang: fn() -> Action = || Action::Hang;
+    let delay: fn() -> Action = || Action::Delayed(Duration::from_millis(1500), ok());
+    for (scenario, slow) in [("hung", hang), ("slow", delay)] {
+        let cluster = Cluster::new();
+        let slow_port = Arc::new(AtomicU16::new(0));
+        let handler: Handler = {
+            let slow_port = slow_port.clone();
+            Arc::new(move |request| {
+                (request.is(b"AUTH") && request.port == slow_port.load(Ordering::SeqCst)).then(slow)
+            })
+        };
+        let a = fake_node(cluster.clone(), handler.clone()).await;
+        let b = fake_node(cluster.clone(), handler).await;
+        slow_port.store(b.port, Ordering::SeqCst);
+        cluster.set(slots(vec![
+            (0, 8191, a.port, vec![]),
+            (8192, 16383, b.port, vec![]),
+        ]));
+        let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+        let key_on_a = key_in(0, 8191);
+
+        let reauth = {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client
+                    .reauthenticate_all(&redis_tower::credentials::Credentials::new(
+                        "default", "rotated",
+                    ))
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = tokio::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            client.execute(RawCommand::new("GET").arg(key_on_a.as_str())),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{scenario}: GET on a healthy node waited for AUTH"))
+        .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "{scenario}: GET on a healthy node took {:?}",
+            started.elapsed()
+        );
+        let outcome = tokio::time::timeout(Duration::from_secs(10), reauth)
+            .await
+            .expect("reauthentication is bounded")
+            .unwrap();
+        match scenario {
+            "hung" => assert!(
+                matches!(outcome, Err(redis_tower_core::RedisError::CommandTimeout)),
+                "{outcome:?}"
+            ),
+            _ => outcome.expect("a slow AUTH still succeeds"),
+        }
+    }
+}
