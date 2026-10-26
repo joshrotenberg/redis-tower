@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ask nodes the topology lists without a connection (replicas under
   `ReadPreference::Master`) during a topology refresh in both clients; in a
   one-shard cluster whose master died, no other node was left to ask
+- connect both clients best-effort: a master that is unreachable at connect
+  time (still listed by `CLUSTER SLOTS` mid-failover, or restarting) no
+  longer fails `connect()` for the whole cluster. Its slots fail with a
+  connection error until it answers and are then connected lazily; only a
+  cluster with no reachable master fails to connect. Replicas are likewise
+  best-effort. `MultiplexedClusterClient` also connects a slot owner that has
+  no worker (skipped by a refresh, or dropped after a failed
+  re-authentication) when a command routes to it, instead of bouncing off the
+  default node with a `MOVED` that `max_redirects(0)` turned into a failure
 - resolve an empty or NULL endpoint in `CLUSTER SLOTS` to the node that was
   asked, as Redis documents: a single-node cluster reports `""` for itself and
   `cluster-preferred-endpoint-type unknown-endpoint` reports NULL, so neither

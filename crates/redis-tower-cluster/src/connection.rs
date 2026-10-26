@@ -589,29 +589,57 @@ impl ClusterConnection {
         let mut nodes = HashMap::new();
         let mut default_node = String::new();
 
-        // Connect to all masters.
-        for addr in topology.master_addrs() {
-            let addr_str = addr.addr_string();
-            if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone()) {
-                let conn = connector.connect(&addr_str, false).await?;
-                if default_node.is_empty() {
-                    default_node.clone_from(&addr_str);
+        // Connect to all masters, best-effort: one that cannot be reached
+        // now (listed mid-failover, restarting) is connected lazily when a
+        // command routes to it, so its outage does not stop the connection
+        // from serving every other slot. Only a cluster with no reachable
+        // master fails to connect.
+        let masters = dedup_node_addrs(topology.master_addrs());
+        let mut first_error = None;
+        for addr in &masters {
+            match connector.connect(addr, false).await {
+                Ok(conn) => {
+                    if default_node.is_empty() {
+                        default_node.clone_from(addr);
+                    }
+                    nodes.insert(addr.clone(), NodeSocket::master(conn));
                 }
-                e.insert(NodeSocket::master(conn));
+                Err(error) => {
+                    tracing::warn!(
+                        addr,
+                        %error,
+                        "cluster: master unreachable at connect; connecting lazily"
+                    );
+                    first_error.get_or_insert(error);
+                }
             }
         }
+        if nodes.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
 
-        // Connect to replicas if read preference uses them.
+        // Connect to replicas if read preference uses them, best-effort: an
+        // unconnected replica is reconnected when routing picks it.
         if read_preference != ReadPreference::Master {
-            for addr in topology.replica_addrs() {
-                let addr_str = addr.addr_string();
-                if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone())
-                {
-                    let conn = connector.connect(&addr_str, true).await?;
-                    e.insert(NodeSocket {
-                        conn,
-                        readonly: true,
-                    });
+            for addr in dedup_node_addrs(topology.replica_addrs()) {
+                if nodes.contains_key(&addr) {
+                    continue;
+                }
+                match connector.connect(&addr, true).await {
+                    Ok(conn) => {
+                        nodes.insert(
+                            addr,
+                            NodeSocket {
+                                conn,
+                                readonly: true,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(addr, %error, "cluster: replica unreachable at connect");
+                    }
                 }
             }
         }
