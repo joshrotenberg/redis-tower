@@ -12,6 +12,21 @@
 //! reply shapes a CLI or tooling layer decodes. `Frame` implements `FromFrame`
 //! as an identity, so `query::<Frame>()` is the raw passthrough.
 //!
+//! # RESP2 and RESP3
+//!
+//! The same command can reply with different frame types depending on the
+//! negotiated protocol, and every impl decodes both forms to the same value:
+//!
+//! - Strings accept RESP3 doubles (`,2.5` and `,inf`), which RESP2 sends as
+//!   bulk strings. A finite double renders with Rust's shortest round-trip
+//!   formatting, so `1.0` becomes `"1"` like Redis's own RESP2 reply.
+//! - `Vec<T>` accepts a RESP3 map, flattened to the `[k, v, k, v, ...]` order
+//!   of the RESP2 array.
+//! - `HashMap<K, V>` and `Vec<(K, V)>` accept a RESP3 map, a RESP3 array of
+//!   `[k, v]` pairs (for example `ZRANGE ... WITHSCORES`), and the RESP2 flat
+//!   `[k, v, k, v, ...]` array. An array whose every element is a two-element
+//!   array is read as pairs.
+//!
 //! # Example
 //!
 //! Decoding the frames a dynamic command would return. `RawCommand::query::<T>()`
@@ -58,6 +73,27 @@ pub trait FromFrame: Sized {
     /// [`RedisError::Redis`] before any type matching, so every impl can assume
     /// a non-error frame.
     fn from_frame(frame: Frame) -> Result<Self, RedisError>;
+
+    /// Decode the elements of an array-like reply into a `Vec<Self>`.
+    ///
+    /// `Vec<T>` calls this rather than decoding each element on its own, so a
+    /// type can read several elements as one value. The default decodes each
+    /// element with [`FromFrame::from_frame`]. Two-element tuples override it
+    /// to read a RESP2 flat `[k, v, k, v, ...]` array as pairs, matching the
+    /// `[[k, v], ...]` array RESP3 sends for the same reply.
+    fn from_frame_elements(elements: Vec<Frame>) -> Result<Vec<Self>, RedisError> {
+        elements.into_iter().map(Self::from_frame).collect()
+    }
+
+    /// Decode the entries of a RESP3 map reply into a `Vec<Self>`.
+    ///
+    /// The default flattens the map to `[k, v, k, v, ...]`, the order RESP2
+    /// sends the same reply in, and decodes it with
+    /// [`FromFrame::from_frame_elements`]. Two-element tuples override it to
+    /// decode each entry as a pair.
+    fn from_frame_map(entries: Vec<(Frame, Frame)>) -> Result<Vec<Self>, RedisError> {
+        Self::from_frame_elements(entries.into_iter().flat_map(|(k, v)| [k, v]).collect())
+    }
 }
 
 /// Reject error frames up front so each impl only handles value frames.
@@ -78,11 +114,15 @@ fn unexpected(expected: &'static str, frame: &Frame) -> RedisError {
 }
 
 /// Extract the bytes from a string-like frame (simple/bulk/verbatim/big-number).
+///
+/// RESP3 doubles are accepted because RESP2 sends the same values as bulk
+/// strings (`ZSCORE`, `INCRBYFLOAT`, `HINCRBYFLOAT`, ...).
 fn frame_to_bytes(frame: Frame) -> Result<Bytes, RedisError> {
     match frame {
-        Frame::SimpleString(b) | Frame::BigNumber(b) => Ok(b),
+        Frame::SimpleString(b) | Frame::BigNumber(b) | Frame::SpecialFloat(b) => Ok(b),
         Frame::BulkString(Some(b)) => Ok(b),
         Frame::VerbatimString(_, b) => Ok(b),
+        Frame::Double(d) => Ok(Bytes::from(d.to_string())),
         other => Err(unexpected("string-like frame", &other)),
     }
 }
@@ -99,6 +139,40 @@ fn frame_to_vec(frame: Frame) -> Result<Vec<Frame>, RedisError> {
         | Frame::StreamedPush(v) => Ok(v),
         other => Err(unexpected("array-like frame", &other)),
     }
+}
+
+/// Whether `frame` is a two-element array.
+fn is_pair(frame: &Frame) -> bool {
+    matches!(frame, Frame::Array(Some(v)) if v.len() == 2)
+}
+
+/// Read array elements as key/value pairs.
+///
+/// RESP3 sends pair replies such as `ZRANGE ... WITHSCORES` as an array of
+/// `[k, v]` arrays, and RESP2 as a flat `[k, v, k, v, ...]` array. An array
+/// whose every element is a two-element array is read as the former.
+fn elements_to_pairs(elements: Vec<Frame>) -> Result<Vec<(Frame, Frame)>, RedisError> {
+    if !elements.is_empty() && elements.iter().all(is_pair) {
+        return Ok(elements
+            .into_iter()
+            .filter_map(|pair| match pair {
+                Frame::Array(Some(kv)) => <[Frame; 2]>::try_from(kv).ok().map(|[k, v]| (k, v)),
+                _ => None,
+            })
+            .collect());
+    }
+    if !elements.len().is_multiple_of(2) {
+        return Err(RedisError::UnexpectedResponse {
+            expected: "flat array with an even number of elements, or an array of pairs",
+            actual: format!("array of {} elements", elements.len()),
+        });
+    }
+    let mut it = elements.into_iter();
+    let mut pairs = Vec::with_capacity(it.len() / 2);
+    while let (Some(k), Some(v)) = (it.next(), it.next()) {
+        pairs.push((k, v));
+    }
+    Ok(pairs)
 }
 
 // -- Identity --
@@ -231,10 +305,10 @@ impl<T: FromFrame> FromFrame for Option<T> {
 
 impl<T: FromFrame> FromFrame for Vec<T> {
     fn from_frame(frame: Frame) -> Result<Self, RedisError> {
-        frame_to_vec(check_error(frame)?)?
-            .into_iter()
-            .map(T::from_frame)
-            .collect()
+        match check_error(frame)? {
+            Frame::Map(entries) | Frame::StreamedMap(entries) => T::from_frame_map(entries),
+            other => T::from_frame_elements(frame_to_vec(other)?),
+        }
     }
 }
 
@@ -249,22 +323,9 @@ where
         let pairs = match check_error(frame)? {
             Frame::Map(pairs) | Frame::StreamedMap(pairs) | Frame::Attribute(pairs) => pairs,
             Frame::Array(None) => Vec::new(),
-            // RESP2 returns maps as a flat array [k, v, k, v, ...].
-            Frame::Array(Some(flat)) => {
-                if flat.len() % 2 != 0 {
-                    return Err(RedisError::UnexpectedResponse {
-                        expected: "flat array with an even number of elements",
-                        actual: format!("array of {} elements", flat.len()),
-                    });
-                }
-                let mut it = flat.into_iter();
-                let mut pairs = Vec::with_capacity(it.len() / 2);
-                while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                    pairs.push((k, v));
-                }
-                pairs
-            }
-            other => return Err(unexpected("map or flat array", &other)),
+            // RESP2 flat [k, v, k, v, ...] or RESP3 [[k, v], ...].
+            Frame::Array(Some(elements)) => elements_to_pairs(elements)?,
+            other => return Err(unexpected("map, flat array, or array of pairs", &other)),
         };
         pairs
             .into_iter()
@@ -296,11 +357,37 @@ macro_rules! impl_from_frame_tuple {
 }
 
 impl_from_frame_tuple!(1; A);
-impl_from_frame_tuple!(2; A, B);
 impl_from_frame_tuple!(3; A, B, C);
 impl_from_frame_tuple!(4; A, B, C, D);
 impl_from_frame_tuple!(5; A, B, C, D, E);
 impl_from_frame_tuple!(6; A, B, C, D, E, F);
+
+/// Pairs also decode from the reply shapes that carry a run of pairs, so
+/// `Vec<(K, V)>` reads a RESP2 flat array, a RESP3 array of pairs, and a RESP3
+/// map alike.
+impl<A: FromFrame, B: FromFrame> FromFrame for (A, B) {
+    fn from_frame(frame: Frame) -> Result<Self, RedisError> {
+        let items = frame_to_vec(check_error(frame)?)?;
+        match <[Frame; 2]>::try_from(items) {
+            Ok([a, b]) => Ok((A::from_frame(a)?, B::from_frame(b)?)),
+            Err(items) => Err(RedisError::UnexpectedResponse {
+                expected: "array of 2 elements",
+                actual: format!("array of {} elements", items.len()),
+            }),
+        }
+    }
+
+    fn from_frame_elements(elements: Vec<Frame>) -> Result<Vec<Self>, RedisError> {
+        Self::from_frame_map(elements_to_pairs(elements)?)
+    }
+
+    fn from_frame_map(entries: Vec<(Frame, Frame)>) -> Result<Vec<Self>, RedisError> {
+        entries
+            .into_iter()
+            .map(|(a, b)| Ok((A::from_frame(a)?, B::from_frame(b)?)))
+            .collect()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -644,5 +731,110 @@ mod tests {
         ]));
         let v: Vec<(String, i64)> = FromFrame::from_frame(f).unwrap();
         assert_eq!(v, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+    }
+
+    // -- RESP2 / RESP3 parity --
+    //
+    // Each test decodes the RESP2 and RESP3 forms of one reply and expects
+    // the same value from both.
+
+    fn bulk(s: &str) -> Frame {
+        Frame::BulkString(Some(Bytes::from(s.to_string())))
+    }
+
+    #[test]
+    fn string_from_resp2_bulk_and_resp3_double() {
+        // ZSCORE: RESP2 `$3 2.5`, RESP3 `,2.5`.
+        let resp2: String = FromFrame::from_frame(bulk("2.5")).unwrap();
+        let resp3: String = FromFrame::from_frame(Frame::Double(2.5)).unwrap();
+        assert_eq!(resp2, resp3);
+        // Whole doubles render without a fractional part, like RESP2.
+        let resp3: String = FromFrame::from_frame(Frame::Double(3.0)).unwrap();
+        assert_eq!(resp3, "3");
+    }
+
+    #[test]
+    fn string_from_resp3_special_float() {
+        // ZSCORE of an infinite score: RESP2 `$3 inf`, RESP3 `,inf`.
+        let resp2: String = FromFrame::from_frame(bulk("inf")).unwrap();
+        let resp3: String = FromFrame::from_frame(Frame::SpecialFloat(Bytes::from("inf"))).unwrap();
+        assert_eq!(resp2, resp3);
+        let bytes: Bytes = FromFrame::from_frame(Frame::SpecialFloat(Bytes::from("-inf"))).unwrap();
+        assert_eq!(bytes, Bytes::from("-inf"));
+    }
+
+    #[test]
+    fn vec_from_resp2_flat_array_and_resp3_map() {
+        // HGETALL: RESP2 flat array, RESP3 map.
+        let resp2: Vec<String> =
+            FromFrame::from_frame(Frame::Array(Some(vec![bulk("f"), bulk("v")]))).unwrap();
+        let resp3: Vec<String> =
+            FromFrame::from_frame(Frame::Map(vec![(bulk("f"), bulk("v"))])).unwrap();
+        assert_eq!(resp2, vec!["f", "v"]);
+        assert_eq!(resp2, resp3);
+    }
+
+    #[test]
+    fn hashmap_from_resp3_nested_pairs() {
+        // ZRANGE ... WITHSCORES: RESP2 flat, RESP3 array of [member, score].
+        let resp2: HashMap<String, f64> = FromFrame::from_frame(Frame::Array(Some(vec![
+            bulk("a"),
+            bulk("1"),
+            bulk("b"),
+            bulk("inf"),
+        ])))
+        .unwrap();
+        let resp3: HashMap<String, f64> = FromFrame::from_frame(Frame::Array(Some(vec![
+            Frame::Array(Some(vec![bulk("a"), Frame::Double(1.0)])),
+            Frame::Array(Some(vec![
+                bulk("b"),
+                Frame::SpecialFloat(Bytes::from("inf")),
+            ])),
+        ])))
+        .unwrap();
+        assert_eq!(resp2, resp3);
+        assert_eq!(resp3.get("b").copied(), Some(f64::INFINITY));
+
+        // A single RESP3 pair is an odd-length outer array.
+        let one: HashMap<String, f64> = FromFrame::from_frame(Frame::Array(Some(vec![
+            Frame::Array(Some(vec![bulk("a"), Frame::Double(1.0)])),
+        ])))
+        .unwrap();
+        assert_eq!(one.get("a").copied(), Some(1.0));
+    }
+
+    #[test]
+    fn vec_of_pairs_from_every_pair_shape() {
+        let expected = vec![("a".to_string(), 1i64), ("b".to_string(), 2)];
+        // RESP2 flat array.
+        let flat: Vec<(String, i64)> = FromFrame::from_frame(Frame::Array(Some(vec![
+            bulk("a"),
+            Frame::Integer(1),
+            bulk("b"),
+            Frame::Integer(2),
+        ])))
+        .unwrap();
+        // RESP3 array of pairs.
+        let nested: Vec<(String, i64)> = FromFrame::from_frame(Frame::Array(Some(vec![
+            Frame::Array(Some(vec![bulk("a"), Frame::Integer(1)])),
+            Frame::Array(Some(vec![bulk("b"), Frame::Integer(2)])),
+        ])))
+        .unwrap();
+        // RESP3 map.
+        let map: Vec<(String, i64)> = FromFrame::from_frame(Frame::Map(vec![
+            (bulk("a"), Frame::Integer(1)),
+            (bulk("b"), Frame::Integer(2)),
+        ]))
+        .unwrap();
+        assert_eq!(flat, expected);
+        assert_eq!(nested, expected);
+        assert_eq!(map, expected);
+    }
+
+    #[test]
+    fn vec_of_pairs_from_odd_flat_array_fails() {
+        let r: Result<Vec<(String, i64)>, _> =
+            FromFrame::from_frame(Frame::Array(Some(vec![bulk("a")])));
+        assert!(matches!(r, Err(RedisError::UnexpectedResponse { .. })));
     }
 }
