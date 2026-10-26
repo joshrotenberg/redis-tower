@@ -206,6 +206,11 @@ pub const FIXTURE_PORT_RANGES: &[FixturePortRange] = &[
         len: 10,
     },
     FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (node-scoped fan-out)",
+        start: 18140,
+        len: 10,
+    },
+    FixturePortRange {
         name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub migration)",
         start: 18160,
         len: 10,

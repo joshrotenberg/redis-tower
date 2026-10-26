@@ -3417,4 +3417,69 @@ mod failover_recovery {
             client.shutdown().await;
         }
     }
+    /// redis-rs #2474: node-scoped commands used to reach only the keyless
+    /// default master. DBSIZE reported one master's keys, FLUSHALL emptied one
+    /// master, and a SCRIPT LOAD was invisible to EVALSHA on the others.
+    #[tokio::test]
+    #[ignore = "live: starts a dedicated 3-master/3-replica cluster"]
+    async fn node_scoped_commands_reach_every_master() {
+        let fixture = ClusterFixture::builder()
+            .base_port(18140)
+            .start()
+            .await
+            .expect("failed to start node-scope fixture");
+        let mux = MultiplexedClusterClient::connect(&fixture.seed_addr())
+            .await
+            .unwrap();
+        let mut direct = ClusterConnection::connect(&fixture.seed_addr())
+            .await
+            .unwrap();
+        let topology = fixture.topology().await.unwrap();
+        let keys: Vec<String> = topology
+            .masters()
+            .map(|master| key_for_slot(master.slots[0].start))
+            .collect();
+        assert_eq!(keys.len(), 3);
+        for key in &keys {
+            mux.execute(Set::new(key, "v")).await.unwrap();
+        }
+        assert_eq!(mux.execute(DbSize).await.unwrap(), 3);
+        assert_eq!(direct.execute(DbSize).await.unwrap(), 3);
+
+        let sha = mux
+            .execute(ScriptLoad::new("return redis.call('GET', KEYS[1])"))
+            .await
+            .unwrap();
+        for key in &keys {
+            let reply = direct
+                .execute(
+                    RawCommand::new("EVALSHA")
+                        .arg(sha.as_str())
+                        .arg("1")
+                        .arg(key.as_str()),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("EVALSHA for {key}: {error}"));
+            assert_eq!(
+                reply,
+                redis_tower_core::Frame::BulkString(Some(Bytes::from_static(b"v")))
+            );
+        }
+
+        mux.execute(FlushAll::new()).await.unwrap();
+        for master in topology.masters() {
+            let node = redis_tower_cluster::NodeAddr::new("127.0.0.1", master.port);
+            let mut conn = mux.connect_to_node(node).await.unwrap();
+            assert_eq!(
+                conn.execute(DbSize).await.unwrap(),
+                0,
+                "FLUSHALL reached {}",
+                master.addr
+            );
+        }
+        assert_eq!(direct.execute(DbSize).await.unwrap(), 0);
+        tokio::time::timeout(Duration::from_secs(10), mux.shutdown())
+            .await
+            .expect("timed out shutting down");
+    }
 }
