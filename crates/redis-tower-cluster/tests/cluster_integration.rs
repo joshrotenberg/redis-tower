@@ -3124,3 +3124,137 @@ mod cluster_pubsub {
         .await;
     }
 }
+
+/// Live failover-recovery regressions: READONLY replies from demoted masters,
+/// per-role sockets, replica repair, and node-scoped commands. Each test owns
+/// a fixture on its own port block (registered in `redis-tower-test`'s
+/// `port_ranges`).
+mod failover_recovery {
+    use super::*;
+    use redis_tower_test::cluster::ClusterNode;
+
+    /// Fail over the master owning `slot` with `CLUSTER FAILOVER` and wait
+    /// until the old master reports itself as a replica, so every node it
+    /// still has a socket from now answers as a replica.
+    async fn fail_over_slot_owner(
+        fixture: &ClusterFixture,
+        slot: u16,
+    ) -> (ClusterNode, ClusterNode) {
+        let before = fixture.topology().await.expect("initial topology");
+        let old = before.owner_of_slot(slot).expect("slot owner").clone();
+        let replica = before.replicas_of(&old.id)[0].clone();
+        fixture
+            .promote_replica(replica.index)
+            .await
+            .expect("CLUSTER FAILOVER failed");
+        fixture
+            .wait_for_slot_owner(slot, &replica.id, Duration::from_secs(30))
+            .await
+            .expect("replica did not take over the slot");
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let topology = fixture.topology().await.expect("topology");
+            if topology
+                .node_by_id(&old.id)
+                .is_some_and(|node| node.is_replica())
+            {
+                return (old, replica);
+            }
+            assert!(Instant::now() < deadline, "old master was never demoted");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// redis-rs #2085: after `CLUSTER FAILOVER` demotes the keyless default
+    /// master, a keyless write is answered READONLY (keyless commands skip the
+    /// MOVED check). With no other traffic to schedule a refresh, both clients
+    /// used to fail it forever.
+    #[tokio::test]
+    #[ignore = "live: starts a dedicated 3-master/3-replica cluster and fails over a master"]
+    async fn keyless_writes_follow_a_failover_of_the_default_master() {
+        let fixture = ClusterFixture::builder()
+            .base_port(18100)
+            .start()
+            .await
+            .expect("failed to start READONLY failover fixture");
+        let mux = MultiplexedClusterClient::connect(&fixture.seed_addr())
+            .await
+            .unwrap();
+        let mut direct = ClusterConnection::connect(&fixture.seed_addr())
+            .await
+            .unwrap();
+        mux.execute(RawCommand::new("FLUSHALL")).await.unwrap();
+
+        // Slot 0's owner is the first-listed master: both clients' default.
+        let (old, promoted) = fail_over_slot_owner(&fixture, 0).await;
+
+        mux.execute(RawCommand::new("FLUSHALL"))
+            .await
+            .expect("multiplexed keyless write after failover of its default node");
+        direct
+            .execute(RawCommand::new("FLUSHALL"))
+            .await
+            .expect("ClusterConnection keyless write after failover of its default node");
+        let masters: Vec<String> = direct
+            .topology()
+            .master_addrs()
+            .iter()
+            .map(|addr| addr.addr_string())
+            .collect();
+        assert!(
+            masters.contains(&promoted.addr) && !masters.contains(&old.addr),
+            "READONLY refreshed the topology: {masters:?}"
+        );
+
+        let key = key_for_slot(0);
+        mux.execute(Set::new(&key, "mux")).await.unwrap();
+        direct.execute(Set::new(&key, "direct")).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), mux.shutdown())
+            .await
+            .expect("timed out shutting down");
+    }
+
+    /// `ClusterConnection` kept one socket per address regardless of role:
+    /// after a failover and a refresh the demoted master is the shard's
+    /// replica, but its socket had no READONLY state, so strict replica reads
+    /// bounced with MOVED forever.
+    #[tokio::test]
+    #[ignore = "live: starts a dedicated 3-master/3-replica cluster and fails over a master"]
+    async fn strict_replica_reads_use_the_demoted_master_after_failover() {
+        let fixture = ClusterFixture::builder()
+            .base_port(18120)
+            .start()
+            .await
+            .expect("failed to start replica-role fixture");
+        let slot = 0;
+        let key = key_for_slot(slot);
+        let mut conn = ClusterConnection::builder(fixture.seed_addr())
+            .read_preference(ReadPreference::Replica)
+            .connect()
+            .await
+            .unwrap();
+        conn.execute(Set::new(&key, "v")).await.unwrap();
+
+        let (old, _) = fail_over_slot_owner(&fixture, slot).await;
+        conn.refresh_topology().await.unwrap();
+        assert!(
+            conn.topology()
+                .replicas_for_slot(slot)
+                .unwrap_or(&[])
+                .iter()
+                .any(|replica| replica.addr_string() == old.addr),
+            "the demoted master is the slot's replica"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match conn.execute(Get::new(&key)).await {
+                Ok(Some(value)) if value.as_ref() == b"v" => break,
+                // Replication of the pre-failover write may still be settling.
+                Ok(_) if Instant::now() < deadline => {}
+                other => panic!("strict replica read after failover: {other:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}

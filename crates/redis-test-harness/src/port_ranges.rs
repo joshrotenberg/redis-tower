@@ -195,6 +195,16 @@ pub const FIXTURE_PORT_RANGES: &[FixturePortRange] = &[
         start: 18000,
         len: 10,
     },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (READONLY after failover)",
+        start: 18100,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (replica roles after failover)",
+        start: 18120,
+        len: 10,
+    },
 ];
 
 /// Fails clearly, naming both fixtures and the exact overlapping ports, if

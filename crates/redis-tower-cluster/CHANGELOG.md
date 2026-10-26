@@ -14,6 +14,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- treat a `READONLY` reply from a master as stale topology in both clients:
+  wait for a topology refresh that started after the reply, then re-send the
+  command to the slot's (or keyless default's) current master. A write sent
+  to a master demoted with its sockets intact previously failed forever with
+  no refresh scheduled (redis-rs #2085/#2115). Redis rejects the command
+  before running it, so re-sending is safe for non-idempotent writes; the
+  multiplexed client bypasses the background refresh rate limit for this, and
+  the server's `READONLY` text is returned once the redirect budget is spent
+- reuse a `ClusterConnection` node socket only for the role it was opened
+  for: after a failover the demoted master's socket (opened without
+  `READONLY`) is replaced for replica reads, which previously bounced with
+  `MOVED` forever under `ReadPreference::Replica`
+- make `ClusterConnection::refresh_topology` ask each connected node and then
+  the original seed until one reports slot owners, skip (and later connect
+  lazily) nodes it cannot reach instead of failing, close sockets for departed
+  nodes, and move the keyless default node to a current master
+- route `ClusterConnection` keyed commands to the slot owner even when its
+  socket was dropped, reconnecting lazily; they were sent to the default node
+  and bounced with `MOVED`, which failed outright under `max_redirects(0)`
 - move `MultiplexedClusterClient`'s keyless-command default node to a surviving
   master when a topology refresh prunes it; previously a failover or scale-in
   of the first-listed master made PING, INFO, DBSIZE, and other keyless
