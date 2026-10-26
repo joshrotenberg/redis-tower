@@ -11,9 +11,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - declarative connection-local setup retained by built-in address, URL, and
   credential factories across standalone reconnects
+- `AutoPipelineShutdownHandle::shutdown_timeout(grace)` and `abort()`, plus
+  the `ShutdownOutcome` they report, so embedding hosts can bound teardown even
+  when a server stops answering and `response_timeout` is `None`
+  (redis-developer/redis-database-mcp-rs#125)
 
 ### Fixed
 
+- stop graceful shutdown from waiting forever on an in-flight batch whose
+  callers have all gone away; with no response timeout, one abandoned request
+  to an unresponsive server made `AutoPipelineShutdownHandle::shutdown()` hang.
+  The batch is now abandoned and its connection discarded
+- warn about an `AutoPipelineService` dropped before `shutdown()` only when
+  requests are still queued or in flight; idle, healthy teardown (for example
+  a router releasing its clone after the owner's non-final `shutdown()`) no
+  longer logs a spurious warning
 - defer managed stream-consumer automatic `XACK` until the caller advances
   past the delivered item, leaving it pending and recoverable if the stream is
   dropped before that point (#734)

@@ -11,6 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - connection-setup/client-name builder policies replayed on discovery, masters,
   replicas, redirected/topology-created nodes, dedicated sockets, and replacements
+- `MultiplexedClusterClient::shutdown_handle()` returning a cloneable
+  `ClusterShutdownHandle` with `shutdown()`, `shutdown_timeout(grace)`, and
+  `abort()`. Unlike `shutdown(self)`, which acts only on the final clone, it
+  stops admission across every clone, keeps topology refreshes from installing
+  new node services, and joins every per-node worker, so a host whose router
+  holds clones can still tear the client down deterministically
+  (redis-developer/redis-database-mcp-rs#125)
 
 ### Fixed
 

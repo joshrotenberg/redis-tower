@@ -72,7 +72,6 @@ use std::sync::{Arc, Mutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 
 use futures::stream::{StreamExt, TryStreamExt};
-use redis_tower::AutoPipelineService;
 use redis_tower::PipelineExecutor;
 use redis_tower::RedisExecutor;
 use redis_tower::auto_pipeline::{AutoPipelineConfig, AutoPipelineReconnectConfig};
@@ -84,6 +83,7 @@ use redis_tower::metrics_layer::{
     ClusterRedirectKind, ClusterTopologyRefreshOutcome, ErrorKind, MetricsRecorder,
 };
 use redis_tower::reconnect::{ConnectionFactory, ReconnectConfig};
+use redis_tower::{AutoPipelineService, AutoPipelineShutdownHandle, ShutdownOutcome};
 use redis_tower_commands::ClientCaching;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
 use redis_tower_core::tls::TlsConfig;
@@ -125,6 +125,9 @@ pub struct MultiplexedClusterClient {
     /// across clones, so a node failure seen by many concurrent commands
     /// triggers one refresh, not a storm.
     refresh_gate: Arc<RefreshGate>,
+    /// Shutdown state and per-node worker registry shared by every clone and
+    /// by [`ClusterShutdownHandle`].
+    lifecycle: Arc<ClusterLifecycle>,
 }
 
 impl Clone for MultiplexedClusterClient {
@@ -136,7 +139,142 @@ impl Clone for MultiplexedClusterClient {
             include_node_in_metrics: self.include_node_in_metrics,
             node_metric_labels: Arc::clone(&self.node_metric_labels),
             refresh_gate: Arc::clone(&self.refresh_gate),
+            lifecycle: Arc::clone(&self.lifecycle),
         }
+    }
+}
+
+/// Shutdown state shared by every clone of one cluster client.
+///
+/// The registry holds a shutdown handle for every per-node worker the client
+/// has built and that has not finished, including services a topology refresh
+/// already replaced or pruned but that are still draining. Holding these
+/// handles keeps nothing alive: workers stay governed by their service
+/// leases, and the handles only allow joining them.
+#[derive(Default)]
+struct ClusterLifecycle {
+    shutdown_requested: AtomicBool,
+    workers: Mutex<Vec<AutoPipelineShutdownHandle>>,
+}
+
+impl ClusterLifecycle {
+    fn is_shutdown_requested(&self) -> bool {
+        self.shutdown_requested.load(Ordering::Acquire)
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown_requested.store(true, Ordering::Release);
+    }
+
+    /// Fail fast once shutdown has been requested through a handle.
+    fn ensure_running(&self) -> Result<(), RedisError> {
+        if self.is_shutdown_requested() {
+            Err(RedisError::ConnectionClosed)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Register a newly built per-node worker, forgetting finished ones.
+    fn track(&self, service: &AutoPipelineService) {
+        let mut workers = self.workers.lock().unwrap();
+        workers.retain(|worker| !worker.is_finished());
+        workers.push(service.shutdown_handle());
+    }
+
+    fn snapshot(&self) -> Vec<AutoPipelineShutdownHandle> {
+        self.workers.lock().unwrap().clone()
+    }
+
+    /// Drop finished workers and report whether any remain.
+    fn retain_unfinished(&self) -> bool {
+        let mut workers = self.workers.lock().unwrap();
+        workers.retain(|worker| !worker.is_finished());
+        !workers.is_empty()
+    }
+}
+
+/// An owned controller that shuts down every per-node worker of a
+/// [`MultiplexedClusterClient`], whichever clones still exist.
+///
+/// Obtain it with [`MultiplexedClusterClient::shutdown_handle`] before the
+/// client is cloned into a router or erased behind a trait object.
+/// [`MultiplexedClusterClient::shutdown`] acts only on the final clone; this
+/// handle stops admission on all of them. After shutdown starts, `execute`,
+/// pipelines, and node-pinned calls on every clone fail with
+/// [`RedisError::ConnectionClosed`], no background or explicit topology refresh
+/// installs new node services, and every worker the client built, including
+/// ones a refresh replaced and is still draining, is joined.
+///
+/// The handle is cloneable; shutdown is idempotent and safe to call
+/// concurrently. Dropping the handle does not stop the client.
+#[derive(Clone)]
+#[must_use = "retain the handle and call shutdown() during orderly application shutdown"]
+pub struct ClusterShutdownHandle {
+    lifecycle: Arc<ClusterLifecycle>,
+    refresh_gate: Arc<RefreshGate>,
+}
+
+impl std::fmt::Debug for ClusterShutdownHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClusterShutdownHandle")
+            .field("shutdown_requested", &self.is_shutdown_requested())
+            .finish()
+    }
+}
+
+impl ClusterShutdownHandle {
+    /// Stop admission on every clone, drain each per-node worker, and join
+    /// them.
+    ///
+    /// An in-flight background topology refresh is allowed to finish first;
+    /// it installs nothing once shutdown has begun. Each worker drains as
+    /// described by
+    /// [`AutoPipelineShutdownHandle::shutdown`](redis_tower::AutoPipelineShutdownHandle::shutdown).
+    /// Use [`shutdown_timeout`](Self::shutdown_timeout) when teardown must be
+    /// bounded even if a node stops answering.
+    pub async fn shutdown(&self) {
+        self.lifecycle.request_shutdown();
+        self.refresh_gate.wait_until_idle().await;
+        loop {
+            let workers = self.lifecycle.snapshot();
+            futures::future::join_all(workers.iter().map(AutoPipelineShutdownHandle::shutdown))
+                .await;
+            if !self.lifecycle.retain_unfinished() {
+                return;
+            }
+        }
+    }
+
+    /// Shut down like [`shutdown`](Self::shutdown), but [`abort`](Self::abort)
+    /// whatever has not drained after `grace`.
+    pub async fn shutdown_timeout(&self, grace: Duration) -> ShutdownOutcome {
+        match tokio::time::timeout(grace, self.shutdown()).await {
+            Ok(()) => ShutdownOutcome::Drained,
+            Err(_elapsed) => {
+                self.abort().await;
+                ShutdownOutcome::Aborted
+            }
+        }
+    }
+
+    /// Stop admission and cancel every per-node worker without draining.
+    ///
+    /// Requests still queued or awaiting replies fail with
+    /// [`RedisError::ConnectionClosed`]; commands already written may have
+    /// executed. See
+    /// [`AutoPipelineShutdownHandle::abort`](redis_tower::AutoPipelineShutdownHandle::abort).
+    pub async fn abort(&self) {
+        self.lifecycle.request_shutdown();
+        let workers = self.lifecycle.snapshot();
+        futures::future::join_all(workers.iter().map(AutoPipelineShutdownHandle::abort)).await;
+        self.lifecycle.retain_unfinished();
+    }
+
+    /// Return whether shutdown has been requested through any handle.
+    pub fn is_shutdown_requested(&self) -> bool {
+        self.lifecycle.is_shutdown_requested()
     }
 }
 
@@ -386,6 +524,7 @@ impl Inner {
 pub(crate) struct ClusterPubSubBackend {
     inner: Weak<RwLock<Inner>>,
     cache_hooks: Weak<StdRwLock<Option<ClusterCacheHooks>>>,
+    lifecycle: Weak<ClusterLifecycle>,
     connector: ClusterNodeConnector,
     reconnect: ReconnectConfig,
     max_redirects: usize,
@@ -544,7 +683,18 @@ impl ClusterPubSubBackend {
             self.connector.clone(),
         )
         .await?;
-        inner.write().await.masters.entry(addr).or_insert(service);
+        let lifecycle = self
+            .lifecycle
+            .upgrade()
+            .ok_or(RedisError::ConnectionClosed)?;
+        lifecycle.track(&service);
+        let mut inner = inner.write().await;
+        if lifecycle.is_shutdown_requested() {
+            drop(inner);
+            service.shutdown_handle().shutdown().await;
+            return Err(RedisError::ConnectionClosed);
+        }
+        inner.masters.entry(addr).or_insert(service);
         Ok(())
     }
 }
@@ -1005,6 +1155,10 @@ impl MultiplexedClusterClient {
         }
 
         let read_routing = read_routing.unwrap_or_else(|| Arc::new(RoundRobinRouting::new()));
+        let lifecycle = Arc::new(ClusterLifecycle::default());
+        for service in masters.values().chain(replicas.values()) {
+            lifecycle.track(service);
+        }
 
         Ok(Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -1031,6 +1185,7 @@ impl MultiplexedClusterClient {
             include_node_in_metrics,
             node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
             refresh_gate: Arc::new(RefreshGate::new(REFRESH_MIN_INTERVAL)),
+            lifecycle,
         })
     }
 
@@ -1052,6 +1207,7 @@ impl MultiplexedClusterClient {
         cmd: Cmd,
         dispatch_mode: CacheDispatchMode,
     ) -> Result<Cmd::Response, RedisError> {
+        self.lifecycle.ensure_running()?;
         let deadline = cmd.deadline();
         let observation = self
             .metrics_recorder
@@ -1109,6 +1265,7 @@ impl MultiplexedClusterClient {
     /// operation because Redis may have applied an unknown prefix of that
     /// batch.
     async fn execute_cluster_pipeline(&self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
+        self.lifecycle.ensure_running()?;
         if frames.is_empty() {
             return Ok(Vec::new());
         }
@@ -1666,6 +1823,7 @@ impl MultiplexedClusterClient {
     }
 
     async fn refresh_topology_inner(&self) -> Result<TopologyRefreshStats, RedisError> {
+        self.lifecycle.ensure_running()?;
         // Snapshot what we need from the inner state, then release the lock
         // before doing network I/O.
         let (
@@ -1822,6 +1980,9 @@ impl MultiplexedClusterClient {
             connector,
         )
         .await;
+        for (_, service) in built_masters.iter().chain(built_replicas.iter()) {
+            self.lifecycle.track(service);
+        }
         let services_requested = master_diff.to_build.len() + replica_diff.to_build.len();
         let services_built = built_masters.len() + built_replicas.len();
         let services_skipped = services_requested.saturating_sub(services_built);
@@ -1832,6 +1993,21 @@ impl MultiplexedClusterClient {
         let mut to_drain: Vec<AutoPipelineService> = Vec::new();
         {
             let mut inner = self.inner.write().await;
+            // A shutdown handle sets the flag before draining, so checking it
+            // under the write lock means a refresh racing shutdown either
+            // committed first (and its services are drained by the handle) or
+            // installs nothing.
+            if self.lifecycle.is_shutdown_requested() {
+                drop(inner);
+                let built = built_masters.into_iter().chain(built_replicas);
+                futures::future::join_all(
+                    built.map(
+                        |(_, service)| async move { service.shutdown_handle().shutdown().await },
+                    ),
+                )
+                .await;
+                return Err(RedisError::ConnectionClosed);
+            }
             let previous_topology = inner.topology.clone();
             let current_topology = topology;
             let change = inner
@@ -1912,6 +2088,9 @@ impl MultiplexedClusterClient {
     /// dead address forever. The [`RefreshGate`] collapses concurrent triggers
     /// into a single refresh.
     fn trigger_refresh(&self) {
+        if self.lifecycle.is_shutdown_requested() {
+            return;
+        }
         let Some(permit) = self.refresh_gate.try_begin() else {
             return;
         };
@@ -1972,6 +2151,7 @@ impl MultiplexedClusterClient {
         ClusterPubSubBackend {
             inner: Arc::downgrade(&self.inner),
             cache_hooks: Arc::downgrade(&self.cache_hooks),
+            lifecycle: Arc::downgrade(&self.lifecycle),
             connector,
             reconnect: inner.reconnect_config.reconnect.clone(),
             max_redirects: inner.max_redirects,
@@ -2091,6 +2271,33 @@ impl MultiplexedClusterClient {
         cmd.parse_response(response)
     }
 
+    /// Return an owned controller that shuts down every per-node worker.
+    ///
+    /// Retain this before cloning the client into a router or erasing its
+    /// type. Unlike [`Self::shutdown`], which acts only on the final clone,
+    /// [`ClusterShutdownHandle::shutdown`] stops admission across all clones,
+    /// keeps topology refreshes from installing new node services, drains, and
+    /// joins every worker.
+    ///
+    /// ```no_run
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// use redis_tower_cluster::MultiplexedClusterClient;
+    ///
+    /// let cluster = MultiplexedClusterClient::connect("127.0.0.1:7000").await?;
+    /// let shutdown = cluster.shutdown_handle();
+    /// let router_client = cluster.clone();
+    /// # let _ = router_client;
+    /// shutdown.shutdown().await;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn shutdown_handle(&self) -> ClusterShutdownHandle {
+        ClusterShutdownHandle {
+            lifecycle: Arc::clone(&self.lifecycle),
+            refresh_gate: Arc::clone(&self.refresh_gate),
+        }
+    }
+
     /// Gracefully shut down the cluster client, draining every per-node worker.
     ///
     /// Signals each master and replica [`AutoPipelineService`] to stop
@@ -2106,6 +2313,8 @@ impl MultiplexedClusterClient {
     /// this returns immediately and the workers keep running until the final
     /// clone shuts down or is dropped -- mirroring
     /// [`MultiplexedClient::shutdown`](redis_tower::MultiplexedClient::shutdown).
+    /// When the final clone cannot be recovered, retain
+    /// [`Self::shutdown_handle`] instead.
     ///
     /// # Example
     ///
@@ -2205,6 +2414,7 @@ impl MultiplexedClusterClient {
     }
 
     async fn master_service(&self, addr: &str) -> Result<Target, RedisError> {
+        self.lifecycle.ensure_running()?;
         let inner = self.inner.read().await;
         let svc = inner
             .masters
@@ -2253,7 +2463,13 @@ impl MultiplexedClusterClient {
                     return Err(error);
                 }
             };
+        self.lifecycle.track(&svc);
         let mut inner = self.inner.write().await;
+        if self.lifecycle.is_shutdown_requested() {
+            drop(inner);
+            svc.shutdown_handle().shutdown().await;
+            return Err(RedisError::ConnectionClosed);
+        }
         inner.masters.entry(addr.to_string()).or_insert(svc);
         Ok(())
     }
@@ -3653,6 +3869,10 @@ mod observability_tests {
         include_node_in_metrics: bool,
     ) -> MultiplexedClusterClient {
         let recorder: Arc<dyn MetricsRecorder> = recorder;
+        let lifecycle = Arc::new(ClusterLifecycle::default());
+        for service in masters.values() {
+            lifecycle.track(service);
+        }
         MultiplexedClusterClient {
             inner: Arc::new(RwLock::new(Inner {
                 topology,
@@ -3678,6 +3898,7 @@ mod observability_tests {
             include_node_in_metrics,
             node_metric_labels: Arc::new(BoundedNodeMetricLabels::default()),
             refresh_gate: Arc::new(RefreshGate::new(REFRESH_MIN_INTERVAL)),
+            lifecycle,
         }
     }
 
@@ -4313,6 +4534,107 @@ mod observability_tests {
             .await
             .expect("final shutdown did not wake after refresh released its clone")
             .unwrap();
+        server.await.unwrap();
+    }
+
+    fn single_master_topology(addr: &str) -> ClusterTopology {
+        ClusterTopology::new(vec![crate::topology::SlotRange {
+            start: 0,
+            end: 16_383,
+            master: node_addr(addr),
+            replicas: Vec::new(),
+        }])
+    }
+
+    /// redis-database-mcp-rs#125: a host that hands clones to a router must be
+    /// able to shut every per-node worker down without recovering the final
+    /// clone, and later calls through any clone must fail fast.
+    #[tokio::test]
+    async fn shutdown_handle_stops_every_clone_and_joins_node_workers() {
+        let (addr, service, server) = framed_service(
+            vec![get_frame("k")],
+            vec![Frame::BulkString(Some(Bytes::from_static(b"v")))],
+        )
+        .await;
+        let client = test_client(
+            addr.clone(),
+            single_master_topology(&addr),
+            HashMap::from([(addr, service)]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let shutdown = client.shutdown_handle();
+        let router = client.clone();
+        let router_held: Arc<dyn Send + Sync> = Arc::new(client.clone());
+        let value: Option<Bytes> = router.execute(Get::new("k")).await.unwrap();
+        assert_eq!(value.as_deref(), Some(&b"v"[..]));
+
+        tokio::time::timeout(Duration::from_secs(2), shutdown.shutdown())
+            .await
+            .expect("the handle must not wait for the final clone");
+        assert!(shutdown.is_shutdown_requested());
+        assert!(client.lifecycle.snapshot().iter().all(|w| w.is_finished()));
+        assert!(matches!(
+            router.execute(Get::new("k")).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(matches!(
+            client.refresh_topology().await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        let mut pipeline_client = client.clone();
+        assert!(matches!(
+            PipelineExecutor::execute_pipeline(&mut pipeline_client, vec![get_frame("k")]).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        // Idempotent, and the final clone's own shutdown still completes.
+        shutdown.shutdown().await;
+        drop((router, router_held, pipeline_client));
+        tokio::time::timeout(Duration::from_secs(2), client.shutdown())
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    /// With no response timeout, a node that never answers a request its
+    /// caller still awaits can only be bounded by the abort path.
+    #[tokio::test]
+    async fn shutdown_timeout_aborts_a_node_that_never_answers() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (mut peer, _) = listener.accept().await.unwrap();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let _ = peer.read(&mut buf).await;
+            let _ = release_rx.await;
+        });
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(stream));
+        let service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        let addr = addr.to_string();
+        let client = test_client(
+            addr.clone(),
+            single_master_topology(&addr),
+            HashMap::from([(addr, service)]),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let shutdown = client.shutdown_handle();
+        let caller = client.clone();
+        let waiting = tokio::spawn(async move { caller.execute(Get::new("k")).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        assert_eq!(
+            shutdown.shutdown_timeout(Duration::from_millis(100)).await,
+            ShutdownOutcome::Aborted
+        );
+        assert!(matches!(
+            waiting.await.unwrap(),
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(client.lifecycle.snapshot().iter().all(|w| w.is_finished()));
+        let _ = release_tx.send(());
         server.await.unwrap();
     }
 
