@@ -806,6 +806,11 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
         };
         replacement.resubscribe().await?;
         self.framed = replacement.framed;
+        // A server-initiated unsubscribe still buffered from the old socket
+        // describes a subscription the replay has just re-established on the
+        // new one; applying it later would untrack a live subscription.
+        self.buffered_frames
+            .retain(|frame| Self::server_shard_unsubscribe(frame).is_none());
         self.buffered_frames.extend(replacement.buffered_frames);
         Ok(())
     }
@@ -889,6 +894,12 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
     /// can be consumed by a subsequent confirmation loop or the message stream.
     /// With `null_ack_completes`, an unsubscribe acknowledgement with a null
     /// name (the server held nothing of this family) ends the wait early.
+    ///
+    /// Unrelated frames go straight into the connection's buffer as they are
+    /// read, so a caller that cancels this wait loses no message already taken
+    /// off the wire. Existing buffered frames are older than anything read
+    /// here, and nothing pops the buffer during the wait, so appending keeps
+    /// delivery order.
     async fn await_confirmations(
         &mut self,
         names: &[&[u8]],
@@ -896,19 +907,15 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
         null_ack_completes: bool,
     ) -> Result<(), RedisError> {
         let mut pending: HashSet<&[u8]> = names.iter().copied().collect();
-        let mut deferred = VecDeque::new();
 
-        let result = loop {
+        loop {
             if pending.is_empty() {
-                break Ok(());
+                return Ok(());
             }
 
-            let frame = match self.next_wire_frame().await {
-                Ok(frame) => frame,
-                Err(error) => break Err(error),
-            };
+            let frame = self.next_wire_frame().await?;
             if null_ack_completes && Self::is_null_unsubscribe_ack(&frame, expected_kind) {
-                break Ok(());
+                return Ok(());
             }
 
             match Self::extract_confirmation_channel(&frame, expected_kind) {
@@ -919,42 +926,29 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
                     }
                     // Confirmation for a channel we did not request in this call.
                     // Buffer it so the caller that IS waiting for it can consume it.
-                    deferred.push_back(frame);
+                    self.buffered_frames.push_back(frame);
                 }
-                Some(Err(error)) => break Err(error),
+                Some(Err(error)) => return Err(error),
                 None => {
                     // Not a confirmation of the expected kind at all. Buffer it.
-                    deferred.push_back(frame);
+                    self.buffered_frames.push_back(frame);
                 }
             }
-        };
-
-        // Existing buffered frames are older than anything read above. Append
-        // deferred wire frames to retain delivery order for the message stream.
-        self.buffered_frames.extend(deferred);
-        result
+        }
     }
 
     /// Wait for one confirmation of `expected_kind`, preserving every frame
-    /// unrelated to that acknowledgement.
+    /// unrelated to that acknowledgement (buffered as read, as in
+    /// [`await_confirmations`](Self::await_confirmations)).
     async fn await_confirmation(&mut self, expected_kind: &str) -> Result<(), RedisError> {
-        let mut deferred = VecDeque::new();
-
-        let result = loop {
-            let frame = match self.next_wire_frame().await {
-                Ok(frame) => frame,
-                Err(error) => break Err(error),
-            };
-
+        loop {
+            let frame = self.next_wire_frame().await?;
             match Self::is_confirmation(&frame, expected_kind) {
-                Some(Ok(())) => break Ok(()),
-                Some(Err(error)) => break Err(error),
-                None => deferred.push_back(frame),
+                Some(Ok(())) => return Ok(()),
+                Some(Err(error)) => return Err(error),
+                None => self.buffered_frames.push_back(frame),
             }
-        };
-
-        self.buffered_frames.extend(deferred);
-        result
+        }
     }
 
     /// Whether `frame` is an unsubscribe acknowledgement of `expected_kind`
@@ -1994,6 +1988,130 @@ mod tests {
             .unwrap();
         assert!(pubsub.subscriptions().shard_channels.is_empty());
         let _server = server_task.await.unwrap();
+    }
+
+    /// Review finding: frames read off the wire while waiting for a
+    /// confirmation were kept in a future-local queue, so cancelling the wait
+    /// (a caller timeout around a resubscribe) discarded messages already
+    /// received on a socket the session keeps using.
+    #[tokio::test]
+    async fn cancelled_confirmation_wait_keeps_messages_already_read() {
+        let (mut pubsub, mut server) = binary_pubsub_pair().await;
+        let (release, released) = tokio::sync::oneshot::channel::<()>();
+        let server_task = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            server
+                .send(push(vec![
+                    bulk("ssubscribe"),
+                    bulk("{s}a"),
+                    Frame::Integer(1),
+                ]))
+                .await
+                .unwrap();
+            assert_eq!(
+                server.next().await.unwrap().unwrap(),
+                array(vec![bulk("SSUBSCRIBE"), bulk("{s}b")])
+            );
+            // A message for the existing channel arrives before the ack.
+            server
+                .send(push(vec![bulk("smessage"), bulk("{s}a"), bulk("early")]))
+                .await
+                .unwrap();
+            released.await.unwrap();
+            for frame in [
+                push(vec![bulk("ssubscribe"), bulk("{s}b"), Frame::Integer(2)]),
+                push(vec![bulk("smessage"), bulk("{s}a"), bulk("late")]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            server
+        });
+        pubsub.ssubscribe_bytes(&[b"{s}a"]).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                pubsub.ssubscribe_bytes(&[b"{s}b"])
+            )
+            .await
+            .is_err(),
+            "the caller gives up waiting for the acknowledgement"
+        );
+        release.send(()).unwrap();
+        let first = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.payload.as_ref(),
+            b"early",
+            "the received message survives"
+        );
+        let second = pubsub.next().await.unwrap().unwrap();
+        assert_eq!(second.payload.as_ref(), b"late");
+        let _server = server_task.await.unwrap();
+    }
+
+    /// Review finding: a server-initiated `sunsubscribe` buffered from the old
+    /// socket survived a reconnect. The replacement replayed the channel, then
+    /// the stale notice removed it from tracking, so the next reconnect
+    /// silently stopped replaying a subscription the server still held.
+    #[tokio::test]
+    async fn reconnect_discards_server_unsubscribes_buffered_from_the_old_socket() {
+        let (mut pubsub, mut server) = binary_pubsub_pair().await;
+        let old_server = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            server
+                .send(push(vec![
+                    bulk("ssubscribe"),
+                    bulk("{s}a"),
+                    Frame::Integer(1),
+                ]))
+                .await
+                .unwrap();
+            let _ = server.next().await.unwrap().unwrap();
+            for frame in [
+                push(vec![bulk("sunsubscribe"), bulk("{s}a"), Frame::Integer(0)]),
+                push(vec![bulk("ssubscribe"), bulk("{s}b"), Frame::Integer(1)]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            server
+        });
+        pubsub.ssubscribe_bytes(&[b"{s}a"]).await.unwrap();
+        pubsub.ssubscribe_bytes(&[b"{s}b"]).await.unwrap();
+        let _old = old_server.await.unwrap();
+
+        let (client, replacement) = redis_stream_pair().await;
+        let client = std::sync::Mutex::new(Some(client));
+        let factory = move || {
+            let stream = client.lock().unwrap().take().unwrap();
+            async move { Ok(RedisConnection::from_stream(stream)) }
+        };
+        let mut replacement = Framed::new(replacement, redis_tower_protocol::RespCodec::new());
+        let new_server = tokio::spawn(async move {
+            assert_eq!(
+                replacement.next().await.unwrap().unwrap(),
+                array(vec![bulk("SSUBSCRIBE"), bulk("{s}a"), bulk("{s}b")])
+            );
+            for frame in [
+                push(vec![bulk("ssubscribe"), bulk("{s}a"), Frame::Integer(1)]),
+                push(vec![bulk("ssubscribe"), bulk("{s}b"), Frame::Integer(2)]),
+                push(vec![bulk("smessage"), bulk("{s}a"), bulk("after")]),
+            ] {
+                replacement.send(frame).await.unwrap();
+            }
+            replacement
+        });
+        pubsub.reconnect_with(&factory).await.unwrap();
+        let _new = new_server.await.unwrap();
+        match pubsub.next_event().await.unwrap().unwrap() {
+            NamedPubSubEvent::Message(message) => assert_eq!(message.payload.as_ref(), b"after"),
+            other => panic!("the old socket's drop notice resurfaced: {other:?}"),
+        }
+        assert!(
+            pubsub
+                .subscriptions()
+                .shard_channels
+                .contains(&Bytes::from_static(b"{s}a")),
+            "the replayed channel stays tracked"
+        );
     }
 
     /// If tracking still claims channels the server no longer holds, the
