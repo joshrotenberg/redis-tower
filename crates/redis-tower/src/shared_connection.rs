@@ -202,15 +202,33 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
             continue;
         };
         match kind {
-            Unshareable::Transaction => match command {
-                "MULTI" => in_multi = true,
-                "WATCH" if !in_multi => watching = true,
-                "EXEC" | "DISCARD" if in_multi => {
-                    in_multi = false;
-                    watching = false;
+            Unshareable::Transaction => {
+                // Redis refuses a malformed DISCARD (and, on older servers,
+                // EXEC) without ending the transaction, so a terminator that
+                // only looks right would leave every later caller in MULTI.
+                let argc = command_args(frame).map_or(0, <[Frame]>::len);
+                let well_formed = if command == "WATCH" {
+                    argc >= 2
+                } else {
+                    argc == 1
+                };
+                if !well_formed {
+                    return Err(RedisError::Redis(format!(
+                        "ERR wrong number of arguments for {command} in a batch on a shared \
+                         multiplexed connection: Redis can refuse it without ending the \
+                         transaction, leaving other callers inside MULTI"
+                    )));
                 }
-                _ => {}
-            },
+                match command {
+                    "MULTI" => in_multi = true,
+                    "WATCH" if !in_multi => watching = true,
+                    "EXEC" | "DISCARD" if in_multi => {
+                        in_multi = false;
+                        watching = false;
+                    }
+                    _ => {}
+                }
+            }
             Unshareable::Blocking if in_multi => {}
             kind => return Err(rejection(command, kind)),
         }
@@ -224,6 +242,81 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
         ));
     }
     Ok(())
+}
+
+/// How a transaction opened by `MULTI` is meant to end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Terminator {
+    Exec,
+    Discard,
+}
+
+/// One `MULTI` and the `EXEC` or `DISCARD` meant to close it, as indexes into
+/// a flushed batch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TransactionSpan {
+    pub(crate) multi: usize,
+    pub(crate) end: usize,
+    pub(crate) terminator: Terminator,
+}
+
+impl TransactionSpan {
+    pub(crate) fn offset(self, by: usize) -> Self {
+        Self {
+            multi: self.multi + by,
+            end: self.end + by,
+            terminator: self.terminator,
+        }
+    }
+}
+
+/// Locate each `MULTI` in `frames` and the `EXEC` or `DISCARD` that closes it.
+pub(crate) fn transaction_spans(frames: &[Frame]) -> Vec<TransactionSpan> {
+    let mut spans = Vec::new();
+    let mut open = None;
+    for (index, frame) in frames.iter().enumerate() {
+        let Some(name) = command_args(frame).and_then(|items| bulk_arg(&items[0])) else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case(b"MULTI") {
+            open.get_or_insert(index);
+        } else if let Some(multi) = open {
+            let terminator = if name.eq_ignore_ascii_case(b"EXEC") {
+                Terminator::Exec
+            } else if name.eq_ignore_ascii_case(b"DISCARD") {
+                Terminator::Discard
+            } else {
+                continue;
+            };
+            spans.push(TransactionSpan {
+                multi,
+                end: index,
+                terminator,
+            });
+            open = None;
+        }
+    }
+    spans
+}
+
+/// Whether a transaction's replies show the connection may still be inside
+/// `MULTI`.
+///
+/// A refused `EXEC` is answered with `EXECABORT` and ends the transaction on
+/// current servers; any other `EXEC` error, and any `DISCARD` error (wrong
+/// arity, ACL denial), may leave it open. A refused `MULTI` never opened one.
+pub(crate) fn transaction_left_open(span: &TransactionSpan, replies: &[Frame]) -> bool {
+    let (Some(multi), Some(end)) = (replies.get(span.multi), replies.get(span.end)) else {
+        return true;
+    };
+    if matches!(multi, Frame::Error(_)) {
+        return false;
+    }
+    match (span.terminator, end) {
+        (Terminator::Exec, Frame::Error(message)) => !message.starts_with(b"EXECABORT"),
+        (Terminator::Discard, Frame::Error(_)) => true,
+        _ => false,
+    }
 }
 
 /// Reject a typed command that declares [`Command::is_blocking`] before it is
@@ -355,6 +448,97 @@ mod tests {
                 "{frames:?}"
             );
         }
+    }
+
+    #[test]
+    fn malformed_transaction_control_is_rejected_in_batches() {
+        for frames in [
+            vec![
+                cmd(&["MULTI"]),
+                cmd(&["SET", "k", "v"]),
+                cmd(&["DISCARD", "x"]),
+            ],
+            vec![
+                cmd(&["MULTI"]),
+                cmd(&["SET", "k", "v"]),
+                cmd(&["EXEC", "x"]),
+            ],
+            vec![
+                cmd(&["MULTI", "x"]),
+                cmd(&["SET", "k", "v"]),
+                cmd(&["EXEC"]),
+            ],
+            vec![cmd(&["WATCH"]), cmd(&["MULTI"]), cmd(&["EXEC"])],
+        ] {
+            assert!(
+                matches!(validate_shared_batch(&frames), Err(RedisError::Redis(m)) if m.contains("arguments")),
+                "{frames:?}"
+            );
+        }
+    }
+
+    fn reply(text: &'static [u8]) -> Frame {
+        Frame::SimpleString(bytes::Bytes::from_static(text))
+    }
+
+    fn error(text: &'static [u8]) -> Frame {
+        Frame::Error(bytes::Bytes::from_static(text))
+    }
+
+    #[test]
+    fn transaction_replies_reveal_a_connection_left_inside_multi() {
+        let frames = [
+            cmd(&["GET", "a"]),
+            cmd(&["MULTI"]),
+            cmd(&["SET", "k", "v"]),
+            cmd(&["DISCARD"]),
+            cmd(&["MULTI"]),
+            cmd(&["EXEC"]),
+        ];
+        let spans = transaction_spans(&frames);
+        assert_eq!(
+            spans,
+            vec![
+                TransactionSpan {
+                    multi: 1,
+                    end: 3,
+                    terminator: Terminator::Discard
+                },
+                TransactionSpan {
+                    multi: 4,
+                    end: 5,
+                    terminator: Terminator::Exec
+                },
+            ]
+        );
+        let discard = spans[0];
+        let exec = spans[1];
+        let ok = |at| {
+            let mut replies = vec![reply(b"OK"); 6];
+            replies[at] = error(b"NOPERM denied");
+            replies
+        };
+        assert!(transaction_left_open(&discard, &ok(3)), "refused DISCARD");
+        assert!(
+            !transaction_left_open(&discard, &ok(1)),
+            "refused MULTI never opened"
+        );
+        assert!(
+            transaction_left_open(&exec, &ok(5)),
+            "EXEC error without EXECABORT"
+        );
+        let mut aborted = vec![reply(b"OK"); 6];
+        aborted[5] = error(b"EXECABORT Transaction discarded");
+        assert!(!transaction_left_open(&exec, &aborted));
+        aborted[5] = Frame::Null;
+        assert!(
+            !transaction_left_open(&exec, &aborted),
+            "WATCH abort ends MULTI"
+        );
+        assert!(
+            transaction_left_open(&exec, &[]),
+            "missing replies are unknown"
+        );
     }
 
     #[test]

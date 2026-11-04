@@ -46,7 +46,10 @@ use crate::reconnect::{
     ConnectionDisconnectReason, ConnectionEvent, ConnectionEventBus, ConnectionFactory,
     ReconnectConfig, connect_with_timeout,
 };
-use crate::shared_connection::{validate_shared_batch, validate_shared_request};
+use crate::shared_connection::{
+    TransactionSpan, transaction_left_open, transaction_spans, validate_shared_batch,
+    validate_shared_request,
+};
 
 /// Configuration for the auto-pipelining service.
 #[derive(Clone)]
@@ -206,14 +209,19 @@ enum PipelineFailure {
     Connection(RedisError),
     CommandTimeout,
     ReadOnly,
+    /// The transport is intact but its session state is unusable for other
+    /// callers, for example a refused `DISCARD` left it inside `MULTI`.
+    SessionState(RedisError),
 }
 
 impl PipelineFailure {
     fn event_reason(&self) -> ConnectionDisconnectReason {
         match self {
-            Self::Connection(error) => ConnectionDisconnectReason::ConnectionError {
-                error: Arc::from(error.to_string()),
-            },
+            Self::Connection(error) | Self::SessionState(error) => {
+                ConnectionDisconnectReason::ConnectionError {
+                    error: Arc::from(error.to_string()),
+                }
+            }
             Self::CommandTimeout => ConnectionDisconnectReason::CommandTimeout,
             Self::ReadOnly => ConnectionDisconnectReason::ReadOnly,
         }
@@ -1688,6 +1696,13 @@ async fn pipeline_worker(
             // Pipeline execution failed. Either give up (Fixed source) or
             // reconnect via factory and keep serving.
             match &source {
+                ConnSource::Fixed if matches!(failure, PipelineFailure::SessionState(_)) => {
+                    // The socket still works but is stuck in a state other
+                    // callers must not inherit, and a fixed worker cannot
+                    // replace it. Close it and reject queued work.
+                    fail_queued_requests(&mut rx);
+                    return;
+                }
                 ConnSource::Fixed => {
                     // Current behavior: leave the worker running on the dead
                     // connection so any future batches also fail-fast and
@@ -2125,6 +2140,10 @@ async fn flush_batch(
 
     let mut frames: Vec<Frame> = Vec::with_capacity(total_frames);
     let mut responders: Vec<Responder> = Vec::with_capacity(batch.len());
+    // Transactions in this batch, so their replies can be checked for one
+    // that left the shared connection inside MULTI. Single requests cannot
+    // carry transaction control; they are rejected at admission.
+    let mut transactions: Vec<TransactionSpan> = Vec::new();
 
     for req in batch {
         match req {
@@ -2137,6 +2156,12 @@ async fn flush_batch(
                 response_tx,
             } => {
                 let count = fs.len();
+                let offset = frames.len();
+                transactions.extend(
+                    transaction_spans(&fs)
+                        .into_iter()
+                        .map(|span| span.offset(offset)),
+                );
                 frames.extend(fs);
                 responders.push(Responder::Multi(count, response_tx));
             }
@@ -2179,20 +2204,39 @@ async fn flush_batch(
             // so the caller still gets the error, then signal the worker to
             // reconnect via the factory onto a real master.
             let saw_readonly = reconnect_on_readonly && responses.iter().any(is_readonly_frame);
+            // A refused DISCARD (or an EXEC refused without EXECABORT) leaves
+            // the connection inside MULTI: every later frame was queued, not
+            // executed. Those callers fail instead of receiving QUEUED, and
+            // the connection is discarded rather than reused.
+            let left_open_at = transactions
+                .iter()
+                .filter(|span| transaction_left_open(span, &responses))
+                .map(|span| span.end)
+                .min();
 
-            if saw_readonly {
+            if saw_readonly || left_open_at.is_some() {
                 connection_health.set(false);
             }
 
             let mut iter = responses.into_iter();
+            let mut position = 0;
             for responder in responders {
+                let start = position;
                 match responder {
                     Responder::Single(tx) => {
-                        let _ = tx.send(iter.next().ok_or(RedisError::ConnectionClosed));
+                        position += 1;
+                        let reply = iter.next().ok_or(RedisError::ConnectionClosed);
+                        if left_open_at.is_some_and(|end| start > end) {
+                            let _ = tx.send(Err(RedisError::ConnectionClosed));
+                        } else {
+                            let _ = tx.send(reply);
+                        }
                     }
                     Responder::Multi(count, tx) => {
+                        position += count;
                         let collected: Vec<Frame> = iter.by_ref().take(count).collect();
-                        if collected.len() == count {
+                        if collected.len() == count && !left_open_at.is_some_and(|end| start > end)
+                        {
                             let _ = tx.send(Ok(collected));
                         } else {
                             let _ = tx.send(Err(RedisError::ConnectionClosed));
@@ -2200,7 +2244,11 @@ async fn flush_batch(
                     }
                 }
             }
-            if saw_readonly {
+            if left_open_at.is_some() {
+                Err(PipelineFailure::SessionState(RedisError::Redis(
+                    "a refused EXEC or DISCARD left the shared connection inside MULTI".to_owned(),
+                )))
+            } else if saw_readonly {
                 Err(PipelineFailure::ReadOnly)
             } else {
                 Ok(())
@@ -4222,6 +4270,64 @@ mod tests {
             }
         });
         (addr, task)
+    }
+
+    /// A fixed worker cannot replace a connection that a refused DISCARD left
+    /// inside MULTI, so it closes instead of letting later callers' commands
+    /// be queued into that transaction.
+    #[tokio::test]
+    async fn fixed_worker_closes_a_connection_left_inside_multi() {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_protocol::helpers::{array, bulk};
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut framed = Framed::new(
+                redis_tower_core::RedisStream::Tcp(stream),
+                redis_tower_core::RespCodec::new(),
+            );
+            // Behave like Redis after a refused DISCARD: still in MULTI.
+            while let Some(Ok(request)) = framed.next().await {
+                let name = match &request {
+                    Frame::Array(Some(items)) => match items.first() {
+                        Some(Frame::BulkString(Some(name))) => name.to_ascii_uppercase(),
+                        _ => Vec::new(),
+                    },
+                    _ => Vec::new(),
+                };
+                let reply = match name.as_slice() {
+                    b"MULTI" => Frame::SimpleString(bytes::Bytes::from_static(b"OK")),
+                    b"DISCARD" => Frame::Error(bytes::Bytes::from_static(b"NOPERM denied")),
+                    _ => Frame::SimpleString(bytes::Bytes::from_static(b"QUEUED")),
+                };
+                if framed.send(reply).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(stream));
+        let mut service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+
+        let replies = service
+            .call_pipeline(vec![
+                array(vec![bulk("MULTI")]),
+                array(vec![bulk("SET"), bulk("k"), bulk("v")]),
+                array(vec![bulk("DISCARD")]),
+            ])
+            .await
+            .unwrap();
+        assert!(matches!(&replies[2], Frame::Error(_)));
+        assert!(matches!(
+            call_frame(&mut service, ping()).await,
+            Err(RedisError::ConnectionClosed)
+        ));
+        assert!(!service.is_connection_healthy());
+        service.shutdown().await;
+        server.await.unwrap();
     }
 
     /// With the default unlimited reconnect budget, a factory-backed worker
