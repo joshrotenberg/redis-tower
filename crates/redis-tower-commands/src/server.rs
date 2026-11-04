@@ -1471,6 +1471,12 @@ impl Command for Wait {
     fn name(&self) -> &str {
         "WAIT"
     }
+
+    /// `WAIT` holds the connection until replicas acknowledge or the timeout
+    /// ends; a zero timeout with too few replicas never returns.
+    fn is_blocking(&self) -> bool {
+        true
+    }
 }
 
 /// WAITAOF numlocal numreplicas timeout
@@ -1540,6 +1546,12 @@ impl Command for WaitAof {
 
     fn name(&self) -> &str {
         "WAITAOF"
+    }
+
+    /// `WAITAOF` holds the connection until the AOF and replicas acknowledge
+    /// or the timeout ends; a zero timeout that cannot be met never returns.
+    fn is_blocking(&self) -> bool {
+        true
     }
 }
 
@@ -4242,6 +4254,12 @@ mod tests {
         cmd.parse_response(Frame::SimpleString(Bytes::from("OK")))
             .unwrap();
         assert!(cmd.parse_response(Frame::Integer(1)).is_err());
+    }
+
+    #[test]
+    fn wait_commands_report_blocking() {
+        assert!(Wait::new(1, 0).is_blocking());
+        assert!(WaitAof::new(0, 1, 0).is_blocking());
     }
 
     // -- FlushDb --

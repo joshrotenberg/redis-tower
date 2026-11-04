@@ -92,8 +92,9 @@ use crate::transaction::TransactionExecutor;
 /// # Blocking and connection-state commands
 ///
 /// Because every clone shares one connection and one pipeline worker, a
-/// blocking command (`BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`, or
-/// `XREAD`/`XREADGROUP` with `BLOCK`) would hold that worker for its entire
+/// blocking command (`BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`,
+/// `XREAD`/`XREADGROUP` with `BLOCK`, or `WAIT`/`WAITAOF`) would hold that
+/// worker for its entire
 /// wait and stall every other caller, so `execute` rejects it, along with any
 /// typed command reporting `is_blocking() == true`. Use a dedicated
 /// [`RedisConnection`] or a [`ConnectionPool`](crate::pool::ConnectionPool)

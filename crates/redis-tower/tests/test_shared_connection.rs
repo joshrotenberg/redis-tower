@@ -471,3 +471,38 @@ async fn refused_exec_keeps_the_connection() {
         .unwrap();
     client.shutdown_handle().shutdown().await;
 }
+
+/// `WAIT` and `WAITAOF` hold the connection until replicas acknowledge or the
+/// timeout ends; with no replicas and a zero timeout they never return, which
+/// would hang every caller sharing the worker.
+#[tokio::test]
+async fn wait_commands_are_rejected_before_they_stall_the_worker() {
+    let client = client_with(ProtocolVersion::Resp2).await;
+    client
+        .execute(Set::new("shared_conn:wait", "written"))
+        .await
+        .unwrap();
+
+    let started = std::time::Instant::now();
+    match client.execute(Wait::new(1, 0)).await {
+        Err(RedisError::Redis(message)) => {
+            assert!(message.contains("shared multiplexed"), "{message}")
+        }
+        other => panic!("typed WAIT reached the shared connection: {other:?}"),
+    }
+    match client.execute(WaitAof::new(0, 1, 0)).await {
+        Err(RedisError::Redis(message)) => {
+            assert!(message.contains("shared multiplexed"), "{message}")
+        }
+        other => panic!("typed WAITAOF reached the shared connection: {other:?}"),
+    }
+    let raw = assert_neighbors_unaffected(&client, RawCommand::new("WAIT").arg("1").arg("0")).await;
+    assert!(raw.contains("ConnectionPool"), "{raw}");
+    let raw_aof = assert_neighbors_unaffected(
+        &client,
+        RawCommand::new("WAITAOF").arg("0").arg("1").arg("0"),
+    )
+    .await;
+    assert!(raw_aof.contains("ConnectionPool"), "{raw_aof}");
+    assert!(started.elapsed() < Duration::from_secs(2));
+}

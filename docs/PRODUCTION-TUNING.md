@@ -29,7 +29,8 @@ Client choice has a larger effect than most numeric knobs:
 Blocking commands cannot share a multiplexed connection: one blocked Redis
 connection would stall its pipeline worker and every clone. Standalone, Cluster,
 and Sentinel multiplexed clients therefore reject `BLPOP`, `BRPOP`, `BLMOVE`,
-the other blocking pops, `XREAD` / `XREADGROUP` with `BLOCK`, and any typed
+the other blocking pops, `XREAD` / `XREADGROUP` with `BLOCK`, `WAIT` /
+`WAITAOF` (a zero timeout with too few replicas never returns), and any typed
 command whose `is_blocking()` is true, before anything is sent. Isolate blocking
 traffic on dedicated or pooled connections, and ensure the pool has enough
 independent slots for the maximum intended number of simultaneous blockers.

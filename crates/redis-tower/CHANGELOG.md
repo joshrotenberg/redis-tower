@@ -37,7 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller's reply, redis-rs #2423), `MONITOR`, `SYNC`/`PSYNC`, `RESET` (it
   switched every clone of a read-only ACL user to `default`), `HELLO`, `QUIT`,
   `CLIENT REPLY` (one caller received another's value), blocking commands
-  including `XREAD`/`XREADGROUP ... BLOCK` and any typed command whose
+  including `XREAD`/`XREADGROUP ... BLOCK`, `WAIT`, `WAITAOF`, and any typed command whose
   `is_blocking()` is true, and stand-alone `MULTI`/`EXEC`/`DISCARD`/`WATCH`.
   This applies to `AutoPipelineService` and therefore to `MultiplexedClient`,
   `CachedMultiplexedClient`, and layered clients. Explicit pipelines may still
