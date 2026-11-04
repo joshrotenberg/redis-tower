@@ -90,6 +90,10 @@ impl TlsConfig {
     }
 
     /// Create a TLS config using the rustls backend with system root certs.
+    ///
+    /// The native root store (or its loading error) is cached on first use for
+    /// the lifetime of the process. An empty native store uses the webpki bundle;
+    /// loading failures with no usable native roots return an error instead.
     #[cfg(feature = "tls-rustls")]
     #[cfg_attr(docsrs, doc(cfg(feature = "tls-rustls")))]
     pub fn default_rustls() -> Self {
@@ -152,6 +156,12 @@ impl TlsConfig {
     /// Accept invalid hostnames in TLS certificates.
     ///
     /// **DANGEROUS**: This disables hostname verification.
+    /// The certificate chain, validity period, and handshake signature are still
+    /// verified against the trust roots; only the match between the server's
+    /// certificate and the connected hostname or IP is skipped. Useful when a
+    /// cluster reports node IPs the certificate does not name. Honored by both
+    /// backends. Ignored for caller-built backend configurations, which control
+    /// their own verification.
     pub fn danger_accept_invalid_hostnames(mut self, accept: bool) -> Self {
         self.accept_invalid_hostnames = accept;
         self
@@ -160,8 +170,9 @@ impl TlsConfig {
     /// Trust a custom root CA, given its certificate(s) in PEM.
     ///
     /// Replaces the default trust roots (system store + webpki bundle) with the
-    /// provided CA(s) -- the standard private-CA / enterprise posture. Works
-    /// with either backend. Ignored if the config was built from a pre-made
+    /// provided CA(s), including every certificate in a PEM bundle -- the
+    /// standard private-CA / enterprise posture. Works with either backend.
+    /// Ignored if the config was built from a pre-made
     /// `ClientConfig` / `TlsConnector`.
     ///
     /// # Example
@@ -242,9 +253,12 @@ impl TlsConfig {
         builder.danger_accept_invalid_certs(self.accept_invalid_certs);
         builder.danger_accept_invalid_hostnames(self.accept_invalid_hostnames);
         if let Some(ref ca) = self.root_ca_pem {
-            let cert = native_tls::Certificate::from_pem(ca)
+            let certs = native_tls::Certificate::stack_from_pem(ca)
                 .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
-            builder.add_root_certificate(cert);
+            builder.disable_built_in_roots(true);
+            for cert in certs {
+                builder.add_root_certificate(cert);
+            }
         }
         if let Some((ref cert_pem, ref key_pem)) = self.client_auth_pem {
             let identity = native_tls::Identity::from_pkcs8(cert_pem, key_pem)
@@ -284,7 +298,7 @@ impl TlsConfig {
     /// Build the rustls root cert store: the custom CA if one was provided,
     /// otherwise the system store with a webpki-roots fallback.
     #[cfg(feature = "tls-rustls")]
-    fn rustls_root_store(&self) -> Result<rustls::RootCertStore, RedisError> {
+    fn rustls_root_store(&self) -> Result<std::sync::Arc<rustls::RootCertStore>, RedisError> {
         let mut root_store = rustls::RootCertStore::empty();
         if let Some(ref ca) = self.root_ca_pem {
             for cert in parse_certs_pem(ca)? {
@@ -293,15 +307,9 @@ impl TlsConfig {
                     .map_err(|e| RedisError::from(std::io::Error::other(e)))?;
             }
         } else {
-            let native_result = rustls_native_certs::load_native_certs();
-            for cert in native_result.certs {
-                let _ = root_store.add(cert);
-            }
-            if root_store.is_empty() {
-                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            }
+            return rustls_native_root_store();
         }
-        Ok(root_store)
+        Ok(std::sync::Arc::new(root_store))
     }
 
     #[cfg(feature = "tls-rustls")]
@@ -312,7 +320,7 @@ impl TlsConfig {
     ) -> Result<RedisStream, RedisError> {
         use std::sync::Arc;
 
-        // Choose the server-cert verifier; both arms yield a builder awaiting
+        // Choose the server-cert verifier; every arm yields a builder awaiting
         // the client-auth choice, so client certs are applied uniformly below.
         // redis-tower enables rustls' ring backend explicitly. Select it on
         // this builder as well: downstream SDKs may enable aws-lc-rs through
@@ -327,6 +335,14 @@ impl TlsConfig {
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(DangerousVerifier))
+        } else if self.accept_invalid_hostnames {
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(HostnameBypassVerifier {
+                    roots: self.rustls_root_store()?,
+                    algorithms: rustls::crypto::ring::default_provider()
+                        .signature_verification_algorithms,
+                }))
         } else {
             builder.with_root_certificates(self.rustls_root_store()?)
         };
@@ -370,6 +386,40 @@ impl TlsConfig {
 
         Ok(RedisStream::Rustls(Box::new(tls_stream)))
     }
+}
+
+/// Share the native trust snapshot, including a useful failure, across connects.
+#[cfg(feature = "tls-rustls")]
+fn rustls_native_root_store() -> Result<std::sync::Arc<rustls::RootCertStore>, RedisError> {
+    use std::sync::{Arc, OnceLock};
+
+    static ROOTS: OnceLock<Result<Arc<rustls::RootCertStore>, String>> = OnceLock::new();
+    ROOTS
+        .get_or_init(|| {
+            let native = rustls_native_certs::load_native_certs();
+            let mut errors: Vec<_> = native.errors.iter().map(ToString::to_string).collect();
+            let mut roots = rustls::RootCertStore::empty();
+            for cert in native.certs {
+                if let Err(error) = roots.add(cert) {
+                    errors.push(error.to_string());
+                }
+            }
+            if roots.is_empty() {
+                if !errors.is_empty() {
+                    return Err(format!(
+                        "failed to load rustls native root certificates: {}",
+                        errors.join("; ")
+                    ));
+                }
+                roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            } else if !errors.is_empty() {
+                tracing::warn!(errors = ?errors, "some rustls native root certificates could not be loaded");
+            }
+            Ok(Arc::new(roots))
+        })
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|error| RedisError::from(std::io::Error::other(error.clone())))
 }
 
 /// Parse one or more certificates from PEM into rustls DER form.
@@ -437,9 +487,80 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
     }
 }
 
+/// Certificate verifier that checks everything except the server name. Used
+/// when `danger_accept_invalid_hostnames` is enabled without
+/// `danger_accept_invalid_certs`.
+///
+/// The chain must still lead to a trusted root, be within its validity period,
+/// and carry the server-auth usage, and the handshake signature must verify
+/// against the presented certificate. Only the final hostname / IP SAN match is
+/// skipped -- the same check rustls' `WebPkiServerVerifier` performs last.
+#[cfg(feature = "tls-rustls")]
+#[derive(Debug)]
+struct HostnameBypassVerifier {
+    roots: std::sync::Arc<rustls::RootCertStore>,
+    algorithms: rustls::crypto::WebPkiSupportedAlgorithms,
+}
+
+#[cfg(feature = "tls-rustls")]
+impl rustls::client::danger::ServerCertVerifier for HostnameBypassVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let cert = rustls::server::ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_cert_signed_by_trust_anchor(
+            &cert,
+            &self.roots,
+            intermediates,
+            now,
+            self.algorithms.all,
+        )?;
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(feature = "tls-rustls")]
+    use std::sync::Arc;
+
+    // Static fixtures avoid adding a core dev-dependency outside this task's
+    // manifest scope. Generated with OpenSSL; the leaf is signed by TEST_CERT,
+    // uses TEST_KEY, and has localhost / 127.0.0.1 SANs. Its 824-day validity
+    // respects Secure Transport's maximum; renew the leaf before February 2029.
+    #[cfg(feature = "tls-rustls")]
+    const SERVER_CERT: &str = include_str!("../tests/tls/server.pem");
+    #[cfg(feature = "tls-rustls")]
+    const UNRELATED_CA: &str = include_str!("../tests/tls/unrelated-ca.pem");
 
     // A self-signed P-256 cert + its PKCS#8 key, used to exercise PEM parsing.
     const TEST_CERT: &str = "-----BEGIN CERTIFICATE-----\n\
@@ -512,5 +633,298 @@ aHzx7UOqMKxs4Csh4kTiDRmwUoIq9DISRM1uYUR5dR9MjoMk/NEt3Jxp\n\
         assert!(parse_certs_pem(b"not a pem").unwrap().is_empty());
         // A missing private key is an error.
         assert!(parse_private_key_pem(b"-----BEGIN CERTIFICATE-----\nx\n").is_err());
+    }
+
+    /// A real TLS handshake on an ephemeral port, without a Redis process.
+    #[cfg(feature = "tls-rustls")]
+    async fn handshake(tls: TlsConfig, hostname: &str) -> Result<(), RedisError> {
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(
+            parse_certs_pem(SERVER_CERT.as_bytes()).unwrap(),
+            parse_private_key_pem(TEST_KEY.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            tokio_rustls::TlsAcceptor::from(Arc::new(config))
+                .accept(tcp)
+                .await
+        };
+        let client = async {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            tls.connect(tcp, hostname).await
+        };
+        let (client, server) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(client, server)
+        })
+        .await
+        .expect("TLS handshake timed out");
+        if client.is_ok() {
+            assert!(
+                server.is_ok(),
+                "server rejected a successful client handshake"
+            );
+        }
+        client.map(|_| ())
+    }
+
+    #[cfg(all(feature = "tls-rustls", feature = "tls-native-tls"))]
+    #[tokio::test]
+    async fn native_tls_trusts_every_ca_in_a_bundle() {
+        for bundle in [
+            format!("{UNRELATED_CA}{TEST_CERT}"),
+            format!("{TEST_CERT}{UNRELATED_CA}"),
+        ] {
+            handshake(
+                TlsConfig::default_native_tls().with_root_ca_pem(bundle),
+                "localhost",
+            )
+            .await
+            .expect("the signing CA must be trusted in either bundle position");
+        }
+        assert!(
+            handshake(
+                TlsConfig::default_native_tls().with_root_ca_pem(UNRELATED_CA),
+                "localhost",
+            )
+            .await
+            .is_err(),
+            "an unrelated CA must not trust the server"
+        );
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[tokio::test]
+    async fn rustls_hostname_bypass_skips_only_the_name_check() {
+        // The leaf's SANs are localhost / 127.0.0.1; a mismatched DNS name and
+        // a mismatched IP both exercise the skipped check.
+        for hostname in ["localhost", "wrong.example", "127.0.0.2"] {
+            handshake(
+                TlsConfig::default_rustls()
+                    .with_root_ca_pem(TEST_CERT)
+                    .danger_accept_invalid_hostnames(true),
+                hostname,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("hostname bypass must accept {hostname}: {error}"));
+        }
+        for hostname in ["wrong.example", "127.0.0.2"] {
+            assert!(
+                handshake(
+                    TlsConfig::default_rustls().with_root_ca_pem(TEST_CERT),
+                    hostname,
+                )
+                .await
+                .is_err(),
+                "without the bypass, {hostname} must fail hostname verification"
+            );
+            assert!(
+                handshake(
+                    TlsConfig::default_rustls()
+                        .with_root_ca_pem(TEST_CERT)
+                        .danger_accept_invalid_hostnames(true)
+                        .danger_accept_invalid_hostnames(false),
+                    hostname,
+                )
+                .await
+                .is_err(),
+                "turning the option back off must restore hostname verification"
+            );
+        }
+        // The chain is still verified: an untrusted issuer fails even with the
+        // hostname check skipped.
+        assert!(
+            handshake(
+                TlsConfig::default_rustls()
+                    .with_root_ca_pem(UNRELATED_CA)
+                    .danger_accept_invalid_hostnames(true),
+                "wrong.example",
+            )
+            .await
+            .is_err(),
+            "hostname bypass must not trust an unrelated CA"
+        );
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[tokio::test]
+    async fn rustls_invalid_certs_and_custom_config_keep_their_verification_policy() {
+        for accept_hostnames in [false, true] {
+            handshake(
+                TlsConfig::default_rustls()
+                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_hostnames(accept_hostnames),
+                "wrong.example",
+            )
+            .await
+            .expect("certificate bypass must retain its existing behavior");
+        }
+        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_root_certificates(
+            TlsConfig::default_rustls()
+                .with_root_ca_pem(TEST_CERT)
+                .rustls_root_store()
+                .unwrap(),
+        )
+        .with_no_client_auth();
+        handshake(
+            TlsConfig::from_rustls_config(Arc::new(config)).danger_accept_invalid_hostnames(true),
+            "localhost",
+        )
+        .await
+        .expect("a custom config must continue to ignore the builder option");
+    }
+
+    /// Set loader environment variables only in a child process, before any TLS
+    /// initialization. This avoids unsafe environment mutation and cache races.
+    #[cfg(feature = "tls-rustls")]
+    fn isolated_root_file(
+        test: &str,
+        contents: Option<&str>,
+        check: impl FnOnce(&std::path::Path),
+    ) {
+        const CASE: &str = "REDIS_TOWER_TLS_ROOT_TEST";
+        if std::env::var(CASE).as_deref() == Ok(test) {
+            check(std::path::Path::new(
+                &std::env::var_os("SSL_CERT_FILE").unwrap(),
+            ));
+            return;
+        }
+        let dir =
+            std::env::temp_dir().join(format!("redis-tower-tls-{}-{test}", std::process::id()));
+        std::fs::create_dir(&dir).unwrap();
+        let file = dir.join("roots.pem");
+        if let Some(contents) = contents {
+            std::fs::write(&file, contents).unwrap();
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("tls::tests::{test}"),
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CASE, test)
+            .env("SSL_CERT_FILE", &file)
+            .env_remove("SSL_CERT_DIR")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "isolated TLS test failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[test]
+    fn rustls_native_roots_are_cached_and_custom_roots_stay_separate() {
+        isolated_root_file(
+            "rustls_native_roots_are_cached_and_custom_roots_stay_separate",
+            Some(TEST_CERT),
+            |file| {
+                let first = TlsConfig::default_rustls().rustls_root_store().unwrap();
+                assert_eq!(first.len(), 1);
+                std::fs::remove_file(file).unwrap();
+                let second = TlsConfig::default_rustls().rustls_root_store().unwrap();
+                assert!(Arc::ptr_eq(&first, &second));
+                let custom = TlsConfig::default_rustls()
+                    .with_root_ca_pem(UNRELATED_CA)
+                    .rustls_root_store()
+                    .unwrap();
+                assert_eq!(custom.len(), 1);
+                assert_ne!(first.roots, custom.roots);
+            },
+        );
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[test]
+    fn rustls_native_root_loading_errors_are_cached_and_descriptive() {
+        isolated_root_file(
+            "rustls_native_root_loading_errors_are_cached_and_descriptive",
+            None,
+            |file| {
+                let first = TlsConfig::default_rustls()
+                    .rustls_root_store()
+                    .unwrap_err()
+                    .to_string();
+                assert!(first.contains("failed to load rustls native root certificates"));
+                assert!(
+                    first.contains("roots.pem"),
+                    "loader context missing: {first}"
+                );
+                std::fs::write(file, TEST_CERT).unwrap();
+                let second = TlsConfig::default_rustls()
+                    .rustls_root_store()
+                    .unwrap_err()
+                    .to_string();
+                assert_eq!(first, second);
+                assert!(
+                    TlsConfig::default_rustls()
+                        .with_root_ca_pem(TEST_CERT)
+                        .rustls_root_store()
+                        .is_ok(),
+                    "a failed native loader must not affect explicit custom roots"
+                );
+            },
+        );
+    }
+
+    #[cfg(feature = "tls-rustls")]
+    #[test]
+    fn rustls_empty_native_store_keeps_webpki_fallback() {
+        isolated_root_file(
+            "rustls_empty_native_store_keeps_webpki_fallback",
+            Some(""),
+            |_| {
+                let roots = TlsConfig::default_rustls().rustls_root_store().unwrap();
+                assert_eq!(roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+            },
+        );
+    }
+
+    // SSL_CERT_FILE controls OpenSSL's default roots, allowing us to test root
+    // replacement without installing a CA into the user's OS trust store.
+    #[cfg(all(
+        feature = "tls-rustls",
+        feature = "tls-native-tls",
+        target_os = "linux"
+    ))]
+    #[test]
+    fn native_tls_custom_ca_replaces_default_roots() {
+        isolated_root_file(
+            "native_tls_custom_ca_replaces_default_roots",
+            Some(TEST_CERT),
+            |_| {
+                tokio::runtime::Runtime::new().unwrap().block_on(async {
+                    handshake(TlsConfig::default_native_tls(), "localhost")
+                        .await
+                        .expect("the default root file must trust the server");
+                    assert!(
+                        handshake(
+                            TlsConfig::default_native_tls().with_root_ca_pem(UNRELATED_CA),
+                            "localhost",
+                        )
+                        .await
+                        .is_err(),
+                        "custom roots must replace the default root file"
+                    );
+                });
+            },
+        );
     }
 }

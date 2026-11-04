@@ -44,6 +44,19 @@ on each topology crate that opens TLS connections; neither backend is enabled
 by the facade's default feature set. Redis Stack command groups can be selected
 individually or through the facade's default `commands-stack` feature.
 
+`TlsConfig::with_root_ca_pem` replaces the default trust roots with every CA in
+the supplied PEM bundle for either backend. Rustls loads native roots once per
+process, caching the result or loading error; an empty native store falls back
+to the webpki bundle, while loading failures with no usable roots return the
+loader diagnostics. Restart the process to pick up changes to native roots.
+`danger_accept_invalid_hostnames(true)` works on both backends and matches
+redis-rs's hostname-only bypass: the certificate must still chain to a trusted
+root, but its names need not match the connected host or IP. That is the usual
+answer for a cluster whose nodes report IPs the certificate does not name.
+`danger_accept_invalid_certs(true)` disables all certificate verification. Both
+are dangerous settings. Caller-built `ClientConfig` / `TlsConnector`
+configurations retain their own verification and trust policy.
+
 The standalone
 [registry compatibility harness](https://github.com/joshrotenberg/redis-tower/tree/main/release-tests/redis-rs-migration)
 is compiled in CI against these exact crates.io versions. It is an independent

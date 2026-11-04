@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- replace native-tls default trust roots with every CA in a custom PEM bundle,
+  requiring native-tls 0.2.16 or newer
+- honor `danger_accept_invalid_hostnames(true)` on the rustls backend; it was
+  silently ignored, so hostname verification stayed on. The bypass skips only
+  the hostname / IP match: the chain, validity period, and handshake signature
+  are still verified against the trust roots
+- cache rustls native roots and loading failures once per process, retaining
+  loader diagnostics when no native roots can be loaded and the webpki fallback
+  for an empty native store
 - classify socket failures surfaced through the codec (connection reset,
   keepalive timeout, EOF part-way through a reply) as `RedisError::Connection`
   instead of `RedisError::Protocol`, so `is_connection_error()`, reconnect
