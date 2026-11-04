@@ -1881,8 +1881,11 @@ impl MultiplexedClusterClient {
     ///
     /// A master answering READONLY was demoted by a failover: after a refresh
     /// that started after the reply, the command runs on the masters that
-    /// have not answered yet (the promoted replica among them), within the
-    /// redirect budget. Nodes that already answered are not re-sent.
+    /// have not answered yet (the promoted replica among them). A node
+    /// answering TRYAGAIN, CLUSTERDOWN, or LOADING is retried after the same
+    /// backoff ordinary routing uses (CLUSTERDOWN also schedules a refresh).
+    /// Both share the redirect budget; nodes that already answered are never
+    /// re-sent, and once the budget is spent the last replies are final.
     async fn execute_fan_out(&self, frame: &Frame, fan_out: FanOut) -> Result<Frame, RedisError> {
         let max_redirects = self.inner.read().await.max_redirects;
         let mut replies: BTreeMap<String, Result<Frame, RedisError>> = BTreeMap::new();
@@ -1936,31 +1939,49 @@ impl MultiplexedClusterClient {
                     (addr, master, reply)
                 }
             });
-            let mut demoted = Vec::new();
+            let mut retry = Vec::new();
+            let mut demoted = false;
+            let mut cluster_down = false;
             for (addr, master, reply) in futures::future::join_all(calls).await {
                 match &reply {
                     Ok(frame) if master && is_readonly_reply(frame) => {
-                        demoted.push((addr, reply));
+                        demoted = true;
+                        retry.push((addr, reply));
                         continue;
                     }
+                    Ok(frame) => {
+                        if let Some(transient) = TransientError::from_frame(frame) {
+                            cluster_down |= transient == TransientError::ClusterDown;
+                            self.notify_cache_node_loss(&addr);
+                            retry.push((addr, reply));
+                            continue;
+                        }
+                    }
                     Err(error) => self.observe_node_error(&addr, error),
-                    Ok(_) => {}
                 }
                 replies.insert(addr, reply);
             }
-            if demoted.is_empty() {
+            if retry.is_empty() {
                 break;
             }
             if rounds >= max_redirects {
-                replies.extend(demoted);
+                replies.extend(retry);
                 break;
             }
             rounds += 1;
             tracing::warn!(
-                nodes = ?demoted.iter().map(|(addr, _)| addr.as_str()).collect::<Vec<_>>(),
-                "cluster: master answered READONLY to a node-scoped command; refreshing topology"
+                nodes = ?retry.iter().map(|(addr, _)| addr.as_str()).collect::<Vec<_>>(),
+                demoted,
+                "cluster: node-scoped command rejected by some nodes; retrying them"
             );
-            self.await_refresh_since(Instant::now()).await;
+            if demoted {
+                self.await_refresh_since(Instant::now()).await;
+            } else {
+                if cluster_down {
+                    self.trigger_refresh();
+                }
+                tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+            }
         }
         node_scope::aggregate(fan_out.aggregate, replies)
     }

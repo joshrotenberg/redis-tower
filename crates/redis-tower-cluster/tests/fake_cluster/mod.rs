@@ -26,6 +26,8 @@ pub enum Action {
     Hang,
     /// Close the socket without answering.
     Close,
+    /// Close the socket without answering, after a delay (a slow failure).
+    CloseAfter(Duration),
 }
 
 /// One command as seen by a fake node.
@@ -270,6 +272,10 @@ pub async fn fake_node_at(cluster: Arc<Cluster>, handler: Handler, port: u16) ->
                             return;
                         }
                         Action::Close => return,
+                        Action::CloseAfter(delay) => {
+                            tokio::time::sleep(delay).await;
+                            return;
+                        }
                     };
                     for reply in replies {
                         if framed.send(reply).await.is_err() {

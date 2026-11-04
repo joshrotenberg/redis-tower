@@ -995,3 +995,168 @@ async fn pipeline_planning_failure_schedules_a_refresh() {
         vec![None]
     );
 }
+
+/// Review finding: a replica whose reconnect fails more slowly than its
+/// backoff (250 ms, then doubling) became eligible again while the other
+/// replica was being tried, so re-routing alternated between two dead
+/// replicas forever -- never falling back to the master under
+/// `PreferReplica`, never returning under `Replica`, and holding
+/// `ClusterClient`'s mutex throughout. Each command now tries a replica once.
+#[tokio::test]
+async fn cluster_connection_tries_each_failing_replica_once_per_command() {
+    let cluster = Cluster::new();
+    let slow_failure: Handler = Arc::new(|request| {
+        request
+            .is(b"READONLY")
+            .then(|| Action::CloseAfter(Duration::from_millis(400)))
+    });
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    let r1 = fake_node(cluster.clone(), slow_failure.clone()).await;
+    let r2 = fake_node(cluster.clone(), slow_failure).await;
+    cluster.set(slots(vec![(0, 16383, a.port, vec![r1.port, r2.port])]));
+
+    for preference in [ReadPreference::PreferReplica, ReadPreference::Replica] {
+        let mut conn = ClusterConnection::builder(a.addr())
+            .read_preference(preference)
+            .connect()
+            .await
+            .unwrap();
+        let attempts_before =
+            r1.accepted.load(Ordering::SeqCst) + r2.accepted.load(Ordering::SeqCst);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            conn.execute(RawCommand::new("GET").arg("k")),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{preference:?}: routing looped over failing replicas"));
+        match preference {
+            ReadPreference::PreferReplica => {
+                result.expect("PreferReplica falls back to the master");
+            }
+            _ => assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("ReadPreference::Replica requires"),
+                "strict replica reads fail once both replicas failed"
+            ),
+        }
+        let attempts = r1.accepted.load(Ordering::SeqCst) + r2.accepted.load(Ordering::SeqCst)
+            - attempts_before;
+        assert_eq!(attempts, 2, "{preference:?}: each replica tried once");
+    }
+    assert_eq!(
+        a.received("GET"),
+        1,
+        "only PreferReplica reached the master"
+    );
+}
+
+/// Review finding: after the keyless default left the master set, the
+/// refresh pointed it at the first listed master even when connecting to that
+/// master had just failed, pinning PING/INFO to an unreachable node.
+#[tokio::test]
+async fn cluster_connection_refresh_moves_the_default_to_a_connected_master() {
+    let cluster = Cluster::new();
+    let a = fake_node(cluster.clone(), default_handler()).await;
+    let c = fake_node(cluster.clone(), default_handler()).await;
+    let parked = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unreachable = parked.local_addr().unwrap().port();
+    drop(parked);
+    cluster.set(slots(vec![
+        (0, 8191, a.port, vec![]),
+        (8192, 16383, c.port, vec![]),
+    ]));
+    let mut conn = ClusterConnection::connect(&a.addr()).await.unwrap();
+
+    // a is replaced by an unreachable master listed first; c stays up.
+    drop(a);
+    cluster.set(slots(vec![
+        (0, 8191, unreachable, vec![]),
+        (8192, 16383, c.port, vec![]),
+    ]));
+    conn.refresh_topology().await.unwrap();
+    assert_eq!(
+        conn.execute(RawCommand::new("PING")).await.unwrap(),
+        Frame::SimpleString(Bytes::from_static(b"PONG")),
+        "keyless commands use the connected master"
+    );
+    assert_eq!(c.received("PING"), 1);
+}
+
+/// Review finding: node-scoped fan-out retried only READONLY, so a single
+/// LOADING/TRYAGAIN/CLUSTERDOWN reply -- which ordinary routing retries within
+/// the redirect budget -- failed DBSIZE or SCRIPT LOAD outright. Transient
+/// nodes are now retried without re-sending to nodes that already answered.
+#[tokio::test]
+async fn node_scoped_fan_out_retries_transient_replies_per_node() {
+    for transient in [
+        "LOADING Redis is loading the dataset in memory",
+        "TRYAGAIN Multiple keys request during rehashing of slot",
+        "CLUSTERDOWN The cluster is down",
+    ] {
+        let cluster = Cluster::new();
+        let flaky_port = Arc::new(AtomicU16::new(0));
+        let remaining = Arc::new(std::sync::Mutex::new(0usize));
+        let handler: Handler = {
+            let flaky_port = flaky_port.clone();
+            let remaining = remaining.clone();
+            Arc::new(move |request| {
+                if !request.is(b"DBSIZE") {
+                    return None;
+                }
+                let mut left = remaining.lock().unwrap();
+                if request.port == flaky_port.load(Ordering::SeqCst) && *left > 0 {
+                    *left -= 1;
+                    return Some(Action::Reply(err(transient)));
+                }
+                Some(Action::Reply(Frame::Integer(5)))
+            })
+        };
+        let a = fake_node(cluster.clone(), handler.clone()).await;
+        let b = fake_node(cluster.clone(), handler).await;
+        flaky_port.store(b.port, Ordering::SeqCst);
+        cluster.set(slots(vec![
+            (0, 8191, a.port, vec![]),
+            (8192, 16383, b.port, vec![]),
+        ]));
+        let client = MultiplexedClusterClient::connect(&a.addr()).await.unwrap();
+        let mut direct = ClusterConnection::connect(&a.addr()).await.unwrap();
+
+        *remaining.lock().unwrap() = 1;
+        assert_eq!(
+            client.execute(RawCommand::new("DBSIZE")).await.unwrap(),
+            Frame::Integer(10),
+            "multiplexed: {transient}"
+        );
+        *remaining.lock().unwrap() = 1;
+        assert_eq!(
+            direct.execute(RawCommand::new("DBSIZE")).await.unwrap(),
+            Frame::Integer(10),
+            "ClusterConnection: {transient}"
+        );
+        assert_eq!(
+            a.received("DBSIZE"),
+            2,
+            "{transient}: the healthy node is not re-sent"
+        );
+        assert_eq!(b.received("DBSIZE"), 4, "{transient}: one retry per client");
+
+        // A persistent transient error still ends within the budget.
+        *remaining.lock().unwrap() = usize::MAX;
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            client.execute(RawCommand::new("DBSIZE")),
+        )
+        .await
+        .expect("bounded")
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(transient.split(' ').next().unwrap()),
+            "{error}"
+        );
+        client.shutdown().await;
+    }
+}

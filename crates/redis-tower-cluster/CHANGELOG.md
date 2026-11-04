@@ -24,7 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and `FUNCTION LOAD`/`FLUSH`/`DELETE`/`RESTORE` run on every master; and
   `SCRIPT LOAD`/`FLUSH`/`EXISTS` and `CONFIG SET`/`RESETSTAT`/`REWRITE` also
   run on connected replicas (`SCRIPT EXISTS` is ANDed element-wise). A master
-  that answers `READONLY` is replaced by the promoted one after a refresh. A
+  that answers `READONLY` is replaced by the promoted one after a refresh, and
+  a node answering `TRYAGAIN`, `CLUSTERDOWN`, or `LOADING` is retried as
+  ordinary routing does, without re-sending to nodes that answered. A
   fan-out is not atomic: the first error is returned after every node was
   attempted. Other keyless commands, including node-local diagnostics, still
   use the default node, and explicit pipelines do not fan out
@@ -102,7 +104,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - make `ClusterConnection::refresh_topology` ask each connected node and then
   the original seed until one reports slot owners, skip (and later connect
   lazily) nodes it cannot reach instead of failing, close sockets for departed
-  nodes, and move the keyless default node to a current master
+  nodes, and move the keyless default node to a current master it is
+  connected to
 - rebuild dead replica workers in `MultiplexedClusterClient`: a replica read
   whose slot has an advertised replica with no worker, or one that exhausted
   its reconnect budget, now schedules a (rate-limited) topology refresh. Reads
@@ -114,7 +117,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replica selection forever. It is now reconnected the next time routing
   picks it; a replica whose reconnect fails is skipped for a backoff that
   starts at 250 ms and doubles up to 5 s, and the command is re-routed to
-  another replica, the master (`PreferReplica`), or the strict-replica error
+  another replica, the master (`PreferReplica`), or the strict-replica error.
+  One command tries each replica at most once, so connects slower than the
+  backoff cannot make re-routing alternate between dead replicas
 - route `ClusterConnection` keyed commands to the slot owner even when its
   socket was dropped, reconnecting lazily; they were sent to the default node
   and bounced with `MOVED`, which failed outright under `max_redirects(0)`
