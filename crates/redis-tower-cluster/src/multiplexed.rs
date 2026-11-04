@@ -155,6 +155,9 @@ impl Clone for MultiplexedClusterClient {
 struct ClusterLifecycle {
     shutdown_requested: AtomicBool,
     workers: Mutex<Vec<AutoPipelineShutdownHandle>>,
+    /// The single-flight background refresh, so an abort can cancel a
+    /// refresh stalled on a node that never finishes its handshake.
+    refresh_task: Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 impl ClusterLifecycle {
@@ -172,6 +175,21 @@ impl ClusterLifecycle {
             Err(RedisError::ConnectionClosed)
         } else {
             Ok(())
+        }
+    }
+
+    /// Record the running background refresh. If shutdown already began, the
+    /// abort may have looked before this was stored, so cancel it here.
+    fn set_refresh_task(&self, task: tokio::task::AbortHandle) {
+        *self.refresh_task.lock().unwrap() = Some(task.clone());
+        if self.is_shutdown_requested() {
+            task.abort();
+        }
+    }
+
+    fn cancel_refresh_task(&self) {
+        if let Some(task) = self.refresh_task.lock().unwrap().take() {
+            task.abort();
         }
     }
 
@@ -261,15 +279,23 @@ impl ClusterShutdownHandle {
 
     /// Stop admission and cancel every per-node worker without draining.
     ///
-    /// Requests still queued or awaiting replies fail with
+    /// A background topology refresh still in progress is cancelled too, and
+    /// the workers it had already built are joined with the rest. Requests
+    /// still queued or awaiting replies fail with
     /// [`RedisError::ConnectionClosed`]; commands already written may have
     /// executed. See
     /// [`AutoPipelineShutdownHandle::abort`](redis_tower::AutoPipelineShutdownHandle::abort).
     pub async fn abort(&self) {
         self.lifecycle.request_shutdown();
-        let workers = self.lifecycle.snapshot();
-        futures::future::join_all(workers.iter().map(AutoPipelineShutdownHandle::abort)).await;
-        self.lifecycle.retain_unfinished();
+        self.lifecycle.cancel_refresh_task();
+        self.refresh_gate.wait_until_idle().await;
+        loop {
+            let workers = self.lifecycle.snapshot();
+            futures::future::join_all(workers.iter().map(AutoPipelineShutdownHandle::abort)).await;
+            if !self.lifecycle.retain_unfinished() {
+                return;
+            }
+        }
     }
 
     /// Return whether shutdown has been requested through any handle.
@@ -1971,12 +1997,16 @@ impl MultiplexedClusterClient {
         // SLOTS mid-failover) is skipped, not fatal: committing the reachable
         // nodes and pruning departed ones still makes progress, and the next
         // refresh picks up the rest once it settles.
+        // Each service is registered with the lifecycle as soon as it is
+        // built, so an abort that cancels this refresh mid-build still joins
+        // the workers it already started.
         let built_masters = build_node_services_best_effort(
             master_diff.to_build.clone(),
             false,
             pipeline_config.clone(),
             reconnect_config.clone(),
             connector.clone(),
+            Some(Arc::clone(&self.lifecycle)),
         )
         .await;
         let built_replicas = build_node_services_best_effort(
@@ -1985,11 +2015,9 @@ impl MultiplexedClusterClient {
             pipeline_config.clone(),
             reconnect_config.clone(),
             connector,
+            Some(Arc::clone(&self.lifecycle)),
         )
         .await;
-        for (_, service) in built_masters.iter().chain(built_replicas.iter()) {
-            self.lifecycle.track(service);
-        }
         let services_requested = master_diff.to_build.len() + replica_diff.to_build.len();
         let services_built = built_masters.len() + built_replicas.len();
         let services_skipped = services_requested.saturating_sub(services_built);
@@ -2102,10 +2130,11 @@ impl MultiplexedClusterClient {
             return;
         };
         let client = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let guard = RefreshTaskGuard::new(client, permit);
             let _ = guard.client().refresh_topology().await;
         });
+        self.lifecycle.set_refresh_task(task.abort_handle());
     }
 
     /// Get a snapshot of the current cluster topology.
@@ -2881,19 +2910,30 @@ async fn build_node_services(
 ///
 /// The returned pairs are in completion order, not `addrs` order. Callers must
 /// not derive anything order-dependent from them.
+///
+/// With a `lifecycle`, each service is tracked the moment it exists, and nodes
+/// not yet started once shutdown begins are skipped.
 async fn build_node_services_best_effort(
     addrs: Vec<String>,
     readonly: bool,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     connector: ClusterNodeConnector,
+    lifecycle: Option<Arc<ClusterLifecycle>>,
 ) -> Vec<(String, AutoPipelineService)> {
     let role = if readonly { "replica" } else { "master" };
     futures::stream::iter(addrs.into_iter().map(|addr| {
         let pipeline_config = pipeline_config.clone();
         let reconnect_config = reconnect_config.clone();
         let connector = connector.clone();
+        let lifecycle = lifecycle.clone();
         async move {
+            if lifecycle
+                .as_ref()
+                .is_some_and(|lifecycle| lifecycle.is_shutdown_requested())
+            {
+                return None;
+            }
             match build_node_service(
                 &addr,
                 readonly,
@@ -2903,7 +2943,12 @@ async fn build_node_services_best_effort(
             )
             .await
             {
-                Ok(svc) => Some((addr, svc)),
+                Ok(svc) => {
+                    if let Some(lifecycle) = &lifecycle {
+                        lifecycle.track(&svc);
+                    }
+                    Some((addr, svc))
+                }
                 Err(e) => {
                     tracing::debug!(
                         addr,
@@ -3410,6 +3455,7 @@ mod parallel_connect_tests {
             AutoPipelineConfig::default(),
             default_node_reconnect(),
             connector(ConnectionConfig::default()),
+            None,
         )
         .await;
         (built, live, probe.peak())
@@ -4601,6 +4647,127 @@ mod observability_tests {
             .await
             .unwrap();
         server.await.unwrap();
+    }
+
+    /// A seed that answers the connection handshake with errors (tolerated)
+    /// and CLUSTER SLOTS with one range per `masters` entry.
+    async fn slots_seed(masters: Vec<std::net::SocketAddr>) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let masters = masters.clone();
+                tokio::spawn(async move {
+                    let mut framed =
+                        Framed::new(redis_tower_core::RedisStream::Tcp(stream), RespCodec::new());
+                    while let Some(Ok(request)) = framed.next().await {
+                        let parts = command_parts(request);
+                        let reply = if parts[0].eq_ignore_ascii_case(b"CLUSTER") {
+                            let width = 16_384 / masters.len() as i64;
+                            Frame::Array(Some(
+                                masters
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, master)| {
+                                        let start = i as i64 * width;
+                                        let end = if i + 1 == masters.len() {
+                                            16_383
+                                        } else {
+                                            start + width - 1
+                                        };
+                                        Frame::Array(Some(vec![
+                                            Frame::Integer(start),
+                                            Frame::Integer(end),
+                                            Frame::Array(Some(vec![
+                                                Frame::BulkString(Some(Bytes::from(
+                                                    master.ip().to_string(),
+                                                ))),
+                                                Frame::Integer(i64::from(master.port())),
+                                                Frame::BulkString(Some(Bytes::from(format!(
+                                                    "{i:040}"
+                                                )))),
+                                            ])),
+                                        ]))
+                                    })
+                                    .collect(),
+                            ))
+                        } else {
+                            Frame::Error(Bytes::from_static(b"ERR fake seed"))
+                        };
+                        if framed.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// Review finding: abort must not miss a worker that an unfinished
+    /// background refresh already built. One new master connects; the other
+    /// accepts TCP and never answers its handshake, so the refresh never
+    /// finishes. After an aborted shutdown, the connected master's socket must
+    /// be closed rather than left behind with the stalled refresh.
+    #[tokio::test]
+    async fn abort_reaches_workers_built_by_an_unfinished_refresh() {
+        let fast = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let fast_addr = fast.local_addr().unwrap();
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel::<()>();
+        let (closed_tx, closed_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let (mut sock, _) = fast.accept().await.unwrap();
+            let _ = accepted_tx.send(());
+            let mut buf = [0u8; 1024];
+            loop {
+                match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if sock.write_all(b"-ERR fake node\r\n").await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            let _ = closed_tx.send(());
+        });
+        let stalled = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let stalled_addr = stalled.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = stalled.accept().await {
+                held.push(sock);
+            }
+        });
+        let seed = slots_seed(vec![fast_addr, stalled_addr]).await;
+        let client = test_client(
+            seed.clone(),
+            single_master_topology(&seed),
+            HashMap::new(),
+            Arc::new(RecordingMetrics::default()),
+            false,
+        );
+        let shutdown = client.shutdown_handle();
+
+        client.trigger_refresh();
+        tokio::time::timeout(Duration::from_secs(5), accepted_rx)
+            .await
+            .expect("the refresh never reached the fast master")
+            .unwrap();
+        // Let the fast master's handshake finish and its worker start while
+        // the stalled one keeps the refresh from completing.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        assert_eq!(
+            shutdown.shutdown_timeout(Duration::from_millis(100)).await,
+            ShutdownOutcome::Aborted
+        );
+        tokio::time::timeout(Duration::from_secs(2), closed_rx)
+            .await
+            .expect("a worker built by the unfinished refresh outlived the aborted shutdown")
+            .unwrap();
+        assert!(client.lifecycle.snapshot().iter().all(|w| w.is_finished()));
+        assert!(!client.refresh_gate.in_flight.load(Ordering::Acquire));
     }
 
     /// With no response timeout, a node that never answers a request its

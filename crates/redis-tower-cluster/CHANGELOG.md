@@ -17,7 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stops admission across every clone, keeps topology refreshes from installing
   new node services, and joins every per-node worker, so a host whose router
   holds clones can still tear the client down deterministically
-  (redis-developer/redis-database-mcp-rs#125)
+  (redis-developer/redis-database-mcp-rs#125). Workers a topology refresh
+  builds are registered as they are created, and `abort()` cancels a
+  background refresh still stalled on a node's handshake, so no worker built
+  by an unfinished refresh outlives an aborted shutdown
 
 ### Changed
 
