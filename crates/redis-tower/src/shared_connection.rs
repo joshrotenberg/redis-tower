@@ -11,7 +11,8 @@
 //!   another caller's value;
 //! - `RESET`, `HELLO`, and `QUIT` reset identity, switch protocol, or close
 //!   the socket that every clone uses;
-//! - blocking commands hold the worker for their whole wait;
+//! - blocking commands, including `WAIT` and `WAITAOF`, hold the worker for
+//!   their whole wait;
 //! - `MULTI`, `EXEC`, `DISCARD`, and `WATCH` sent as separate requests leave
 //!   transaction state that other callers' commands land inside.
 //!
@@ -70,6 +71,10 @@ const COMMANDS: &[(&[u8], &str, Unshareable)] = &[
     (b"BZPOPMIN", "BZPOPMIN", Unshareable::Blocking),
     (b"BZPOPMAX", "BZPOPMAX", Unshareable::Blocking),
     (b"BZMPOP", "BZMPOP", Unshareable::Blocking),
+    // WAIT/WAITAOF hold the connection until replicas (or the AOF) acknowledge
+    // or their timeout ends; a zero timeout with no replicas never returns.
+    (b"WAIT", "WAIT", Unshareable::Blocking),
+    (b"WAITAOF", "WAITAOF", Unshareable::Blocking),
     (b"MULTI", "MULTI", Unshareable::Transaction),
     (b"EXEC", "EXEC", Unshareable::Transaction),
     (b"DISCARD", "DISCARD", Unshareable::Transaction),
@@ -362,6 +367,8 @@ mod tests {
         assert!(rejected(&["CLIENT", "REPLY", "SKIP"]).contains("another caller"));
         assert!(rejected(&["BLPOP", "k", "0"]).contains("ConnectionPool"));
         assert!(rejected(&["bzpopmin", "k", "0"]).contains("ConnectionPool"));
+        assert!(rejected(&["WAIT", "1", "0"]).contains("ConnectionPool"));
+        assert!(rejected(&["waitaof", "0", "1", "0"]).contains("ConnectionPool"));
         assert!(rejected(&["MULTI"]).contains("Transaction"));
         assert!(rejected(&["WATCH", "k"]).contains("Transaction"));
         assert!(rejected(&["EXEC"]).contains("Transaction"));

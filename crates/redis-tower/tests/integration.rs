@@ -3510,20 +3510,32 @@ async fn multiplexed_client_reconnects_after_server_restart() {
 
 #[tokio::test]
 async fn multiplexed_response_timeout_trips_on_slow_command() {
-    let conn = RedisConnection::connect(redis_addr().await).await.unwrap();
+    // Blocking pops and WAIT are rejected before they reach a shared
+    // multiplexed connection, so use DEBUG SLEEP on a dedicated server: the
+    // DEBUG command is disabled by default, and sleeping the shared server
+    // would stall every other test using it.
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let server = redis_server_wrapper::RedisServer::new()
+        .port(port)
+        .enable_debug_command("yes")
+        .start()
+        .await
+        .expect("failed to start dedicated Redis server with DEBUG enabled");
+    let conn = RedisConnection::connect(&server.addr()).await.unwrap();
     let config = AutoPipelineConfig {
         response_timeout: Some(std::time::Duration::from_millis(150)),
         ..Default::default()
     };
     let client = MultiplexedClient::from_connection_with_config(conn, config);
 
-    // WAIT for a replica that does not exist holds this connection for up to
-    // 5s (it does not block the whole server). The 150ms response deadline
+    // DEBUG SLEEP holds the server for a second. The 150ms response deadline
     // must trip first and surface CommandTimeout rather than stalling the
-    // worker. (Blocking pops such as BLPOP are rejected before they reach a
-    // shared multiplexed connection.)
+    // worker.
     let err = client
-        .execute(RawCommand::new("WAIT").arg("1").arg("5000"))
+        .execute(RawCommand::new("DEBUG").arg("SLEEP").arg("1"))
         .await
         .unwrap_err();
     assert!(

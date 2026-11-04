@@ -299,7 +299,8 @@ impl WorkerRequest {
 /// [`PubSubConnection`](crate::PubSubConnection)), `MONITOR` (use
 /// [`MonitorStream`](crate::MonitorStream)), `SYNC`/`PSYNC`, `RESET`, `HELLO`,
 /// `QUIT`, `CLIENT REPLY`, the blocking list/sorted-set pops and moves,
-/// `XREAD`/`XREADGROUP` with `BLOCK`, and `MULTI`/`EXEC`/`DISCARD`/`WATCH`
+/// `XREAD`/`XREADGROUP` with `BLOCK`, `WAIT`/`WAITAOF`, and
+/// `MULTI`/`EXEC`/`DISCARD`/`WATCH`
 /// sent on their own (use [`Transaction`](crate::Transaction)). A
 /// [`call_pipeline`](Self::call_pipeline) batch may contain a complete
 /// `WATCH`/`MULTI`/`EXEC` sequence, including blocking commands queued inside
