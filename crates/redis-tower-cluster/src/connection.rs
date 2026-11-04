@@ -749,6 +749,10 @@ impl ClusterConnection {
         let mut target_replica = initial_route.replica;
         let mut send_asking = false;
         let mut followups_used = 0usize;
+        // Replicas this command failed to connect to. Their routing backoff
+        // can expire while another replica is being tried (a connect can take
+        // longer than the backoff), so it alone does not end re-routing.
+        let mut failed_replicas: Vec<String> = Vec::new();
 
         let exhausted = loop {
             let attempt = target_replica.clone().map(|replica| {
@@ -767,15 +771,17 @@ impl ClusterConnection {
                 }
                 // Back this replica off and route again: another replica,
                 // the master (PreferReplica), or replica_unavailable. Each
-                // failure removes one candidate, so this terminates.
+                // failure removes one candidate for the rest of this command,
+                // so this terminates.
                 tracing::debug!(
                     replica = %target_node,
                     %error,
                     "cluster: replica reconnect failed; routing around it"
                 );
                 self.note_replica_reconnect_failure(&target_node);
+                failed_replicas.push(target_node.clone());
                 drop(attempt);
-                let route = self.route_command(&cmd_frame)?;
+                let route = self.route_command_excluding(&cmd_frame, &failed_replicas)?;
                 target_node = route.addr;
                 target_replica = route.replica;
                 continue;
@@ -861,7 +867,8 @@ impl ClusterConnection {
                             // The cluster view may be stale (election / moved
                             // slots); refresh best-effort and re-route the key.
                             let _ = self.refresh_topology().await;
-                            let route = self.route_command(&cmd_frame)?;
+                            let route =
+                                self.route_command_excluding(&cmd_frame, &failed_replicas)?;
                             target_node = route.addr;
                             target_replica = route.replica;
                             send_asking = false;
@@ -886,7 +893,7 @@ impl ClusterConnection {
                         if let Err(error) = self.refresh_topology().await {
                             tracing::debug!(%error, "cluster: refresh after READONLY failed");
                         }
-                        let route = self.route_command(&cmd_frame)?;
+                        let route = self.route_command_excluding(&cmd_frame, &failed_replicas)?;
                         if route.addr == target_node {
                             // The refresh has not observed the promotion yet.
                             tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
@@ -916,8 +923,10 @@ impl ClusterConnection {
     /// Run a node-scoped command on every node of its scope and combine the
     /// replies; see `node_scope`. As in the multiplexed client, a master
     /// answering READONLY triggers a refresh and the command then runs on the
-    /// masters that have not answered yet. Replicas are best-effort: one that
-    /// cannot be connected is skipped.
+    /// masters that have not answered yet, and a TRYAGAIN, CLUSTERDOWN, or
+    /// LOADING node is retried after a backoff (CLUSTERDOWN after a refresh),
+    /// within the redirect budget. Replicas are best-effort: one that cannot
+    /// be connected is skipped.
     async fn execute_fan_out(
         &mut self,
         frame: &Frame,
@@ -942,7 +951,9 @@ impl ClusterConnection {
                 .filter(|(addr, _)| !replies.contains_key(addr))
                 .collect();
 
-            let mut demoted = Vec::new();
+            let mut retry = Vec::new();
+            let mut demoted = false;
+            let mut cluster_down = false;
             for (addr, replica) in targets {
                 if let Err(error) = self.ensure_connection(&addr, replica).await {
                     if replica {
@@ -962,24 +973,38 @@ impl ClusterConnection {
                             .ok_or(RedisError::ConnectionClosed)
                     });
                 if !replica && matches!(&reply, Ok(frame) if is_readonly_reply(frame)) {
-                    demoted.push((addr, reply));
+                    demoted = true;
+                    retry.push((addr, reply));
+                    continue;
+                }
+                if let Ok(frame) = &reply
+                    && let Some(transient) = TransientError::from_frame(frame)
+                {
+                    cluster_down |= transient == TransientError::ClusterDown;
+                    retry.push((addr, reply));
                     continue;
                 }
                 replies.insert(addr, reply);
             }
-            if demoted.is_empty() {
+            if retry.is_empty() {
                 break;
             }
             if rounds >= self.max_redirects {
-                replies.extend(demoted);
+                replies.extend(retry);
                 break;
             }
             rounds += 1;
             tracing::warn!(
-                "cluster: master answered READONLY to a node-scoped command; refreshing topology"
+                demoted,
+                "cluster: node-scoped command rejected by some nodes; retrying them"
             );
-            if let Err(error) = self.refresh_topology().await {
-                tracing::debug!(%error, "cluster: refresh after READONLY failed");
+            if (demoted || cluster_down)
+                && let Err(error) = self.refresh_topology().await
+            {
+                tracing::debug!(%error, "cluster: refresh during node-scoped retry failed");
+            }
+            if !demoted {
+                tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
             }
         }
         node_scope::aggregate(fan_out.aggregate, replies)
@@ -1060,6 +1085,16 @@ impl ClusterConnection {
     /// Determine which node should handle a command based on its key
     /// and read preference.
     fn route_command(&self, frame: &Frame) -> Result<RoutedNode, RedisError> {
+        self.route_command_excluding(frame, &[])
+    }
+
+    /// [`route_command`](Self::route_command), never picking a replica in
+    /// `excluded`.
+    fn route_command_excluding(
+        &self,
+        frame: &Frame,
+        excluded: &[String],
+    ) -> Result<RoutedNode, RedisError> {
         if let Some(key) = key_extractor::extract_key(frame) {
             let slot = slot_for_key(key);
 
@@ -1067,7 +1102,7 @@ impl ClusterConnection {
             if self.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
-                if let Some(route) = self.pick_replica(slot) {
+                if let Some(route) = self.pick_replica(slot, excluded) {
                     return Ok(route);
                 }
                 if self.read_preference == ReadPreference::Replica {
@@ -1093,19 +1128,21 @@ impl ClusterConnection {
         })
     }
 
-    /// Pick a replica for a given slot using the configured read routing strategy.
-    fn pick_replica(&self, slot: u16) -> Option<RoutedNode> {
+    /// Pick a replica for a given slot using the configured read routing
+    /// strategy, skipping `excluded`.
+    fn pick_replica(&self, slot: u16, excluded: &[String]) -> Option<RoutedNode> {
         let replicas = self.topology.replicas_for_slot(slot).unwrap_or(&[]);
         let now = Instant::now();
         // A replica without a usable socket stays eligible -- execute
         // reconnects it -- unless its last reconnect failed recently.
         let is_eligible = |replica: &NodeAddr| {
             let addr = replica.addr_string();
-            self.nodes.get(&addr).is_some_and(|socket| socket.readonly)
-                || self
-                    .replica_backoff
-                    .get(&addr)
-                    .is_none_or(|backoff| backoff.retry_at <= now)
+            !excluded.contains(&addr)
+                && (self.nodes.get(&addr).is_some_and(|socket| socket.readonly)
+                    || self
+                        .replica_backoff
+                        .get(&addr)
+                        .is_none_or(|backoff| backoff.retry_at <= now))
         };
         let available = if replicas.iter().all(&is_eligible) {
             Cow::Borrowed(replicas)
@@ -1286,15 +1323,23 @@ impl ClusterConnection {
             }
         }
 
-        if !masters.contains(&self.default_node)
-            && let Some(first) = masters.first()
+        // Keep the default while it is a connected master; otherwise move it
+        // to the first connected master (as startup chooses), falling back
+        // to the first listed one only when none is connected.
+        let connected = |addr: &String| self.nodes.get(addr).is_some_and(|socket| !socket.readonly);
+        if !(masters.contains(&self.default_node) && connected(&self.default_node))
+            && let Some(next) = masters
+                .iter()
+                .find(|addr| connected(addr))
+                .or(masters.first())
+            && *next != self.default_node
         {
             tracing::info!(
                 previous = %self.default_node,
-                current = %first,
+                current = %next,
                 "cluster: default node for keyless commands moved after topology refresh"
             );
-            self.default_node.clone_from(first);
+            self.default_node.clone_from(next);
         }
         self.topology = topology;
         Ok(())
