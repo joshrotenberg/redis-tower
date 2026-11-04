@@ -425,9 +425,19 @@ fn json_set_with_outcome_reports_unmet_condition() {
     let xx = JsonSet::new("j", "$.zz", "1").xx().with_outcome();
     assert_eq!(parity(&xx, b"$-1\r\n", b"_\r\n"), SetStatus::NotApplied);
 
-    // Without a condition, Redis never replies null.
     let plain = JsonSet::new("j", "$", "1").with_outcome();
-    assert!(plain.parse_response(wire(b"_\r\n")).is_err());
+    assert_eq!(parity(&plain, b"+OK\r\n", b"+OK\r\n"), SetStatus::Applied);
+}
+
+#[test]
+fn json_set_with_outcome_reports_a_missing_parent_path() {
+    // Without NX or XX, `JSON.SET j $.missing.child 1` on `{}` replies null
+    // because the parent object does not exist.
+    for path in ["$.missing.child", ".missing.child"] {
+        let cmd = JsonSet::new("e", path, "1").with_outcome();
+        assert_eq!(parity(&cmd, b"$-1\r\n", b"_\r\n"), SetStatus::NotApplied);
+        parity(&JsonSet::new("e", path, "1"), b"$-1\r\n", b"_\r\n");
+    }
 }
 
 #[test]
@@ -460,6 +470,106 @@ fn json_numincrby_legacy_path_renders_a_bare_number() {
         parity(&cmd, b"$4\r\n2.25\r\n", b"*1\r\n,2.25\r\n"),
         b("2.25")
     );
+}
+
+#[test]
+fn json_numincrby_legacy_path_reports_the_last_numeric_match() {
+    // `{"a":[1,2]}` incremented at `.a[*]` by 1: RESP2 replies with the last
+    // result, RESP3 with every match.
+    let wildcard = JsonNumIncrBy::new("j", ".a[*]", 1.0);
+    assert_eq!(
+        parity(&wildcard, b"$1\r\n3\r\n", b"*2\r\n:2\r\n:3\r\n"),
+        b("3")
+    );
+    // `..a` over `{"x":{"a":1},"y":{"a":2.5},"z":{"a":"s"}}`: the last match
+    // is not a number, so RESP2 reports the last one that was.
+    let recursive = JsonNumIncrBy::new("k", "..a", 1.0);
+    assert_eq!(
+        parity(&recursive, b"$3\r\n3.5\r\n", b"*3\r\n:2\r\n,3.5\r\n_\r\n"),
+        b("3.5")
+    );
+    // No numeric match: RESP2 errors, so RESP3 must not report a value.
+    for resp3 in [&b"*1\r\n_\r\n"[..], b"*0\r\n"] {
+        let none = JsonNumIncrBy::new("j", ".a", 1.0);
+        assert!(none.parse_response(wire(resp3)).is_err());
+    }
+}
+
+#[test]
+fn json_numincrby_renders_floats_like_redisjson() {
+    // RedisJSON formats RESP2 numbers with serde_json; RESP3 sends doubles in
+    // Redis's own notation. Each pair was captured from the same document.
+    let cases: [(&[u8], &[u8], &str); 9] = [
+        (b"$9\r\n[0.00001]\r\n", b"*1\r\n,0.00001\r\n", "[0.00001]"),
+        (
+            b"$10\r\n[-0.00001]\r\n",
+            b"*1\r\n,-0.00001\r\n",
+            "[-0.00001]",
+        ),
+        (b"$8\r\n[1.5e-7]\r\n", b"*1\r\n,1.5e-7\r\n", "[1.5e-7]"),
+        (b"$6\r\n[1e20]\r\n", b"*1\r\n,1e+20\r\n", "[1e20]"),
+        (
+            b"$6\r\n[1e16]\r\n",
+            b"*1\r\n,10000000000000000\r\n",
+            "[1e16]",
+        ),
+        (
+            b"$20\r\n[1000000000000000.0]\r\n",
+            b"*1\r\n,1000000000000000\r\n",
+            "[1000000000000000.0]",
+        ),
+        (
+            b"$23\r\n[1.2345678901234568e17]\r\n",
+            b"*1\r\n,123456789012345680\r\n",
+            "[1.2345678901234568e17]",
+        ),
+        (b"$5\r\n[3.0]\r\n", b"*1\r\n,3\r\n", "[3.0]"),
+        (b"$6\r\n[-4.5]\r\n", b"*1\r\n,-4.5\r\n", "[-4.5]"),
+    ];
+    let cmd = JsonNumIncrBy::new("f", "$.a", 0.0);
+    for (resp2, resp3, text) in cases {
+        assert_eq!(parity(&cmd, resp2, resp3), b(text));
+    }
+    let legacy = JsonNumIncrBy::new("f", ".a", 0.0);
+    assert_eq!(
+        parity(&legacy, b"$7\r\n0.00001\r\n", b"*1\r\n,0.00001\r\n"),
+        b("0.00001")
+    );
+}
+
+#[test]
+fn raw_string_query_keeps_redis_double_text() {
+    // ZSCORE through `RawCommand::query::<String>()`: RESP2 sends Redis's
+    // double text, RESP3 a double the client must render the same way.
+    let cases: [&str; 18] = [
+        "1e+20",
+        "-1e+20",
+        "1e+300",
+        "1e+21",
+        "1.5e+21",
+        "12345678901234567000",
+        "1234567890123456768",
+        "123456789012345680",
+        "10000000000000000",
+        "0.00001",
+        "-0.00001",
+        "0.000015",
+        "1.5e-7",
+        "1.2345e-4",
+        "5e-324",
+        "1234567.125",
+        "0.1",
+        "3",
+    ];
+    for text in cases {
+        let cmd = RawCommand::new("ZSCORE")
+            .arg("z")
+            .arg("m")
+            .query::<String>();
+        let resp2 = format!("${}\r\n{text}\r\n", text.len());
+        let resp3 = format!(",{text}\r\n");
+        assert_eq!(parity(&cmd, resp2.as_bytes(), resp3.as_bytes()), text);
+    }
 }
 
 #[test]

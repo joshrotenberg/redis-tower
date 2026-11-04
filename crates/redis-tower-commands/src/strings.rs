@@ -96,12 +96,13 @@ pub enum SetCondition {
     Xx,
 }
 
-/// Whether Redis applied a [`Set`] operation.
+/// Whether Redis applied a [`Set`] or `JSON.SET` write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetStatus {
     /// Redis stored the requested value.
     Applied,
-    /// Redis left the key unchanged because an `NX` or `XX` condition failed.
+    /// Redis left the value unchanged: an `NX` or `XX` condition failed, or,
+    /// for `JSON.SET`, the parent of the target path does not exist.
     NotApplied,
 }
 

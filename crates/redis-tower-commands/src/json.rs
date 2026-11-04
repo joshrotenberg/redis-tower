@@ -37,10 +37,12 @@ pub enum JsonSetCondition {
 /// Sets the JSON value at `path` in the key. Creates the key if it does not
 /// exist. Returns `Ok(())` on success.
 ///
-/// With [`JsonSet::nx`] or [`JsonSet::xx`], Redis replies with null when the
-/// condition fails, and this command still returns `Ok(())`. Finish the
-/// builder with [`JsonSet::with_outcome`] to learn whether the write was
-/// applied.
+/// Redis replies with null instead of `OK` when it leaves the document
+/// unchanged: a [`JsonSet::nx`] or [`JsonSet::xx`] condition failed, or, with
+/// or without a condition, the parent of `path` does not exist (setting
+/// `$.missing.child` on `{}`). This command returns `Ok(())` either way.
+/// Finish the builder with [`JsonSet::with_outcome`] to learn whether the
+/// write was applied.
 #[derive(Clone)]
 pub struct JsonSet {
     key: CommandArg,
@@ -78,9 +80,9 @@ impl JsonSet {
 
     /// Report whether Redis applied the write.
     ///
-    /// The response is [`SetStatus::NotApplied`] when an `NX` or `XX`
-    /// condition failed and [`SetStatus::Applied`] otherwise, in both RESP2
-    /// and RESP3:
+    /// The response is [`SetStatus::NotApplied`] when Redis replied with null
+    /// (an `NX` or `XX` condition failed, or the parent of `path` does not
+    /// exist) and [`SetStatus::Applied`] for `OK`, in both RESP2 and RESP3:
     ///
     /// ```
     /// use redis_tower_commands::JsonSet;
@@ -113,12 +115,11 @@ impl Command for JsonSetWithOutcome {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::SimpleString(s) if &s[..] == b"OK" => Ok(SetStatus::Applied),
-            // Unmet NX/XX condition: `$-1` in RESP2, `_` in RESP3.
-            Frame::Null | Frame::BulkString(None) if self.command.condition.is_some() => {
-                Ok(SetStatus::NotApplied)
-            }
+            // Unmet NX/XX condition or missing parent path: `$-1` in RESP2,
+            // `_` in RESP3.
+            Frame::Null | Frame::BulkString(None) => Ok(SetStatus::NotApplied),
             other => Err(RedisError::UnexpectedResponse {
-                expected: "OK, or null for a conditional JSON.SET",
+                expected: "OK or null",
                 actual: format!("{other:?}"),
             }),
         }
@@ -150,7 +151,8 @@ impl Command for JsonSet {
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
             Frame::SimpleString(s) if &s[..] == b"OK" => Ok(()),
-            // Unmet NX/XX condition: `$-1` in RESP2, `_` in RESP3.
+            // Unmet NX/XX condition or missing parent path: `$-1` in RESP2,
+            // `_` in RESP3.
             Frame::Null | Frame::BulkString(None) => Ok(()),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "OK or null",
@@ -417,12 +419,13 @@ impl Command for JsonType {
 ///
 /// Increments the numeric value at `path` by `value`. Returns the new value
 /// as JSON text: a JSON array with one entry per match for a `$` JSONPath
-/// (`null` for a match that is not a number), or the bare number for a legacy
-/// path.
+/// (`null` for a match that is not a number), or, for a legacy path, the bare
+/// result of the last match that was a number. A legacy path with no numeric
+/// match is an error.
 ///
 /// RESP2 replies with that text directly. RESP3 replies with typed values,
-/// which are rendered into the same text, so the response does not depend on
-/// the negotiated protocol.
+/// which are rendered into the same text, numbers formatted as RedisJSON
+/// formats them, so the response does not depend on the negotiated protocol.
 #[derive(Clone)]
 pub struct JsonNumIncrBy {
     key: CommandArg,
@@ -457,17 +460,28 @@ impl Command for JsonNumIncrBy {
         match frame {
             // RESP2: the new value(s) as JSON text.
             Frame::BulkString(Some(data)) => Ok(data),
-            // RESP3: one typed value per match, for legacy paths too.
-            Frame::Array(Some(values)) => {
+            // RESP3: one typed value per match, for `$` JSONPaths.
+            Frame::Array(Some(values)) if self.path.starts_with('$') => {
                 let rendered = values
                     .iter()
                     .map(json_number_text)
                     .collect::<Result<Vec<_>, _>>()?;
-                let text = match rendered.as_slice() {
-                    [single] if !self.path.starts_with('$') => single.clone(),
-                    _ => format!("[{}]", rendered.join(",")),
-                };
-                Ok(Bytes::from(text))
+                Ok(Bytes::from(format!("[{}]", rendered.join(","))))
+            }
+            // RESP3 sends every match for legacy paths too. RESP2 reports the
+            // last match that was a number, and errors when none was.
+            Frame::Array(Some(values)) => {
+                let last = values
+                    .iter()
+                    .rev()
+                    .find(|value| !matches!(value, Frame::Null | Frame::BulkString(None)));
+                match last {
+                    Some(value) => Ok(Bytes::from(json_number_text(value)?)),
+                    None => Err(RedisError::UnexpectedResponse {
+                        expected: "a numeric match for a legacy JSON.NUMINCRBY path",
+                        actual: format!("{values:?}"),
+                    }),
+                }
             }
             other => Err(RedisError::UnexpectedResponse {
                 expected: "bulk string (RESP2) or array (RESP3)",
@@ -485,8 +499,7 @@ impl Command for JsonNumIncrBy {
 fn json_number_text(frame: &Frame) -> Result<String, RedisError> {
     match frame {
         Frame::Integer(n) => Ok(n.to_string()),
-        // `{:?}` keeps a fractional part on whole floats (`2.0`), as JSON does.
-        Frame::Double(d) => Ok(format!("{d:?}")),
+        Frame::Double(d) => Ok(json_float_text(*d)),
         Frame::SpecialFloat(text) | Frame::BulkString(Some(text)) => {
             Ok(String::from_utf8_lossy(text).into_owned())
         }
@@ -495,6 +508,46 @@ fn json_number_text(frame: &Frame) -> Result<String, RedisError> {
             expected: "number or null",
             actual: format!("{other:?}"),
         }),
+    }
+}
+
+/// Render a double as serde_json does, which is how RedisJSON writes numbers
+/// in its RESP2 replies: shortest round-trip digits, whole floats keep `.0`,
+/// plain notation from `0.00001` up to 16 integer digits, and an unsigned or
+/// negative exponent beyond that (`1e16`, `1.5e-7`).
+fn json_float_text(d: f64) -> String {
+    if !d.is_finite() {
+        // JSON has no representation for these; RedisJSON never stores them.
+        return d.to_string();
+    }
+    if d == 0.0 {
+        return if d.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
+    }
+    // `{:e}` writes the shortest round-trip digits as `d.ddde<exp>`.
+    let scientific = format!("{:e}", d.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("LowerExp always writes an exponent");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let exponent: i32 = exponent
+        .parse()
+        .expect("LowerExp writes an integer exponent");
+    let len = digits.len() as i32;
+    // Position of the decimal point relative to the first digit.
+    let point = exponent + 1;
+    let last = point - len;
+    let sign = if d < 0.0 { "-" } else { "" };
+    if last >= 0 && point <= 16 {
+        format!("{sign}{digits}{}.0", "0".repeat(last as usize))
+    } else if 0 < point && point <= 16 {
+        let (whole, fraction) = digits.split_at(point as usize);
+        format!("{sign}{whole}.{fraction}")
+    } else if -5 < point && point <= 0 {
+        format!("{sign}0.{}{digits}", "0".repeat(-point as usize))
+    } else {
+        let (first, rest) = digits.split_at(1);
+        let dot = if rest.is_empty() { "" } else { "." };
+        format!("{sign}{first}{dot}{rest}e{exponent}")
     }
 }
 
