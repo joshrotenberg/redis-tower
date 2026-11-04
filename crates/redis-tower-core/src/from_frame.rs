@@ -18,8 +18,8 @@
 //! negotiated protocol, and every impl decodes both forms to the same value:
 //!
 //! - Strings accept RESP3 doubles (`,2.5` and `,inf`), which RESP2 sends as
-//!   bulk strings. A finite double renders with Rust's shortest round-trip
-//!   formatting, so `1.0` becomes `"1"` like Redis's own RESP2 reply.
+//!   bulk strings. A double renders in Redis's own notation (`3`, `0.00001`,
+//!   `1e+20`), so the text matches the RESP2 reply for the same value.
 //! - `Vec<T>` accepts a RESP3 map, flattened to the `[k, v, k, v, ...]` order
 //!   of the RESP2 array.
 //! - `HashMap<K, V>` and `Vec<(K, V)>` accept a RESP3 map, a RESP3 array of
@@ -122,9 +122,73 @@ fn frame_to_bytes(frame: Frame) -> Result<Bytes, RedisError> {
         Frame::SimpleString(b) | Frame::BigNumber(b) | Frame::SpecialFloat(b) => Ok(b),
         Frame::BulkString(Some(b)) => Ok(b),
         Frame::VerbatimString(_, b) => Ok(b),
-        Frame::Double(d) => Ok(Bytes::from(d.to_string())),
+        Frame::Double(d) => Ok(Bytes::from(redis_double_text(d))),
         other => Err(unexpected("string-like frame", &other)),
     }
+}
+
+/// Render a double as Redis writes it in a RESP2 reply.
+///
+/// This follows Redis's `d2string`: whole values within ±2^62 print as
+/// integers, and everything else uses the shortest round-trip digits laid out
+/// as fpconv does: plain up to six leading fractional zeros or seven trailing
+/// integer zeros, scientific with a signed exponent beyond that (`0.00001`,
+/// `1.5e-7`, `12345678901234567000`, `1e+20`).
+fn redis_double_text(d: f64) -> String {
+    if d.is_nan() {
+        return "nan".to_string();
+    }
+    if d.is_infinite() {
+        return if d > 0.0 { "inf" } else { "-inf" }.to_string();
+    }
+    if d == 0.0 {
+        return if d.is_sign_negative() { "-0" } else { "0" }.to_string();
+    }
+    // Redis's `double2ll` bound: LLONG_MAX / 2.
+    const INTEGER_LIMIT: f64 = (i64::MAX / 2) as f64;
+    if d.fract() == 0.0 && d.abs() <= INTEGER_LIMIT {
+        return (d as i64).to_string();
+    }
+
+    let (digits, last) = shortest_digits(d);
+    let len = digits.len() as i32;
+    let sign = if d < 0.0 { "-" } else { "" };
+    let exponent = last + len - 1;
+    if last >= 0 && exponent < len + 7 {
+        return format!("{sign}{digits}{}", "0".repeat(last as usize));
+    }
+    if last < 0 && (last > -7 || exponent.abs() < 4) {
+        let point = len + last;
+        return if point <= 0 {
+            format!("{sign}0.{}{digits}", "0".repeat(-point as usize))
+        } else {
+            let (whole, fraction) = digits.split_at(point as usize);
+            format!("{sign}{whole}.{fraction}")
+        };
+    }
+    let (first, rest) = digits.split_at(1);
+    let point = if rest.is_empty() { "" } else { "." };
+    let exponent_sign = if exponent < 0 { '-' } else { '+' };
+    format!(
+        "{sign}{first}{point}{rest}e{exponent_sign}{}",
+        exponent.abs()
+    )
+}
+
+/// The shortest round-trip decimal digits of a finite, non-zero `d`, and the
+/// power of ten of the last digit: `digits * 10^last == |d|`.
+fn shortest_digits(d: f64) -> (String, i32) {
+    // `{:e}` writes the shortest round-trip digits as `d.ddde<exp>`.
+    let scientific = format!("{:e}", d.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .expect("LowerExp always writes an exponent");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let exponent: i32 = exponent
+        .parse()
+        .expect("LowerExp writes an integer exponent");
+    let last = exponent - (digits.len() as i32 - 1);
+    (digits, last)
 }
 
 /// Extract the element vector from an array-like frame.
@@ -751,6 +815,41 @@ mod tests {
         // Whole doubles render without a fractional part, like RESP2.
         let resp3: String = FromFrame::from_frame(Frame::Double(3.0)).unwrap();
         assert_eq!(resp3, "3");
+    }
+
+    #[test]
+    fn string_from_resp3_double_uses_redis_notation() {
+        // Pairs of the RESP2 bulk text and RESP3 double Redis 8.10.2 sent for
+        // the same ZSCORE.
+        for text in [
+            "1e+20",
+            "-1e+20",
+            "1e+300",
+            "1.5e+21",
+            "12345678901234567000",
+            "1234567890123456768",
+            "123456789012345680",
+            "10000000000000000",
+            "0.00001",
+            "-0.00001",
+            "0.000002",
+            "0.000123",
+            "1.5e-7",
+            "1.2e-6",
+            "1.2345e-4",
+            "5e-324",
+            "1234567.125",
+            "123.456",
+            "0.1",
+            "3",
+            "-3",
+            "0",
+        ] {
+            let resp2: String = FromFrame::from_frame(bulk(text)).unwrap();
+            let resp3: String =
+                FromFrame::from_frame(Frame::Double(text.parse().unwrap())).unwrap();
+            assert_eq!(resp2, resp3, "{text}");
+        }
     }
 
     #[test]

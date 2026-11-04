@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - decode `FromFrame` values the same way under RESP2 and RESP3: `String` and
   `Bytes` accept RESP3 doubles, including the `inf`/`-inf`/`nan` special
-  floats, which RESP2 sends as bulk strings; `Vec<T>` accepts a RESP3 map,
+  floats, which RESP2 sends as bulk strings, and render them in Redis's own
+  notation (`3`, `0.00001`, `1e+20`) so the text matches the RESP2 reply;
+  `Vec<T>` accepts a RESP3 map,
   flattened to the RESP2 `[k, v, ...]` order; and `HashMap<K, V>` accepts the
   RESP3 array of `[k, v]` pairs (`ZRANGE ... WITHSCORES`). An array whose every
   element is a two-element array is now read as pairs rather than as a flat

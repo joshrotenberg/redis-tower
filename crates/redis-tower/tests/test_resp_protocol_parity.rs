@@ -38,6 +38,7 @@ struct Observed {
     raw_zrange_pairs: Vec<(String, f64)>,
     raw_hgetall_flat: Vec<String>,
     raw_zscore_string: String,
+    raw_zscore_notation: Vec<String>,
 }
 
 async fn observe(protocol: ProtocolVersion, prefix: &str) -> Observed {
@@ -150,6 +151,30 @@ async fn observe(protocol: ProtocolVersion, prefix: &str) -> Observed {
         .execute(RawCommand::new("ZSCORE").arg(&z).arg("m").query::<String>())
         .await
         .unwrap();
+    // Scores whose Redis text uses scientific notation, leading fractional
+    // zeros, or exact large integers.
+    let mut raw_zscore_notation = Vec::new();
+    for score in [
+        "1e20",
+        "0.00001",
+        "1.5e-7",
+        "1.2345678901234567e18",
+        "1.5e21",
+    ] {
+        c.execute(RawCommand::new("ZADD").arg(&z).arg(score).arg(score))
+            .await
+            .unwrap();
+        raw_zscore_notation.push(
+            c.execute(
+                RawCommand::new("ZSCORE")
+                    .arg(&z)
+                    .arg(score)
+                    .query::<String>(),
+            )
+            .await
+            .unwrap(),
+        );
+    }
 
     c.execute(Del::keys([&zi, &z, &g, &s, &l, &st, &h]))
         .await
@@ -177,6 +202,7 @@ async fn observe(protocol: ProtocolVersion, prefix: &str) -> Observed {
         raw_zrange_pairs,
         raw_hgetall_flat,
         raw_zscore_string,
+        raw_zscore_notation,
     }
 }
 
@@ -228,4 +254,14 @@ async fn typed_responses_match_across_protocols() {
     );
     assert_eq!(resp3.raw_hgetall_flat, vec!["f", "v"]);
     assert_eq!(resp3.raw_zscore_string, "2.5");
+    assert_eq!(
+        resp3.raw_zscore_notation,
+        [
+            "1e+20",
+            "0.00001",
+            "1.5e-7",
+            "1234567890123456768",
+            "1.5e+21"
+        ]
+    );
 }
