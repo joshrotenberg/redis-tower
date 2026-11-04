@@ -32,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names reports a non-master role; ROLE-verified reconnects previously
   re-asked the first answering sentinel on every backoff attempt and failed
   permanently when that one sentinel was stale. An address already rejected in
-  the pass is not dialed again
+  the pass is not dialed again. Connecting to a reported node and checking
+  its `ROLE` are bounded together (2 s), so a node that finishes setup but
+  never answers `ROLE` no longer stops discovery from reaching later sentinels
 - accept a node whose `ROLE` call is refused (for example an ACL user without
   the `role` command) on the sentinel's word instead of treating it as a
   replica, which previously made every ROLE-verified reconnect fail for such

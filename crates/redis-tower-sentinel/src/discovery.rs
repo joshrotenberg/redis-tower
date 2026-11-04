@@ -536,6 +536,13 @@ pub(crate) async fn check_master_role(
 /// Per-sentinel query budget used by verified discovery.
 const SENTINEL_QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
 
+/// Budget for connecting to one reported master and checking its `ROLE`.
+///
+/// It covers TCP, optional TLS, authentication, protocol negotiation, and the
+/// `ROLE` exchange. A node that stalls longer is skipped like a stale one, so
+/// a hung former master cannot keep discovery from the next sentinel.
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Ask each sentinel in turn for the master, connect to the node it names,
 /// and return the first one that does not report a non-master role.
 ///
@@ -544,13 +551,24 @@ const SENTINEL_QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
 /// healthy sentinel later in the list still wins (redis-rs #2427). An address
 /// already rejected or unreachable in this pass is not dialed again when
 /// another sentinel repeats it. A node whose `ROLE` call is refused is
-/// accepted, see [`MasterRole::Unverified`].
+/// accepted, see [`MasterRole::Unverified`]. Connecting to a reported node and
+/// checking its role are bounded together by [`NODE_CHECK_TIMEOUT`]; a node
+/// that does not finish in time is skipped and the next sentinel is asked.
 ///
 /// Returns the connection and the master's `"host:port"` address.
 pub(crate) async fn connect_verified_master_once(
     sentinel_addrs: &[String],
     master_name: &str,
     config: &SentinelConfig,
+) -> Result<(RedisConnection, String), RedisError> {
+    verified_master_pass(sentinel_addrs, master_name, config, NODE_CHECK_TIMEOUT).await
+}
+
+async fn verified_master_pass(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+    node_check_timeout: Duration,
 ) -> Result<(RedisConnection, String), RedisError> {
     let mut answered = false;
     let mut tried = std::collections::HashSet::new();
@@ -585,31 +603,48 @@ pub(crate) async fn connect_verified_master_once(
         if !tried.insert(master_addr.clone()) {
             continue;
         }
-        let mut conn = match connect_hop(
-            &master_addr,
-            config.node_credentials.as_ref(),
-            config.resp_limits,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            config.node_tls.as_ref(),
-        )
-        .await
-        {
-            Ok(conn) => conn,
-            Err(error) => {
+        let candidate = async {
+            let mut conn = connect_hop(
+                &master_addr,
+                config.node_credentials.as_ref(),
+                config.resp_limits,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                config.node_tls.as_ref(),
+            )
+            .await?;
+            let role = check_master_role(&mut conn).await?;
+            Ok::<_, RedisError>((conn, role))
+        };
+        let (conn, role) = match tokio::time::timeout(node_check_timeout, candidate).await {
+            Ok(Ok(checked)) => checked,
+            Ok(Err(error)) => {
                 tracing::warn!(
                     sentinel_addr = %sentinel_addr,
                     addr = %master_addr,
                     master_name,
                     error = %error,
-                    "sentinel: failed to connect to the reported master"
+                    "sentinel: failed to connect to or check the reported master"
                 );
                 last_err = Some(error);
                 continue;
             }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    addr = %master_addr,
+                    master_name,
+                    timeout_ms = node_check_timeout.as_millis() as u64,
+                    "sentinel: reported master did not finish setup and ROLE in time; asking the next sentinel"
+                );
+                last_err = Some(RedisError::Redis(format!(
+                    "sentinel {sentinel_addr} returned {master_addr} for '{master_name}', but it did not answer setup and ROLE within {node_check_timeout:?}"
+                )));
+                continue;
+            }
         };
-        match check_master_role(&mut conn).await {
-            Ok(MasterRole::Confirmed) => return Ok((conn, master_addr)),
-            Ok(MasterRole::Unverified(reason)) => {
+        match role {
+            MasterRole::Confirmed => return Ok((conn, master_addr)),
+            MasterRole::Unverified(reason) => {
                 tracing::debug!(
                     addr = %master_addr,
                     master_name,
@@ -618,7 +653,7 @@ pub(crate) async fn connect_verified_master_once(
                 );
                 return Ok((conn, master_addr));
             }
-            Ok(MasterRole::Rejected(role)) => {
+            MasterRole::Rejected(role) => {
                 tracing::warn!(
                     sentinel_addr = %sentinel_addr,
                     addr = %master_addr,
@@ -630,7 +665,6 @@ pub(crate) async fn connect_verified_master_once(
                     "sentinel {sentinel_addr} returned {master_addr} for '{master_name}', but it reports role {role}, not master"
                 )));
             }
-            Err(error) => last_err = Some(error),
         }
     }
     if !answered {
@@ -958,6 +992,64 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(addr, node);
+    }
+
+    /// A node that completes its connection setup and then never answers
+    /// `ROLE`: a hung or half-failed former master.
+    async fn spawn_silent_role_node() -> String {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_protocol::RespCodec;
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut framed = Framed::new(stream, RespCodec::new());
+                    while let Some(Ok(request)) = framed.next().await {
+                        let reply = match first_arg(&request).as_slice() {
+                            b"ROLE" => {
+                                futures::future::pending::<()>().await;
+                                unreachable!()
+                            }
+                            b"HELLO" => Frame::Error(Bytes::from_static(b"ERR unknown command")),
+                            _ => Frame::SimpleString(Bytes::from_static(b"OK")),
+                        };
+                        if framed.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// Review finding: an unanswered `ROLE` from the first reported node must
+    /// not stop discovery from reaching a later sentinel's healthy master.
+    #[tokio::test]
+    async fn silent_role_moves_on_to_the_next_sentinel() {
+        let silent = spawn_silent_role_node().await;
+        let master = spawn_node(role("master")).await;
+        let first = spawn_sentinel(&silent).await;
+        let second = spawn_sentinel(&master).await;
+
+        let started = std::time::Instant::now();
+        let (_conn, addr) = tokio::time::timeout(
+            Duration::from_secs(5),
+            verified_master_pass(
+                &[first, second],
+                "mymaster",
+                &SentinelConfig::default(),
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("discovery hung on a node that never answered ROLE")
+        .unwrap();
+        assert_eq!(addr, master);
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 
     #[tokio::test]

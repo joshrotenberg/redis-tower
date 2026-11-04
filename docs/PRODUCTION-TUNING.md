@@ -753,7 +753,10 @@ a demoted primary.
 Every Sentinel connect path, including the initial one, checks `ROLE` on the
 node a Sentinel names. When that node reports `slave` or `sentinel`, the client
 asks the next Sentinel in the list during the same attempt instead of trusting
-the first answer, so one stale Sentinel cannot pin the client to a replica. A
+the first answer, so one stale Sentinel cannot pin the client to a replica.
+Connecting to a named node and checking its role are bounded together (two
+seconds per node, alongside the one-second budget per Sentinel query), so a
+hung former primary is skipped the same way. A
 node that refuses `ROLE` itself (for example an ACL user without the `role`
 command) is accepted on the Sentinel's word, as before verification existed;
 grant `+role` to such users if they should benefit from the check.
