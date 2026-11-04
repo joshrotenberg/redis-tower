@@ -25,13 +25,28 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 512 * 1024 * 1024;
 /// over real traffic while still bounding a hostile server's reply.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
+/// Hard ceiling on decoded nesting depth, applied even when
+/// [`RespLimits::max_depth`] is larger (including [`usize::MAX`]).
+///
+/// The underlying resp-rs parser and `Frame`'s destructor both recurse once per
+/// level. Measured on arm64, an unoptimized build spends about 5.4 KB of stack
+/// per level parsing (about 0.5 KB optimized), so 128 levels use roughly
+/// 690 KB of a 2 MiB tokio worker stack in a debug build and leave the rest for
+/// the caller's own frames. A configured depth above this cannot be honored
+/// without risking a stack overflow that aborts the process, so it is clamped
+/// here. It equals [`DEFAULT_MAX_DEPTH`]: raising `max_depth` above the default
+/// has no effect.
+pub const MAX_DEPTH_CEILING: usize = 128;
+
 /// Resource limits [`RespCodec`] applies while decoding.
 ///
 /// Frames are structurally scanned before the allocating parser runs. The
 /// size limit bounds wire bytes, not exact heap usage: decoded aggregate
 /// elements have their own representation overhead. Incomplete frames never
-/// reserve storage for their declared element counts. Set either field to
-/// [`usize::MAX`] to disable that codec limit; dependency parsing limits remain.
+/// reserve storage for their declared element counts. Set `max_frame_size` to
+/// [`usize::MAX`] to disable the codec's size limit; dependency parsing limits
+/// remain. Depth cannot be disabled: it is always capped at
+/// [`MAX_DEPTH_CEILING`].
 ///
 /// ```
 /// use redis_tower_protocol::{RespCodec, RespLimits};
@@ -55,6 +70,8 @@ pub struct RespLimits {
     ///
     /// Empty aggregates count as a level; RESP2 null arrays are nil leaves.
     /// Attributes and streamed encodings are unsupported independently of depth.
+    /// Values above [`MAX_DEPTH_CEILING`] are clamped to it, so the decoder
+    /// cannot recurse deep enough to overflow a worker thread's stack.
     pub max_depth: usize,
 }
 
@@ -929,6 +946,75 @@ mod limit_tests {
         let mut codec = RespCodec::with_limits(limits);
         let mut buf = nested(64);
         assert!(codec.decode(&mut buf).unwrap().is_some());
+    }
+
+    #[test]
+    fn depth_ceiling_applies_even_when_the_limit_is_disabled() {
+        // Without the ceiling, max_depth = usize::MAX lets this frame through
+        // the pre-scan and resp-rs recurses 200_000 levels deep, overflowing
+        // the stack and aborting the process.
+        let unlimited = RespLimits {
+            max_frame_size: usize::MAX,
+            max_depth: usize::MAX,
+        };
+        for depth in [MAX_DEPTH_CEILING + 1, 200_000] {
+            let mut codec = RespCodec::with_limits(unlimited);
+            let mut buf = nested(depth);
+            let before = buf.len();
+            let err = codec.decode(&mut buf).unwrap_err();
+            assert!(
+                matches!(err, ProtocolError::NestingTooDeep { max } if max == MAX_DEPTH_CEILING),
+                "depth {depth}: unexpected error {err:?}"
+            );
+            assert_eq!(buf.len(), before, "a rejected frame must not be consumed");
+        }
+        let mut codec = RespCodec::with_limits(unlimited);
+        let mut buf = nested(MAX_DEPTH_CEILING);
+        assert!(codec.decode(&mut buf).unwrap().is_some());
+    }
+
+    #[test]
+    fn frames_at_the_depth_ceiling_parse_and_drop_on_a_worker_sized_stack() {
+        // tokio's default worker stack is 2 MiB. Parse and drop every
+        // aggregate kind at the ceiling there, nesting through map keys and
+        // map values too, so the margin is checked in this (unoptimized) build.
+        fn nest(open: &[u8], close: &[u8]) -> BytesMut {
+            let mut buf = BytesMut::new();
+            for _ in 0..MAX_DEPTH_CEILING {
+                buf.extend_from_slice(open);
+            }
+            buf.extend_from_slice(b":1\r\n");
+            for _ in 0..MAX_DEPTH_CEILING {
+                buf.extend_from_slice(close);
+            }
+            buf
+        }
+        let shapes: [(&str, BytesMut); 5] = [
+            ("array", nest(b"*1\r\n", b"")),
+            ("set", nest(b"~1\r\n", b"")),
+            ("push", nest(b">1\r\n", b"")),
+            ("map value", nest(b"%1\r\n+k\r\n", b"")),
+            ("map key", nest(b"%1\r\n", b"+v\r\n")),
+        ];
+        let unlimited = RespLimits {
+            max_frame_size: usize::MAX,
+            max_depth: usize::MAX,
+        };
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(move || {
+                for (name, mut buf) in shapes {
+                    let frame = RespCodec::with_limits(unlimited)
+                        .decode(&mut buf)
+                        .unwrap_or_else(|err| panic!("{name}: {err:?}"))
+                        .unwrap_or_else(|| panic!("{name}: incomplete"));
+                    assert!(buf.is_empty(), "{name}: trailing bytes");
+                    drop(frame);
+                }
+            })
+            .unwrap()
+            .join()
+            .expect("parsing at the depth ceiling must fit a 2 MiB stack");
     }
 
     #[test]
