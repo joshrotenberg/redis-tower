@@ -7,8 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `MAX_DEPTH_CEILING` (128), the nesting depth the decoder enforces regardless
+  of `RespLimits::max_depth`
+
 ### Fixed
 
+- cap decoded nesting depth at `MAX_DEPTH_CEILING` even when `max_depth` is
+  larger; `max_depth: usize::MAX` was documented as disabling the limit, and a
+  hostile 200,000-level `*1` reply then overflowed a tokio worker's stack inside
+  the recursive parser and aborted the process
 - release a connection's read and write buffers once they drain after a frame
   larger than 1 MiB, instead of keeping the largest-ever allocation for the
   life of the connection
