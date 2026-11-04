@@ -309,3 +309,165 @@ async fn auth_remains_allowed_for_credential_rotation() {
     }
     client.health_check().await.unwrap();
 }
+
+/// Redis refuses a malformed `DISCARD` (wrong arity) without leaving `MULTI`,
+/// so a batch that only looked terminated left later callers' commands queued
+/// inside the transaction. (A refused `EXEC` is answered with `EXECABORT` and
+/// does leave `MULTI` on current servers; it is covered here too.)
+#[tokio::test]
+async fn malformed_terminators_are_rejected_before_the_wire() {
+    let mut client = client_with(ProtocolVersion::Resp2).await;
+    let key = "shared_conn:malformed_terminator";
+    client.execute(Set::new(key, "before")).await.unwrap();
+
+    for terminator in [
+        array(vec![bulk("DISCARD"), bulk("extra")]),
+        array(vec![bulk("EXEC"), bulk("extra")]),
+    ] {
+        let result = redis_tower::PipelineExecutor::execute_pipeline(
+            &mut client,
+            vec![
+                array(vec![bulk("MULTI")]),
+                array(vec![bulk("SET"), bulk(key), bulk("inside")]),
+                terminator,
+            ],
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(RedisError::Redis(message)) if message.contains("arguments")),
+            "{result:?}"
+        );
+        let other = client.clone();
+        let value = tokio::time::timeout(Duration::from_secs(2), other.execute(Get::new(key)))
+            .await
+            .expect("a later caller hung");
+        assert_eq!(
+            value.unwrap(),
+            Some(Bytes::from_static(b"before")),
+            "a later caller's GET was queued inside a leftover MULTI"
+        );
+    }
+}
+
+/// Create an ACL user allowed everything except `denied`.
+async fn user_without(admin: &mut RedisConnection, user: &str, denied: &str) {
+    admin
+        .execute(
+            RawCommand::new("ACL")
+                .arg("SETUSER")
+                .arg(user)
+                .arg("reset")
+                .arg("on")
+                .arg(">pw")
+                .arg("~*")
+                .arg("&*")
+                .arg("+@all")
+                .arg(format!("-{denied}")),
+        )
+        .await
+        .unwrap();
+}
+
+/// A well-formed `DISCARD` that the server refuses (here an ACL denial) also
+/// leaves the connection inside `MULTI`. The worker must not reuse it: the
+/// transaction's caller sees the refusal, a caller batched behind it fails
+/// instead of receiving `QUEUED`, and later callers get a fresh connection.
+#[tokio::test]
+async fn refused_discard_discards_the_connection_left_inside_multi() {
+    let addr = common::redis_addr().await;
+    let mut admin = RedisConnection::connect(addr).await.unwrap();
+    user_without(&mut admin, "shared_conn_nodiscard", "discard").await;
+    let key = "shared_conn:refused_discard";
+    admin.execute(Set::new(key, "before")).await.unwrap();
+
+    let client = MultiplexedClient::from_factory(
+        UrlConnectionFactory::new(format!("redis://shared_conn_nodiscard:pw@{addr}")),
+        AutoPipelineConfig {
+            batch_window: Duration::from_millis(50),
+            ..AutoPipelineConfig::default()
+        },
+        AutoPipelineReconnectConfig::default(),
+    )
+    .await
+    .unwrap();
+    let batched = client.clone();
+    let mut transaction_client = client.clone();
+    let transaction = tokio::spawn(async move {
+        redis_tower::PipelineExecutor::execute_pipeline(
+            &mut transaction_client,
+            vec![
+                array(vec![bulk("MULTI")]),
+                array(vec![bulk("SET"), bulk(key), bulk("inside")]),
+                array(vec![bulk("DISCARD")]),
+            ],
+        )
+        .await
+    });
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    let behind = tokio::spawn(async move { batched.execute(Get::new(key)).await });
+
+    let replies = transaction.await.unwrap().unwrap();
+    assert!(
+        matches!(&replies[2], Frame::Error(message) if message.starts_with(b"NOPERM")),
+        "{replies:?}"
+    );
+    let behind = behind.await.unwrap();
+    assert!(
+        !matches!(&behind, Ok(Some(value)) if value.as_ref() == b"QUEUED"),
+        "the caller batched behind the refused DISCARD received QUEUED"
+    );
+    let later = tokio::time::timeout(Duration::from_secs(5), client.execute(Get::new(key)))
+        .await
+        .expect("a later caller hung")
+        .unwrap();
+    assert_eq!(later, Some(Bytes::from_static(b"before")));
+
+    admin
+        .execute(
+            RawCommand::new("ACL")
+                .arg("DELUSER")
+                .arg("shared_conn_nodiscard"),
+        )
+        .await
+        .unwrap();
+    client.shutdown_handle().shutdown().await;
+}
+
+/// A refused `EXEC` is answered with `EXECABORT`, which ends the transaction,
+/// so the connection stays usable.
+#[tokio::test]
+async fn refused_exec_keeps_the_connection() {
+    let addr = common::redis_addr().await;
+    let mut admin = RedisConnection::connect(addr).await.unwrap();
+    user_without(&mut admin, "shared_conn_noexec", "exec").await;
+    let key = "shared_conn:refused_exec";
+    admin.execute(Set::new(key, "before")).await.unwrap();
+
+    let mut client = MultiplexedClient::from_factory(
+        UrlConnectionFactory::new(format!("redis://shared_conn_noexec:pw@{addr}")),
+        AutoPipelineConfig::default(),
+        AutoPipelineReconnectConfig::default(),
+    )
+    .await
+    .unwrap();
+    let refused = Transaction::new()
+        .push(Set::new(key, "inside"))
+        .execute(&mut client)
+        .await;
+    assert!(refused.is_err());
+    assert_eq!(
+        client.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from_static(b"before"))
+    );
+    assert!(client.is_connection_healthy());
+
+    admin
+        .execute(
+            RawCommand::new("ACL")
+                .arg("DELUSER")
+                .arg("shared_conn_noexec"),
+        )
+        .await
+        .unwrap();
+    client.shutdown_handle().shutdown().await;
+}

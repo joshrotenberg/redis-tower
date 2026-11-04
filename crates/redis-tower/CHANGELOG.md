@@ -41,8 +41,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `is_blocking()` is true, and stand-alone `MULTI`/`EXEC`/`DISCARD`/`WATCH`.
   This applies to `AutoPipelineService` and therefore to `MultiplexedClient`,
   `CachedMultiplexedClient`, and layered clients. Explicit pipelines may still
-  carry a complete `WATCH`/`MULTI`/`EXEC` block but not one left open. `AUTH`
-  stays allowed for credential re-authentication
+  carry a complete `WATCH`/`MULTI`/`EXEC` block but not one left open or with
+  malformed `MULTI`/`EXEC`/`DISCARD`/`WATCH` arguments. `AUTH` stays allowed
+  for credential re-authentication
+- discard a shared connection whose transaction replies show it was left
+  inside `MULTI`: Redis refuses a `DISCARD` (wrong arity or ACL denial), and on
+  older servers an `EXEC`, without ending the transaction, so later callers'
+  commands were queued instead of executed. Callers batched behind the refused
+  terminator fail with `ConnectionClosed` instead of receiving `QUEUED`; a
+  factory-backed worker reconnects and a fixed one closes
 - stop graceful shutdown from waiting forever on an in-flight batch whose
   callers have all gone away; with no response timeout, one abandoned request
   to an unresponsive server made `AutoPipelineShutdownHandle::shutdown()` hang.
