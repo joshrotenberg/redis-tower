@@ -462,9 +462,11 @@ struct WorkerControl {
     shutdown_tx: watch::Sender<bool>,
     shutdown_notify: Arc<Notify>,
     event_bus: Option<ConnectionEventBus>,
-    /// `true` only while the worker is parked waiting for its next request.
-    /// Lets the unfinished-worker drop warning stay quiet for an idle
-    /// teardown, where nothing can be lost.
+    /// `true` while the worker has no request in hand: before it first runs
+    /// and whenever it is parked waiting for the next one. Lets the
+    /// unfinished-worker drop warning stay quiet for an idle teardown, where
+    /// nothing can be lost. A request sent just before the final drop may not
+    /// have been picked up yet; the worker still drains it after shutdown.
     idle: std::sync::atomic::AtomicBool,
 }
 
@@ -487,7 +489,8 @@ impl WorkerControl {
             shutdown_tx,
             shutdown_notify: Arc::new(Notify::new()),
             event_bus,
-            idle: std::sync::atomic::AtomicBool::new(false),
+            // Nothing can be queued before the service is returned.
+            idle: std::sync::atomic::AtomicBool::new(true),
         }
     }
 
@@ -4205,6 +4208,34 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         service.shutdown().await;
         drop(router_held);
+        assert_eq!(capture.drop_warnings(), 0, "{:?}", capture.messages);
+        let _ = release_tx.send(());
+        server.await.unwrap();
+    }
+
+    /// Review finding: a service dropped before its worker task is ever
+    /// polled (no yield on a current-thread runtime) has nothing queued and
+    /// must not warn either.
+    #[tokio::test]
+    async fn dropping_before_the_worker_first_runs_does_not_warn() {
+        use tracing_subscriber::prelude::*;
+
+        let capture = WarnCapture::default();
+        let _guard =
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(capture.clone()));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (addr, server) = silent_peer(release_rx).await;
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let conn = RedisConnection::from_stream(redis_tower_core::RedisStream::Tcp(stream));
+        let service = AutoPipelineService::new(conn, AutoPipelineConfig::default());
+        drop(service);
+        assert_eq!(capture.drop_warnings(), 0, "{:?}", capture.messages);
+        let lazy = AutoPipelineService::with_lazy_factory(
+            || async { Err::<RedisConnection, _>(RedisError::ConnectionClosed) },
+            AutoPipelineConfig::default(),
+            AutoPipelineReconnectConfig::default(),
+        );
+        drop(lazy);
         assert_eq!(capture.drop_warnings(), 0, "{:?}", capture.messages);
         let _ = release_tx.send(());
         server.await.unwrap();

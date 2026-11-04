@@ -56,8 +56,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The batch is now abandoned and its connection discarded
 - warn about an `AutoPipelineService` dropped before `shutdown()` only when
   requests are still queued or in flight; idle, healthy teardown (for example
-  a router releasing its clone after the owner's non-final `shutdown()`) no
-  longer logs a spurious warning
+  a router releasing its clone after the owner's non-final `shutdown()`, or a
+  service dropped before its worker first ran) no longer logs a spurious
+  warning
 - defer managed stream-consumer automatic `XACK` until the caller advances
   past the delivered item, leaving it pending and recoverable if the stream is
   dropped before that point (#734)
