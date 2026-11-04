@@ -22,6 +22,7 @@ use std::fs;
 use std::future::Future;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -51,12 +52,13 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const CLUSTER_BUS_PORT_OFFSET: u16 = 10_000;
 const AUTO_PORT_START: u16 = 18_000;
 const AUTO_PORT_SPAN: u16 = 24_000;
-const STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
+const STARTUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(15);
 const STARTUP_CLEANUP_QUIET_PERIOD: Duration = Duration::from_millis(500);
 const STARTUP_CLEANUP_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 static CLUSTER_STARTUP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RESERVED_PORTS: OnceLock<Mutex<HashSet<u16>>> = OnceLock::new();
+static NEXT_AUTO_PORT_OFFSET: AtomicU32 = AtomicU32::new(0);
 
 /// Errors produced by the managed cluster fixture.
 #[derive(Debug, thiserror::Error)]
@@ -283,7 +285,8 @@ impl ClusterFixtureBuilder {
     /// Use an explicit run of six client ports beginning at `base_port`.
     ///
     /// The matching six cluster-bus ports (`base_port + 10000`) must also be
-    /// available. By default the fixture searches for a free range. Port
+    /// available. By default the fixture searches for a free range, advancing
+    /// to a fresh block on each start to avoid recently stopped nodes. Port
     /// ranges are reserved across fixtures in this process for their entire
     /// lifetime. TCP probing is best-effort across separate processes, so
     /// callers coordinating multiple test processes should still assign
@@ -361,8 +364,10 @@ impl ClusterFixtureBuilder {
 /// Managed three-master, three-replica Redis Cluster.
 ///
 /// Dropping the fixture resumes any frozen processes, delegates process
-/// shutdown to `redis-server-wrapper`, then removes the fixture's validated
-/// temporary working directory.
+/// shutdown to `redis-server-wrapper`, then waits up to 15 seconds for its
+/// processes and ports to quiesce before removing the validated temporary
+/// working directory. If cleanup fails, the directory is preserved and the
+/// error (including surviving PIDs and busy ports) is printed to stderr.
 pub struct ClusterFixture {
     // `Option` lets Drop stop every process before removing the wrapper's
     // working directory. The value is Some for the fixture's entire usable
@@ -995,10 +1000,17 @@ impl Drop for ClusterFixture {
         // wrapper's graceful shutdown does not stall and leak test processes.
         chaos::recover(&handle);
         let cluster_base = handle.cluster_base().to_path_buf();
-        // RedisClusterHandle drops its node handles synchronously. Only after
-        // every process has stopped is it safe to remove their working tree.
+        let base_port = self._port_lease.base_port();
+        let pids: Vec<_> = handle.nodes().iter().map(RedisServerHandle::pid).collect();
+        // The wrapper can return immediately after SIGKILL. Retain the port
+        // lease and directory until the processes actually exit, including
+        // PIDs whose pidfiles were removed during graceful shutdown.
         drop(handle);
-        let _ = remove_cluster_base(&cluster_base);
+        if let Err(error) =
+            cleanup_startup_base(&cluster_base, base_port, &pids, STARTUP_CLEANUP_TIMEOUT)
+        {
+            eprintln!("Redis Cluster fixture cleanup failed: {error}");
+        }
     }
 }
 
@@ -1110,7 +1122,7 @@ impl StartupArtifactGuard {
 
         for path in current_process_cluster_bases()?.difference(&self.existing_bases) {
             if startup_base_belongs_to_range(path, self.base_port)? {
-                cleanup_startup_base(path, self.base_port)?;
+                cleanup_startup_base(path, self.base_port, &[], STARTUP_CLEANUP_TIMEOUT)?;
             }
         }
         self.armed = false;
@@ -1220,9 +1232,16 @@ fn startup_base_belongs_to_range(path: &Path, base_port: u16) -> std::io::Result
     Ok(saw_node)
 }
 
-fn cleanup_startup_base(path: &Path, base_port: u16) -> std::io::Result<()> {
-    let deadline = std::time::Instant::now() + STARTUP_CLEANUP_TIMEOUT;
+fn cleanup_startup_base(
+    path: &Path,
+    base_port: u16,
+    known_pids: &[u32],
+    cleanup_timeout: Duration,
+) -> std::io::Result<()> {
+    let deadline = std::time::Instant::now() + cleanup_timeout;
     let mut quiet_since = None;
+    let mut pids: HashSet<u32> = known_pids.iter().copied().collect();
+    let mut signalled_pids = HashSet::new();
     loop {
         if !path.exists() {
             return Ok(());
@@ -1237,10 +1256,22 @@ fn cleanup_startup_base(path: &Path, base_port: u16) -> std::io::Result<()> {
             ));
         }
 
-        if stop_startup_nodes(path, base_port) {
-            quiet_since = None;
+        collect_startup_pids(path, base_port, &mut pids);
+        let mut alive_pids: Vec<_> = pids
+            .iter()
+            .copied()
+            .filter(|pid| redis_server_wrapper::process::pid_alive(*pid))
+            .collect();
+        alive_pids.sort_unstable();
+        for pid in &alive_pids {
+            // Escalate once, then observe exit rather than repeatedly spending
+            // the wrapper's 500 ms grace period on a slow-to-exit process.
+            if signalled_pids.insert(*pid) {
+                redis_server_wrapper::process::force_kill(*pid);
+            }
         }
-        if startup_ports_are_free(base_port) {
+        let busy_ports = busy_startup_ports(base_port)?;
+        if alive_pids.is_empty() && busy_ports.is_empty() {
             let quiet_since = quiet_since.get_or_insert_with(std::time::Instant::now);
             if quiet_since.elapsed() >= STARTUP_CLEANUP_QUIET_PERIOD {
                 // Revalidate immediately before deletion. A path that was
@@ -1264,8 +1295,9 @@ fn cleanup_startup_base(path: &Path, base_port: u16) -> std::io::Result<()> {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
-                    "startup processes or ports did not quiesce for {}",
-                    path.display()
+                    "startup processes or ports did not quiesce for {} after {cleanup_timeout:?}; \
+                     surviving PIDs: {alive_pids:?}; busy ports: {busy_ports:?}",
+                    path.display(),
                 ),
             ));
         }
@@ -1273,11 +1305,10 @@ fn cleanup_startup_base(path: &Path, base_port: u16) -> std::io::Result<()> {
     }
 }
 
-fn stop_startup_nodes(path: &Path, base_port: u16) -> bool {
+fn collect_startup_pids(path: &Path, base_port: u16, pids: &mut HashSet<u32>) {
     let Ok(ports) = client_ports(base_port) else {
-        return false;
+        return;
     };
-    let mut stopped_process = false;
     for port in ports {
         let node_name = format!("node-{port}");
         let node_dir = path.join(&node_name);
@@ -1285,29 +1316,27 @@ fn stop_startup_nodes(path: &Path, base_port: u16) -> bool {
             node_dir.join("redis.pid"),
             node_dir.join(&node_name).join("redis.pid"),
         ] {
-            if let Some(pid) = redis_server_wrapper::process::read_pidfile(&pidfile)
-                && redis_server_wrapper::process::pid_alive(pid)
-            {
-                redis_server_wrapper::process::force_kill(pid);
-                stopped_process = true;
+            if let Some(pid) = redis_server_wrapper::process::read_pidfile(&pidfile) {
+                pids.insert(pid);
             }
         }
     }
-    stopped_process
 }
 
-fn startup_ports_are_free(base_port: u16) -> bool {
-    let Ok(ports) = fixture_ports(base_port) else {
-        return false;
-    };
+fn busy_startup_ports(base_port: u16) -> std::io::Result<Vec<String>> {
+    let ports = fixture_ports(base_port).map_err(std::io::Error::other)?;
     let mut listeners = Vec::with_capacity(ports.len());
+    let mut busy = Vec::new();
     for port in ports {
-        let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) else {
-            return false;
-        };
-        listeners.push(listener);
+        // On Unix std's listener sets SO_REUSEADDR, like Redis, so ordinary
+        // TIME_WAIT connections do not prevent this probe from succeeding.
+        // Keep every successful listener until the entire range is checked.
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => listeners.push(listener),
+            Err(error) => busy.push(format!("{port}: {error}")),
+        }
     }
-    true
+    Ok(busy)
 }
 
 fn remove_cluster_base(path: &Path) -> std::io::Result<()> {
@@ -1501,8 +1530,10 @@ fn reserve_port_range(base_port: u16) -> Result<PortRangeLease> {
 
 fn find_and_reserve_port_range() -> Result<PortRangeLease> {
     let process_offset = (std::process::id() % AUTO_PORT_SPAN as u32) as u16;
-    for attempt in 0..AUTO_PORT_SPAN {
-        let offset = (process_offset + attempt.wrapping_mul(17)) % AUTO_PORT_SPAN;
+    for _ in 0..AUTO_PORT_SPAN {
+        let next = NEXT_AUTO_PORT_OFFSET.fetch_add(17, Ordering::Relaxed);
+        let offset = ((u32::from(process_offset) + next % u32::from(AUTO_PORT_SPAN))
+            % u32::from(AUTO_PORT_SPAN)) as u16;
         let candidate = AUTO_PORT_START + offset;
         if let Ok(lease) = reserve_port_range(candidate) {
             return Ok(lease);
@@ -1690,6 +1721,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn consecutive_automatic_port_leases_use_fresh_ranges() {
+        let mut observed = HashSet::new();
+        for _ in 0..5 {
+            let lease = find_and_reserve_port_range().unwrap();
+            for port in &lease.ports {
+                assert!(observed.insert(*port), "recent port {port} was reused");
+            }
+            drop(lease);
+        }
+    }
+
+    #[test]
+    fn cleanup_timeout_reports_all_busy_ports_and_preserves_artifacts() {
+        let mut lease = find_and_reserve_port_range().unwrap();
+        let base_port = lease.base_port();
+        lease.release_listeners();
+        let owned = synthetic_cluster_base();
+        create_synthetic_node(&owned, base_port);
+        let bus_port = base_port + CLUSTER_BUS_PORT_OFFSET;
+        let client = TcpListener::bind(("127.0.0.1", base_port)).unwrap();
+        let bus = TcpListener::bind(("127.0.0.1", bus_port)).unwrap();
+
+        let error =
+            cleanup_startup_base(&owned, base_port, &[], Duration::from_millis(50)).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        let message = error.to_string();
+        assert!(message.contains(&format!("{base_port}:")), "{message}");
+        assert!(message.contains(&format!("{bus_port}:")), "{message}");
+        assert!(message.contains("surviving PIDs: []"), "{message}");
+        assert!(owned.exists(), "busy fixture artifacts must be preserved");
+        // Cleanup must never kill an unrelated listener just to free a port.
+        assert_eq!(client.local_addr().unwrap().port(), base_port);
+        assert_eq!(bus.local_addr().unwrap().port(), bus_port);
+        drop((client, bus));
+        remove_cluster_base(&owned).unwrap();
+    }
+
+    #[test]
+    fn cleanup_allows_slow_port_release_beyond_the_old_deadline() {
+        let mut lease = find_and_reserve_port_range().unwrap();
+        let base_port = lease.base_port();
+        lease.release_listeners();
+        let owned = synthetic_cluster_base();
+        create_synthetic_node(&owned, base_port);
+        let listener = TcpListener::bind(("127.0.0.1", base_port)).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5_250));
+            drop(listener);
+        });
+
+        cleanup_startup_base(&owned, base_port, &[], STARTUP_CLEANUP_TIMEOUT).unwrap();
+        release.join().unwrap();
+        assert!(!owned.exists());
+    }
+
+    #[test]
+    fn cleanup_tracks_process_exit_after_its_pidfile_disappears() {
+        let mut lease = find_and_reserve_port_range().unwrap();
+        let base_port = lease.base_port();
+        lease.release_listeners();
+        let owned = synthetic_cluster_base();
+        create_synthetic_node(&owned, base_port);
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let waiter = std::thread::spawn(move || child.wait_with_output().unwrap().status);
+
+        cleanup_startup_base(&owned, base_port, &[pid], STARTUP_CLEANUP_TIMEOUT).unwrap();
+        assert!(!redis_server_wrapper::process::pid_alive(pid));
+        assert!(!waiter.join().unwrap().success());
+        assert!(!owned.exists());
+    }
+
     #[tokio::test]
     async fn failed_start_removes_only_its_new_artifact_tree() {
         let mut lease = find_and_reserve_port_range().unwrap();
@@ -1850,6 +1957,39 @@ mod tests {
         assert_eq!(current_process_cluster_bases().unwrap(), existing_bases);
         let lease = reserve_port_range(base_port).unwrap();
         assert_eq!(lease.base_port(), base_port);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires redis-server and redis-cli; starts five clusters back to back"]
+    async fn live_consecutive_fixtures_release_processes_ports_and_directories() {
+        let existing_bases = current_process_cluster_bases().unwrap();
+        let mut observed_ports = HashSet::new();
+        for _ in 0..5 {
+            let fixture = ClusterFixture::start().await.unwrap();
+            let base_port = fixture._port_lease.base_port();
+            for port in fixture_ports(base_port).unwrap() {
+                assert!(observed_ports.insert(port), "recent port {port} was reused");
+            }
+            let cluster_base = fixture.handle().cluster_base().to_path_buf();
+            let pids: Vec<_> = fixture
+                .handle()
+                .nodes()
+                .iter()
+                .map(RedisServerHandle::pid)
+                .collect();
+            assert!(fixture.topology().await.unwrap().is_ready());
+
+            drop(fixture);
+            for pid in pids {
+                assert!(
+                    !redis_server_wrapper::process::pid_alive(pid),
+                    "fixture Drop left process {pid} alive"
+                );
+            }
+            assert!(busy_startup_ports(base_port).unwrap().is_empty());
+            assert!(!cluster_base.exists());
+        }
+        assert_eq!(current_process_cluster_bases().unwrap(), existing_bases);
     }
 
     #[tokio::test]
