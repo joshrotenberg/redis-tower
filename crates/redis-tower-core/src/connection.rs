@@ -108,13 +108,33 @@ const CONNECTION_ATTEMPT_DELAY: Duration = Duration::from_millis(250);
 /// that one. Instead, attempts are staggered Happy Eyeballs style: address
 /// families alternate, each attempt gets `attempt_delay` to itself before the
 /// next starts alongside it, a refused attempt starts the next immediately,
-/// and the first established stream wins while the rest are dropped.
-async fn connect_resolved(addr: &str, attempt_delay: Duration) -> Result<TcpStream, RedisError> {
+/// and the first established stream wins while the rest are dropped. With a
+/// `deadline`, the stagger shrinks so that every address starts within the
+/// budget left after resolution.
+async fn connect_resolved(
+    addr: &str,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<TcpStream, RedisError> {
     let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr)
         .await
         .map_err(|error| RedisError::connection(addr, error))?
         .collect();
+    let remaining =
+        deadline.map(|deadline| deadline.saturating_duration_since(tokio::time::Instant::now()));
+    let attempt_delay = attempt_delay(remaining, resolved.len());
     connect_addrs(addr, interleave_address_families(resolved), attempt_delay).await
+}
+
+/// The stagger between address attempts: the RFC 8305 default, or an even
+/// share of a smaller remaining budget so the last address still starts in
+/// time.
+fn attempt_delay(remaining: Option<Duration>, addresses: usize) -> Duration {
+    match (remaining, u32::try_from(addresses)) {
+        (Some(remaining), Ok(count)) if count > 1 => {
+            CONNECTION_ATTEMPT_DELAY.min(remaining / count)
+        }
+        _ => CONNECTION_ATTEMPT_DELAY,
+    }
 }
 
 async fn connect_addrs(
@@ -492,7 +512,9 @@ impl ConnectionConfig {
     /// addresses, the timeout covers resolution and every address attempt
     /// together. Attempts are staggered rather than sequential, so an address
     /// that silently drops packets delays a working one by a fraction of a
-    /// second instead of consuming the whole budget.
+    /// second instead of consuming the whole budget; with a timeout shorter
+    /// than the usual 250 ms stagger, the stagger shrinks so every address
+    /// still starts within it.
     #[must_use]
     pub fn with_connect_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.connect_timeout = timeout;
@@ -611,9 +633,12 @@ impl RedisConnection {
     /// The timeout bounds name resolution plus the whole address race in
     /// [`connect_resolved`], not one address at a time.
     async fn open_tcp(addr: &str, config: &ConnectionConfig) -> Result<TcpStream, RedisError> {
-        let connect = connect_resolved(addr, CONNECTION_ATTEMPT_DELAY);
-        let stream = match config.connect_timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, connect).await {
+        let deadline = config
+            .connect_timeout
+            .map(|timeout| tokio::time::Instant::now() + timeout);
+        let connect = connect_resolved(addr, deadline);
+        let stream = match deadline {
+            Some(deadline) => match tokio::time::timeout_at(deadline, connect).await {
                 Ok(result) => result?,
                 Err(_elapsed) => return Err(RedisError::ConnectTimeout),
             },
@@ -2157,6 +2182,27 @@ mod tests {
     }
 
     #[test]
+    fn stagger_shrinks_to_fit_a_short_budget() {
+        assert_eq!(attempt_delay(None, 2), CONNECTION_ATTEMPT_DELAY);
+        assert_eq!(
+            attempt_delay(Some(Duration::from_secs(10)), 2),
+            CONNECTION_ATTEMPT_DELAY
+        );
+        assert_eq!(
+            attempt_delay(Some(Duration::from_millis(100)), 2),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            attempt_delay(Some(Duration::from_millis(100)), 4),
+            Duration::from_millis(25)
+        );
+        assert_eq!(
+            attempt_delay(Some(Duration::from_millis(100)), 1),
+            CONNECTION_ATTEMPT_DELAY
+        );
+    }
+
+    #[test]
     fn address_families_alternate_from_the_resolver_choice() {
         let v4 = |port| SocketAddr::from(([127, 0, 0, 1], port));
         let v6 = |port| SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
@@ -2262,6 +2308,20 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn dual_stack_hostname_falls_back_to_the_second_family() {
+        assert_dual_stack_fallback(Duration::from_secs(2)).await;
+    }
+
+    /// Review finding: the fallback must also fit a connect timeout shorter
+    /// than the 250 ms stagger, instead of the black-holed first address
+    /// spending the whole budget before the second one starts.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dual_stack_fallback_fits_a_timeout_shorter_than_the_stagger() {
+        assert_dual_stack_fallback(Duration::from_millis(150)).await;
+    }
+
+    #[cfg(unix)]
+    async fn assert_dual_stack_fallback(connect_timeout: Duration) {
         use std::net::ToSocketAddrs;
 
         let resolved: Vec<SocketAddr> = match ("localhost", 0).to_socket_addrs() {
@@ -2295,7 +2355,7 @@ mod tests {
         };
 
         let config = ConnectionConfig::new()
-            .with_connect_timeout(Some(Duration::from_secs(2)))
+            .with_connect_timeout(Some(connect_timeout))
             .with_protocol(ProtocolVersion::Resp2);
         let stream = RedisConnection::open_tcp(&format!("localhost:{}", working.port()), &config)
             .await
