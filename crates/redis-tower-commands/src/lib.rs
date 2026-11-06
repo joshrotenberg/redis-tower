@@ -106,6 +106,7 @@ pub mod keys;
 pub mod lists;
 pub mod pubsub;
 pub mod raw;
+mod reply;
 pub mod scan;
 pub mod scripting;
 pub mod server;

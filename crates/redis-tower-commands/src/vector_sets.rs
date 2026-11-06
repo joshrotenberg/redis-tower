@@ -18,6 +18,7 @@
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
 
 use crate::CommandArg;
+use crate::reply;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -384,24 +385,7 @@ impl Command for VEmb {
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
         match frame {
-            Frame::Array(Some(frames)) => frames
-                .into_iter()
-                .map(|f| match f {
-                    Frame::BulkString(Some(data)) => {
-                        let s = String::from_utf8_lossy(&data);
-                        s.parse::<f64>()
-                            .map_err(|_| RedisError::UnexpectedResponse {
-                                expected: "float string",
-                                actual: format!("{s}"),
-                            })
-                    }
-                    Frame::Double(d) => Ok(d),
-                    other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string or double",
-                        actual: format!("{other:?}"),
-                    }),
-                })
-                .collect(),
+            Frame::Array(Some(frames)) => frames.into_iter().map(|f| reply::double(&f)).collect(),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "array",
                 actual: format!("{other:?}"),
@@ -528,21 +512,8 @@ fn parse_vector_result_name(frame: Frame) -> Result<Bytes, RedisError> {
 
 fn parse_vector_result_score(frame: Frame) -> Result<f64, RedisError> {
     match frame {
-        Frame::BulkString(Some(data)) | Frame::SimpleString(data) => {
-            let score = String::from_utf8_lossy(&data);
-            score
-                .parse::<f64>()
-                .map_err(|_| RedisError::UnexpectedResponse {
-                    expected: "float string",
-                    actual: score.into_owned(),
-                })
-        }
-        Frame::Double(score) => Ok(score),
         Frame::Integer(score) => Ok(score as f64),
-        other => Err(RedisError::UnexpectedResponse {
-            expected: "string, double, or integer score",
-            actual: format!("{other:?}"),
-        }),
+        other => reply::double(&other),
     }
 }
 
@@ -1010,8 +981,19 @@ impl Command for VInfo {
 
 /// VLINKS key element \[WITHSCORES\]
 ///
-/// Returns the neighbor links of `element` in the vector set at `key`.
-/// With WITHSCORES, returns (element, score) pairs.
+/// Returns the neighbor links of `element` in the vector set at `key`, one
+/// list per HNSW layer the element belongs to. The outer list runs from the
+/// element's highest layer down to layer 0, so the last entry holds the
+/// densest neighbor list. Each neighbor carries its similarity score when
+/// WITHSCORES is set. Returns `None` when the key or element does not exist.
+///
+/// ```
+/// use redis_tower_commands::VLinks;
+/// use redis_tower_core::Command;
+///
+/// let command = VLinks::new("embeddings", "doc:1").withscores();
+/// assert_eq!(command.name(), "VLINKS");
+/// ```
 #[derive(Clone)]
 pub struct VLinks {
     key: CommandArg,
@@ -1037,7 +1019,7 @@ impl VLinks {
 }
 
 impl Command for VLinks {
-    type Response = Vec<(Bytes, Option<f64>)>;
+    type Response = Option<Vec<Vec<(Bytes, Option<f64>)>>>;
 
     fn to_frame(&self) -> Frame {
         let mut args = vec![bulk("VLINKS"), bulk(&self.key), bulk(&self.element)];
@@ -1048,7 +1030,21 @@ impl Command for VLinks {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        parse_vector_results(frame, self.withscores)
+        match frame {
+            // Missing key or element: `$-1` in RESP2, `_` in RESP3.
+            Frame::Null | Frame::BulkString(None) | Frame::Array(None) => Ok(None),
+            // One entry per layer. With WITHSCORES, RESP2 sends each layer as
+            // a flat `[name, score, ...]` array and RESP3 as a map.
+            Frame::Array(Some(layers)) => layers
+                .into_iter()
+                .map(|layer| parse_vector_results(layer, self.withscores))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some),
+            other => Err(RedisError::UnexpectedResponse {
+                expected: "array of per-layer neighbor lists, or null",
+                actual: format!("{other:?}"),
+            }),
+        }
     }
 
     fn name(&self) -> &str {
@@ -1137,15 +1133,16 @@ mod tests {
                 (Bytes::from_static(b"b"), Some(1.0)),
             ]
         );
+        // VLINKS wraps one such map per HNSW layer.
         assert_eq!(
             VLinks::new("vectors", "a")
                 .withscores()
-                .parse_response(resp3)
+                .parse_response(Frame::Array(Some(vec![resp3])))
                 .unwrap(),
-            vec![
+            Some(vec![vec![
                 (Bytes::from_static(b"a"), Some(1.0)),
                 (Bytes::from_static(b"b"), Some(1.0)),
-            ]
+            ]])
         );
     }
 

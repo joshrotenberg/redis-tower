@@ -331,15 +331,19 @@ impl<'a, C: RedisExecutor> VectorSetClient<'a, C> {
     }
 
     /// Return the neighbour links of an element, with similarity scores.
+    ///
+    /// The result holds one list per HNSW layer the element belongs to,
+    /// ordered from its highest layer down to layer 0; the last list is the
+    /// densest. Returns `None` when the set or the element does not exist.
     pub async fn links(
         &mut self,
         element: impl Into<CommandArg>,
-    ) -> Result<Vec<SimilarityResult>, RedisError> {
+    ) -> Result<Option<Vec<Vec<SimilarityResult>>>, RedisError> {
         let raw = self
             .conn
             .execute(VLinks::new(self.key.clone(), element).withscores())
             .await?;
-        Ok(to_results(raw))
+        Ok(raw.map(|layers| layers.into_iter().map(to_results).collect()))
     }
 
     /// Return one or more random elements from the set. A negative `count`
@@ -667,5 +671,37 @@ mod tests {
         let mut mock = MockRedis::new(vec![Frame::Integer(1)]);
         let mut vset = VectorSetClient::new(&mut mock, "k");
         assert!(vset.del_attr("a").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn links_returns_one_list_per_layer_in_both_protocols() {
+        // RESP2: each layer is a flat [name, score, ...] array.
+        let resp2 = Frame::Array(Some(vec![
+            Frame::Array(Some(vec![bulk("e2"), bulk("0.5")])),
+            Frame::Array(Some(vec![
+                bulk("e2"),
+                bulk("0.5"),
+                bulk("e3"),
+                bulk("0.25"),
+            ])),
+        ]));
+        // RESP3: each layer is a map of name to score.
+        let resp3 = Frame::Array(Some(vec![
+            Frame::Map(vec![(bulk("e2"), Frame::Double(0.5))]),
+            Frame::Map(vec![
+                (bulk("e2"), Frame::Double(0.5)),
+                (bulk("e3"), Frame::Double(0.25)),
+            ]),
+        ]));
+        let mut mock = MockRedis::new(vec![resp2, resp3, Frame::Null]);
+        let mut vset = VectorSetClient::new(&mut mock, "vs");
+        for _ in 0..2 {
+            let layers = vset.links("e1").await.unwrap().expect("element exists");
+            assert_eq!(layers.len(), 2);
+            assert_eq!(layers[0].len(), 1);
+            assert_eq!(layers[1][1].element, Bytes::from("e3"));
+            assert_eq!(layers[1][1].score, Some(0.25));
+        }
+        assert!(vset.links("missing").await.unwrap().is_none());
     }
 }

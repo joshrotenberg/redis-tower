@@ -22,6 +22,7 @@ use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::CommandArg;
+use crate::reply;
 
 /// ZADD key score member \[score member ...\]
 ///
@@ -337,24 +338,7 @@ impl Command for ZScore {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(&data);
-                let score = s
-                    .parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })?;
-                Ok(Some(score))
-            }
-            Frame::Double(d) => Ok(Some(d)),
-            Frame::BulkString(None) | Frame::Null => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string, double, or null",
-                actual: format!("{other:?}"),
-            }),
-        }
+        reply::optional_double(&frame)
     }
 
     fn name(&self) -> &str {
@@ -442,21 +426,7 @@ impl Command for ZIncrBy {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(&data);
-                s.parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })
-            }
-            Frame::Double(d) => Ok(d),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or double",
-                actual: format!("{other:?}"),
-            }),
-        }
+        reply::double(&frame)
     }
 
     fn name(&self) -> &str {
@@ -620,53 +590,9 @@ impl Command for ZPopMin {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) => {
-                if frames.len() % 2 != 0 {
-                    return Err(RedisError::UnexpectedResponse {
-                        expected: "even number of elements (member/score pairs)",
-                        actual: format!("array of length {}", frames.len()),
-                    });
-                }
-                frames
-                    .chunks(2)
-                    .map(|pair| {
-                        let member = match &pair[0] {
-                            Frame::BulkString(Some(data)) => data.clone(),
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        let score = match &pair[1] {
-                            Frame::BulkString(Some(data)) => {
-                                let s = String::from_utf8_lossy(data);
-                                s.parse::<f64>()
-                                    .map_err(|_| RedisError::UnexpectedResponse {
-                                        expected: "float string",
-                                        actual: format!("{s}"),
-                                    })?
-                            }
-                            Frame::Double(d) => *d,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string or double",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        Ok((member, score))
-                    })
-                    .collect()
-            }
-            Frame::Array(None) => Ok(Vec::new()),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            }),
-        }
+        // Without COUNT both protocols reply with a flat `[member, score]`;
+        // with COUNT, RESP3 nests each pair (`[[member, score], ...]`).
+        parse_member_score_pairs(frame)
     }
 
     fn name(&self) -> &str {
@@ -712,53 +638,9 @@ impl Command for ZPopMax {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) => {
-                if frames.len() % 2 != 0 {
-                    return Err(RedisError::UnexpectedResponse {
-                        expected: "even number of elements (member/score pairs)",
-                        actual: format!("array of length {}", frames.len()),
-                    });
-                }
-                frames
-                    .chunks(2)
-                    .map(|pair| {
-                        let member = match &pair[0] {
-                            Frame::BulkString(Some(data)) => data.clone(),
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        let score = match &pair[1] {
-                            Frame::BulkString(Some(data)) => {
-                                let s = String::from_utf8_lossy(data);
-                                s.parse::<f64>()
-                                    .map_err(|_| RedisError::UnexpectedResponse {
-                                        expected: "float string",
-                                        actual: format!("{s}"),
-                                    })?
-                            }
-                            Frame::Double(d) => *d,
-                            other => {
-                                return Err(RedisError::UnexpectedResponse {
-                                    expected: "bulk string or double",
-                                    actual: format!("{other:?}"),
-                                });
-                            }
-                        };
-                        Ok((member, score))
-                    })
-                    .collect()
-            }
-            Frame::Array(None) => Ok(Vec::new()),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "array",
-                actual: format!("{other:?}"),
-            }),
-        }
+        // Without COUNT both protocols reply with a flat `[member, score]`;
+        // with COUNT, RESP3 nests each pair (`[[member, score], ...]`).
+        parse_member_score_pairs(frame)
     }
 
     fn name(&self) -> &str {
@@ -999,24 +881,7 @@ impl Command for ZMScore {
         match frame {
             Frame::Array(Some(frames)) => frames
                 .into_iter()
-                .map(|f| match f {
-                    Frame::BulkString(Some(data)) => {
-                        let s = String::from_utf8_lossy(&data);
-                        let score =
-                            s.parse::<f64>()
-                                .map_err(|_| RedisError::UnexpectedResponse {
-                                    expected: "float string",
-                                    actual: format!("{s}"),
-                                })?;
-                        Ok(Some(score))
-                    }
-                    Frame::Double(d) => Ok(Some(d)),
-                    Frame::BulkString(None) | Frame::Null => Ok(None),
-                    other => Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string, double, or null",
-                        actual: format!("{other:?}"),
-                    }),
-                })
+                .map(|f| reply::optional_double(&f))
                 .collect(),
             other => Err(RedisError::UnexpectedResponse {
                 expected: "array",
@@ -1504,72 +1369,7 @@ impl Command for ZMPop {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) if frames.len() == 2 => {
-                let key = match &frames[0] {
-                    Frame::BulkString(Some(data)) => data.clone(),
-                    other => {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "bulk string (key name)",
-                            actual: format!("{other:?}"),
-                        });
-                    }
-                };
-                let members = match &frames[1] {
-                    Frame::Array(Some(pairs)) => pairs
-                        .iter()
-                        .map(|pair| match pair {
-                            Frame::Array(Some(inner)) if inner.len() == 2 => {
-                                let member = match &inner[0] {
-                                    Frame::BulkString(Some(data)) => data.clone(),
-                                    other => {
-                                        return Err(RedisError::UnexpectedResponse {
-                                            expected: "bulk string (member)",
-                                            actual: format!("{other:?}"),
-                                        });
-                                    }
-                                };
-                                let score = match &inner[1] {
-                                    Frame::BulkString(Some(data)) => {
-                                        let s = String::from_utf8_lossy(data);
-                                        s.parse::<f64>().map_err(|_| {
-                                            RedisError::UnexpectedResponse {
-                                                expected: "float string",
-                                                actual: format!("{s}"),
-                                            }
-                                        })?
-                                    }
-                                    Frame::Double(d) => *d,
-                                    other => {
-                                        return Err(RedisError::UnexpectedResponse {
-                                            expected: "bulk string or double (score)",
-                                            actual: format!("{other:?}"),
-                                        });
-                                    }
-                                };
-                                Ok((member, score))
-                            }
-                            other => Err(RedisError::UnexpectedResponse {
-                                expected: "array of [member, score]",
-                                actual: format!("{other:?}"),
-                            }),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    other => {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "array of member/score pairs",
-                            actual: format!("{other:?}"),
-                        });
-                    }
-                };
-                Ok(Some((key, members)))
-            }
-            Frame::Array(None) | Frame::Null | Frame::BulkString(None) => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "two-element array or null",
-                actual: format!("{other:?}"),
-            }),
-        }
+        parse_key_member_scores_or_null(frame)
     }
 
     fn name(&self) -> &str {
@@ -1813,23 +1613,6 @@ fn parse_member_array(frame: Frame) -> Result<Vec<Bytes>, RedisError> {
 /// Parse a WITHSCORES response (flat `[member, score, ...]` array in RESP2 or
 /// an array of `[member, score]` pairs in RESP3) into `Vec<(Bytes, f64)>`.
 fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisError> {
-    fn parse_score(frame: &Frame) -> Result<f64, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(data);
-                s.parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })
-            }
-            Frame::Double(d) => Ok(*d),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string or double",
-                actual: format!("{other:?}"),
-            }),
-        }
-    }
     fn parse_member(frame: &Frame) -> Result<Bytes, RedisError> {
         match frame {
             Frame::BulkString(Some(data)) => Ok(data.clone()),
@@ -1851,7 +1634,7 @@ fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisErro
                     .iter()
                     .map(|pair| match pair {
                         Frame::Array(Some(inner)) => {
-                            Ok((parse_member(&inner[0])?, parse_score(&inner[1])?))
+                            Ok((parse_member(&inner[0])?, reply::double(&inner[1])?))
                         }
                         other => Err(RedisError::UnexpectedResponse {
                             expected: "array of [member, score]",
@@ -1869,11 +1652,40 @@ fn parse_member_score_pairs(frame: Frame) -> Result<Vec<(Bytes, f64)>, RedisErro
             }
             frames
                 .chunks(2)
-                .map(|pair| Ok((parse_member(&pair[0])?, parse_score(&pair[1])?)))
+                .map(|pair| Ok((parse_member(&pair[0])?, reply::double(&pair[1])?)))
                 .collect()
         }
         other => Err(RedisError::UnexpectedResponse {
             expected: "array",
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// A popped key and its `(member, score)` pairs.
+type KeyMemberScores = (Bytes, Vec<(Bytes, f64)>);
+
+/// Parse a ZMPOP/BZMPOP reply: `[key, [[member, score], ...]]`, or null when
+/// nothing was popped.
+fn parse_key_member_scores_or_null(frame: Frame) -> Result<Option<KeyMemberScores>, RedisError> {
+    match frame {
+        Frame::Array(Some(frames)) if frames.len() == 2 => {
+            let mut frames = frames.into_iter();
+            let key = match frames.next() {
+                Some(Frame::BulkString(Some(data))) => data,
+                other => {
+                    return Err(RedisError::UnexpectedResponse {
+                        expected: "bulk string (key name)",
+                        actual: format!("{other:?}"),
+                    });
+                }
+            };
+            let members = parse_member_score_pairs(frames.next().unwrap_or(Frame::Null))?;
+            Ok(Some((key, members)))
+        }
+        Frame::Array(None) | Frame::Null | Frame::BulkString(None) => Ok(None),
+        other => Err(RedisError::UnexpectedResponse {
+            expected: "two-element array or null",
             actual: format!("{other:?}"),
         }),
     }
@@ -1916,24 +1728,7 @@ impl Command for ZAddIncr {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::BulkString(Some(data)) => {
-                let s = String::from_utf8_lossy(&data);
-                let score = s
-                    .parse::<f64>()
-                    .map_err(|_| RedisError::UnexpectedResponse {
-                        expected: "float string",
-                        actual: format!("{s}"),
-                    })?;
-                Ok(Some(score))
-            }
-            Frame::Double(d) => Ok(Some(d)),
-            Frame::BulkString(None) | Frame::Null => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "bulk string, double, or null",
-                actual: format!("{other:?}"),
-            }),
-        }
+        reply::optional_double(&frame)
     }
 
     fn name(&self) -> &str {
@@ -2358,72 +2153,7 @@ impl Command for BZMPop {
     }
 
     fn parse_response(&self, frame: Frame) -> Result<Self::Response, RedisError> {
-        match frame {
-            Frame::Array(Some(frames)) if frames.len() == 2 => {
-                let key = match &frames[0] {
-                    Frame::BulkString(Some(data)) => data.clone(),
-                    other => {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "bulk string (key name)",
-                            actual: format!("{other:?}"),
-                        });
-                    }
-                };
-                let members = match &frames[1] {
-                    Frame::Array(Some(pairs)) => pairs
-                        .iter()
-                        .map(|pair| match pair {
-                            Frame::Array(Some(inner)) if inner.len() == 2 => {
-                                let member = match &inner[0] {
-                                    Frame::BulkString(Some(data)) => data.clone(),
-                                    other => {
-                                        return Err(RedisError::UnexpectedResponse {
-                                            expected: "bulk string (member)",
-                                            actual: format!("{other:?}"),
-                                        });
-                                    }
-                                };
-                                let score = match &inner[1] {
-                                    Frame::BulkString(Some(data)) => {
-                                        let s = String::from_utf8_lossy(data);
-                                        s.parse::<f64>().map_err(|_| {
-                                            RedisError::UnexpectedResponse {
-                                                expected: "float string",
-                                                actual: format!("{s}"),
-                                            }
-                                        })?
-                                    }
-                                    Frame::Double(d) => *d,
-                                    other => {
-                                        return Err(RedisError::UnexpectedResponse {
-                                            expected: "bulk string or double (score)",
-                                            actual: format!("{other:?}"),
-                                        });
-                                    }
-                                };
-                                Ok((member, score))
-                            }
-                            other => Err(RedisError::UnexpectedResponse {
-                                expected: "array of [member, score]",
-                                actual: format!("{other:?}"),
-                            }),
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                    other => {
-                        return Err(RedisError::UnexpectedResponse {
-                            expected: "array of member/score pairs",
-                            actual: format!("{other:?}"),
-                        });
-                    }
-                };
-                Ok(Some((key, members)))
-            }
-            Frame::Array(None) | Frame::Null | Frame::BulkString(None) => Ok(None),
-            other => Err(RedisError::UnexpectedResponse {
-                expected: "two-element array or null",
-                actual: format!("{other:?}"),
-            }),
-        }
+        parse_key_member_scores_or_null(frame)
     }
 
     fn name(&self) -> &str {

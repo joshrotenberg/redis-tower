@@ -11098,13 +11098,18 @@
       "availability": {
         "disposition": "typed_builder",
         "api": [
-          "redis_tower_commands::JsonArrPop"
+          "redis_tower_commands::JsonArrPop",
+          "redis_tower_commands::JsonArrPopAll"
         ],
         "rationale": "A dedicated typed Command implementation is present.",
         "source_refs": [
           {
             "path": "crates/redis-tower-commands/src/json.rs",
             "symbol": "JsonArrPop"
+          },
+          {
+            "path": "crates/redis-tower-commands/src/json.rs",
+            "symbol": "JsonArrPopAll"
           }
         ]
       },
@@ -11780,13 +11785,18 @@
       "availability": {
         "disposition": "typed_builder",
         "api": [
-          "redis_tower_commands::JsonSet"
+          "redis_tower_commands::JsonSet",
+          "redis_tower_commands::JsonSetWithOutcome"
         ],
         "rationale": "A dedicated typed Command implementation is present.",
         "source_refs": [
           {
             "path": "crates/redis-tower-commands/src/json.rs",
             "symbol": "JsonSet"
+          },
+          {
+            "path": "crates/redis-tower-commands/src/json.rs",
+            "symbol": "JsonSetWithOutcome"
           }
         ]
       },
@@ -12721,13 +12731,18 @@
       "availability": {
         "disposition": "typed_builder",
         "api": [
-          "redis_tower_commands::LPos"
+          "redis_tower_commands::LPos",
+          "redis_tower_commands::LPosCount"
         ],
         "rationale": "A dedicated typed Command implementation is present.",
         "source_refs": [
           {
             "path": "crates/redis-tower-commands/src/lists.rs",
             "symbol": "LPos"
+          },
+          {
+            "path": "crates/redis-tower-commands/src/lists.rs",
+            "symbol": "LPosCount"
           }
         ]
       },

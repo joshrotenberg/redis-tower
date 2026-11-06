@@ -17,6 +17,7 @@
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#feature-gated-and-versioned-families
 
 use crate::CommandArg;
+use crate::reply;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
 
@@ -25,24 +26,8 @@ use redis_tower_protocol::helpers::{array, bulk};
 // ---------------------------------------------------------------------------
 
 fn parse_f64_from_frame(f: Frame) -> Result<f64, RedisError> {
-    match f {
-        Frame::Double(v) => Ok(v),
-        Frame::BulkString(Some(data)) => {
-            let s = std::str::from_utf8(&data).map_err(|_| RedisError::UnexpectedResponse {
-                expected: "valid UTF-8 bulk string",
-                actual: format!("{data:?}"),
-            })?;
-            s.parse::<f64>()
-                .map_err(|_| RedisError::UnexpectedResponse {
-                    expected: "float string",
-                    actual: s.to_string(),
-                })
-        }
-        other => Err(RedisError::UnexpectedResponse {
-            expected: "double or bulk string",
-            actual: format!("{other:?}"),
-        }),
-    }
+    // Empty digests reply `nan`, which RESP3 sends as a special float.
+    reply::double(&f)
 }
 
 fn parse_f64_array(frame: Frame) -> Result<Vec<f64>, RedisError> {

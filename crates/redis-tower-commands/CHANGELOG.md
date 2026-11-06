@@ -7,9 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `LPos::with_count`, returning an `LPosCount` command whose response is
+  `Vec<i64>`, for `LPOS ... COUNT`. `LPos::count` remains, but its
+  `Option<i64>` response cannot hold the list Redis returns, so its docs and
+  parse error now point to `LPos::with_count`
+- `JsonSet::with_outcome`, returning a `JsonSetWithOutcome` command whose
+  `SetStatus` response tells an applied write from one Redis left undone (an
+  unmet `NX`/`XX` condition, or a path whose parent does not exist) in both
+  protocols
+- `JsonArrPop::all_matches`, returning a `JsonArrPopAll` command whose
+  response holds the popped value for every array a JSONPath matched
+- `StreamEntry::is_deleted` for pending entries whose payload was removed with
+  `XDEL` after delivery
+
+### Changed
+
+- **Pre-1.0 source compatibility:** `VLinks`'s response is now
+  `Option<Vec<Vec<(Bytes, Option<f64>)>>>`: one neighbor list per HNSW layer,
+  ordered from the element's highest layer down to layer 0, and `None` for a
+  missing key or element. The previous flat `Vec<(Bytes, Option<f64>)>` could
+  not represent the per-layer reply and failed to parse on both protocols.
+
 ### Fixed
 
 - redact the `AUTH`/`AUTH2` password in `Migrate`'s `Debug` output
+- accept RESP3 `inf`, `-inf`, and `nan` doubles, which the codec decodes to
+  `Frame::SpecialFloat`, in every typed double reply: `ZSCORE`, `ZMSCORE`,
+  `ZINCRBY`, `ZADD ... INCR`, every `*WithScores` read, `ZPOPMIN`/`ZPOPMAX`,
+  `BZPOPMIN`/`BZPOPMAX`, `ZMPOP`/`BZMPOP`, `GEODIST`, `GEOPOS`, the T-Digest
+  quantile/min/max/CDF family, `VEMB`, and `VSIM`. Several of these commands
+  pop or change data before replying, so the parse error lost the result
+- parse `ZPOPMIN`/`ZPOPMAX` with `count`, which RESP3 sends as nested
+  `[[member, score], ...]` pairs
+- accept RESP3 null and set replies from `SPOP` and `SRANDMEMBER`
+- accept the RESP2 nil bulk reply from `LPOS` when nothing matches
+- return `Ok(())` when `JSON.SET` replies null under RESP2 (`$-1`: an unmet
+  `NX`/`XX` condition or a missing parent path), as RESP3 already did
+- parse RESP3 `JSON.NUMINCRBY` replies, rendering the typed values into the
+  JSON text RESP2 returns: numbers formatted as RedisJSON formats them
+  (`0.00001`, `1e20`, `3.0`), and the last numeric match for a legacy path;
+  the increment was applied before the error
+- unwrap the single match of a `$` JSONPath `JSON.ARRPOP` reply, and point at
+  `JsonArrPop::all_matches` when a path matched several arrays
+- parse `XREADGROUP` pending history that contains entries deleted after
+  delivery (`[id, nil]`), which failed the whole read and left the entries
+  impossible to acknowledge
 
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.2...redis-tower-commands-v0.1.3) - 2026-10-01
 
