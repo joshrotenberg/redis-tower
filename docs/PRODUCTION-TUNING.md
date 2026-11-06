@@ -26,15 +26,24 @@ Client choice has a larger effect than most numeric knobs:
 | Repeated master-routed Cluster reads with bounded staleness | `CachedMultiplexedClusterClient` | One slot-aware shared cache with complete per-master RESP3 invalidation coverage |
 | Sentinel-managed primary with failover | `MultiplexedSentinelClient::connect_with_reconnect` | Re-discovers and verifies the primary after failure or READONLY |
 
-Never send `BLPOP`, `BRPOP`, blocking `XREAD` / `XREADGROUP`, or another
-blocking command through a shared `MultiplexedClient`. One blocked Redis
-connection stalls its pipeline worker and every clone. Isolate blocking traffic
-on dedicated or pooled connections, and ensure the pool has enough independent
-slots for the maximum intended number of simultaneous blockers.
+Blocking commands cannot share a multiplexed connection: one blocked Redis
+connection would stall its pipeline worker and every clone. Standalone, Cluster,
+and Sentinel multiplexed clients therefore reject `BLPOP`, `BRPOP`, `BLMOVE`,
+the other blocking pops, `XREAD` / `XREADGROUP` with `BLOCK`, `WAIT` /
+`WAITAOF` (a zero timeout with too few replicas never returns), and any typed
+command whose `is_blocking()` is true, before anything is sent. Isolate blocking
+traffic on dedicated or pooled connections, and ensure the pool has enough
+independent slots for the maximum intended number of simultaneous blockers.
 
 Likewise, keep `PubSubConnection` and `MonitorStream` dedicated. Redis changes
 the connection's mode for pub/sub and MONITOR, and MONITOR itself has a large
-server-side throughput cost.
+server-side throughput cost. Multiplexed clients reject the commands that would
+otherwise corrupt the shared session for every clone: subscriptions, `MONITOR`,
+`SYNC`/`PSYNC`, `RESET`, `HELLO`, `QUIT`, `CLIENT REPLY`, and stand-alone
+`MULTI`/`EXEC`/`DISCARD`/`WATCH` (use `Transaction`, whose batch stays
+contiguous). `AUTH` remains allowed so credential rotation can re-authenticate
+the shared worker. `SELECT` and `CLIENT SETNAME` are allowed but apply to every
+clone and are reverted by a reconnect; put them in the connection factory.
 
 ## Plan for Smart Client Handoff maintenance
 
@@ -584,6 +593,20 @@ them.
 
 ## Decide whether to queue while offline
 
+A factory-backed `MultiplexedClient` (including `connect_lazy` and the
+per-node workers of the Cluster and Sentinel multiplexed clients) holds
+commands that were queued when the connection dropped for one reconnect
+attempt, so an immediate reconnect is transparent. Once an attempt fails, the
+outage is treated as real: queued commands and every command issued while the
+worker keeps retrying fail with `ConnectionClosed` instead of waiting behind a
+reconnect budget that, by default, never runs out. Reconnecting continues in
+the background. Because no connect or response timeout is set by default,
+configure `ReconnectConfig::connect_timeout` (otherwise a black-holed endpoint
+holds that first attempt for the OS TCP timeout) and
+`AutoPipelineConfig::response_timeout` (otherwise a server that stops answering
+is never detected). Use `MultiplexedClient::retry` for idempotent commands that
+should ride out a short outage; for Sentinel this includes the failover window.
+
 `ResilientRedisClient` fails later work while reconnecting by default. For a
 workload that benefits from waiting through a short outage, enable its bounded
 offline queue explicitly:
@@ -726,6 +749,17 @@ production failover. Configure Sentinel-hop and Redis-node credentials/TLS
 separately when the deployment does; the client re-queries Sentinel, verifies
 `ROLE`, and reconnects after a transport failure or a `READONLY` response from
 a demoted primary.
+
+Every Sentinel connect path, including the initial one, checks `ROLE` on the
+node a Sentinel names. When that node reports `slave` or `sentinel`, the client
+asks the next Sentinel in the list during the same attempt instead of trusting
+the first answer, so one stale Sentinel cannot pin the client to a replica.
+Connecting to a named node and checking its role are bounded together (two
+seconds per node, alongside the one-second budget per Sentinel query), so a
+hung former primary is skipped the same way. A
+node that refuses `ROLE` itself (for example an ACL user without the `role`
+command) is accepted on the Sentinel's word, as before verification existed;
+grant `+role` to such users if they should benefit from the check.
 
 Test the complete failure path under load:
 
@@ -875,8 +909,26 @@ in flight. For clone-heavy or trait-erased hosts, call the retained
 `AutoPipelineShutdownHandle::shutdown().await` instead. It atomically stops new
 admission across all clones, drains already accepted work while the connection
 is usable, cancels reconnect/backoff work, and joins the worker. Surviving
-client clones then return `ConnectionClosed` and can be dropped without the
-unfinished-worker warning.
+client clones then return `ConnectionClosed` and can be dropped quietly. The
+unfinished-worker warning fires only when the last handle goes away while
+requests are still queued or in flight, never for an idle client.
+
+`MultiplexedClusterClient::shutdown_handle()` is the cluster equivalent: its
+`ClusterShutdownHandle` stops admission on every clone, keeps background and
+explicit topology refreshes from installing new node services, and drains and
+joins every per-node worker, including ones a refresh replaced and is still
+draining.
+
+Draining waits for replies to requests that were already written. A batch whose
+callers all gave up is abandoned during shutdown, because nobody can receive
+its replies. A reply that a caller is still waiting for is bounded only by
+`AutoPipelineConfig::response_timeout`; without one, a node that stops
+answering can hold `shutdown()` open indefinitely. Hosts that must finish
+teardown on a deadline should call `shutdown_timeout(grace)` on either handle.
+It drains for up to `grace`, then aborts: everything still queued or awaiting a
+reply fails with `ConnectionClosed`, and commands already written have unknown
+outcomes. It returns `ShutdownOutcome::Drained` or `ShutdownOutcome::Aborted`.
+`abort()` skips the drain entirely.
 
 ## A repeatable tuning loop
 

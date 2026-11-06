@@ -2306,8 +2306,8 @@
         "status": "partial",
         "keys": "multi",
         "routing": "same slot in Cluster",
-        "session": "exclusive connection recommended; a multiplexed response deadline can fail a slow command and retire its worker",
-        "notes": "Standalone value and Redis-timeout replies are verified. Cluster routing and non-stalling concurrent isolation are not command-specifically verified here."
+        "session": "exclusive connection required; multiplexed clients reject it before dispatch",
+        "notes": "Standalone value and Redis-timeout replies are verified, and the multiplexed rejection leaves concurrent callers unaffected. Cluster routing is not command-specifically verified here."
       },
       "evidence": [
         "command.blocking-dedicated"
@@ -23192,7 +23192,7 @@
     {
       "id": "command.blocking-dedicated",
       "anchor": "behavior-command-blocking-dedicated",
-      "description": "Typed BLPOP returns a key/value pair when data is available and None after a Redis timeout on an exclusive connection. A separate multiplexed raw BLPOP test proves the configured response deadline returns CommandTimeout; the differential BLMOVE case is immediate because its source list is preloaded.",
+      "description": "Typed BLPOP returns a key/value pair when data is available and None after a Redis timeout on an exclusive connection. Typed and raw BLPOP on a shared multiplexed client are rejected before reaching the wire while batched neighbors keep their own replies; the differential BLMOVE case is immediate because its source list is preloaded.",
       "dimensions": [
         "typed-semantics",
         "session-ownership"
@@ -23218,8 +23218,8 @@
           "symbol": "blpop_timeout"
         },
         {
-          "path": "crates/redis-tower/tests/integration.rs",
-          "symbol": "multiplexed_response_timeout_trips_on_slow_command"
+          "path": "crates/redis-tower/tests/test_shared_connection.rs",
+          "symbol": "blocking_commands_are_rejected_before_they_stall_the_worker"
         },
         {
           "path": "crates/redis-tower/tests/differential_redis_rs.rs",

@@ -30,6 +30,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of the password into the host shown in connection errors and spans
 - stop echoing raw port, path-database, and IPv6 text in `InvalidUrl` errors,
   and redact the password in `RedisUrl`'s `Debug` output
+- race the addresses a hostname resolves to (Happy Eyeballs style: families
+  alternate, each attempt gets 250 ms before the next joins it, a refusal starts
+  the next at once) under one `connect_timeout`, so a black-holed first address
+  such as an unrouted IPv6 path no longer consumes the whole budget before a
+  working address is tried (redis-rs #2161). A timeout shorter than the stagger
+  splits the remaining budget evenly, so every address still starts in time
 
 ### Documentation
 
