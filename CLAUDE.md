@@ -93,7 +93,32 @@ fallbacks.
 ### Cluster pub/sub (`redis-tower-cluster/pubsub.rs`)
 
 `ClusterPubSubConnection` and `ShardedClusterPubSubConnection` (SSUBSCRIBE /
-SPUBLISH). Both reconnect on connection loss and resubscribe.
+SPUBLISH). Both reconnect on connection loss and resubscribe, refreshing the
+topology between attempts under `pubsub_reconnect_config` (default: node
+backoff, no retry limit). A sharded session also follows the server's own
+`sunsubscribe` -- Redis drops a shard subscription when its slot migrates or
+its node is demoted, with the socket still open -- surfaced by
+`NamedPubSubConnection::next_event` in `redis-tower`. Recovery work is stored
+on the session before it is awaited, so `next_message` is cancel-safe. A
+regular session stays pinned to its node and errors once the node leaves the
+topology.
+
+### Cluster resilience (both clients)
+
+- `READONLY` from a master (demoted with sockets intact) is stale topology:
+  wait for a refresh that started after the reply (`RefreshGate` is awaitable
+  and can bypass its 1 s rate limit), then re-route; safe because Redis
+  rejected the command unexecuted.
+- `connect()` is best-effort per node; owners without a worker are connected
+  lazily when routed to. `ClusterConnection` tracks the role each socket was
+  opened for (`NodeSocket`) and backs off replicas whose reconnect failed.
+- Node-scoped keyless commands fan out with aggregation (`node_scope.rs`):
+  `DBSIZE` summed, `FLUSHALL`/`FLUSHDB`/`SAVE`/`BGSAVE`/`FUNCTION
+  LOAD|FLUSH|DELETE|RESTORE` on every master, `SCRIPT LOAD|FLUSH|EXISTS` and
+  `CONFIG SET|RESETSTAT|REWRITE` also on connected replicas.
+- An exhausted redirect budget returns the server's last reply (`MOVED ...`),
+  not a synthetic error. Empty/NULL `CLUSTER SLOTS` endpoints and
+  `MOVED <slot> :port` resolve to the node that answered.
 
 ## Middleware Layers (Tower)
 
@@ -196,6 +221,13 @@ cargo test -p redis-tower-cluster --test cluster_integration -- --ignored
 ```
 
 Must run **single-threaded** (`-- --ignored`, no `--test-threads`). Tests are `#[ignore]` -- they won't run in the normal `cargo test` pass.
+
+Failure-mode regressions that need no real cluster run in the normal pass
+against scripted fake nodes (`tests/fake_cluster/`, shared `CLUSTER SLOTS`
+state plus per-command reply overrides and unsolicited pushes):
+`failover_recovery.rs`, `pubsub_recovery.rs`, `topology_recovery.rs`. Their
+live counterparts are the `failover_recovery` module of `cluster_integration.rs`
+(ports 18100-18221, registered in `port_ranges.rs`).
 
 ### Sentinel tests (`crates/redis-tower-sentinel/tests/`)
 

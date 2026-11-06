@@ -11,8 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - declarative connection-local setup retained by built-in address, URL, and
   credential factories across standalone reconnects
+- `NamedPubSubConnection::next_event` / `poll_next_event` and the
+  `NamedPubSubEvent` (`BinaryPubSubEvent`) type, which report a shard channel
+  the server unsubscribed on its own alongside ordinary messages
 
 ### Fixed
+
+- stop treating a server-initiated `sunsubscribe` (Redis sends one when a
+  shard channel's slot migrates away or its node is demoted) as an ordinary
+  confirmation: the channel is removed from `subscriptions()` so reconnects no
+  longer replay a subscription the caller cannot see is gone, and a later
+  no-argument `SUNSUBSCRIBE` no longer waits forever for an acknowledgement the
+  server never sends. A no-argument unsubscribe also completes on the server's
+  null-name acknowledgement if tracking still claims channels, and a reconnect
+  discards such notices still buffered from the old socket so they cannot
+  untrack a subscription the replacement just replayed
+- keep messages read off the wire while a subscribe or unsubscribe waits for
+  its acknowledgement when that wait is cancelled (for example by a caller's
+  timeout); they were held in a future-local queue and lost with it, even
+  though the connection kept the socket
 
 - defer managed stream-consumer automatic `XACK` until the caller advances
   past the delivered item, leaving it pending and recoverable if the stream is

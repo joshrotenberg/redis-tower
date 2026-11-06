@@ -53,6 +53,21 @@
 //! [`MultiplexedClusterClientBuilder::include_node_in_metrics`] and bounded to
 //! 64 concrete addresses plus `_OTHER`.
 //!
+//! # Node-scoped commands
+//!
+//! Keyless commands run on one default master, except those whose effect or
+//! answer covers only the node that runs them. `DBSIZE` (summed), `FLUSHALL`,
+//! `FLUSHDB`, `SAVE`, `BGSAVE`, and `FUNCTION LOAD`/`FLUSH`/`DELETE`/`RESTORE`
+//! run on every master; `SCRIPT LOAD`/`FLUSH`/`EXISTS` and
+//! `CONFIG SET`/`RESETSTAT`/`REWRITE` also run on the connected replicas.
+//! Their replies are combined (one reply once every node succeeded, a sum, or
+//! an element-wise AND for `SCRIPT EXISTS`). A fan-out is not atomic: the
+//! first error is returned after every node was attempted, and other nodes
+//! may have applied the command. Node-local diagnostics (`INFO`,
+//! `CONFIG GET`, `CLIENT LIST`, ...) still run on the default node; use
+//! [`MultiplexedClusterClient::connect_to_node`] to address one node. Explicit
+//! pipelines do not fan out.
+//!
 //! # Transactions
 //!
 //! This client does **not** support MULTI/EXEC. Keyless transaction commands
@@ -71,7 +86,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock, Weak};
 use std::time::{Duration, Instant};
 
-use futures::stream::{StreamExt, TryStreamExt};
+use futures::stream::StreamExt;
 use redis_tower::AutoPipelineService;
 use redis_tower::PipelineExecutor;
 use redis_tower::RedisExecutor;
@@ -103,13 +118,15 @@ use crate::connection::ReplicaRoutingOutcome;
 use crate::connection::{
     ClusterNodeConnector, MAX_REDIRECTS, ReadPreference, ReadRoutingStrategy, Redirect,
     ReplicaRoutingAttempt, RoundRobinRouting, TRANSIENT_RETRY_BACKOFF, TransientError,
-    parse_cluster_url, parse_redirect, remap_topology, remap_topology_with_map,
-    replica_outcome_for_result, replica_unavailable, strict_replica_read_slot,
+    is_readonly_reply, parse_cluster_url, parse_redirect, parse_setup_ok, redis_error_from_reply,
+    reject_nonzero_select, remap_topology, remap_topology_with_map, replica_outcome_for_result,
+    replica_unavailable, resolve_redirect_addr, strict_replica_read_slot,
 };
 use crate::key_extractor;
+use crate::node_scope::{self, FanOut, NodeTargets};
 use crate::slot::slot_for_key;
 use crate::topology::changes::{TopologyChange, TopologyChangeTracker, TopologySnapshot};
-use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at};
 
 /// A high-concurrency, multiplexed Redis Cluster client.
 ///
@@ -195,16 +212,22 @@ impl NodeMetricLabel<'_> {
 
 /// Coordinates background topology refreshes: single-flight (only one at a
 /// time) and rate-limited (at most one per `min_interval`).
-struct RefreshGate {
+pub(crate) struct RefreshGate {
     in_flight: AtomicBool,
     last_start: Mutex<Option<Instant>>,
+    /// Start time of the newest refresh that has finished, successfully or
+    /// not. A caller holding stale-topology evidence from time `t` waits for a
+    /// refresh that started at or after `t`; see
+    /// [`MultiplexedClusterClient::await_refresh_since`].
+    last_finished_start: Mutex<Option<Instant>>,
     min_interval: Duration,
     idle: Notify,
 }
 
 /// Releases a claimed refresh gate even if its task is cancelled or unwinds.
-struct RefreshPermit {
+pub(crate) struct RefreshPermit {
     gate: Arc<RefreshGate>,
+    started: Instant,
 }
 
 /// Owns a background refresh's internal client clone and gate permit in the
@@ -238,7 +261,7 @@ impl Drop for RefreshTaskGuard {
 
 impl Drop for RefreshPermit {
     fn drop(&mut self) {
-        self.gate.finish();
+        self.gate.finish(self.started);
     }
 }
 
@@ -247,6 +270,7 @@ impl RefreshGate {
         Self {
             in_flight: AtomicBool::new(false),
             last_start: Mutex::new(None),
+            last_finished_start: Mutex::new(None),
             min_interval,
             idle: Notify::new(),
         }
@@ -258,25 +282,56 @@ impl RefreshGate {
     /// task cancellation and panic unwinding. `None` means a refresh is already
     /// in flight or one ran too recently.
     fn try_begin(self: &Arc<Self>) -> Option<RefreshPermit> {
+        self.begin(true)
+    }
+
+    /// Like [`try_begin`](Self::try_begin), but ignores the rate limit. Still
+    /// single-flight: `None` means a refresh is already running.
+    fn try_begin_unthrottled(self: &Arc<Self>) -> Option<RefreshPermit> {
+        self.begin(false)
+    }
+
+    fn begin(self: &Arc<Self>, throttled: bool) -> Option<RefreshPermit> {
         // Single-flight: bail if another refresh is already running.
         if self.in_flight.swap(true, Ordering::AcqRel) {
             return None;
         }
         // Rate-limit: bail if we refreshed within the last `min_interval`.
         let mut last = self.last_start.lock().unwrap();
-        if let Some(t) = *last
+        if throttled
+            && let Some(t) = *last
             && t.elapsed() < self.min_interval
         {
-            self.finish();
+            self.release();
             return None;
         }
-        *last = Some(Instant::now());
+        let started = Instant::now();
+        *last = Some(started);
         Some(RefreshPermit {
             gate: Arc::clone(self),
+            started,
         })
     }
 
-    fn finish(&self) {
+    /// Whether a refresh that started at or after `observed` has finished.
+    fn finished_since(&self, observed: Instant) -> bool {
+        self.last_finished_start
+            .lock()
+            .unwrap()
+            .is_some_and(|started| started >= observed)
+    }
+
+    fn finish(&self, started: Instant) {
+        {
+            let mut finished = self.last_finished_start.lock().unwrap();
+            if finished.is_none_or(|previous| previous < started) {
+                *finished = Some(started);
+            }
+        }
+        self.release();
+    }
+
+    fn release(&self) {
         self.in_flight.store(false, Ordering::Release);
         self.idle.notify_waiters();
     }
@@ -292,6 +347,45 @@ impl RefreshGate {
             notified.await;
         }
     }
+}
+
+/// Wait until a refresh that started at or after `observed` has finished,
+/// starting one through `client` whenever none is running.
+///
+/// `client` is called once per round and its clone is dropped before waiting,
+/// so a dedicated Pub/Sub session (which holds only weak client state) never
+/// keeps a client alive across the wait; the spawned refresh owns its own
+/// guarded clone. Returns `false` when `client` reports the client is gone.
+async fn await_refresh_since(
+    gate: &Arc<RefreshGate>,
+    observed: Instant,
+    client: impl Fn() -> Option<MultiplexedClusterClient>,
+) -> bool {
+    loop {
+        if gate.finished_since(observed) {
+            return true;
+        }
+        {
+            let Some(client) = client() else {
+                return false;
+            };
+            if let Some(permit) = gate.try_begin_unthrottled() {
+                client.spawn_refresh(permit);
+            }
+        }
+        gate.wait_until_idle().await;
+    }
+}
+
+/// Upper bound on one node's `AUTH` reply during
+/// [`MultiplexedClusterClient::reauthenticate_all`].
+const REAUTHENTICATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Whether two handles drive the same auto-pipeline worker. Each worker owns
+/// one connection-health channel, so channel identity is worker identity.
+fn same_worker(a: &AutoPipelineService, b: &AutoPipelineService) -> bool {
+    a.subscribe_connection_health()
+        .same_channel(&b.subscribe_connection_health())
 }
 
 /// Minimum interval between background self-healing refreshes.
@@ -344,6 +438,9 @@ struct Inner {
     max_redirects: usize,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
+    /// Retry policy for dedicated Pub/Sub sessions; see
+    /// [`MultiplexedClusterClientBuilder::pubsub_reconnect_config`].
+    pubsub_reconnect: Option<ReconnectConfig>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -388,7 +485,14 @@ pub(crate) struct ClusterPubSubBackend {
     cache_hooks: Weak<StdRwLock<Option<ClusterCacheHooks>>>,
     connector: ClusterNodeConnector,
     reconnect: ReconnectConfig,
+    pubsub_reconnect: ReconnectConfig,
     max_redirects: usize,
+    // Enough of the client to run a refresh on demand. None of these keep
+    // the node workers alive.
+    refresh_gate: Arc<RefreshGate>,
+    metrics_recorder: Option<Arc<dyn MetricsRecorder>>,
+    include_node_in_metrics: bool,
+    node_metric_labels: Arc<BoundedNodeMetricLabels>,
 }
 
 impl ClusterPubSubBackend {
@@ -396,8 +500,32 @@ impl ClusterPubSubBackend {
         self.inner.upgrade().ok_or(RedisError::ConnectionClosed)
     }
 
-    pub(crate) fn reconnect_config(&self) -> &ReconnectConfig {
-        &self.reconnect
+    /// A temporary client handle while the originating client is alive.
+    fn client(&self) -> Option<MultiplexedClusterClient> {
+        Some(MultiplexedClusterClient {
+            inner: self.inner.upgrade()?,
+            cache_hooks: self.cache_hooks.upgrade()?,
+            metrics_recorder: self.metrics_recorder.clone(),
+            include_node_in_metrics: self.include_node_in_metrics,
+            node_metric_labels: Arc::clone(&self.node_metric_labels),
+            refresh_gate: Arc::clone(&self.refresh_gate),
+        })
+    }
+
+    /// Wait for a topology refresh that started at or after `observed`, as
+    /// for a command that saw stale topology. Fails with
+    /// [`RedisError::ConnectionClosed`] once the client is gone.
+    pub(crate) async fn await_refresh_since(&self, observed: Instant) -> Result<(), RedisError> {
+        if await_refresh_since(&self.refresh_gate, observed, || self.client()).await {
+            Ok(())
+        } else {
+            Err(RedisError::ConnectionClosed)
+        }
+    }
+
+    /// Retry budget and backoff for re-establishing a Pub/Sub session.
+    pub(crate) fn pubsub_reconnect_config(&self) -> &ReconnectConfig {
+        &self.pubsub_reconnect
     }
 
     pub(crate) fn max_redirects(&self) -> usize {
@@ -471,7 +599,12 @@ impl ClusterPubSubBackend {
 
     /// Apply the same address-map/host-override policy used by ordinary
     /// command redirects to an address advertised in a Pub/Sub MOVED reply.
-    pub(crate) async fn remap_redirect(&self, addr: &str) -> Result<NodeAddr, RedisError> {
+    pub(crate) async fn remap_redirect(
+        &self,
+        addr: &str,
+        from: &NodeAddr,
+    ) -> Result<NodeAddr, RedisError> {
+        let addr = &resolve_redirect_addr(addr, &from.addr_string());
         let inner = self.inner()?;
         let inner = inner.read().await;
         let remapped = if let Some(mapped) = inner
@@ -560,6 +693,7 @@ pub struct MultiplexedClusterClientBuilder {
     pipeline_config: AutoPipelineConfig,
     include_node_in_metrics: bool,
     reconnect_config: AutoPipelineReconnectConfig,
+    pubsub_reconnect: Option<ReconnectConfig>,
     credentials: Option<Arc<dyn CredentialProvider>>,
     connection_config: ConnectionConfig,
     #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -619,7 +753,10 @@ impl MultiplexedClusterClientBuilder {
     /// The initial node attempt is always made, including when `max` is zero.
     /// Each followed redirect is another round-trip, so this bounds the worst
     /// case latency of one command during a resharding. Transient cluster
-    /// replies share the same follow-up budget. Defaults to 5.
+    /// replies (and `READONLY` from a demoted master) share the same
+    /// follow-up budget. Once it is spent, the server's last reply -- `MOVED`,
+    /// `ASK`, `TRYAGAIN`, `CLUSTERDOWN`, `READONLY` -- is returned as the error.
+    /// Defaults to 5.
     pub fn max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
         self
@@ -655,6 +792,23 @@ impl MultiplexedClusterClientBuilder {
     /// Override the reconnect config used for each per-node worker.
     pub fn reconnect_config(mut self, config: AutoPipelineReconnectConfig) -> Self {
         self.reconnect_config = config;
+        self
+    }
+
+    /// Set the retry policy for re-establishing dedicated Pub/Sub sessions
+    /// ([`pubsub_on`](MultiplexedClusterClient::pubsub_on),
+    /// [`sharded_pubsub`](MultiplexedClusterClient::sharded_pubsub), and their
+    /// binary forms) after their socket closes.
+    ///
+    /// Each failed attempt waits for a topology refresh before the next, so a
+    /// sharded session dials the slot's promoted master after a failover. The
+    /// default keeps [`reconnect_config`](Self::reconnect_config)'s backoff
+    /// and connect timeout but retries without limit: a failover takes at
+    /// least `cluster-node-timeout`, far longer than the node workers' small
+    /// retry budget. Set `max_retries` to make a session give up and return
+    /// [`RedisError::ReconnectFailed`] instead.
+    pub fn pubsub_reconnect_config(mut self, config: ReconnectConfig) -> Self {
+        self.pubsub_reconnect = Some(config);
         self
     }
 
@@ -744,6 +898,7 @@ impl MultiplexedClusterClientBuilder {
             self.pipeline_config,
             self.include_node_in_metrics,
             self.reconnect_config,
+            self.pubsub_reconnect,
             self.credentials,
             self.connection_config,
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -756,56 +911,88 @@ impl MultiplexedClusterClientBuilder {
 impl MultiplexedClusterClient {
     /// Re-authenticate every established master and replica worker.
     ///
-    /// Each `AUTH` is serialized through its node's auto-pipeline worker. A
-    /// worker that rejects the replacement credential is removed from routing
-    /// so the next command reconnects through the configured provider.
+    /// Each `AUTH` is serialized through its node's auto-pipeline worker, and
+    /// all nodes are authenticated concurrently, each bounded by a 5 second
+    /// timeout. Routing is never locked across this I/O,
+    /// so one slow or hung node delays only its own traffic. A worker that
+    /// rejects the replacement credential, or does not answer in time, is
+    /// removed from routing so the next command to that node connects afresh
+    /// through the configured provider -- unless a concurrent topology refresh
+    /// already replaced it. Every node is attempted before the first error is
+    /// returned.
     pub async fn reauthenticate_all(&self, credentials: &Credentials) -> Result<(), RedisError> {
-        // Gate routing and topology replacement for the duration of the pass.
-        // Besides preventing mixed old/new routing after this method returns,
-        // this ensures an AUTH failure cannot remove a newer worker that a
-        // concurrent topology refresh installed at the same address.
-        let mut inner = self.inner.write().await;
-        let services: Vec<(String, bool, AutoPipelineService)> = inner
-            .masters
-            .iter()
-            .map(|(address, service)| (address.clone(), false, service.clone()))
-            .chain(
-                inner
-                    .replicas
-                    .iter()
-                    .map(|(address, service)| (address.clone(), true, service.clone())),
-            )
-            .collect();
+        let services: Vec<(String, bool, AutoPipelineService)> = {
+            let inner = self.inner.read().await;
+            inner
+                .masters
+                .iter()
+                .map(|(address, service)| (address.clone(), false, service.clone()))
+                .chain(
+                    inner
+                        .replicas
+                        .iter()
+                        .map(|(address, service)| (address.clone(), true, service.clone())),
+                )
+                .collect()
+        };
 
-        let auth = credentials.auth_command();
-        let frame = auth.to_frame();
-        let mut failed = Vec::new();
+        let frame = credentials.auth_command().to_frame();
+        let attempts = services.into_iter().map(|(address, replica, mut service)| {
+            let frame = frame.clone();
+            async move {
+                let reply =
+                    tokio::time::timeout(REAUTHENTICATE_TIMEOUT, call_service(&mut service, frame))
+                        .await;
+                let result = match reply {
+                    Ok(Ok(Frame::SimpleString(value))) if &value[..] == b"OK" => Ok(()),
+                    Ok(Ok(Frame::Error(error))) => Err(RedisError::Redis(
+                        String::from_utf8_lossy(&error).into_owned(),
+                    )),
+                    Ok(Ok(other)) => Err(RedisError::UnexpectedResponse {
+                        expected: "OK",
+                        actual: format!("{other:?}"),
+                    }),
+                    Ok(Err(error)) => Err(error),
+                    Err(_elapsed) => Err(RedisError::CommandTimeout),
+                };
+                (address, replica, service, result)
+            }
+        });
+        let outcomes = futures::future::join_all(attempts).await;
+
         let mut first_error = None;
-        for (address, replica, mut service) in services {
-            let result = match call_service(&mut service, frame.clone()).await {
-                Ok(Frame::SimpleString(value)) if &value[..] == b"OK" => Ok(()),
-                Ok(Frame::Error(error)) => Err(RedisError::Redis(
-                    String::from_utf8_lossy(&error).into_owned(),
-                )),
-                Ok(other) => Err(RedisError::UnexpectedResponse {
-                    expected: "OK",
-                    actual: format!("{other:?}"),
-                }),
-                Err(error) => Err(error),
-            };
+        let mut failed = Vec::new();
+        for (address, replica, service, result) in outcomes {
             if let Err(error) = result {
-                failed.push((address, replica));
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                tracing::warn!(
+                    node = %address,
+                    replica,
+                    %error,
+                    "cluster: re-authentication failed; dropping the node's worker"
+                );
+                failed.push((address, replica, service));
+                first_error.get_or_insert(error);
             }
         }
-
-        for (address, replica) in failed {
-            if replica {
-                inner.replicas.remove(&address);
-            } else {
-                inner.masters.remove(&address);
+        if !failed.is_empty() {
+            let mut inner = self.inner.write().await;
+            for (address, replica, service) in failed {
+                let workers = if replica {
+                    &mut inner.replicas
+                } else {
+                    &mut inner.masters
+                };
+                // A refresh may have installed a newer worker at this address
+                // meanwhile; that one authenticated through the provider.
+                if workers
+                    .get(&address)
+                    .is_some_and(|current| same_worker(current, &service))
+                {
+                    workers.remove(&address);
+                    if !replica {
+                        self.notify_cache_node_loss(&address);
+                    }
+                }
             }
         }
 
@@ -844,6 +1031,7 @@ impl MultiplexedClusterClient {
             false,
             default_node_reconnect(),
             None,
+            None,
             ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             None,
@@ -866,6 +1054,7 @@ impl MultiplexedClusterClient {
             AutoPipelineConfig::default(),
             false,
             default_node_reconnect(),
+            None,
             None,
             ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -913,6 +1102,7 @@ impl MultiplexedClusterClient {
             pipeline_config: AutoPipelineConfig::default(),
             include_node_in_metrics: false,
             reconnect_config: default_node_reconnect(),
+            pubsub_reconnect: None,
             credentials: None,
             connection_config: ConnectionConfig::default(),
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -931,6 +1121,7 @@ impl MultiplexedClusterClient {
         pipeline_config: AutoPipelineConfig,
         include_node_in_metrics: bool,
         reconnect_config: AutoPipelineReconnectConfig,
+        pubsub_reconnect: Option<ReconnectConfig>,
         credentials: Option<Arc<dyn CredentialProvider>>,
         connection_config: ConnectionConfig,
         #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))] tls: Option<Arc<TlsConfig>>,
@@ -946,7 +1137,7 @@ impl MultiplexedClusterClient {
         // before CLUSTER SLOTS so the discovery itself works against an
         // ACL-protected cluster.
         let mut seed_conn = connector.connect(seed_addr, false).await?;
-        let mut topology = discover_topology(&mut seed_conn).await?;
+        let mut topology = discover_topology_at(&mut seed_conn, seed_addr).await?;
         drop(seed_conn);
 
         if let Some(ref map) = address_map {
@@ -960,33 +1151,69 @@ impl MultiplexedClusterClient {
         // The handshakes run concurrently (bounded by MAX_CONCURRENT_CONNECTS);
         // a large cluster would otherwise serialize one connect round trip per
         // node before `connect` returns.
+        //
+        // Best-effort: a master that cannot be reached now (listed by CLUSTER
+        // SLOTS mid-failover, or restarting) gets no worker and is connected
+        // lazily when a command routes to it, so its outage does not stop the
+        // client from serving every other slot. Only a cluster with no
+        // reachable master fails to connect.
         let master_addrs = dedup_addrs(topology.master_addrs());
-        // Taken from the address list, not from completion order, so the
-        // default node stays the first master in topology order no matter
-        // which handshake finishes first.
-        let mut default_node = master_addrs.first().cloned().unwrap_or_default();
-        let mut masters: HashMap<String, AutoPipelineService> = build_node_services(
-            master_addrs,
+        let mut masters = HashMap::new();
+        let mut first_error = None;
+        for (addr, built) in build_node_services_reporting(
+            master_addrs.clone(),
             /* readonly = */ false,
             pipeline_config.clone(),
             reconnect_config.clone(),
             connector.clone(),
         )
-        .await?;
+        .await
+        {
+            match built {
+                Ok(service) => {
+                    masters.insert(addr, service);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        addr,
+                        %error,
+                        "cluster: master unreachable at connect; connecting lazily"
+                    );
+                    first_error.get_or_insert(error);
+                }
+            }
+        }
+        if masters.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
+        // Taken from the address list, not from completion order, so the
+        // default node stays the first reachable master in topology order no
+        // matter which handshake finishes first.
+        let mut default_node = master_addrs
+            .iter()
+            .find(|addr| masters.contains_key(*addr))
+            .cloned()
+            .unwrap_or_default();
 
-        // Connect to replicas if the read preference uses them.
+        // Connect to replicas if the read preference uses them. A replica
+        // that cannot be reached now is rebuilt by a later refresh, which a
+        // read for its slot schedules.
         let replicas: HashMap<String, AutoPipelineService> =
             if read_preference == ReadPreference::Master {
                 HashMap::new()
             } else {
-                build_node_services(
+                build_node_services_best_effort(
                     dedup_addrs(topology.replica_addrs()),
                     /* readonly = */ true,
                     pipeline_config.clone(),
                     reconnect_config.clone(),
                     connector.clone(),
                 )
-                .await?
+                .await
+                .into_iter()
+                .collect()
             };
 
         if default_node.is_empty() {
@@ -1021,6 +1248,7 @@ impl MultiplexedClusterClient {
                 max_redirects,
                 pipeline_config,
                 reconnect_config,
+                pubsub_reconnect,
                 credentials,
                 connection_config,
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -1121,10 +1349,30 @@ impl MultiplexedClusterClient {
         let routing_slots = frames
             .iter()
             .map(|frame| {
+                reject_nonzero_select(frame)?;
                 key_extractor::pipeline_routing_slot(frame)
                     .map_err(|error| RedisError::Redis(error.to_string()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Connect any slot owner without a worker first, as keyed routing
+        // does; planning below must not fail on a node that is reachable.
+        let missing: Vec<String> = {
+            let inner = self.inner.read().await;
+            let mut missing: Vec<String> = routing_slots
+                .iter()
+                .flatten()
+                .filter_map(|slot| inner.topology.master_for_slot(*slot))
+                .map(NodeAddr::addr_string)
+                .filter(|addr| !inner.masters.contains_key(addr))
+                .collect();
+            missing.sort();
+            missing.dedup();
+            missing
+        };
+        for addr in missing {
+            self.ensure_master(&addr).await?;
+        }
 
         let mut groups: HashMap<String, (AutoPipelineService, Vec<(usize, Frame)>)> =
             HashMap::new();
@@ -1141,15 +1389,20 @@ impl MultiplexedClusterClient {
                 .zip(routing_slots.iter().copied())
                 .enumerate()
             {
+                // Each failure here is a routing gap that only a topology
+                // refresh can close, and nothing reached a node to schedule
+                // one: do it before failing.
                 let (addr, service) = match slot {
                     Some(slot) => {
                         let owner = inner.topology.master_for_slot(slot).ok_or_else(|| {
+                            self.trigger_refresh();
                             RedisError::Redis(format!(
                                 "no cluster master owns pipeline slot {slot}"
                             ))
                         })?;
                         let addr = owner.addr_string();
                         let service = inner.masters.get(&addr).cloned().ok_or_else(|| {
+                            self.trigger_refresh();
                             RedisError::Redis(format!(
                                 "no connected master service for pipeline slot {slot} ({addr})"
                             ))
@@ -1157,6 +1410,7 @@ impl MultiplexedClusterClient {
                         (addr, service)
                     }
                     None => inner.default_master().ok_or_else(|| {
+                        self.trigger_refresh();
                         RedisError::Redis(format!(
                             "no connected default master service for pipeline ({})",
                             inner.default_node
@@ -1185,13 +1439,15 @@ impl MultiplexedClusterClient {
                 if let Err(error) = &response {
                     client.observe_node_error(&addr, error);
                 }
-                (entries, response)
+                (addr, entries, response)
             }
         });
         let batches = futures::future::join_all(batches).await;
 
         let mut ordered = vec![None; frames.len()];
-        for (entries, response) in batches {
+        // The node each entry went to, to resolve host-less redirects.
+        let mut sent_to = vec![String::new(); frames.len()];
+        for (addr, entries, response) in batches {
             let responses = response?;
             if responses.len() != entries.len() {
                 return Err(RedisError::UnexpectedResponse {
@@ -1205,15 +1461,28 @@ impl MultiplexedClusterClient {
             }
             for ((index, _), response) in entries.into_iter().zip(responses) {
                 ordered[index] = Some(response);
+                sent_to[index].clone_from(&addr);
             }
+        }
+
+        // READONLY is returned to the caller as that entry's raw reply, like
+        // any other command error, but it proves a master was demoted: heal
+        // routing for later commands.
+        if ordered.iter().flatten().any(is_readonly_reply) {
+            self.trigger_refresh();
         }
 
         // Successful entries are final. Only entries that explicitly asked us
         // to redirect are retried, each as its own raw frame so a successful
         // neighbor in the original node batch can never be replayed.
-        let mut redirected_by_slot: BTreeMap<u16, Vec<(usize, Frame, Redirect)>> = BTreeMap::new();
+        let mut redirected_by_slot: BTreeMap<u16, Vec<(usize, Frame, Redirect, Frame)>> =
+            BTreeMap::new();
         for (index, response) in ordered.iter().enumerate() {
-            let Some(redirect) = response.as_ref().and_then(parse_redirect) else {
+            let Some(redirect) = response
+                .as_ref()
+                .and_then(parse_redirect)
+                .map(|redirect| redirect.resolved_against(&sent_to[index]))
+            else {
                 continue;
             };
             let redirect_slot = match &redirect {
@@ -1227,6 +1496,7 @@ impl MultiplexedClusterClient {
                 index,
                 frames[index].clone(),
                 redirect,
+                response.clone().unwrap_or(Frame::Null),
             ));
         }
 
@@ -1238,8 +1508,10 @@ impl MultiplexedClusterClient {
             let client = self.clone();
             async move {
                 let mut completed = Vec::with_capacity(entries.len());
-                for (index, frame, redirect) in entries {
-                    let response = client.follow_pipeline_redirect(frame, redirect).await?;
+                for (index, frame, redirect, reply) in entries {
+                    let response = client
+                        .follow_pipeline_redirect(frame, redirect, reply)
+                        .await?;
                     completed.push((index, response));
                 }
                 Ok::<_, RedisError>(completed)
@@ -1281,6 +1553,7 @@ impl MultiplexedClusterClient {
         &self,
         frame: Frame,
         mut redirect: Redirect,
+        mut last_reply: Frame,
     ) -> Result<Frame, RedisError> {
         let max_redirects = self.inner.read().await.max_redirects;
         self.record_pipeline_redirect(&redirect);
@@ -1289,7 +1562,7 @@ impl MultiplexedClusterClient {
         // exactly one redirect, so max_redirects=1 permits one replay.
         for redirect_number in 1..=max_redirects {
             let attempt = redirect_number.saturating_add(1);
-            let response = match redirect {
+            let (response, replied_from) = match redirect {
                 Redirect::Moved { slot, addr } => {
                     self.notify_cache_node_loss(&addr);
                     let addr = self.remap_addr(&addr).await;
@@ -1305,13 +1578,15 @@ impl MultiplexedClusterClient {
                     self.update_slot_owner(slot, &addr).await;
                     self.trigger_refresh();
                     let mut target = self.master_service(&addr).await?;
-                    self.dispatch_to_target(
-                        &mut target,
-                        frame.clone(),
-                        CacheDispatchMode::Plain,
-                        false,
-                    )
-                    .await?
+                    let response = self
+                        .dispatch_to_target(
+                            &mut target,
+                            frame.clone(),
+                            CacheDispatchMode::Plain,
+                            false,
+                        )
+                        .await?;
+                    (response, addr)
                 }
                 Redirect::Ask { slot, addr } => {
                     self.notify_cache_node_loss(&addr);
@@ -1326,28 +1601,34 @@ impl MultiplexedClusterClient {
                     );
                     self.ensure_master(&addr).await?;
                     let mut target = self.master_service(&addr).await?;
-                    self.dispatch_to_target(
-                        &mut target,
-                        frame.clone(),
-                        CacheDispatchMode::Plain,
-                        true,
-                    )
-                    .await?
+                    let response = self
+                        .dispatch_to_target(
+                            &mut target,
+                            frame.clone(),
+                            CacheDispatchMode::Plain,
+                            true,
+                        )
+                        .await?;
+                    (response, addr)
                 }
             };
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|next| next.resolved_against(&replied_from)) {
                 Some(next) => {
                     self.record_pipeline_redirect(&next);
                     redirect = next;
+                    last_reply = response;
                 }
                 None => return Ok(response),
             }
         }
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({max_redirects})"
-        )))
+        // As for single commands, surface the server's last redirect.
+        tracing::warn!(
+            max_redirects,
+            "cluster: pipelined redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&last_reply))
     }
 
     async fn dispatch_to_target(
@@ -1418,6 +1699,11 @@ impl MultiplexedClusterClient {
         observe_metrics: bool,
         last_node: &mut Option<String>,
     ) -> Result<Cmd::Response, RedisError> {
+        reject_nonzero_select(&cmd_frame)?;
+        if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
+            let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
+            return cmd.parse_response(reply);
+        }
         let strict_replica_slot = {
             let inner = self.inner.read().await;
             strict_replica_read_slot(inner.read_preference, &cmd_frame)
@@ -1429,7 +1715,7 @@ impl MultiplexedClusterClient {
         let mut effective_dispatch_mode = dispatch_mode;
         let mut followups_used = 0usize;
 
-        loop {
+        let exhausted = loop {
             if observe_metrics {
                 *last_node = Some(target.addr.clone());
             }
@@ -1443,7 +1729,8 @@ impl MultiplexedClusterClient {
                 .await?;
             let attempt = followups_used.saturating_add(1);
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|redirect| redirect.resolved_against(&target.addr))
+            {
                 Some(Redirect::Moved { slot, addr }) => {
                     // A MOVED reply proves the routing snapshot is stale. Close
                     // cache use synchronously before any address remapping or
@@ -1469,7 +1756,7 @@ impl MultiplexedClusterClient {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     self.ensure_master(&addr).await?;
@@ -1505,7 +1792,7 @@ impl MultiplexedClusterClient {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     self.ensure_master(&addr).await?;
@@ -1523,7 +1810,7 @@ impl MultiplexedClusterClient {
                         self.notify_cache_node_loss(&target.addr);
                         effective_dispatch_mode = CacheDispatchMode::Plain;
                         if followups_used >= max_redirects {
-                            break;
+                            break response;
                         }
                         followups_used += 1;
                         if transient == TransientError::ClusterDown {
@@ -1540,17 +1827,163 @@ impl MultiplexedClusterClient {
                         tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
                         continue;
                     }
+                    if target.replica.is_none() && is_readonly_reply(&response) {
+                        // A master answering READONLY has been demoted with
+                        // its socket intact (failover): keyless commands skip
+                        // the MOVED check, and managed services answer keyed
+                        // writes this way too. Redis rejects the command
+                        // before executing it, so re-sending is safe even for
+                        // a non-idempotent write. Wait for a refresh that
+                        // started after this reply -- re-routing on the stale
+                        // snapshot would hit the same node again.
+                        self.notify_cache_node_loss(&target.addr);
+                        effective_dispatch_mode = CacheDispatchMode::Plain;
+                        tracing::warn!(
+                            command = cmd.name(),
+                            attempt,
+                            node = %target.addr,
+                            "cluster: master answered READONLY; refreshing topology"
+                        );
+                        if followups_used >= max_redirects {
+                            return Err(redis_error_from_reply(&response));
+                        }
+                        followups_used += 1;
+                        self.await_refresh_since(Instant::now()).await;
+                        let previous = std::mem::take(&mut target.addr);
+                        target = self.route_command(&cmd_frame).await?;
+                        send_asking = false;
+                        if target.addr == previous {
+                            // The refresh has not observed the promotion yet.
+                            tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        }
+                        continue;
+                    }
                     if let Frame::Error(ref e) = response {
                         return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
                     }
                     return cmd.parse_response(response);
                 }
             }
-        }
+        };
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({max_redirects})"
-        )))
+        // Return the server's own reply (MOVED, ASK, TRYAGAIN, CLUSTERDOWN,
+        // ...) so callers can classify it; the budget is a client limit.
+        tracing::warn!(
+            command = cmd.name(),
+            max_redirects,
+            "cluster: redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&exhausted))
+    }
+
+    /// Run a node-scoped command on every node of its scope and combine the
+    /// replies; see [`node_scope`].
+    ///
+    /// A master answering READONLY was demoted by a failover: after a refresh
+    /// that started after the reply, the command runs on the masters that
+    /// have not answered yet (the promoted replica among them). A node
+    /// answering TRYAGAIN, CLUSTERDOWN, or LOADING is retried after the same
+    /// backoff ordinary routing uses (CLUSTERDOWN also schedules a refresh).
+    /// Both share the redirect budget; nodes that already answered are never
+    /// re-sent, and once the budget is spent the last replies are final.
+    async fn execute_fan_out(&self, frame: &Frame, fan_out: FanOut) -> Result<Frame, RedisError> {
+        let max_redirects = self.inner.read().await.max_redirects;
+        let mut replies: BTreeMap<String, Result<Frame, RedisError>> = BTreeMap::new();
+        let mut rounds = 0usize;
+        loop {
+            let (masters, replicas) = {
+                let inner = self.inner.read().await;
+                let masters = dedup_addrs(inner.topology.master_addrs());
+                let replicas: Vec<(String, AutoPipelineService)> = match fan_out.targets {
+                    NodeTargets::Masters => Vec::new(),
+                    NodeTargets::MastersAndReplicas => inner
+                        .replicas
+                        .iter()
+                        .filter(|(_, service)| service.is_alive())
+                        .map(|(addr, service)| (addr.clone(), service.clone()))
+                        .collect(),
+                };
+                (masters, replicas)
+            };
+            let mut targets = Vec::new();
+            let pending: Vec<String> = masters
+                .into_iter()
+                .filter(|addr| !replies.contains_key(addr))
+                .collect();
+            for addr in pending {
+                // A master without a worker is connected here, as for keyed
+                // routing; one that cannot be reached fails the command.
+                match self.ensure_master(&addr).await {
+                    Ok(()) => match self.master_service(&addr).await {
+                        Ok(target) => targets.push((addr, true, target.svc)),
+                        Err(error) => {
+                            replies.insert(addr, Err(error));
+                        }
+                    },
+                    Err(error) => {
+                        replies.insert(addr, Err(error));
+                    }
+                }
+            }
+            targets.extend(
+                replicas
+                    .into_iter()
+                    .filter(|(addr, _)| !replies.contains_key(addr))
+                    .map(|(addr, service)| (addr, false, service)),
+            );
+
+            let calls = targets.into_iter().map(|(addr, master, mut service)| {
+                let frame = frame.clone();
+                async move {
+                    let reply = call_service(&mut service, frame).await;
+                    (addr, master, reply)
+                }
+            });
+            let mut retry = Vec::new();
+            let mut demoted = false;
+            let mut cluster_down = false;
+            for (addr, master, reply) in futures::future::join_all(calls).await {
+                match &reply {
+                    Ok(frame) if master && is_readonly_reply(frame) => {
+                        demoted = true;
+                        retry.push((addr, reply));
+                        continue;
+                    }
+                    Ok(frame) => {
+                        if let Some(transient) = TransientError::from_frame(frame) {
+                            cluster_down |= transient == TransientError::ClusterDown;
+                            self.notify_cache_node_loss(&addr);
+                            retry.push((addr, reply));
+                            continue;
+                        }
+                    }
+                    Err(error) => self.observe_node_error(&addr, error),
+                }
+                replies.insert(addr, reply);
+            }
+            if retry.is_empty() {
+                break;
+            }
+            if rounds >= max_redirects {
+                replies.extend(retry);
+                break;
+            }
+            rounds += 1;
+            tracing::warn!(
+                nodes = ?retry.iter().map(|(addr, _)| addr.as_str()).collect::<Vec<_>>(),
+                demoted,
+                "cluster: node-scoped command rejected by some nodes; retrying them"
+            );
+            if demoted {
+                self.await_refresh_since(Instant::now()).await;
+            } else {
+                if cluster_down {
+                    self.trigger_refresh();
+                }
+                tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+            }
+        }
+        node_scope::aggregate(fan_out.aggregate, replies)
     }
 
     fn record_command_completion(
@@ -1700,8 +2133,11 @@ impl MultiplexedClusterClient {
         // Run CLUSTER SLOTS against the first node that answers. The previous
         // seed (`masters.keys().next()`) could be the node that just died, so
         // try every node we know about -- masters first, then replicas, then
-        // the caller's original seed, so a refresh can still recover after
-        // every known node service has been pruned.
+        // nodes the topology lists without a service (replicas are not
+        // connected under `ReadPreference::Master`, and in a one-shard
+        // cluster whose master died they are the only nodes left), then the
+        // caller's original seed, so a refresh can still recover after every
+        // known node service has been pruned.
         let seeds: Vec<String> = {
             let inner = self.inner.read().await;
             let mut seeds: Vec<String> = inner
@@ -1710,8 +2146,16 @@ impl MultiplexedClusterClient {
                 .chain(inner.replicas.keys())
                 .cloned()
                 .collect();
-            if !inner.seed_addr.is_empty() && !seeds.contains(&inner.seed_addr) {
-                seeds.push(inner.seed_addr.clone());
+            let listed = inner
+                .topology
+                .master_addrs()
+                .into_iter()
+                .chain(inner.topology.replica_addrs())
+                .map(NodeAddr::addr_string);
+            for addr in listed.chain(std::iter::once(inner.seed_addr.clone())) {
+                if !addr.is_empty() && !seeds.contains(&addr) {
+                    seeds.push(addr);
+                }
             }
             seeds
         };
@@ -1915,11 +2359,35 @@ impl MultiplexedClusterClient {
         let Some(permit) = self.refresh_gate.try_begin() else {
             return;
         };
+        self.spawn_refresh(permit);
+    }
+
+    /// Run one refresh in the background under an already claimed permit.
+    ///
+    /// The task owns its client clone through [`RefreshTaskGuard`], so a
+    /// caller that stops waiting (a cancelled command) does not abort the
+    /// refresh, and [`shutdown`](Self::shutdown) still sees the clone released
+    /// before the gate reports idle.
+    fn spawn_refresh(&self, permit: RefreshPermit) {
         let client = self.clone();
         tokio::spawn(async move {
             let guard = RefreshTaskGuard::new(client, permit);
             let _ = guard.client().refresh_topology().await;
         });
+    }
+
+    /// Wait until a topology refresh that started at or after `observed` has
+    /// finished, starting one if none is running.
+    ///
+    /// For replies that prove the routing snapshot is stale and that would
+    /// fail identically if re-sent before the refresh lands (`READONLY` from a
+    /// demoted master). [`trigger_refresh`](Self::trigger_refresh) is not
+    /// enough there: its rate limit can drop the request, and a refresh that
+    /// was already running may have read `CLUSTER SLOTS` before the failover.
+    /// Concurrent callers share one refresh. The refresh's own outcome is not
+    /// reported; callers re-route from whatever it committed.
+    async fn await_refresh_since(&self, observed: Instant) {
+        await_refresh_since(&self.refresh_gate, observed, || Some(self.clone())).await;
     }
 
     /// Get a snapshot of the current cluster topology.
@@ -1969,12 +2437,26 @@ impl MultiplexedClusterClient {
             #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
             inner.tls.clone(),
         );
+        let reconnect = inner.reconnect_config.reconnect.clone();
+        // Node workers retry a few times and then exit so a refresh can heal
+        // routing. A Pub/Sub session re-resolves its node after a refresh on
+        // every attempt instead, so by default it keeps the node policy's
+        // backoff and connect timeout but does not give up.
+        let pubsub_reconnect = inner.pubsub_reconnect.clone().unwrap_or(ReconnectConfig {
+            max_retries: None,
+            ..reconnect.clone()
+        });
         ClusterPubSubBackend {
             inner: Arc::downgrade(&self.inner),
             cache_hooks: Arc::downgrade(&self.cache_hooks),
             connector,
-            reconnect: inner.reconnect_config.reconnect.clone(),
+            reconnect,
+            pubsub_reconnect,
             max_redirects: inner.max_redirects,
+            refresh_gate: Arc::clone(&self.refresh_gate),
+            metrics_recorder: self.metrics_recorder.clone(),
+            include_node_in_metrics: self.include_node_in_metrics,
+            node_metric_labels: Arc::clone(&self.node_metric_labels),
         }
     }
 
@@ -2160,6 +2642,13 @@ impl MultiplexedClusterClient {
             if inner.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
+                // A replica worker that gave up reconnecting (or was never
+                // built) is only rebuilt by a topology refresh. Reads route
+                // around it, so no node error would ever schedule one; do it
+                // here, behind the refresh rate limit.
+                if replica_needs_rebuild(&inner, slot) {
+                    self.trigger_refresh();
+                }
                 if let Some((addr, replica)) = pick_replica(&inner, slot)
                     && let Some(svc) = inner.replicas.get(&addr)
                     && replica_service_is_usable(svc)
@@ -2186,6 +2675,14 @@ impl MultiplexedClusterClient {
                         replica: None,
                     });
                 }
+                // The owner has no worker: unreachable at connect or during
+                // a refresh, or dropped after a failed re-authentication.
+                // Connect it now rather than bouncing off the default node
+                // with a MOVED (which fails outright under max_redirects(0)).
+                // A failed connect schedules a refresh.
+                drop(inner);
+                self.ensure_master(&addr_str).await?;
+                return self.master_service(&addr_str).await;
             }
         }
 
@@ -2475,19 +2972,6 @@ fn parse_prefixed_response(
     responses.next().ok_or(RedisError::ConnectionClosed)
 }
 
-fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError> {
-    match frame {
-        Frame::SimpleString(value) if value.as_ref() == b"OK" => Ok(()),
-        Frame::Error(error) => Err(RedisError::Redis(
-            String::from_utf8_lossy(&error).into_owned(),
-        )),
-        other => Err(RedisError::UnexpectedResponse {
-            expected,
-            actual: format!("{other:?}"),
-        }),
-    }
-}
-
 fn pick_replica(inner: &Inner, slot: u16) -> Option<(String, NodeAddr)> {
     let replicas = inner.topology.replicas_for_slot(slot).unwrap_or(&[]);
     let is_usable = |replica: &NodeAddr| {
@@ -2519,6 +3003,22 @@ fn pick_replica(inner: &Inner, slot: u16) -> Option<(String, NodeAddr)> {
 
 fn replica_service_is_usable(service: &AutoPipelineService) -> bool {
     service.is_alive() && service.is_connection_healthy()
+}
+
+/// Whether an advertised replica of `slot` has no worker or a dead one. A
+/// worker that is merely reconnecting is left to its own retry loop.
+fn replica_needs_rebuild(inner: &Inner, slot: u16) -> bool {
+    inner
+        .topology
+        .replicas_for_slot(slot)
+        .unwrap_or(&[])
+        .iter()
+        .any(|replica| {
+            inner
+                .replicas
+                .get(&replica.addr_string())
+                .is_none_or(|service| !service.is_alive())
+        })
 }
 
 /// Counts reported when a topology refresh completes successfully.
@@ -2590,7 +3090,7 @@ async fn discover_from_seed(
     connector: &ClusterNodeConnector,
 ) -> Result<ClusterTopology, RedisError> {
     let mut conn = connector.connect(seed_addr, false).await?;
-    discover_topology(&mut conn).await
+    discover_topology_at(&mut conn, seed_addr).await
 }
 
 /// Collect node addresses as strings, dropping duplicates and preserving
@@ -2612,52 +3112,46 @@ fn dedup_addrs(addrs: Vec<&NodeAddr>) -> Vec<String> {
 }
 
 /// Build one [`AutoPipelineService`] per address, running up to
-/// [`MAX_CONCURRENT_CONNECTS`] handshakes at a time.
+/// [`MAX_CONCURRENT_CONNECTS`] handshakes at a time, and report each node's
+/// outcome.
 ///
-/// Fails on the first node that fails to connect; the remaining in-flight
-/// connects are dropped. Because the connects overlap, the error surfaced when
-/// several nodes are unreachable is whichever failed first in time, not
-/// whichever comes first in `addrs`.
-async fn build_node_services(
+/// A node can be legitimately unreachable mid-failover while still listed by
+/// `CLUSTER SLOTS`, so one failure never cancels the other connects. The
+/// pairs are in completion order, not `addrs` order; callers must not derive
+/// anything order-dependent from them.
+async fn build_node_services_reporting(
     addrs: Vec<String>,
     readonly: bool,
     pipeline_config: AutoPipelineConfig,
     reconnect_config: AutoPipelineReconnectConfig,
     connector: ClusterNodeConnector,
-) -> Result<HashMap<String, AutoPipelineService>, RedisError> {
+) -> Vec<(String, Result<AutoPipelineService, RedisError>)> {
     futures::stream::iter(addrs.into_iter().map(|addr| {
         let pipeline_config = pipeline_config.clone();
         let reconnect_config = reconnect_config.clone();
         let connector = connector.clone();
         async move {
-            let svc = build_node_service(
+            let built = build_node_service(
                 &addr,
                 readonly,
                 pipeline_config,
                 reconnect_config,
                 connector,
             )
-            .await?;
-            Ok((addr, svc))
+            .await;
+            (addr, built)
         }
     }))
     .buffer_unordered(MAX_CONCURRENT_CONNECTS)
-    .try_collect()
+    .collect()
     .await
 }
 
-/// Build one [`AutoPipelineService`] per address with the same bounded fan-out
-/// as [`build_node_services`], but keeping only the nodes that answered.
+/// [`build_node_services_reporting`], keeping only the nodes that answered.
 ///
-/// This is the topology-refresh counterpart: an address that fails to connect
-/// is logged at debug and dropped instead of failing the batch. A node can be
-/// legitimately unreachable mid-failover while still listed by `CLUSTER SLOTS`,
-/// and committing the reachable nodes makes progress that the next refresh
-/// builds on. Startup ([`build_node_services`]) wants the opposite -- a node it
-/// cannot reach is a failed connect -- so the two cannot share one helper.
-///
-/// The returned pairs are in completion order, not `addrs` order. Callers must
-/// not derive anything order-dependent from them.
+/// An address that fails to connect is logged at debug and dropped:
+/// committing the reachable nodes makes progress that the next refresh, or a
+/// lazy connect when a command routes there, builds on.
 async fn build_node_services_best_effort(
     addrs: Vec<String>,
     readonly: bool,
@@ -2666,37 +3160,28 @@ async fn build_node_services_best_effort(
     connector: ClusterNodeConnector,
 ) -> Vec<(String, AutoPipelineService)> {
     let role = if readonly { "replica" } else { "master" };
-    futures::stream::iter(addrs.into_iter().map(|addr| {
-        let pipeline_config = pipeline_config.clone();
-        let reconnect_config = reconnect_config.clone();
-        let connector = connector.clone();
-        async move {
-            match build_node_service(
-                &addr,
-                readonly,
-                pipeline_config,
-                reconnect_config,
-                connector,
-            )
-            .await
-            {
-                Ok(svc) => Some((addr, svc)),
-                Err(e) => {
-                    tracing::debug!(
-                        addr,
-                        role,
-                        error = %e,
-                        "cluster: node unreachable during refresh; skipping"
-                    );
-                    None
-                }
-            }
-        }
-    }))
-    .buffer_unordered(MAX_CONCURRENT_CONNECTS)
-    .filter_map(|built| async move { built })
-    .collect()
+    build_node_services_reporting(
+        addrs,
+        readonly,
+        pipeline_config,
+        reconnect_config,
+        connector,
+    )
     .await
+    .into_iter()
+    .filter_map(|(addr, built)| match built {
+        Ok(service) => Some((addr, service)),
+        Err(e) => {
+            tracing::debug!(
+                addr,
+                role,
+                error = %e,
+                "cluster: node unreachable; skipping"
+            );
+            None
+        }
+    })
+    .collect()
 }
 
 async fn build_node_service(
@@ -2903,6 +3388,35 @@ mod diff_tests {
         assert!(gate.try_begin().is_none());
     }
 
+    #[test]
+    fn unthrottled_claim_ignores_the_rate_limit_but_stays_single_flight() {
+        let gate = Arc::new(RefreshGate::new(Duration::from_secs(60)));
+        drop(gate.try_begin().unwrap());
+        assert!(gate.try_begin().is_none(), "rate limited");
+        let permit = gate
+            .try_begin_unthrottled()
+            .expect("stale-topology evidence bypasses the rate limit");
+        assert!(
+            gate.try_begin_unthrottled().is_none(),
+            "still single-flight"
+        );
+        drop(permit);
+    }
+
+    #[test]
+    fn finished_since_requires_a_refresh_that_started_after_the_observation() {
+        let gate = Arc::new(RefreshGate::new(Duration::from_millis(0)));
+        let earlier = gate.try_begin().unwrap();
+        let observed = Instant::now();
+        drop(earlier);
+        assert!(
+            !gate.finished_since(observed),
+            "a refresh that started before the evidence may have read stale CLUSTER SLOTS"
+        );
+        drop(gate.try_begin().unwrap());
+        assert!(gate.finished_since(observed));
+    }
+
     #[tokio::test]
     async fn refresh_gate_rejected_claim_leaves_idle_waiters_released() {
         let gate = Arc::new(RefreshGate::new(Duration::from_secs(60)));
@@ -3011,7 +3525,7 @@ mod parallel_connect_tests {
         for _ in 0..count {
             addrs.push(spawn_fake_node(probe.clone()).await);
         }
-        let services = build_node_services(
+        let services = build_node_services_reporting(
             addrs,
             false,
             AutoPipelineConfig::default(),
@@ -3019,7 +3533,9 @@ mod parallel_connect_tests {
             connector(ConnectionConfig::default()),
         )
         .await
-        .expect("every fake node should connect");
+        .into_iter()
+        .map(|(addr, built)| (addr, built.expect("every fake node should connect")))
+        .collect();
         (services, probe.peak())
     }
 
@@ -3232,13 +3748,11 @@ mod parallel_connect_tests {
     /// The fail-fast sibling still fails fast: the same unreachable address
     /// that refresh skips must abort a startup build.
     #[tokio::test(flavor = "multi_thread")]
-    async fn startup_build_still_fails_on_an_unreachable_node() {
+    async fn startup_build_reports_each_unreachable_node_without_dropping_the_rest() {
         let probe = Arc::new(ConcurrencyProbe::default());
-        let addrs = vec![
-            spawn_fake_node(probe.clone()).await,
-            UNREACHABLE.to_string(),
-        ];
-        let result = build_node_services(
+        let reachable = spawn_fake_node(probe.clone()).await;
+        let addrs = vec![reachable.clone(), UNREACHABLE.to_string()];
+        let outcomes = build_node_services_reporting(
             addrs,
             false,
             AutoPipelineConfig::default(),
@@ -3247,10 +3761,14 @@ mod parallel_connect_tests {
         )
         .await;
 
-        assert!(
-            result.is_err(),
-            "startup must not silently drop a node it cannot reach"
-        );
+        assert_eq!(outcomes.len(), 2);
+        for (addr, built) in outcomes {
+            assert_eq!(
+                built.is_ok(),
+                addr == reachable,
+                "{addr}: each node's own outcome is reported"
+            );
+        }
     }
 
     #[test]
@@ -3668,6 +4186,7 @@ mod observability_tests {
                 max_redirects: 3,
                 pipeline_config: AutoPipelineConfig::default(),
                 reconnect_config: default_node_reconnect(),
+                pubsub_reconnect: None,
                 credentials: None,
                 connection_config: ConnectionConfig::default(),
                 #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
@@ -3699,6 +4218,18 @@ mod observability_tests {
             (target_addr, target_service),
         ]);
         test_client(initial_addr, topology, masters, recorder, true)
+    }
+
+    #[tokio::test]
+    async fn same_worker_distinguishes_replaced_workers() {
+        let (_, first, _, first_server) = quiet_service().await;
+        let (_, second, _, second_server) = quiet_service().await;
+        assert!(same_worker(&first, &first.clone()));
+        assert!(!same_worker(&first, &second));
+        first.shutdown().await;
+        second.shutdown().await;
+        first_server.await.unwrap();
+        second_server.await.unwrap();
     }
 
     #[tokio::test]
@@ -4586,7 +5117,10 @@ mod observability_tests {
             .execute(Get::new("key"))
             .await
             .expect_err("one redirect budget followed ASK and MOVED");
-        assert!(error.to_string().contains("too many redirects (1)"));
+        assert!(
+            error.is_moved(),
+            "the exhausted budget surfaces the server's MOVED: {error}"
+        );
         assert_eq!(
             *recorder.redirects.lock().unwrap(),
             vec![ClusterRedirectKind::Ask, ClusterRedirectKind::Moved]

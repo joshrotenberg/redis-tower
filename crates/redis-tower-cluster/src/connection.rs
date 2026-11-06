@@ -18,8 +18,9 @@ use redis_tower_core::{
 use redis_tower_protocol::helpers::{array, bulk};
 
 use crate::key_extractor;
+use crate::node_scope::{self, FanOut, NodeTargets};
 use crate::slot::slot_for_key;
-use crate::topology::{ClusterTopology, NodeAddr, discover_topology};
+use crate::topology::{ClusterTopology, NodeAddr, discover_topology_at, host_of};
 
 /// Strategy for selecting which replica to read from.
 ///
@@ -122,6 +123,50 @@ struct RoutedNode {
     replica: Option<NodeAddr>,
 }
 
+/// One direct node connection and the role it was opened for.
+///
+/// A socket opened for master traffic has no `READONLY` state, so a demoted
+/// master's old socket answers replica reads with MOVED; a replica socket
+/// keeps serving local reads after its node is promoted and later demoted
+/// again. Routing therefore reuses a socket only for the role it was opened
+/// for and replaces it when a failover changes the node's role.
+struct NodeSocket {
+    conn: RedisConnection,
+    readonly: bool,
+}
+
+impl NodeSocket {
+    fn master(conn: RedisConnection) -> Self {
+        Self {
+            conn,
+            readonly: false,
+        }
+    }
+
+    #[cfg(test)]
+    fn replica(conn: RedisConnection) -> Self {
+        Self {
+            conn,
+            readonly: true,
+        }
+    }
+}
+
+/// First wait before routing to a replica again after reconnecting to it
+/// failed; doubles per consecutive failure up to
+/// [`REPLICA_RECONNECT_MAX_BACKOFF`].
+const REPLICA_RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Upper bound for [`REPLICA_RECONNECT_BACKOFF`] growth.
+const REPLICA_RECONNECT_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A replica whose last reconnect attempt failed: routing skips it until
+/// `retry_at`.
+struct ReplicaBackoff {
+    retry_at: Instant,
+    failures: u32,
+}
+
 /// Maximum number of redirects to follow before giving up.
 pub(crate) const MAX_REDIRECTS: usize = 5;
 
@@ -143,7 +188,11 @@ pub use redis_tower::ReadPreference;
 /// then maintains connections to masters (and optionally replicas).
 ///
 /// Handles MOVED and ASK redirects automatically. Supports read
-/// preference for routing read-only commands to replicas.
+/// preference for routing read-only commands to replicas. Node-scoped
+/// keyless commands (`DBSIZE`, `FLUSHALL`, `SCRIPT LOAD`, `CONFIG SET`, ...)
+/// run on every master, and where accepted on the connected replicas, with
+/// combined replies, exactly as described for
+/// [`MultiplexedClusterClient`](crate::MultiplexedClusterClient).
 ///
 /// # Concurrency
 ///
@@ -174,12 +223,21 @@ pub use redis_tower::ReadPreference;
 /// # }
 /// ```
 pub struct ClusterConnection {
-    /// Connections to nodes, keyed by "host:port".
-    nodes: HashMap<String, RedisConnection>,
+    /// Connections to nodes, keyed by "host:port", with the role each was
+    /// opened for.
+    nodes: HashMap<String, NodeSocket>,
     /// Current cluster topology.
     topology: ClusterTopology,
-    /// Address of a node to use for keyless commands.
+    /// Address of a node to use for keyless commands. Re-pointed to a current
+    /// master by [`refresh_topology`](Self::refresh_topology).
     default_node: String,
+    /// Caller-supplied seed, kept as a last-resort discovery source.
+    seed_addr: String,
+    /// Replicas whose socket is gone and whose last reconnect failed. A
+    /// replica without a socket is otherwise reconnected lazily the next time
+    /// routing picks it, so one dropped reply does not disable replica reads
+    /// for its slots.
+    replica_backoff: HashMap<String, ReplicaBackoff>,
     /// Host override for Docker/proxy environments.
     host_override: Option<String>,
     /// Per-address mapping for NAT/Kubernetes environments.
@@ -276,7 +334,10 @@ impl ClusterConnectionBuilder {
     /// The initial node attempt is always made, including when `max` is zero.
     /// Each followed redirect is another round-trip, so this bounds the worst
     /// case latency of one command during a resharding. Transient cluster
-    /// replies share the same follow-up budget. Defaults to 5.
+    /// replies (and `READONLY` from a demoted master) share the same
+    /// follow-up budget. Once it is spent, the server's last reply -- `MOVED`,
+    /// `ASK`, `TRYAGAIN`, `CLUSTERDOWN`, `READONLY` -- is returned as the error.
+    /// Defaults to 5.
     pub fn max_redirects(mut self, max: usize) -> Self {
         self.max_redirects = max;
         self
@@ -360,6 +421,34 @@ pub(crate) enum Redirect {
     Ask { slot: u16, addr: String },
 }
 
+impl Redirect {
+    /// Resolve the target against `from`, the node that sent the redirect:
+    /// see [`resolve_redirect_addr`].
+    pub(crate) fn resolved_against(self, from: &str) -> Self {
+        match self {
+            Self::Moved { slot, addr } => Self::Moved {
+                slot,
+                addr: resolve_redirect_addr(&addr, from),
+            },
+            Self::Ask { slot, addr } => Self::Ask {
+                slot,
+                addr: resolve_redirect_addr(&addr, from),
+            },
+        }
+    }
+}
+
+/// A redirect target with an empty host (`MOVED 3999 :6381`) names a node on
+/// the host that sent the redirect. Redis sends that form when the node does
+/// not know its own endpoint: a single-node cluster, or
+/// `cluster-preferred-endpoint-type unknown-endpoint`.
+pub(crate) fn resolve_redirect_addr(addr: &str, from: &str) -> String {
+    match addr.strip_prefix(':') {
+        Some(port) => format!("{}:{port}", host_of(from)),
+        None => addr.to_string(),
+    }
+}
+
 impl ClusterConnection {
     #[cfg(test)]
     pub(crate) fn empty_for_test() -> Self {
@@ -367,6 +456,8 @@ impl ClusterConnection {
             nodes: HashMap::new(),
             topology: ClusterTopology::new(Vec::new()),
             default_node: String::new(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -494,7 +585,7 @@ impl ClusterConnection {
             tls.clone(),
         );
         let mut seed_conn = connector.connect(seed_addr, false).await?;
-        let mut topology = discover_topology(&mut seed_conn).await?;
+        let mut topology = discover_topology_at(&mut seed_conn, seed_addr).await?;
 
         if let Some(ref map) = address_map {
             remap_topology_with_map(&mut topology, map);
@@ -506,32 +597,63 @@ impl ClusterConnection {
         let mut nodes = HashMap::new();
         let mut default_node = String::new();
 
-        // Connect to all masters.
-        for addr in topology.master_addrs() {
-            let addr_str = addr.addr_string();
-            if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone()) {
-                let conn = connector.connect(&addr_str, false).await?;
-                if default_node.is_empty() {
-                    default_node.clone_from(&addr_str);
+        // Connect to all masters, best-effort: one that cannot be reached
+        // now (listed mid-failover, restarting) is connected lazily when a
+        // command routes to it, so its outage does not stop the connection
+        // from serving every other slot. Only a cluster with no reachable
+        // master fails to connect.
+        let masters = dedup_node_addrs(topology.master_addrs());
+        let mut first_error = None;
+        for addr in &masters {
+            match connector.connect(addr, false).await {
+                Ok(conn) => {
+                    if default_node.is_empty() {
+                        default_node.clone_from(addr);
+                    }
+                    nodes.insert(addr.clone(), NodeSocket::master(conn));
                 }
-                e.insert(conn);
+                Err(error) => {
+                    tracing::warn!(
+                        addr,
+                        %error,
+                        "cluster: master unreachable at connect; connecting lazily"
+                    );
+                    first_error.get_or_insert(error);
+                }
             }
         }
+        if nodes.is_empty()
+            && let Some(error) = first_error
+        {
+            return Err(error);
+        }
 
-        // Connect to replicas if read preference uses them.
+        // Connect to replicas if read preference uses them, best-effort: an
+        // unconnected replica is reconnected when routing picks it.
         if read_preference != ReadPreference::Master {
-            for addr in topology.replica_addrs() {
-                let addr_str = addr.addr_string();
-                if let std::collections::hash_map::Entry::Vacant(e) = nodes.entry(addr_str.clone())
-                {
-                    let conn = connector.connect(&addr_str, true).await?;
-                    e.insert(conn);
+            for addr in dedup_node_addrs(topology.replica_addrs()) {
+                if nodes.contains_key(&addr) {
+                    continue;
+                }
+                match connector.connect(&addr, true).await {
+                    Ok(conn) => {
+                        nodes.insert(
+                            addr,
+                            NodeSocket {
+                                conn,
+                                readonly: true,
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        tracing::debug!(addr, %error, "cluster: replica unreachable at connect");
+                    }
                 }
             }
         }
 
         if default_node.is_empty() {
-            nodes.insert(seed_addr.to_string(), seed_conn);
+            nodes.insert(seed_addr.to_string(), NodeSocket::master(seed_conn));
             default_node = seed_addr.to_string();
         }
 
@@ -541,6 +663,8 @@ impl ClusterConnection {
             nodes,
             topology,
             default_node,
+            seed_addr: seed_addr.to_string(),
+            replica_backoff: HashMap::new(),
             host_override,
             address_map,
             read_preference,
@@ -565,12 +689,12 @@ impl ClusterConnection {
         let addresses: Vec<String> = self.nodes.keys().cloned().collect();
         let mut first_error = None;
         for address in addresses {
-            let Some(mut connection) = self.nodes.remove(&address) else {
+            let Some(mut socket) = self.nodes.remove(&address) else {
                 continue;
             };
-            match connection.execute(credentials.auth_command()).await {
+            match socket.conn.execute(credentials.auth_command()).await {
                 Ok(()) => {
-                    self.nodes.insert(address, connection);
+                    self.nodes.insert(address, socket);
                 }
                 Err(error) => {
                     if first_error.is_none() {
@@ -613,6 +737,11 @@ impl ClusterConnection {
         cmd: Cmd,
     ) -> Result<Cmd::Response, RedisError> {
         let cmd_frame = cmd.to_frame();
+        reject_nonzero_select(&cmd_frame)?;
+        if let Some(fan_out) = node_scope::fan_out(&cmd_frame) {
+            let reply = self.execute_fan_out(&cmd_frame, fan_out).await?;
+            return cmd.parse_response(reply);
+        }
         let strict_replica_slot = strict_replica_read_slot(self.read_preference, &cmd_frame);
         let initial_route = self.route_command(&cmd_frame)?;
 
@@ -620,26 +749,60 @@ impl ClusterConnection {
         let mut target_replica = initial_route.replica;
         let mut send_asking = false;
         let mut followups_used = 0usize;
+        // Replicas this command failed to connect to. Their routing backoff
+        // can expire while another replica is being tried (a connect can take
+        // longer than the backoff), so it alone does not end re-routing.
+        let mut failed_replicas: Vec<String> = Vec::new();
 
-        loop {
+        let exhausted = loop {
             let attempt = target_replica.clone().map(|replica| {
                 ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
             });
-            // A previous command deadline may have quarantined this node's
-            // socket while a reply was outstanding. Reconnect lazily before
-            // routing the next command to it.
-            self.ensure_connection(&target_node).await?;
+            // A previous command deadline or I/O error may have quarantined
+            // this node's socket, or a failover may have changed the role its
+            // socket was opened for. Reconnect lazily before routing the next
+            // command to it.
+            if let Err(error) = self
+                .ensure_connection(&target_node, target_replica.is_some())
+                .await
+            {
+                if target_replica.is_none() {
+                    return Err(error);
+                }
+                // Back this replica off and route again: another replica,
+                // the master (PreferReplica), or replica_unavailable. Each
+                // failure removes one candidate for the rest of this command,
+                // so this terminates.
+                tracing::debug!(
+                    replica = %target_node,
+                    %error,
+                    "cluster: replica reconnect failed; routing around it"
+                );
+                self.note_replica_reconnect_failure(&target_node);
+                failed_replicas.push(target_node.clone());
+                drop(attempt);
+                let route = self.route_command_excluding(&cmd_frame, &failed_replicas)?;
+                target_node = route.addr;
+                target_replica = route.replica;
+                continue;
+            }
             let response = if send_asking {
                 // ASKING is connection-local and one-shot, so keep it in the
                 // same checked-out exchange as the migrated command.
-                self.execute_pipeline_on_node(
-                    &target_node,
-                    vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
-                )
-                .await?
-                .into_iter()
-                .nth(1)
-                .ok_or(RedisError::ConnectionClosed)?
+                let mut replies = self
+                    .execute_pipeline_on_node(
+                        &target_node,
+                        vec![array(vec![bulk("ASKING")]), cmd_frame.clone()],
+                    )
+                    .await?
+                    .into_iter();
+                // A rejected ASKING leaves the command to run without the
+                // migration flag; its reply is not the answer to trust.
+                parse_setup_ok(
+                    replies.next().ok_or(RedisError::ConnectionClosed)?,
+                    "ASKING OK response",
+                )?;
+                replies.next().ok_or(RedisError::ConnectionClosed)?
             } else {
                 self.execute_pipeline_on_node(&target_node, vec![cmd_frame.clone()])
                     .await?
@@ -651,7 +814,8 @@ impl ClusterConnection {
                 attempt.finish(ReplicaRoutingOutcome::Success);
             }
 
-            match parse_redirect(&response) {
+            match parse_redirect(&response).map(|redirect| redirect.resolved_against(&target_node))
+            {
                 Some(Redirect::Moved { slot, addr }) => {
                     tracing::debug!(slot, from_addr = %target_node, to_addr = %addr, kind = "MOVED", "cluster redirect");
                     if let Some(request_slot) = strict_replica_slot {
@@ -663,11 +827,11 @@ impl ClusterConnection {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= self.max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     let addr = self.remap_addr(&addr);
-                    self.ensure_connection(&addr).await?;
+                    self.ensure_connection(&addr, false).await?;
                     self.update_slot_owner(slot, &addr);
                     target_node = addr;
                     target_replica = None;
@@ -682,7 +846,7 @@ impl ClusterConnection {
                         return Err(replica_unavailable(request_slot));
                     }
                     if followups_used >= self.max_redirects {
-                        break;
+                        break response;
                     }
                     followups_used += 1;
                     let addr = self.remap_addr(&addr);
@@ -696,14 +860,15 @@ impl ClusterConnection {
                     // budget rather than surfacing on first occurrence.
                     if let Some(transient) = TransientError::from_frame(&response) {
                         if followups_used >= self.max_redirects {
-                            break;
+                            break response;
                         }
                         followups_used += 1;
                         if transient == TransientError::ClusterDown {
                             // The cluster view may be stale (election / moved
                             // slots); refresh best-effort and re-route the key.
                             let _ = self.refresh_topology().await;
-                            let route = self.route_command(&cmd_frame)?;
+                            let route =
+                                self.route_command_excluding(&cmd_frame, &failed_replicas)?;
                             target_node = route.addr;
                             target_replica = route.replica;
                             send_asking = false;
@@ -712,18 +877,137 @@ impl ClusterConnection {
                         tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
                         continue;
                     }
+                    if target_replica.is_none() && is_readonly_reply(&response) {
+                        // A demoted master rejected the command before running
+                        // it (see MultiplexedClusterClient), so re-sending is
+                        // safe even for a non-idempotent write. Refresh inline:
+                        // this connection is exclusively owned.
+                        tracing::warn!(
+                            node = %target_node,
+                            "cluster: master answered READONLY; refreshing topology"
+                        );
+                        if followups_used >= self.max_redirects {
+                            return Err(redis_error_from_reply(&response));
+                        }
+                        followups_used += 1;
+                        if let Err(error) = self.refresh_topology().await {
+                            tracing::debug!(%error, "cluster: refresh after READONLY failed");
+                        }
+                        let route = self.route_command_excluding(&cmd_frame, &failed_replicas)?;
+                        if route.addr == target_node {
+                            // The refresh has not observed the promotion yet.
+                            tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+                        }
+                        target_node = route.addr;
+                        target_replica = route.replica;
+                        send_asking = false;
+                        continue;
+                    }
                     if let Frame::Error(ref e) = response {
                         return Err(RedisError::Redis(String::from_utf8_lossy(e).into_owned()));
                     }
                     return cmd.parse_response(response);
                 }
             }
-        }
+        };
 
-        Err(RedisError::Redis(format!(
-            "too many redirects ({})",
-            self.max_redirects
-        )))
+        // Return the server's own reply (MOVED, ASK, TRYAGAIN, CLUSTERDOWN,
+        // ...) so callers can classify it; the budget is a client limit.
+        tracing::warn!(
+            max_redirects = self.max_redirects,
+            "cluster: redirect budget exhausted"
+        );
+        Err(redis_error_from_reply(&exhausted))
+    }
+
+    /// Run a node-scoped command on every node of its scope and combine the
+    /// replies; see `node_scope`. As in the multiplexed client, a master
+    /// answering READONLY triggers a refresh and the command then runs on the
+    /// masters that have not answered yet, and a TRYAGAIN, CLUSTERDOWN, or
+    /// LOADING node is retried after a backoff (CLUSTERDOWN after a refresh),
+    /// within the redirect budget. Replicas are best-effort: one that cannot
+    /// be connected is skipped.
+    async fn execute_fan_out(
+        &mut self,
+        frame: &Frame,
+        fan_out: FanOut,
+    ) -> Result<Frame, RedisError> {
+        let mut replies: std::collections::BTreeMap<String, Result<Frame, RedisError>> =
+            std::collections::BTreeMap::new();
+        let mut rounds = 0usize;
+        loop {
+            let masters = dedup_node_addrs(self.topology.master_addrs());
+            let replicas = if fan_out.targets == NodeTargets::MastersAndReplicas
+                && self.read_preference != ReadPreference::Master
+            {
+                dedup_node_addrs(self.topology.replica_addrs())
+            } else {
+                Vec::new()
+            };
+            let targets: Vec<(String, bool)> = masters
+                .into_iter()
+                .map(|addr| (addr, false))
+                .chain(replicas.into_iter().map(|addr| (addr, true)))
+                .filter(|(addr, _)| !replies.contains_key(addr))
+                .collect();
+
+            let mut retry = Vec::new();
+            let mut demoted = false;
+            let mut cluster_down = false;
+            for (addr, replica) in targets {
+                if let Err(error) = self.ensure_connection(&addr, replica).await {
+                    if replica {
+                        self.note_replica_reconnect_failure(&addr);
+                    } else {
+                        replies.insert(addr, Err(error));
+                    }
+                    continue;
+                }
+                let reply = self
+                    .execute_pipeline_on_node(&addr, vec![frame.clone()])
+                    .await
+                    .and_then(|replies| {
+                        replies
+                            .into_iter()
+                            .next()
+                            .ok_or(RedisError::ConnectionClosed)
+                    });
+                if !replica && matches!(&reply, Ok(frame) if is_readonly_reply(frame)) {
+                    demoted = true;
+                    retry.push((addr, reply));
+                    continue;
+                }
+                if let Ok(frame) = &reply
+                    && let Some(transient) = TransientError::from_frame(frame)
+                {
+                    cluster_down |= transient == TransientError::ClusterDown;
+                    retry.push((addr, reply));
+                    continue;
+                }
+                replies.insert(addr, reply);
+            }
+            if retry.is_empty() {
+                break;
+            }
+            if rounds >= self.max_redirects {
+                replies.extend(retry);
+                break;
+            }
+            rounds += 1;
+            tracing::warn!(
+                demoted,
+                "cluster: node-scoped command rejected by some nodes; retrying them"
+            );
+            if (demoted || cluster_down)
+                && let Err(error) = self.refresh_topology().await
+            {
+                tracing::debug!(%error, "cluster: refresh during node-scoped retry failed");
+            }
+            if !demoted {
+                tokio::time::sleep(TRANSIENT_RETRY_BACKOFF).await;
+            }
+        }
+        node_scope::aggregate(fan_out.aggregate, replies)
     }
 
     /// Run a pipeline on one node while making cancellation quarantine-safe.
@@ -738,13 +1022,13 @@ impl ClusterConnection {
         addr: &str,
         frames: Vec<Frame>,
     ) -> Result<Vec<Frame>, RedisError> {
-        let mut conn = self
+        let mut socket = self
             .nodes
             .remove(addr)
             .ok_or_else(|| RedisError::Redis(format!("no connection for node {addr}")))?;
-        match conn.execute_pipeline(frames).await {
+        match socket.conn.execute_pipeline(frames).await {
             Ok(responses) => {
-                self.nodes.insert(addr.to_string(), conn);
+                self.nodes.insert(addr.to_string(), socket);
                 Ok(responses)
             }
             Err(error) => Err(error),
@@ -763,13 +1047,17 @@ impl ClusterConnection {
         watch_frames: Vec<Frame>,
         command_frames: Vec<Frame>,
     ) -> Result<Option<Vec<Frame>>, RedisError> {
-        let mut conn = self
+        let mut socket = self
             .nodes
             .remove(addr)
             .ok_or_else(|| RedisError::Redis(format!("no connection for node {addr}")))?;
-        match conn.execute_transaction(watch_frames, command_frames).await {
+        match socket
+            .conn
+            .execute_transaction(watch_frames, command_frames)
+            .await
+        {
             Ok(responses) => {
-                self.nodes.insert(addr.to_string(), conn);
+                self.nodes.insert(addr.to_string(), socket);
                 Ok(responses)
             }
             Err(error) => Err(error),
@@ -797,6 +1085,16 @@ impl ClusterConnection {
     /// Determine which node should handle a command based on its key
     /// and read preference.
     fn route_command(&self, frame: &Frame) -> Result<RoutedNode, RedisError> {
+        self.route_command_excluding(frame, &[])
+    }
+
+    /// [`route_command`](Self::route_command), never picking a replica in
+    /// `excluded`.
+    fn route_command_excluding(
+        &self,
+        frame: &Frame,
+        excluded: &[String],
+    ) -> Result<RoutedNode, RedisError> {
         if let Some(key) = key_extractor::extract_key(frame) {
             let slot = slot_for_key(key);
 
@@ -804,7 +1102,7 @@ impl ClusterConnection {
             if self.read_preference != ReadPreference::Master
                 && key_extractor::is_readonly_command(frame)
             {
-                if let Some(route) = self.pick_replica(slot) {
+                if let Some(route) = self.pick_replica(slot, excluded) {
                     return Ok(route);
                 }
                 if self.read_preference == ReadPreference::Replica {
@@ -813,16 +1111,15 @@ impl ClusterConnection {
                 // PreferReplica falls through to master.
             }
 
+            // Route to the owner even when its socket is gone: execute
+            // reconnects it lazily. Falling back to the default node would
+            // cost a MOVED round trip, and fail outright with
+            // `max_redirects(0)`.
             if let Some(addr) = self.topology.master_for_slot(slot) {
-                let addr_str = addr.addr_string();
-                for node_key in self.nodes.keys() {
-                    if *node_key == addr_str {
-                        return Ok(RoutedNode {
-                            addr: node_key.clone(),
-                            replica: None,
-                        });
-                    }
-                }
+                return Ok(RoutedNode {
+                    addr: addr.addr_string(),
+                    replica: None,
+                });
             }
         }
         Ok(RoutedNode {
@@ -831,32 +1128,58 @@ impl ClusterConnection {
         })
     }
 
-    /// Pick a replica for a given slot using the configured read routing strategy.
-    fn pick_replica(&self, slot: u16) -> Option<RoutedNode> {
+    /// Pick a replica for a given slot using the configured read routing
+    /// strategy, skipping `excluded`.
+    fn pick_replica(&self, slot: u16, excluded: &[String]) -> Option<RoutedNode> {
         let replicas = self.topology.replicas_for_slot(slot).unwrap_or(&[]);
-        let is_connected = |replica: &NodeAddr| self.nodes.contains_key(&replica.addr_string());
-        let available = if replicas.iter().all(&is_connected) {
+        let now = Instant::now();
+        // A replica without a usable socket stays eligible -- execute
+        // reconnects it -- unless its last reconnect failed recently.
+        let is_eligible = |replica: &NodeAddr| {
+            let addr = replica.addr_string();
+            !excluded.contains(&addr)
+                && (self.nodes.get(&addr).is_some_and(|socket| socket.readonly)
+                    || self
+                        .replica_backoff
+                        .get(&addr)
+                        .is_none_or(|backoff| backoff.retry_at <= now))
+        };
+        let available = if replicas.iter().all(&is_eligible) {
             Cow::Borrowed(replicas)
         } else {
-            // A direct connection is removed after an I/O failure while the
-            // last topology snapshot can still list it. Never expose those
-            // stale entries to a caller-provided routing strategy.
+            // Never expose a replica in reconnect backoff to a
+            // caller-provided routing strategy.
             Cow::Owned(
                 replicas
                     .iter()
-                    .filter(|replica| is_connected(replica))
+                    .filter(|replica| is_eligible(replica))
                     .cloned()
                     .collect(),
             )
         };
         let selected = self.read_routing.select_replica(slot, &available)?.clone();
-        let selected_addr = selected.addr_string();
-        self.nodes
-            .get_key_value(&selected_addr)
-            .map(|(addr, _connection)| RoutedNode {
-                addr: addr.clone(),
-                replica: Some(selected),
-            })
+        Some(RoutedNode {
+            addr: selected.addr_string(),
+            replica: Some(selected),
+        })
+    }
+
+    /// Record a failed replica reconnect, growing its routing backoff.
+    fn note_replica_reconnect_failure(&mut self, addr: &str) {
+        let failures = self
+            .replica_backoff
+            .get(addr)
+            .map_or(1, |backoff| backoff.failures.saturating_add(1));
+        let delay = REPLICA_RECONNECT_BACKOFF
+            .saturating_mul(1u32 << failures.saturating_sub(1).min(16))
+            .min(REPLICA_RECONNECT_MAX_BACKOFF);
+        self.replica_backoff.insert(
+            addr.to_string(),
+            ReplicaBackoff {
+                retry_at: Instant::now() + delay,
+                failures,
+            },
+        );
     }
 
     /// Remap an address using the address map or host override.
@@ -878,18 +1201,33 @@ impl ClusterConnection {
         addr.to_string()
     }
 
-    /// Ensure we have a connection to the given address.
-    async fn ensure_connection(&mut self, addr: &str) -> Result<(), RedisError> {
-        if !self.nodes.contains_key(addr) {
-            let connector = ClusterNodeConnector::new(
-                self.connection_config.clone(),
-                self.credentials.clone(),
-                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                self.tls.clone(),
-            );
-            let conn = connector.connect(addr, false).await?;
-            self.nodes.insert(addr.to_string(), conn);
+    /// The connector every node socket is opened through.
+    fn connector(&self) -> ClusterNodeConnector {
+        ClusterNodeConnector::new(
+            self.connection_config.clone(),
+            self.credentials.clone(),
+            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+            self.tls.clone(),
+        )
+    }
+
+    /// Ensure we have a connection to the given address opened for the given
+    /// role (`readonly` for replica reads).
+    ///
+    /// A socket opened for the other role -- the node changed role in a
+    /// failover -- is replaced rather than reused; see [`NodeSocket`].
+    async fn ensure_connection(&mut self, addr: &str, readonly: bool) -> Result<(), RedisError> {
+        if self
+            .nodes
+            .get(addr)
+            .is_some_and(|socket| socket.readonly == readonly)
+        {
+            return Ok(());
         }
+        let conn = self.connector().connect(addr, readonly).await?;
+        self.replica_backoff.remove(addr);
+        self.nodes
+            .insert(addr.to_string(), NodeSocket { conn, readonly });
         Ok(())
     }
 
@@ -922,25 +1260,19 @@ impl ClusterConnection {
         self.read_preference
     }
 
-    /// Refresh the cluster topology from a connected node.
+    /// Refresh the cluster topology and reconcile node connections.
+    ///
+    /// `CLUSTER SLOTS` is asked of each connected node in turn, then of the
+    /// caller's original seed, until one reports slot owners: a dead node, or
+    /// one that lost its cluster state (restarted without `nodes.conf`) and
+    /// reports an empty map, is skipped rather than committed. Sockets for
+    /// nodes that left the topology are closed, new masters (and replicas,
+    /// when the read preference uses them) are connected best-effort -- one
+    /// that cannot be reached now is connected lazily when routing needs it --
+    /// and the keyless default moves to a current master if its node was
+    /// demoted or removed.
     pub async fn refresh_topology(&mut self) -> Result<(), RedisError> {
-        let seed_addr = self
-            .nodes
-            .keys()
-            .next()
-            .cloned()
-            .ok_or(RedisError::ConnectionClosed)?;
-        let mut conn = self
-            .nodes
-            .remove(&seed_addr)
-            .ok_or(RedisError::ConnectionClosed)?;
-        let mut topology = match discover_topology(&mut conn).await {
-            Ok(topology) => {
-                self.nodes.insert(seed_addr, conn);
-                topology
-            }
-            Err(error) => return Err(error),
-        };
+        let mut topology = self.discover_current_topology().await?;
 
         if let Some(ref map) = self.address_map {
             remap_topology_with_map(&mut topology, map);
@@ -949,37 +1281,139 @@ impl ClusterConnection {
             remap_topology(&mut topology, host);
         }
 
-        let connector = ClusterNodeConnector::new(
-            self.connection_config.clone(),
-            self.credentials.clone(),
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            self.tls.clone(),
-        );
+        let masters = dedup_node_addrs(topology.master_addrs());
+        let replicas = if self.read_preference == ReadPreference::Master {
+            Vec::new()
+        } else {
+            dedup_node_addrs(topology.replica_addrs())
+        };
+        self.nodes
+            .retain(|addr, _| masters.contains(addr) || replicas.contains(addr));
+        self.replica_backoff
+            .retain(|addr, _| replicas.contains(addr));
 
-        for addr in topology.master_addrs() {
-            let addr_str = addr.addr_string();
-            if let std::collections::hash_map::Entry::Vacant(e) = self.nodes.entry(addr_str.clone())
-            {
-                let conn = connector.connect(&addr_str, false).await?;
-                e.insert(conn);
-            }
-        }
-
-        if self.read_preference != ReadPreference::Master {
-            for addr in topology.replica_addrs() {
-                let addr_str = addr.addr_string();
-                if let std::collections::hash_map::Entry::Vacant(e) =
-                    self.nodes.entry(addr_str.clone())
+        let connector = self.connector();
+        for (addrs, readonly) in [(&masters, false), (&replicas, true)] {
+            for addr in addrs {
+                if self
+                    .nodes
+                    .get(addr)
+                    .is_some_and(|socket| socket.readonly == readonly)
                 {
-                    let conn = connector.connect(&addr_str, true).await?;
-                    e.insert(conn);
+                    continue;
+                }
+                match connector.connect(addr, readonly).await {
+                    Ok(conn) => {
+                        self.replica_backoff.remove(addr);
+                        self.nodes
+                            .insert(addr.clone(), NodeSocket { conn, readonly });
+                    }
+                    Err(error) => {
+                        if readonly {
+                            self.note_replica_reconnect_failure(addr);
+                        }
+                        tracing::debug!(
+                            addr,
+                            readonly,
+                            %error,
+                            "cluster: node unreachable during refresh; connecting lazily"
+                        );
+                    }
                 }
             }
         }
 
+        // Keep the default while it is a connected master; otherwise move it
+        // to the first connected master (as startup chooses), falling back
+        // to the first listed one only when none is connected.
+        let connected = |addr: &String| self.nodes.get(addr).is_some_and(|socket| !socket.readonly);
+        if !(masters.contains(&self.default_node) && connected(&self.default_node))
+            && let Some(next) = masters
+                .iter()
+                .find(|addr| connected(addr))
+                .or(masters.first())
+            && *next != self.default_node
+        {
+            tracing::info!(
+                previous = %self.default_node,
+                current = %next,
+                "cluster: default node for keyless commands moved after topology refresh"
+            );
+            self.default_node.clone_from(next);
+        }
         self.topology = topology;
         Ok(())
     }
+
+    /// Run `CLUSTER SLOTS` against the first node that answers with at least
+    /// one slot owner.
+    async fn discover_current_topology(&mut self) -> Result<ClusterTopology, RedisError> {
+        let mut candidates: Vec<String> = self.nodes.keys().cloned().collect();
+        // Ask known masters before replicas, in a stable order.
+        candidates.sort_by_key(|addr| {
+            (
+                self.nodes.get(addr).is_some_and(|s| s.readonly),
+                addr.clone(),
+            )
+        });
+        // Then listed nodes without a socket (replicas are not connected under
+        // `ReadPreference::Master`), then the original seed.
+        let listed = self
+            .topology
+            .master_addrs()
+            .into_iter()
+            .chain(self.topology.replica_addrs())
+            .map(NodeAddr::addr_string);
+        for addr in listed.chain(std::iter::once(self.seed_addr.clone())) {
+            if !addr.is_empty() && !candidates.contains(&addr) {
+                candidates.push(addr);
+            }
+        }
+
+        let mut last_error = RedisError::ConnectionClosed;
+        for addr in candidates {
+            // Reuse an existing socket, keeping it only if the exchange
+            // completed; otherwise open a short-lived one.
+            let result = match self.nodes.remove(&addr) {
+                Some(mut socket) => {
+                    let result = discover_topology_at(&mut socket.conn, &addr).await;
+                    if result.is_ok() {
+                        self.nodes.insert(addr.clone(), socket);
+                    }
+                    result
+                }
+                None => match self.connector().connect(&addr, false).await {
+                    Ok(mut conn) => discover_topology_at(&mut conn, &addr).await,
+                    Err(error) => Err(error),
+                },
+            };
+            match result {
+                Ok(topology) if topology.master_addrs().is_empty() => {
+                    last_error = RedisError::Redis(format!(
+                        "cluster topology refresh: {addr} reported no slot owners"
+                    ));
+                }
+                Ok(topology) => return Ok(topology),
+                Err(error) => {
+                    tracing::debug!(addr, %error, "cluster: node unreachable during topology refresh");
+                    last_error = error;
+                }
+            }
+        }
+        Err(last_error)
+    }
+}
+
+/// Node addresses as strings, without duplicates, in first-seen order.
+fn dedup_node_addrs(addrs: Vec<&NodeAddr>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(addrs.len());
+    for addr in addrs {
+        let addr = addr.addr_string();
+        if !out.contains(&addr) {
+            out.push(addr);
+        }
+    }
+    out
 }
 
 impl redis_tower::RedisExecutor for ClusterConnection {
@@ -1021,7 +1455,7 @@ impl redis_tower::TransactionExecutor for ClusterConnection {
         async move {
             let slot = slot?;
             let node = self.transaction_node(slot)?;
-            self.ensure_connection(&node).await?;
+            self.ensure_connection(&node, false).await?;
             let result = self
                 .execute_transaction_on_node(&node, watch_frames, command_frames)
                 .await;
@@ -1033,7 +1467,9 @@ impl redis_tower::TransactionExecutor for ClusterConnection {
             // future transaction before surfacing the original error.
             if let Err(RedisError::Redis(message)) = &result {
                 let redirect = Frame::Error(message.clone().into());
-                if let Some(Redirect::Moved { slot, addr }) = parse_redirect(&redirect) {
+                if let Some(Redirect::Moved { slot, addr }) =
+                    parse_redirect(&redirect).map(|redirect| redirect.resolved_against(&node))
+                {
                     let addr = self.remap_addr(&addr);
                     self.update_slot_owner(slot, &addr);
                 }
@@ -1069,9 +1505,17 @@ impl<Cmd: Command + 'static> tower_service::Service<Cmd> for ClusterConnection {
             ReplicaRoutingAttempt::new(Arc::clone(&self.read_routing), Some(replica))
         });
 
-        match self.nodes.get_mut(&route.addr) {
-            Some(conn) => {
-                let future = <RedisConnection as tower_service::Service<Cmd>>::call(conn, cmd);
+        // Service::call cannot reconnect, so a socket opened for the other role
+        // is treated like a missing one.
+        let wants_readonly = route.replica.is_some();
+        match self
+            .nodes
+            .get_mut(&route.addr)
+            .filter(|socket| socket.readonly == wants_readonly)
+        {
+            Some(socket) => {
+                let future =
+                    <RedisConnection as tower_service::Service<Cmd>>::call(&mut socket.conn, cmd);
                 Box::pin(async move {
                     let result = future.await;
                     if let Some(attempt) = attempt {
@@ -1176,6 +1620,68 @@ impl TransientError {
             Some("LOADING") => Some(Self::Loading),
             _ => None,
         }
+    }
+}
+
+/// Whether `frame` is a `READONLY` error: the node is a replica (or a master
+/// demoted by a failover) and rejected a write before executing it.
+pub(crate) fn is_readonly_reply(frame: &Frame) -> bool {
+    match frame {
+        Frame::Error(error) => error.starts_with(b"READONLY ") || error.as_ref() == b"READONLY",
+        _ => false,
+    }
+}
+
+/// Check a setup reply (`ASKING`, `READONLY`) is `OK`.
+pub(crate) fn parse_setup_ok(frame: Frame, expected: &'static str) -> Result<(), RedisError> {
+    match frame {
+        Frame::SimpleString(value) if value.as_ref() == b"OK" => Ok(()),
+        Frame::Error(error) => Err(RedisError::Redis(
+            String::from_utf8_lossy(&error).into_owned(),
+        )),
+        other => Err(RedisError::UnexpectedResponse {
+            expected,
+            actual: format!("{other:?}"),
+        }),
+    }
+}
+
+/// Reject `SELECT` of any database but 0 before it reaches a node.
+///
+/// Redis Cluster has only database 0. On a server that accepts other
+/// databases in cluster mode, a `SELECT` would switch one node's shared
+/// connection -- every caller's traffic through it -- while other nodes stay
+/// on database 0. `SELECT 0` is a no-op and still allowed.
+pub(crate) fn reject_nonzero_select(frame: &Frame) -> Result<(), RedisError> {
+    let Frame::Array(Some(items)) = frame else {
+        return Ok(());
+    };
+    let is_select = matches!(
+        items.first(),
+        Some(Frame::BulkString(Some(name)) | Frame::SimpleString(name))
+            if name.eq_ignore_ascii_case(b"SELECT")
+    );
+    let selects_zero = matches!(
+        items.get(1),
+        Some(Frame::BulkString(Some(db)) | Frame::SimpleString(db)) if db.as_ref() == b"0"
+    );
+    if is_select && !(items.len() == 2 && selects_zero) {
+        return Err(RedisError::Redis(
+            "ERR SELECT is not allowed in cluster mode: Redis Cluster has only database 0"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// The server's error text as a [`RedisError::Redis`].
+pub(crate) fn redis_error_from_reply(frame: &Frame) -> RedisError {
+    match frame {
+        Frame::Error(error) => RedisError::Redis(String::from_utf8_lossy(error).into_owned()),
+        other => RedisError::UnexpectedResponse {
+            expected: "error reply",
+            actual: format!("{other:?}"),
+        },
     }
 }
 
@@ -1292,6 +1798,15 @@ pub(crate) fn parse_cluster_url(
         return Err(RedisError::InvalidUrl(
             "unix socket URLs are not supported for cluster connections".to_string(),
         ));
+    }
+    // Every cluster node has only database 0, so a `/db` path cannot be
+    // honored; ignoring it would silently use database 0.
+    if let Some(database) = parsed.database
+        && database != 0
+    {
+        return Err(RedisError::InvalidUrl(format!(
+            "Redis Cluster has only database 0; remove /{database} from the URL"
+        )));
     }
     let seed = format!("{}:{}", parsed.host, parsed.port);
     let credentials = parsed.password.map(|password| match parsed.username {
@@ -1445,7 +1960,7 @@ mod tests {
         cluster.topology = topology;
         cluster.nodes.insert(
             addr.to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Unix(client))),
         );
         cluster
     }
@@ -1537,7 +2052,7 @@ mod tests {
         cluster.default_node = addr.clone();
         cluster.nodes.insert(
             addr.clone(),
-            RedisConnection::from_stream(RedisStream::Tcp(client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Tcp(client))),
         );
 
         let result = cluster
@@ -1637,7 +2152,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
-    async fn strict_replica_skips_unconnected_topology_replica_on_direct_connection() {
+    async fn strict_replica_skips_replica_in_reconnect_backoff_on_direct_connection() {
         let master_addr = "127.0.0.1:7000";
         let connected_replica_addr = "127.0.0.1:7002";
         let (master_client, mut master_server) = tokio::net::UnixStream::pair().unwrap();
@@ -1657,9 +2172,13 @@ mod tests {
         let mut cluster = cluster_over_stream(master_addr, master_client, topology);
         cluster.nodes.insert(
             connected_replica_addr.to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+            NodeSocket::replica(RedisConnection::from_stream(RedisStream::Unix(
+                replica_client,
+            ))),
         );
         cluster.read_preference = ReadPreference::Replica;
+        // 7001 has no socket and its last reconnect failed.
+        cluster.note_replica_reconnect_failure("127.0.0.1:7001");
         let routing_calls = Arc::new(AtomicUsize::new(0));
         let routing_candidates = Arc::new(Mutex::new(Vec::new()));
         cluster.read_routing = Arc::new(RecordingRouting {
@@ -1698,7 +2217,9 @@ mod tests {
         let mut cluster = cluster_over_stream(master_addr, master_client, topology);
         cluster.nodes.insert(
             replica_addr.to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+            NodeSocket::replica(RedisConnection::from_stream(RedisStream::Unix(
+                replica_client,
+            ))),
         );
         cluster.read_preference = ReadPreference::Replica;
         let outcomes = Arc::new(Mutex::new(Vec::new()));
@@ -1743,7 +2264,9 @@ mod tests {
             let mut cluster = cluster_over_stream(master_addr, master_client, topology);
             cluster.nodes.insert(
                 replica_addr.to_string(),
-                RedisConnection::from_stream(RedisStream::Unix(replica_client)),
+                NodeSocket::replica(RedisConnection::from_stream(RedisStream::Unix(
+                    replica_client,
+                ))),
             );
             cluster.read_preference = ReadPreference::Replica;
             cluster.read_routing = Arc::new(FirstReplicaRouting);
@@ -1801,7 +2324,9 @@ mod tests {
         );
         cluster.nodes.insert(
             target_addr.to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(target_client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Unix(
+                target_client,
+            ))),
         );
         cluster.max_redirects = 1;
         let slot = slot_for_key(b"foo");
@@ -1849,7 +2374,7 @@ mod tests {
         cluster.default_node = addr.clone();
         cluster.nodes.insert(
             addr.clone(),
-            RedisConnection::from_stream(RedisStream::Tcp(client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Tcp(client))),
         );
 
         let result = cluster
@@ -1891,7 +2416,7 @@ mod tests {
         cluster.default_node = addr.clone();
         cluster.nodes.insert(
             addr.clone(),
-            RedisConnection::from_stream(RedisStream::Tcp(client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Tcp(client))),
         );
 
         let result = cluster.execute(Ping::new()).await;
@@ -1965,7 +2490,9 @@ mod tests {
         );
         cluster.nodes.insert(
             target_addr.to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(target_client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Unix(
+                target_client,
+            ))),
         );
         let slot = slot_for_key(b"foo");
         let moved = format!("-MOVED {slot} {target_addr}\r\n");
@@ -2241,6 +2768,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: String::new(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: Some("127.0.0.1".to_string()),
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2260,6 +2789,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: String::new(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2289,6 +2820,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: String::new(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: Some(map),
             read_preference: ReadPreference::Master,
@@ -2319,6 +2852,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: String::new(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: Some("127.0.0.1".to_string()),
             address_map: Some(map),
             read_preference: ReadPreference::Master,
@@ -2409,6 +2944,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: "10.0.0.1:7000".to_string(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2435,6 +2972,8 @@ mod tests {
             nodes: HashMap::new(),
             topology: make_topology(),
             default_node: "10.0.0.1:7000".to_string(),
+            seed_addr: String::new(),
+            replica_backoff: HashMap::new(),
             host_override: None,
             address_map: None,
             read_preference: ReadPreference::Master,
@@ -2692,11 +3231,15 @@ mod tests {
         let mut cluster = ClusterConnection::empty_for_test();
         cluster.nodes.insert(
             "127.0.0.1:7000".to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(accepted_client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Unix(
+                accepted_client,
+            ))),
         );
         cluster.nodes.insert(
             "127.0.0.1:7001".to_string(),
-            RedisConnection::from_stream(RedisStream::Unix(rejected_client)),
+            NodeSocket::master(RedisConnection::from_stream(RedisStream::Unix(
+                rejected_client,
+            ))),
         );
 
         let accepted = tokio::spawn(async move {

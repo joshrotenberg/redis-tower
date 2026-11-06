@@ -252,6 +252,7 @@ mod client;
 mod connection;
 pub mod key_extractor;
 mod multiplexed;
+mod node_scope;
 pub mod pipeline;
 mod pubsub;
 pub mod scan_stream;
