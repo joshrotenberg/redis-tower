@@ -117,6 +117,10 @@ impl ClusterTopology {
             let owner = idx as u16;
             let start = range.start as usize;
             let end = (range.end as usize).min(SLOT_COUNT - 1);
+            if start > end {
+                // Empty or out-of-range: owns no slot in the table.
+                continue;
+            }
             for slot in slot_owner[start..=end].iter_mut() {
                 *slot = owner;
             }
@@ -188,6 +192,10 @@ impl ClusterTopology {
     /// the master that already owns it, or that is not currently mapped, is
     /// handled without splitting.
     pub fn reassign_slot(&mut self, slot: u16, master: NodeAddr) {
+        if usize::from(slot) >= SLOT_COUNT {
+            // Not a slot; recording it would index past the slot table.
+            return;
+        }
         let Some(idx) = self
             .slot_ranges
             .iter()
@@ -711,8 +719,14 @@ fn parse_cluster_slots(frame: &Frame) -> Result<ClusterTopology, RedisError> {
             }
         };
 
-        let start = extract_integer(&range_items[0])? as u16;
-        let end = extract_integer(&range_items[1])? as u16;
+        let start = extract_slot(&range_items[0])?;
+        let end = extract_slot(&range_items[1])?;
+        if start > end {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "slot range with start <= end",
+                actual: format!("{start}..{end}"),
+            });
+        }
         let master = parse_node_addr(&range_items[2])?;
 
         let mut replicas = Vec::new();
@@ -757,9 +771,27 @@ fn parse_node_addr(frame: &Frame) -> Result<NodeAddr, RedisError> {
         }
     };
 
-    let port = extract_integer(&items[1])? as u16;
+    let port = extract_integer(&items[1])?;
+    let port = u16::try_from(port).map_err(|_| RedisError::UnexpectedResponse {
+        expected: "port in 0..=65535",
+        actual: port.to_string(),
+    })?;
 
     Ok(NodeAddr { host, port })
+}
+
+/// A slot number from CLUSTER SLOTS, rejected rather than truncated when it is
+/// outside `0..16384`: a wrapped value would silently misroute, and an
+/// out-of-range one would index past the slot table.
+fn extract_slot(frame: &Frame) -> Result<u16, RedisError> {
+    let slot = extract_integer(frame)?;
+    u16::try_from(slot)
+        .ok()
+        .filter(|slot| usize::from(*slot) < SLOT_COUNT)
+        .ok_or_else(|| RedisError::UnexpectedResponse {
+            expected: "slot in 0..16384",
+            actual: slot.to_string(),
+        })
 }
 
 fn extract_integer(frame: &Frame) -> Result<i64, RedisError> {
@@ -802,6 +834,50 @@ mod tests {
             slot_ranges.push(Frame::Array(Some(range_items)));
         }
         Frame::Array(Some(slot_ranges))
+    }
+
+    fn raw_range(start: i64, end: i64, port: i64) -> Frame {
+        Frame::Array(Some(vec![Frame::Array(Some(vec![
+            Frame::Integer(start),
+            Frame::Integer(end),
+            Frame::Array(Some(vec![
+                Frame::BulkString(Some(Bytes::from("127.0.0.1"))),
+                Frame::Integer(port),
+                Frame::BulkString(Some(Bytes::from("node-id"))),
+            ])),
+        ]))]))
+    }
+
+    #[test]
+    fn out_of_range_slots_and_ports_are_rejected_not_truncated() {
+        for (start, end, port) in [
+            (-1, 100, 7000),
+            (0, 16_384, 7000),
+            (16_000, 100, 7000),
+            (0, 16_383, 70_000),
+            (0, 16_383, -1),
+        ] {
+            assert!(
+                parse_cluster_slots(&raw_range(start, end, port)).is_err(),
+                "{start}..{end} on port {port} must be rejected"
+            );
+        }
+        let topology = parse_cluster_slots(&raw_range(0, 16_383, 7000)).unwrap();
+        assert_eq!(topology.master_for_slot(16_383).unwrap().port, 7000);
+    }
+
+    #[test]
+    fn reassigning_a_slot_outside_the_table_is_ignored() {
+        let mut topology = parse_cluster_slots(&raw_range(0, 16_383, 7000)).unwrap();
+        topology.reassign_slot(
+            20_000,
+            NodeAddr {
+                host: "127.0.0.1".into(),
+                port: 7001,
+            },
+        );
+        assert_eq!(topology.master_for_slot(0).unwrap().port, 7000);
+        assert!(topology.master_for_slot(20_000).is_none());
     }
 
     #[test]

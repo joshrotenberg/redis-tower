@@ -32,8 +32,12 @@ pub enum RedisError {
     },
 
     /// RESP protocol error (parsing or serialization).
+    ///
+    /// Converting a [`ProtocolError`] with `?` produces this variant for
+    /// framing problems only; transport I/O surfaced through the codec becomes
+    /// [`RedisError::Connection`].
     #[error("protocol error: {0}")]
-    Protocol(#[from] ProtocolError),
+    Protocol(ProtocolError),
 
     /// Redis server returned an error response.
     #[error("redis error: {0}")]
@@ -145,6 +149,22 @@ pub enum RedisError {
 impl From<std::io::Error> for RedisError {
     fn from(source: std::io::Error) -> Self {
         RedisError::Connection { addr: None, source }
+    }
+}
+
+/// Framed transports report socket failures (resets, keepalive timeouts, EOF
+/// part-way through a reply) as [`ProtocolError::Io`]. Those are connection
+/// losses: classify them as [`RedisError::Connection`] so reconnect, retry, and
+/// "outcome unknown" handling see them. `ErrorKind::Unsupported` is the codec's
+/// own signal for RESP3 constructs it rejects, so it stays a protocol error.
+impl From<ProtocolError> for RedisError {
+    fn from(error: ProtocolError) -> Self {
+        match error {
+            ProtocolError::Io(source) if source.kind() != std::io::ErrorKind::Unsupported => {
+                RedisError::Connection { addr: None, source }
+            }
+            error => RedisError::Protocol(error),
+        }
     }
 }
 

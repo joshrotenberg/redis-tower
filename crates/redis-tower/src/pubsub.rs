@@ -750,7 +750,9 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
     /// Keeping the candidate transport local means a failed replay cannot
     /// leave `self` pointing at a partially subscribed session. Messages that
     /// arrive while the replay confirmations are read move across with the
-    /// successful candidate's delivery buffer.
+    /// successful candidate's delivery buffer, after any messages already
+    /// buffered from the previous transport (a proactive reconnect can run
+    /// while those are still undelivered).
     async fn install_replacement(&mut self, conn: RedisConnection) -> Result<(), RedisError> {
         let mut replacement = Self {
             framed: conn.into_framed()?,
@@ -759,7 +761,7 @@ impl<N: PubSubName> NamedPubSubConnection<N> {
         };
         replacement.resubscribe().await?;
         self.framed = replacement.framed;
-        self.buffered_frames = replacement.buffered_frames;
+        self.buffered_frames.extend(replacement.buffered_frames);
         Ok(())
     }
 
@@ -1321,6 +1323,68 @@ mod tests {
             .unwrap();
         assert!(pubsub.subscriptions().is_empty());
         replay.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proactive_reconnect_keeps_messages_buffered_from_the_old_transport() {
+        let (client, server) = redis_stream_pair().await;
+        let mut pubsub =
+            BinaryPubSubConnection::from_connection(RedisConnection::from_stream(client)).unwrap();
+        let mut server = Framed::new(server, redis_tower_protocol::RespCodec::new());
+        let old_server = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            // A message between the two confirmations is buffered in-process
+            // before the caller has read it.
+            for frame in [
+                Frame::Push(vec![bulk("subscribe"), bulk("a"), Frame::Integer(1)]),
+                Frame::Push(vec![bulk("message"), bulk("a"), bulk("before-rotation")]),
+                Frame::Push(vec![bulk("subscribe"), bulk("b"), Frame::Integer(2)]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            server
+        });
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            pubsub.subscribe_bytes(&[b"a", b"b"]),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let _old_server = old_server.await.unwrap();
+
+        let (replacement, server) = redis_stream_pair().await;
+        let replacement = std::sync::Mutex::new(Some(replacement));
+        let factory = move || {
+            let stream = replacement.lock().unwrap().take().unwrap();
+            async move { Ok(RedisConnection::from_stream(stream)) }
+        };
+        let mut server = Framed::new(server, redis_tower_protocol::RespCodec::new());
+        let replay = tokio::spawn(async move {
+            let _ = server.next().await.unwrap().unwrap();
+            for frame in [
+                Frame::Push(vec![bulk("subscribe"), bulk("a"), Frame::Integer(1)]),
+                Frame::Push(vec![bulk("message"), bulk("a"), bulk("during-replay")]),
+                Frame::Push(vec![bulk("subscribe"), bulk("b"), Frame::Integer(2)]),
+            ] {
+                server.send(frame).await.unwrap();
+            }
+            server
+        });
+        tokio::time::timeout(Duration::from_secs(1), pubsub.reconnect_with(&factory))
+            .await
+            .unwrap()
+            .unwrap();
+        let _replacement_server = replay.await.unwrap();
+
+        for expected in [&b"before-rotation"[..], b"during-replay"] {
+            let message = tokio::time::timeout(Duration::from_secs(1), pubsub.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.payload.as_ref(), expected);
+        }
     }
 
     #[test]

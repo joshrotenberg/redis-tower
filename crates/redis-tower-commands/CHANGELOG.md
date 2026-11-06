@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- redact the `AUTH`/`AUTH2` password in `Migrate`'s `Debug` output
+
 ## [0.1.3](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-commands-v0.1.2...redis-tower-commands-v0.1.3) - 2026-10-01
 
 ### Added

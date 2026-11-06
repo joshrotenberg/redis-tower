@@ -91,16 +91,32 @@ impl MonitorEvent {
             .ok_or_else(|| malformed("MONITOR header has no database delimiter"))?;
         let database = parse_i64(&header[1..database_end], "invalid MONITOR database number")?;
 
+        // Redis writes the source verbatim (a Unix socket path may contain
+        // `] "`), but always escapes arguments, so argument text such as
+        // `"[tag] "` can also contain the delimiter. Take the first delimiter
+        // whose remainder parses as quoted arguments: argument bytes can then
+        // never move the header boundary, and unusual socket paths still parse.
+        // The opening quote stays with the arguments so the quoted-argument
+        // parser validates it and every separator.
         let source_start = database_end + 1;
-        let header_end = rfind_subslice(&header[source_start..], b"] \"")
-            .map(|position| source_start + position)
-            .ok_or_else(|| malformed("MONITOR header has no closing bracket"))?;
+        let mut search_from = source_start;
+        let mut last_error = None;
+        let (header_end, mut values) = loop {
+            let Some(position) = find_subslice(&header[search_from..], b"] \"") else {
+                return Err(last_error
+                    .unwrap_or_else(|| malformed("MONITOR header has no closing bracket")));
+            };
+            let header_end = search_from + position;
+            match parse_quoted_arguments(&header[header_end + 2..]) {
+                Ok(values) => break (header_end, values),
+                Err(error) => {
+                    last_error = Some(error);
+                    search_from = header_end + 1;
+                }
+            }
+        };
         let source = Bytes::copy_from_slice(&header[source_start..header_end]);
 
-        // Keep the opening quote: the quoted-argument parser validates it and
-        // all remaining separators rather than relying on whitespace splitting.
-        let encoded_arguments = &header[header_end + 2..];
-        let mut values = parse_quoted_arguments(encoded_arguments)?;
         if values.is_empty() {
             return Err(malformed("MONITOR line contains no command"));
         }
@@ -298,10 +314,10 @@ fn find_byte(bytes: &[u8], needle: u8) -> Option<usize> {
     bytes.iter().position(|byte| *byte == needle)
 }
 
-fn rfind_subslice(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+fn find_subslice(bytes: &[u8], needle: &[u8]) -> Option<usize> {
     bytes
         .windows(needle.len())
-        .rposition(|window| window == needle)
+        .position(|window| window == needle)
 }
 
 fn malformed(actual: &'static str) -> RedisError {
@@ -355,6 +371,27 @@ mod tests {
         );
         assert_eq!(event.command, Bytes::from_static(b"ECHO"));
         assert_eq!(event.arguments, vec![Bytes::from_static(b"edge")]);
+    }
+
+    #[test]
+    fn arguments_containing_the_header_delimiter_do_not_move_the_header() {
+        // Any client can write a value ending in `] `; its closing quote
+        // forms `] "` inside the argument section.
+        let event = parse(br#"1700000000.000001 [0 127.0.0.1:5000] "SET" "k" "[tag] ""#);
+        assert_eq!(event.source, Bytes::from_static(b"127.0.0.1:5000"));
+        assert_eq!(event.command, Bytes::from_static(b"SET"));
+        assert_eq!(
+            event.arguments,
+            vec![Bytes::from_static(b"k"), Bytes::from_static(b"[tag] ")]
+        );
+
+        let event = parse(br#"1.000001 [3 lua] "SET" "[tag] " "after""#);
+        assert_eq!(event.database, 3);
+        assert_eq!(event.source, Bytes::from_static(b"lua"));
+        assert_eq!(
+            event.arguments,
+            vec![Bytes::from_static(b"[tag] "), Bytes::from_static(b"after")]
+        );
     }
 
     #[test]

@@ -3,8 +3,8 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use futures::Sink;
 use futures::SinkExt;
+use futures::{Sink, Stream};
 use socket2::{Socket, TcpKeepalive};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -116,6 +116,21 @@ fn apply_keepalive(stream: TcpStream, config: &KeepaliveConfig) -> Result<TcpStr
     Ok(TcpStream::from_std(std_stream)?)
 }
 
+/// Deliver a push frame to the registered channels.
+fn route_push(
+    frame: Frame,
+    push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    received_push_tx: &Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
+) {
+    let received_at = std::time::Instant::now();
+    if let Some(ref tx) = *push_tx {
+        let _ = tx.send(frame.clone());
+    }
+    if let Some(ref tx) = *received_push_tx {
+        let _ = tx.send(ReceivedPushFrame { received_at, frame });
+    }
+}
+
 /// Read the next non-push response frame, routing push frames to the channel.
 async fn read_response_from(
     framed: &mut Framed<RedisStream, RespCodec>,
@@ -130,18 +145,82 @@ async fn read_response_from(
             .map_err(RedisError::from)?;
 
         if let Frame::Push(_) = &frame {
-            let received_at = std::time::Instant::now();
-            if let Some(ref tx) = *push_tx {
-                let _ = tx.send(frame.clone());
-            }
-            if let Some(ref tx) = *received_push_tx {
-                let _ = tx.send(ReceivedPushFrame { received_at, frame });
-            }
+            route_push(frame, push_tx, received_push_tx);
             continue;
         }
 
         return Ok(frame);
     }
+}
+
+/// Write `frames` and read one non-push reply per frame, advancing both
+/// directions in every poll.
+///
+/// Writing a whole batch before reading any reply can deadlock against a peer
+/// that applies backpressure (managed services and proxies stop reading while
+/// their replies go unread): the client blocks writing a large value while the
+/// peer blocks writing replies to earlier commands. Draining replies while
+/// writes are pending keeps both sides moving.
+async fn exchange_pipeline(
+    framed: &mut Framed<RedisStream, RespCodec>,
+    frames: Vec<Frame>,
+    push_tx: &Option<tokio::sync::mpsc::UnboundedSender<Frame>>,
+    received_push_tx: &Option<tokio::sync::broadcast::Sender<ReceivedPushFrame>>,
+) -> Result<Vec<Frame>, RedisError> {
+    let count = frames.len();
+    let mut unsent = frames.into_iter();
+    let mut next = unsent.next();
+    let mut flushed = count == 0;
+    let mut responses = Vec::with_capacity(count);
+
+    std::future::poll_fn(|cx| {
+        // Write side: hand frames to the sink while it has room, then flush.
+        while let Some(frame) = next.take() {
+            match Pin::new(&mut *framed).poll_ready(cx) {
+                Poll::Ready(Ok(())) => {
+                    if let Err(error) = Pin::new(&mut *framed).start_send(frame) {
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    next = unsent.next();
+                }
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Pending => {
+                    next = Some(frame);
+                    break;
+                }
+            }
+        }
+        if next.is_none() && !flushed {
+            match Pin::new(&mut *framed).poll_flush(cx) {
+                Poll::Ready(Ok(())) => flushed = true,
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+                Poll::Pending => {}
+            }
+        }
+
+        // Read side: drain every reply that has already arrived.
+        while responses.len() < count {
+            match Pin::new(&mut *framed).poll_next(cx) {
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Frame::Push(_) = &frame {
+                        route_push(frame, push_tx, received_push_tx);
+                    } else {
+                        responses.push(frame);
+                    }
+                }
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
+                Poll::Ready(None) => return Poll::Ready(Err(RedisError::ConnectionClosed)),
+                Poll::Pending => break,
+            }
+        }
+
+        if flushed && responses.len() == count {
+            Poll::Ready(Ok(std::mem::take(&mut responses)))
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
 }
 
 /// A single Redis connection implementing `tower::Service<Cmd>`.
@@ -467,6 +546,16 @@ impl RedisConnection {
     ///
     /// The configured RESP decode limits are installed before any server data
     /// is read, including `CLIENT SETINFO` and protocol-negotiation replies.
+    ///
+    /// This constructor does not authenticate. Any
+    /// [`ConnectionSetup`](crate::ConnectionSetup) in `config` runs right after
+    /// protocol negotiation, so on a server that requires `AUTH` it fails with
+    /// `NOAUTH`. When you authenticate on the returned connection yourself,
+    /// connect with `config.clone().with_setup(ConnectionSetup::default())`,
+    /// then call [`apply_setup`](Self::apply_setup) with `config.setup()` after
+    /// `AUTH`, `SELECT`, and protocol negotiation. URL constructors such as
+    /// [`connect_url_with_config`](Self::connect_url_with_config) authenticate
+    /// first and need no such step.
     pub async fn connect_with_config(
         addr: &str,
         config: &ConnectionConfig,
@@ -563,6 +652,16 @@ impl RedisConnection {
     /// The TCP connect timeout, keepalive policy, protocol negotiation, and
     /// RESP decode limits all come from `config`. The connect timeout covers
     /// the TCP handshake only, matching [`connect_tls_with_timeout`](Self::connect_tls_with_timeout).
+    ///
+    /// This constructor does not authenticate. Any
+    /// [`ConnectionSetup`](crate::ConnectionSetup) in `config` runs right after
+    /// protocol negotiation, so on a server that requires `AUTH` it fails with
+    /// `NOAUTH`. When you authenticate on the returned connection yourself,
+    /// connect with `config.clone().with_setup(ConnectionSetup::default())`,
+    /// then call [`apply_setup`](Self::apply_setup) with `config.setup()` after
+    /// `AUTH`, `SELECT`, and protocol negotiation. URL constructors such as
+    /// [`connect_url_with_config`](Self::connect_url_with_config) authenticate
+    /// first and need no such step.
     #[cfg(any(feature = "tls-native-tls", feature = "tls-rustls"))]
     #[cfg_attr(
         docsrs,
@@ -962,7 +1061,7 @@ impl RedisConnection {
     pub async fn hello(&mut self, version: u8) -> Result<Frame, RedisError> {
         let frame = array(vec![bulk("HELLO"), bulk(version.to_string())]);
         let response = {
-            let framed = self.framed.as_mut().expect("connection not in flight");
+            let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
             framed.send(frame).await.map_err(RedisError::from)?;
             read_response_from(framed, &self.push_tx, &self.received_push_tx).await?
         };
@@ -1138,9 +1237,10 @@ impl RedisConnection {
     /// For values approaching 10MB or larger, the sequential send-then-read
     /// pattern can cause TCP backpressure issues on some managed Redis
     /// services (e.g., ElastiCache) if the write buffer fills before the
-    /// response starts being read. Consider using `AutoPipelineService`
-    /// for large-value workloads, or splitting large values across
-    /// multiple keys.
+    /// response starts being read. [`execute_pipeline`](Self::execute_pipeline),
+    /// and the `AutoPipelineService` built on it, read replies while writes
+    /// are still in progress; prefer them for large-value workloads, or split
+    /// large values across multiple keys.
     ///
     /// Cancelling this future after dispatch closes the connection. The
     /// transport is checked out of `self` until a complete response has been
@@ -1212,26 +1312,12 @@ impl RedisConnection {
     /// Cancelling before every response has been read closes the connection.
     pub async fn execute_pipeline(&mut self, frames: Vec<Frame>) -> Result<Vec<Frame>, RedisError> {
         self.ensure_framed().await?;
-        let count = frames.len();
         let push_tx = self.push_tx.clone();
         let received_push_tx = self.received_push_tx.clone();
         let mut framed = self.framed.take().expect("framed transport was ensured");
 
-        // Send all frames, buffering writes.
-        for (i, frame) in frames.into_iter().enumerate() {
-            if i < count - 1 {
-                framed.feed(frame).await.map_err(RedisError::from)?;
-            } else {
-                framed.send(frame).await.map_err(RedisError::from)?;
-            }
-        }
-
-        // Read all responses, routing push frames to the channel.
-        let mut responses = Vec::with_capacity(count);
-        for _ in 0..count {
-            let response = read_response_from(&mut framed, &push_tx, &received_push_tx).await?;
-            responses.push(response);
-        }
+        // Write and read concurrently, routing push frames to the channel.
+        let responses = exchange_pipeline(&mut framed, frames, &push_tx, &received_push_tx).await?;
 
         self.framed = Some(framed);
         Ok(responses)
@@ -1348,7 +1434,7 @@ impl RedisConnection {
     /// they mean the connection is unusable or its configured limits were
     /// violated, rather than that the optional command was rejected.
     async fn identify_client(&mut self) -> Result<(), RedisError> {
-        let framed = self.framed.as_mut().unwrap();
+        let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
         // CLIENT SETINFO LIB-NAME redis-tower
         framed
             .send(array(vec![
@@ -1376,7 +1462,7 @@ impl RedisConnection {
 
     /// Apply static URL authentication before the remaining URL setup.
     async fn post_connect_authentication(&mut self, url: &RedisUrl) -> Result<(), RedisError> {
-        let framed = self.framed.as_mut().expect("connection not in flight");
+        let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
 
         if let Some(ref password) = url.password {
             let mut auth_args = vec![bulk("AUTH")];
@@ -1403,7 +1489,7 @@ impl RedisConnection {
     /// Select the URL database after authentication and before negotiation.
     async fn post_connect_database(&mut self, database: Option<u16>) -> Result<(), RedisError> {
         if let Some(db) = database {
-            let framed = self.framed.as_mut().expect("connection not in flight");
+            let framed = self.framed.as_mut().ok_or(RedisError::ConnectionClosed)?;
             framed
                 .send(array(vec![bulk("SELECT"), bulk(db.to_string())]))
                 .await
@@ -1552,6 +1638,29 @@ mod tests {
             let (server, _) = listener.accept().await.unwrap();
             (RedisStream::Tcp(client), RedisStream::Tcp(server))
         }
+    }
+
+    #[tokio::test]
+    async fn protocol_negotiation_on_a_closed_transport_returns_an_error() {
+        let (client, server) = stream_pair().await;
+        let server_task = tokio::spawn(async move {
+            // Read one command, then hang up without replying.
+            let mut framed = Framed::new(server, RespCodec::new());
+            let _ = framed.next().await;
+        });
+        let mut connection = RedisConnection::from_stream(client);
+        assert!(connection.execute(DummyCmd).await.is_err());
+        server_task.await.unwrap();
+
+        // The failed exchange consumed the transport; public negotiation must
+        // report that instead of panicking.
+        let negotiated =
+            tokio::spawn(
+                async move { connection.negotiate_protocol(ProtocolVersion::Resp3).await },
+            )
+            .await
+            .expect("negotiate_protocol must not panic on a closed transport");
+        assert!(matches!(negotiated, Err(RedisError::ConnectionClosed)));
     }
 
     async fn write_all(stream: &mut RedisStream, mut bytes: &[u8]) {

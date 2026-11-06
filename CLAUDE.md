@@ -389,13 +389,13 @@ integration tests remain `#[ignore]` and need Redis Stack (`-- --ignored`).
 
 The complete workspace is published and searchable on crates.io. These versions
 were verified against workspace manifests, crates.io search, and GitHub releases
-on 2026-09-25:
+on 2026-10-22:
 
 | Package group | Current version |
 |---|---:|
-| `redis-tower-protocol`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.3 |
-| `redis-tower-core`, `redis-tower-commands`, `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives` | 0.1.2 |
-| `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.1 |
+| `redis-tower-protocol`, `redis-tower`, `redis-tower-cluster`, `redis-tower-sentinel` | 0.1.4 |
+| `redis-tower-core`, `redis-tower-commands`, `redis-tower-sync`, `redis-tower-modules`, `redis-tower-client`, `redis-tower-primitives` | 0.1.3 |
+| `redis-tower-auth-aws`, `redis-tower-auth-azure`, `redis-tower-test` | 0.1.2 |
 
 The Release workflow remains manual and separates release-PR preparation from
 publication. Follow `docs/RELEASING.md`; do not treat this status snapshot as an

@@ -395,6 +395,7 @@ jobs:
         run: |
           cargo test -p redis-tower-protocol --all-features --test frame_boundaries
           cargo test -p redis-tower-core --all-features --test protocol_boundaries
+          cargo test -p redis-tower-core --all-features --test connection_loss
 
       - name: Run command integration regressions
         if: matrix.rust == 'stable'
@@ -472,6 +473,9 @@ jobs:
 
       - name: Run cluster connection-setup regressions
         run: cargo test -p redis-tower-cluster --test connection_setup --all-features -- --test-threads=1
+
+      - name: Run cluster topology-recovery regressions
+        run: cargo test -p redis-tower-cluster --test topology_recovery --all-features -- --test-threads=1
 
       - name: Run sentinel integration tests
         run: cargo test -p redis-tower-sentinel --test 'sentinel_*' --all-features -- --ignored --test-threads=1
@@ -555,6 +559,9 @@ jobs:
 
       - name: Collect cluster connection-setup coverage
         run: cargo llvm-cov --no-report -p redis-tower-cluster --test connection_setup --all-features -- --test-threads=1
+
+      - name: Collect cluster topology-recovery coverage
+        run: cargo llvm-cov --no-report -p redis-tower-cluster --test topology_recovery --all-features -- --test-threads=1
 
       - name: Collect sentinel integration coverage
         run: cargo llvm-cov --no-report -p redis-tower-sentinel --test 'sentinel_*' --all-features -- --ignored --test-threads=1

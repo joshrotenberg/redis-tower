@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - defer managed stream-consumer automatic `XACK` until the caller advances
   past the delivered item, leaving it pending and recoverable if the stream is
   dropped before that point (#734)
+- require `metrics` 0.24.4 for the `metrics` feature; the metrics layer uses
+  `description:`/`unit:` macro arguments that 0.24.0–0.24.3 reject, so those
+  versions satisfied the old requirement but failed to compile
 
 ## [0.1.4](https://github.com/joshrotenberg/redis-tower/compare/redis-tower-v0.1.3...redis-tower-v0.1.4) - 2026-10-01
 

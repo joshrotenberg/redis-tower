@@ -300,7 +300,10 @@ async fn redis_8_4_vector_range_and_hybrid_search() {
         .vector_score_as("vector_score")
         .limit(0, 2);
         let response = conn.execute(basic_hybrid).await.unwrap();
-        assert!(matches!(response, Frame::Map(_) | Frame::Array(Some(_))));
+        assert!(
+            matches!(response, Frame::Map(_) | Frame::Array(Some(_))),
+            "unexpected FT.HYBRID KNN reply: {response:?}"
+        );
 
         let range_response = conn
             .execute(
@@ -316,10 +319,12 @@ async fn redis_8_4_vector_range_and_hybrid_search() {
             )
             .await
             .unwrap();
-        assert!(matches!(
-            range_response,
-            Frame::Map(_) | Frame::Array(Some(_))
-        ));
+        // Nightly 8.8.3 once returned a non-aggregate reply here that did
+        // not reproduce locally; keep the frame in the failure message.
+        assert!(
+            matches!(range_response, Frame::Map(_) | Frame::Array(Some(_))),
+            "unexpected FT.HYBRID RANGE reply: {range_response:?}"
+        );
 
         if version >= (8, 8, 0) {
             let profiled = FtProfile::hybrid(
@@ -338,7 +343,10 @@ async fn redis_8_4_vector_range_and_hybrid_search() {
             )
             .limited();
             let response = conn.execute(profiled).await.unwrap();
-            assert!(matches!(response, Frame::Map(_) | Frame::Array(Some(_))));
+            assert!(
+                matches!(response, Frame::Map(_) | Frame::Array(Some(_))),
+                "unexpected FT.PROFILE HYBRID reply: {response:?}"
+            );
         }
 
         conn.execute(FtDropIndex::new(index).dd()).await.unwrap();
