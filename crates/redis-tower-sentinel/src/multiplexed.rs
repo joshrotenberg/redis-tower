@@ -214,25 +214,16 @@ impl MultiplexedSentinelClientBuilder {
     pub async fn connect(
         self,
     ) -> Result<MultiplexedSentinelClient<AutoPipelineService>, RedisError> {
-        let initial = async {
-            let master_addr = discovery::discover_master_with_config(
-                &self.sentinel_addrs,
-                &self.master_name,
-                &self.config,
-            )
-            .await?;
-            discovery::connect_hop(
-                &master_addr,
-                self.config.node_credentials.as_ref(),
-                self.config.resp_limits,
-                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-                self.config.node_tls.as_ref(),
-            )
-            .await
-        }
+        // Verify ROLE so a stale first sentinel cannot bind the client to a
+        // replica; the next sentinel's answer is tried instead.
+        let initial = discovery::connect_verified_master_once(
+            &self.sentinel_addrs,
+            &self.master_name,
+            &self.config,
+        )
         .await;
         let conn = match initial {
-            Ok(conn) => conn,
+            Ok((conn, _addr)) => conn,
             Err(error) => {
                 if let Some(events) = &self.connection_events {
                     events.publish_with(|| ConnectionEvent::ConnectFailed {
@@ -571,15 +562,10 @@ impl MultiplexedSentinelClient<AutoPipelineService> {
             .iter()
             .map(|a| a.as_ref().to_string())
             .collect();
-        let config = SentinelConfig::default();
-        let master_addr =
-            discovery::discover_master_with_config(&addrs, master_name, &config).await?;
-        let conn = discovery::connect_hop(
-            &master_addr,
-            None,
-            config.resp_limits,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            None,
+        let (conn, _addr) = discovery::connect_verified_master_once(
+            &addrs,
+            master_name,
+            &SentinelConfig::default(),
         )
         .await?;
         Ok(Self {
@@ -820,6 +806,12 @@ where
     S::Future: Send + 'static,
     Cmd: Command,
 {
+    // The master and replica workers are shared by every clone, exactly as in
+    // `MultiplexedClient`; their frame services reject the other
+    // connection-breaking commands.
+    if cmd.is_blocking() {
+        return Err(redis_tower::shared_connection_support::reject_blocking_command(cmd.name()));
+    }
     let operation = async move {
         std::future::poll_fn(|cx| <CommandAdapter<S> as Service<Cmd>>::poll_ready(&mut svc, cx))
             .await?;

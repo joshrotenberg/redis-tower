@@ -1193,6 +1193,92 @@ async fn mux_cluster_shutdown_drains_and_last_clone_wins() {
     clone.shutdown().await;
 }
 
+/// redis-database-mcp-rs#125: a host whose router holds clones retains the
+/// shutdown handle and tears the client down without recovering the final
+/// clone; every clone then fails fast instead of reviving per-node workers.
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_shutdown_handle_stops_router_held_clones() {
+    let cluster = mux_cluster_conn().await;
+    let shutdown = cluster.shutdown_handle();
+    let router: Arc<MultiplexedClusterClient> = Arc::new(cluster.clone());
+    for i in 0..8 {
+        router
+            .execute(Set::new(format!("mux_cluster_handle:{i}"), "v"))
+            .await
+            .unwrap();
+    }
+    for i in 0..8 {
+        cluster
+            .execute(Del::new(format!("mux_cluster_handle:{i}")))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        shutdown.shutdown_timeout(Duration::from_secs(10)).await,
+        redis_tower::ShutdownOutcome::Drained
+    );
+    assert!(matches!(
+        router.execute(Get::new("mux_cluster_handle:0")).await,
+        Err(redis_tower::RedisError::ConnectionClosed)
+    ));
+    assert!(matches!(
+        cluster.refresh_topology().await,
+        Err(redis_tower::RedisError::ConnectionClosed)
+    ));
+    drop(router);
+    cluster.shutdown().await;
+}
+
+/// Per-node workers are shared by every clone, so commands that would block
+/// or desynchronize them are rejected before dispatch and the client keeps
+/// serving other callers.
+#[tokio::test]
+#[ignore]
+async fn mux_cluster_rejects_connection_breaking_commands() {
+    let cluster = mux_cluster_conn().await;
+    let key = "{mux_cluster_guard}:k";
+    cluster.execute(Set::new(key, "v")).await.unwrap();
+
+    let started = Instant::now();
+    for result in [
+        cluster
+            .execute(BLPop::new("{mux_cluster_guard}:q", 0.0))
+            .await
+            .map(|_| ()),
+        cluster
+            .execute(
+                RawCommand::new("BLPOP")
+                    .arg("{mux_cluster_guard}:q")
+                    .arg("0"),
+            )
+            .await
+            .map(|_| ()),
+        cluster
+            .execute(RawCommand::new("SUBSCRIBE").arg("mux_cluster_guard"))
+            .await
+            .map(|_| ()),
+        cluster.execute(RawCommand::new("RESET")).await.map(|_| ()),
+        cluster
+            .execute(RawCommand::new("CLIENT").arg("REPLY").arg("SKIP"))
+            .await
+            .map(|_| ()),
+    ] {
+        assert!(
+            matches!(&result, Err(redis_tower::RedisError::Redis(message)) if message.contains("shared multiplexed")),
+            "{result:?}"
+        );
+    }
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        cluster.execute(Get::new(key)).await.unwrap(),
+        Some(Bytes::from("v"))
+    );
+    cluster.execute(Del::new(key)).await.unwrap();
+    cluster.shutdown().await;
+}
+
 /// Explicit cluster pipelines group by concrete node while preserving the
 /// caller's typed result order. The split helpers intentionally relax Redis's
 /// single-slot atomicity rule, so exercise their duplicate, missing-key, and

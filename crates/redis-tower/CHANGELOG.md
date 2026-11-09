@@ -11,9 +11,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - declarative connection-local setup retained by built-in address, URL, and
   credential factories across standalone reconnects
+- `AutoPipelineShutdownHandle::shutdown_timeout(grace)` and `abort()`, plus
+  the `ShutdownOutcome` they report, so embedding hosts can bound teardown even
+  when a server stops answering and `response_timeout` is `None`
+  (redis-developer/redis-database-mcp-rs#125)
+
+### Changed
+
+- a factory-backed `MultiplexedClient` (and `connect_lazy`, and the per-node
+  and Sentinel workers built on `AutoPipelineService::with_factory`) now fails
+  queued and new commands with `ConnectionClosed` once a reconnect attempt has
+  failed, while reconnecting continues in the background. With the default
+  unlimited retries and no connect or response timeout, callers were
+  previously parked until the server came back, unlike
+  `ResilientRedisClient`. Commands queued when the connection drops still wait
+  for the first attempt, so an immediate reconnect stays transparent
+  (redis-rs #2298, #2269)
 
 ### Fixed
 
+- reject commands that break a connection shared by every clone before they
+  reach the wire, with an error naming the dedicated API: subscriptions (RESP3
+  replies are pushes, so the caller and every later caller hung; a raw
+  multi-channel RESP2 `SUBSCRIBE` left confirmations that became the next
+  caller's reply, redis-rs #2423), `MONITOR`, `SYNC`/`PSYNC`, `RESET` (it
+  switched every clone of a read-only ACL user to `default`), `HELLO`, `QUIT`,
+  `CLIENT REPLY` (one caller received another's value), blocking commands
+  including `XREAD`/`XREADGROUP ... BLOCK`, `WAIT`, `WAITAOF`, and any typed command whose
+  `is_blocking()` is true, and stand-alone `MULTI`/`EXEC`/`DISCARD`/`WATCH`.
+  This applies to `AutoPipelineService` and therefore to `MultiplexedClient`,
+  `CachedMultiplexedClient`, and layered clients. Explicit pipelines may still
+  carry a complete `WATCH`/`MULTI`/`EXEC` block but not one left open or with
+  malformed `MULTI`/`EXEC`/`DISCARD`/`WATCH` arguments. `AUTH` stays allowed
+  for credential re-authentication
+- discard a shared connection whose transaction replies show it was left
+  inside `MULTI`: Redis refuses a `DISCARD` (wrong arity or ACL denial), and on
+  older servers an `EXEC`, without ending the transaction, so later callers'
+  commands were queued instead of executed. Callers batched behind the refused
+  terminator fail with `ConnectionClosed` instead of receiving `QUEUED`; a
+  factory-backed worker reconnects and a fixed one closes
+- stop graceful shutdown from waiting forever on an in-flight batch whose
+  callers have all gone away; with no response timeout, one abandoned request
+  to an unresponsive server made `AutoPipelineShutdownHandle::shutdown()` hang.
+  The batch is now abandoned and its connection discarded
+- warn about an `AutoPipelineService` dropped before `shutdown()` only when
+  requests are still queued or in flight; idle, healthy teardown (for example
+  a router releasing its clone after the owner's non-final `shutdown()`, or a
+  service dropped before its worker first ran) no longer logs a spurious
+  warning
 - defer managed stream-consumer automatic `XACK` until the caller advances
   past the delivered item, leaving it pending and recoverable if the stream is
   dropped before that point (#734)
