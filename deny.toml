@@ -14,7 +14,15 @@ all-features = true
 # yanked crates are errors by default. Add an entry here -- with a comment
 # explaining the review decision -- only when an advisory has been assessed
 # and consciously accepted.
-ignore = []
+ignore = [
+  # pin-utils is unmaintained (upstream archived 2026-10-01); no vulnerability
+  # is reported. It reaches only redis-tower-auth-aws, through
+  # aws-smithy-http 0.63 and aws-smithy-types 1.4 under the exact
+  # aws-sigv4 =1.3.8 / aws-credential-types =1.2.11 pins. Later SDK releases
+  # drop it but declare rust-version 1.94.1, above the 1.88 MSRV. Remove this
+  # entry when the MSRV or those pins move.
+  { id = "RUSTSEC-2026-0441", reason = "unmaintained pin-utils via MSRV-pinned AWS SDK; no safe upgrade at MSRV 1.88" },
+]
 
 [licenses]
 # Only permissive, procurement-friendly licenses are allowed. A dependency
