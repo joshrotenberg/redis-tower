@@ -205,10 +205,9 @@ fn frame_len_observed(
                     if count > MAX_COLLECTION_SIZE {
                         return Err(ParseError::BadLength.into());
                     }
-                    if open.len() >= limits.max_depth {
-                        return Err(ProtocolError::NestingTooDeep {
-                            max: limits.max_depth,
-                        });
+                    let max_depth = limits.max_depth.min(crate::codec::MAX_DEPTH_CEILING);
+                    if open.len() >= max_depth {
+                        return Err(ProtocolError::NestingTooDeep { max: max_depth });
                     }
                     let children = if tag == b'%' {
                         count.checked_mul(2).ok_or(ParseError::BadLength)?

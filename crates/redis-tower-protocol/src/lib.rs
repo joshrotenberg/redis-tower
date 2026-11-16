@@ -64,7 +64,9 @@ mod error;
 pub mod helpers;
 mod preflight;
 
-pub use codec::{DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, RespCodec, RespLimits};
+pub use codec::{
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_FRAME_SIZE, MAX_DEPTH_CEILING, RespCodec, RespLimits,
+};
 pub use error::ProtocolError;
 
 // Re-export the frame type and serializer directly from resp-rs.
