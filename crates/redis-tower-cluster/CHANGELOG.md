@@ -11,9 +11,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - connection-setup/client-name builder policies replayed on discovery, masters,
   replicas, redirected/topology-created nodes, dedicated sockets, and replacements
+- `MultiplexedClusterClientBuilder::pubsub_reconnect_config`, the retry policy
+  for re-establishing dedicated Pub/Sub sessions. It defaults to the node
+  reconnect backoff and connect timeout with no retry limit
+
+### Changed
+
+- run node-scoped keyless commands on every node of their scope with combined
+  replies in both clients, instead of on the single keyless default master
+  where they returned a normal-looking but partial reply (redis-rs #2474):
+  `DBSIZE` is summed across masters; `FLUSHALL`, `FLUSHDB`, `SAVE`, `BGSAVE`,
+  and `FUNCTION LOAD`/`FLUSH`/`DELETE`/`RESTORE` run on every master; and
+  `SCRIPT LOAD`/`FLUSH`/`EXISTS` and `CONFIG SET`/`RESETSTAT`/`REWRITE` also
+  run on connected replicas (`SCRIPT EXISTS` is ANDed element-wise). A master
+  that answers `READONLY` is replaced by the promoted one after a refresh, and
+  a node answering `TRYAGAIN`, `CLUSTERDOWN`, or `LOADING` is retried as
+  ordinary routing does, without re-sending to nodes that answered. A
+  fan-out is not atomic: the first error is returned after every node was
+  attempted. Other keyless commands, including node-local diagnostics, still
+  use the default node, and explicit pipelines do not fan out
 
 ### Fixed
 
+- resubscribe a sharded Pub/Sub session on the slot's new owner when the old
+  owner drops the subscription itself (slot migration, graceful failover). The
+  socket stays open in that case, so the session previously went silent
+  forever unless other traffic happened to refresh the topology
+- refresh the topology between Pub/Sub reconnect attempts and retry under
+  `pubsub_reconnect_config` instead of the node workers' ~1.5 s budget: a
+  sharded session kept dialing a killed owner from its cached topology and gave
+  up long before any failover could finish. A regular session pinned to a node
+  survives the node's restart and ends with an error once the node has left the
+  topology instead of retrying forever
+- make sharded Pub/Sub recovery cancel-safe: a topology change observed by a
+  `next_message` call that was then cancelled (for example by a caller's
+  timeout) was marked seen and lost, leaving the session on the old owner
+- ask nodes the topology lists without a connection (replicas under
+  `ReadPreference::Master`) during a topology refresh in both clients; in a
+  one-shard cluster whose master died, no other node was left to ask
+- check the `ASKING` reply in `ClusterConnection` before trusting the
+  migrated command's reply (redis-rs #2305); a rejected `ASKING` was ignored
+- return the server's own last reply (`MOVED ...`, `ASK ...`, `TRYAGAIN ...`,
+  `CLUSTERDOWN ...`) when the redirect budget is exhausted, in commands,
+  pipelines, and sharded Pub/Sub subscribes, instead of replacing it with
+  "too many redirects (N)"; under `max_redirects(0)` that was every redirect,
+  and callers could not tell a moved slot from a down cluster
+- schedule a topology refresh when a pipeline (including `mget_split`,
+  `mset_split`, and `del_split`) fails during planning because a slot has no
+  known owner, and connect an owner that has no worker before planning; the
+  failure happened before any I/O, so nothing healed it
+- reject `SELECT` of a database other than 0, and a `/db` URL path other than
+  `/0` in `connect_url`, in both clients: Redis Cluster has only database 0.
+  The URL path was silently ignored, and a server that accepts other databases
+  in cluster mode would have switched one node's shared connection
+- connect both clients best-effort: a master that is unreachable at connect
+  time (still listed by `CLUSTER SLOTS` mid-failover, or restarting) no
+  longer fails `connect()` for the whole cluster. Its slots fail with a
+  connection error until it answers and are then connected lazily; only a
+  cluster with no reachable master fails to connect. Replicas are likewise
+  best-effort. `MultiplexedClusterClient` also connects a slot owner that has
+  no worker (skipped by a refresh, or dropped after a failed
+  re-authentication) when a command routes to it, instead of bouncing off the
+  default node with a `MOVED` that `max_redirects(0)` turned into a failure
+- resolve an empty or NULL endpoint in `CLUSTER SLOTS` to the node that was
+  asked, as Redis documents: a single-node cluster reports `""` for itself and
+  `cluster-preferred-endpoint-type unknown-endpoint` reports NULL, so neither
+  client could connect to such a cluster. Host-less redirects
+  (`MOVED 3999 :6381`) likewise resolve to the replying node's host, including
+  pipelined and Pub/Sub redirects. An endpoint of `?` is rejected as unknown,
+  and the public `topology::discover_topology`, which does not know the
+  queried address, now rejects empty/NULL endpoints instead of producing
+  unusable `:port` addresses
+- stop `MultiplexedClusterClient::reauthenticate_all` from holding the routing
+  write lock while it sent `AUTH` to every node in turn: one slow node added
+  its latency to every command on every node, and a hung one stalled routing
+  indefinitely (redis-rs #2092). Nodes are now authenticated concurrently
+  from a snapshot, each bounded by 5 s; a worker that rejects the credential
+  or times out is dropped from routing only if a concurrent refresh has not
+  already replaced it
+- treat a `READONLY` reply from a master as stale topology in both clients:
+  wait for a topology refresh that started after the reply, then re-send the
+  command to the slot's (or keyless default's) current master. A write sent
+  to a master demoted with its sockets intact previously failed forever with
+  no refresh scheduled (redis-rs #2085/#2115). Redis rejects the command
+  before running it, so re-sending is safe for non-idempotent writes; the
+  multiplexed client bypasses the background refresh rate limit for this, and
+  the server's `READONLY` text is returned once the redirect budget is spent
+- reuse a `ClusterConnection` node socket only for the role it was opened
+  for: after a failover the demoted master's socket (opened without
+  `READONLY`) is replaced for replica reads, which previously bounced with
+  `MOVED` forever under `ReadPreference::Replica`
+- make `ClusterConnection::refresh_topology` ask each connected node and then
+  the original seed until one reports slot owners, skip (and later connect
+  lazily) nodes it cannot reach instead of failing, close sockets for departed
+  nodes, and move the keyless default node to a current master it is
+  connected to
+- rebuild dead replica workers in `MultiplexedClusterClient`: a replica read
+  whose slot has an advertised replica with no worker, or one that exhausted
+  its reconnect budget, now schedules a (rate-limited) topology refresh. Reads
+  route around such workers, so nothing scheduled the refresh that rebuilds
+  them; strict replica reads failed forever and `PreferReplica` reads stayed
+  on the master after a replica restart (redis-rs #2120)
+- reconnect `ClusterConnection` replica sockets lazily: a replica whose
+  socket was dropped after one I/O error or a deadline was filtered out of
+  replica selection forever. It is now reconnected the next time routing
+  picks it; a replica whose reconnect fails is skipped for a backoff that
+  starts at 250 ms and doubles up to 5 s, and the command is re-routed to
+  another replica, the master (`PreferReplica`), or the strict-replica error.
+  One command tries each replica at most once, so connects slower than the
+  backoff cannot make re-routing alternate between dead replicas
+- route `ClusterConnection` keyed commands to the slot owner even when its
+  socket was dropped, reconnecting lazily; they were sent to the default node
+  and bounced with `MOVED`, which failed outright under `max_redirects(0)`
 - move `MultiplexedClusterClient`'s keyless-command default node to a surviving
   master when a topology refresh prunes it; previously a failover or scale-in
   of the first-listed master made PING, INFO, DBSIZE, and other keyless

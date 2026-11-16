@@ -195,6 +195,41 @@ pub const FIXTURE_PORT_RANGES: &[FixturePortRange] = &[
         start: 18000,
         len: 10,
     },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (READONLY after failover)",
+        start: 18100,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (replica roles after failover)",
+        start: 18120,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (node-scoped fan-out)",
+        start: 18140,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub migration)",
+        start: 18160,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub failover)",
+        start: 18180,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (sharded Pub/Sub owner killed)",
+        start: 18200,
+        len: 10,
+    },
+    FixturePortRange {
+        name: "redis-tower-cluster/tests/cluster_integration.rs (single-node clusters)",
+        start: 18220,
+        len: 2,
+    },
 ];
 
 /// Fails clearly, naming both fixtures and the exact overlapping ports, if

@@ -27,16 +27,16 @@ matches the current source tree.
 
 ### Compiled integration inventory
 
-The scoreboard-scoped packages compile **756 integration tests** across **45 test binaries**. **212** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
+The scoreboard-scoped packages compile **791 integration tests** across **47 test binaries**. **217** tests are marked `#[ignore]` because they need explicit infrastructure; workflow selectors, rather than the annotation alone, determine whether they run.
 
 | Surface | Package | Binaries | Compiled | `#[ignore]` | Pull request | Scheduled | No workflow selector |
 |---|---|---:|---:|---:|---:|---:|---:|
 | Standalone | `redis-tower` | 32 | 520 | 0 | 520 | 229 | 0 |
-| Cluster | `redis-tower-cluster` | 3 | 112 | 106 | 112 | 0 | 0 |
+| Cluster | `redis-tower-cluster` | 5 | 147 | 111 | 147 | 0 | 0 |
 | Sentinel | `redis-tower-sentinel` | 2 | 88 | 88 | 88 | 0 | 0 |
 | Modules | `redis-tower-modules` | 7 | 20 | 18 | 20 | 18 | 0 |
 | Distributed primitives | `redis-tower-primitives` | 1 | 16 | 0 | 16 | 0 | 0 |
-| **Total** |  | **45** | **756** | **212** | **756** | **247** | **0** |
+| **Total** |  | **47** | **791** | **217** | **791** | **247** | **0** |
 
 Counts are unique compiled tests. A test selected by both pull-request and scheduled workflows appears in both cadence columns, but only once in the compiled total.
 
@@ -90,9 +90,15 @@ The independent redis-rs corpus contains **12 compiled test entry points**. Thes
 | Standalone | `test_server` | `cover_replicaof_and_failover` | normal | pull request |
 | Cluster | `cluster_integration` | `cached_cluster_fails_closed_and_recovers_after_master_connections_are_killed` | ignored | pull request |
 | Cluster | `cluster_integration` | `cluster_pool_exhaustion_and_recovery` | ignored | pull request |
+| Cluster | `cluster_integration` | `failover_recovery::keyless_writes_follow_a_failover_of_the_default_master` | ignored | pull request |
+| Cluster | `cluster_integration` | `failover_recovery::node_scoped_commands_reach_every_master` | ignored | pull request |
+| Cluster | `cluster_integration` | `failover_recovery::sharded_pubsub_follows_owner_changes_without_other_traffic` | ignored | pull request |
+| Cluster | `cluster_integration` | `failover_recovery::single_node_clusters_with_unknown_endpoints_connect` | ignored | pull request |
+| Cluster | `cluster_integration` | `failover_recovery::strict_replica_reads_use_the_demoted_master_after_failover` | ignored | pull request |
 | Cluster | `cluster_integration` | `mux_cluster_handles_ask_then_moved_during_live_reshard` | ignored | pull request |
 | Cluster | `cluster_integration` | `mux_cluster_keyless_commands_survive_default_master_failover` | ignored | pull request |
 | Cluster | `cluster_integration` | `mux_cluster_replaces_killed_master_after_replica_promotion` | ignored | pull request |
+| Cluster | `pubsub_recovery` | `sharded_session_survives_a_slow_hard_failover` | normal | pull request |
 | Cluster | `topology_recovery` | `keyless_commands_follow_the_default_master_through_failover` | normal | pull request |
 | Sentinel | `sentinel_failover` | `sentinel_failover_sequence` | ignored | pull request |
 | Sentinel | `sentinel_integration` | `sentinel_pool_exhaustion_and_recovery` | ignored | pull request |

@@ -678,7 +678,35 @@ pub(crate) mod changes {
 }
 
 /// Discover the cluster topology by sending CLUSTER SLOTS to a node.
+///
+/// Redis reports an empty or NULL endpoint for a node that does not know its
+/// own address (a single-node cluster, or
+/// `cluster-preferred-endpoint-type unknown-endpoint`), meaning "the address
+/// this command was sent to". This function does not know that address and
+/// rejects such replies; the cluster clients resolve them against the node
+/// they asked.
 pub async fn discover_topology(conn: &mut RedisConnection) -> Result<ClusterTopology, RedisError> {
+    discover(conn, None).await
+}
+
+/// [`discover_topology`] against the node at `addr`, resolving empty and
+/// NULL endpoints to `addr`'s host.
+pub(crate) async fn discover_topology_at(
+    conn: &mut RedisConnection,
+    addr: &str,
+) -> Result<ClusterTopology, RedisError> {
+    discover(conn, Some(host_of(addr))).await
+}
+
+/// The host part of a `host:port` address (bracketed IPv6 stays bracketed).
+pub(crate) fn host_of(addr: &str) -> &str {
+    addr.rsplit_once(':').map_or(addr, |(host, _port)| host)
+}
+
+async fn discover(
+    conn: &mut RedisConnection,
+    origin_host: Option<&str>,
+) -> Result<ClusterTopology, RedisError> {
     let frame = array(vec![bulk("CLUSTER"), bulk("SLOTS")]);
     conn.execute_pipeline(vec![frame]).await.and_then(|frames| {
         if frames.len() != 1 {
@@ -687,7 +715,7 @@ pub async fn discover_topology(conn: &mut RedisConnection) -> Result<ClusterTopo
                 actual: format!("{} frames", frames.len()),
             });
         }
-        parse_cluster_slots(&frames[0])
+        parse_cluster_slots(&frames[0], origin_host)
     })
 }
 
@@ -695,7 +723,14 @@ pub async fn discover_topology(conn: &mut RedisConnection) -> Result<ClusterTopo
 ///
 /// The response is an array of slot ranges, each of which is:
 /// `[start_slot, end_slot, [master_host, master_port, ...], [replica_host, replica_port, ...], ...]`
-fn parse_cluster_slots(frame: &Frame) -> Result<ClusterTopology, RedisError> {
+///
+/// An empty or NULL host means the node that answered (`origin_host`); `?`
+/// is an endpoint the node is misconfigured to not know, so that node is
+/// unusable.
+fn parse_cluster_slots(
+    frame: &Frame,
+    origin_host: Option<&str>,
+) -> Result<ClusterTopology, RedisError> {
     let ranges = match frame {
         Frame::Array(Some(items)) => items,
         other => {
@@ -727,11 +762,11 @@ fn parse_cluster_slots(frame: &Frame) -> Result<ClusterTopology, RedisError> {
                 actual: format!("{start}..{end}"),
             });
         }
-        let master = parse_node_addr(&range_items[2])?;
+        let master = parse_node_addr(&range_items[2], origin_host)?;
 
         let mut replicas = Vec::new();
         for node_frame in &range_items[3..] {
-            if let Ok(addr) = parse_node_addr(node_frame) {
+            if let Ok(addr) = parse_node_addr(node_frame, origin_host) {
                 replicas.push(addr);
             }
         }
@@ -750,7 +785,7 @@ fn parse_cluster_slots(frame: &Frame) -> Result<ClusterTopology, RedisError> {
 /// Parse a node address from a CLUSTER SLOTS node entry.
 ///
 /// Each node entry is: `[host, port, node_id]` (host is bulk string, port is integer).
-fn parse_node_addr(frame: &Frame) -> Result<NodeAddr, RedisError> {
+fn parse_node_addr(frame: &Frame, origin_host: Option<&str>) -> Result<NodeAddr, RedisError> {
     let items = match frame {
         Frame::Array(Some(items)) if items.len() >= 2 => items,
         other => {
@@ -762,7 +797,22 @@ fn parse_node_addr(frame: &Frame) -> Result<NodeAddr, RedisError> {
     };
 
     let host = match &items[0] {
-        Frame::BulkString(Some(b)) => String::from_utf8_lossy(b).into_owned(),
+        Frame::BulkString(Some(b)) if b.as_ref() == b"?" => {
+            return Err(RedisError::UnexpectedResponse {
+                expected: "a known node endpoint",
+                actual: "? (cluster-announce-hostname is not configured)".to_string(),
+            });
+        }
+        Frame::BulkString(Some(b)) if !b.is_empty() => String::from_utf8_lossy(b).into_owned(),
+        Frame::BulkString(_) | Frame::Null => match origin_host {
+            Some(host) => host.to_string(),
+            None => {
+                return Err(RedisError::UnexpectedResponse {
+                    expected: "a node endpoint (an empty or NULL one means the queried node)",
+                    actual: format!("{:?}", items[0]),
+                });
+            }
+        },
         other => {
             return Err(RedisError::UnexpectedResponse {
                 expected: "bulk string host",
@@ -848,6 +898,52 @@ mod tests {
         ]))]))
     }
 
+    fn range_with_host(host: Frame) -> Frame {
+        Frame::Array(Some(vec![Frame::Array(Some(vec![
+            Frame::Integer(0),
+            Frame::Integer(16_383),
+            Frame::Array(Some(vec![
+                host,
+                Frame::Integer(7000),
+                Frame::BulkString(Some(Bytes::from("node-id"))),
+            ])),
+        ]))]))
+    }
+
+    /// Redis documents an empty or NULL endpoint as "the address this command
+    /// was sent to": a single-node cluster does not know its own IP, and
+    /// `cluster-preferred-endpoint-type unknown-endpoint` always sends NULL.
+    #[test]
+    fn empty_and_null_endpoints_resolve_to_the_queried_node() {
+        for host in [
+            Frame::BulkString(Some(Bytes::new())),
+            Frame::BulkString(None),
+            Frame::Null,
+        ] {
+            let frame = range_with_host(host.clone());
+            let topology = parse_cluster_slots(&frame, Some("10.0.0.5")).unwrap();
+            assert_eq!(
+                topology.master_for_slot(0),
+                Some(&NodeAddr::new("10.0.0.5", 7000)),
+                "{host:?}"
+            );
+            assert!(
+                parse_cluster_slots(&frame, None).is_err(),
+                "{host:?} cannot be resolved without the queried address"
+            );
+        }
+        assert_eq!(host_of("[::1]:7000"), "[::1]");
+        assert_eq!(host_of("redis.internal:7000"), "redis.internal");
+    }
+
+    /// `?` is an endpoint the node is misconfigured to not know: it is not the
+    /// queried node, so it is unusable rather than silently resolved.
+    #[test]
+    fn unknown_hostname_endpoint_is_rejected() {
+        let frame = range_with_host(Frame::BulkString(Some(Bytes::from_static(b"?"))));
+        assert!(parse_cluster_slots(&frame, Some("10.0.0.5")).is_err());
+    }
+
     #[test]
     fn out_of_range_slots_and_ports_are_rejected_not_truncated() {
         for (start, end, port) in [
@@ -858,17 +954,17 @@ mod tests {
             (0, 16_383, -1),
         ] {
             assert!(
-                parse_cluster_slots(&raw_range(start, end, port)).is_err(),
+                parse_cluster_slots(&raw_range(start, end, port), None).is_err(),
                 "{start}..{end} on port {port} must be rejected"
             );
         }
-        let topology = parse_cluster_slots(&raw_range(0, 16_383, 7000)).unwrap();
+        let topology = parse_cluster_slots(&raw_range(0, 16_383, 7000), None).unwrap();
         assert_eq!(topology.master_for_slot(16_383).unwrap().port, 7000);
     }
 
     #[test]
     fn reassigning_a_slot_outside_the_table_is_ignored() {
-        let mut topology = parse_cluster_slots(&raw_range(0, 16_383, 7000)).unwrap();
+        let mut topology = parse_cluster_slots(&raw_range(0, 16_383, 7000), None).unwrap();
         topology.reassign_slot(
             20_000,
             NodeAddr {
@@ -887,7 +983,7 @@ mod tests {
             (5461, 10922, ("127.0.0.1", 7001), vec![]),
             (10923, 16383, ("127.0.0.1", 7002), vec![]),
         ]);
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         assert_eq!(topo.slot_ranges.len(), 3);
         assert_eq!(topo.master_addrs().len(), 3);
 
@@ -907,7 +1003,7 @@ mod tests {
             (5461, 10922, ("127.0.0.1", 7001), vec![("127.0.0.1", 7004)]),
             (10923, 16383, ("127.0.0.1", 7002), vec![("127.0.0.1", 7005)]),
         ]);
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         assert_eq!(topo.master_addrs().len(), 3);
         assert_eq!(topo.replica_addrs().len(), 3);
 
@@ -919,14 +1015,14 @@ mod tests {
     #[test]
     fn master_for_slot_out_of_range() {
         let frame = mock_cluster_slots_response(vec![(0, 100, ("127.0.0.1", 7000), vec![])]);
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         assert!(topo.master_for_slot(101).is_none());
     }
 
     #[test]
     fn replicas_for_slot_no_replicas() {
         let frame = mock_cluster_slots_response(vec![(0, 16383, ("127.0.0.1", 7000), vec![])]);
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         let replicas = topo.replicas_for_slot(0).unwrap();
         assert!(replicas.is_empty());
     }
@@ -934,7 +1030,7 @@ mod tests {
     #[test]
     fn parse_empty_topology() {
         let frame = Frame::Array(Some(vec![]));
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         assert!(topo.slot_ranges.is_empty());
         assert!(topo.master_for_slot(0).is_none());
     }
@@ -942,7 +1038,7 @@ mod tests {
     #[test]
     fn parse_invalid_frame_type() {
         let frame = Frame::SimpleString(Bytes::from("OK"));
-        let result = parse_cluster_slots(&frame);
+        let result = parse_cluster_slots(&frame, None);
         assert!(result.is_err());
     }
 
@@ -953,7 +1049,7 @@ mod tests {
             Frame::Integer(100),
             // Missing master node array.
         ]))]));
-        let result = parse_cluster_slots(&frame);
+        let result = parse_cluster_slots(&frame, None);
         assert!(result.is_err());
     }
 
@@ -965,7 +1061,7 @@ mod tests {
             ("127.0.0.1", 7000),
             vec![("127.0.0.1", 7001), ("127.0.0.1", 7002)],
         )]);
-        let topo = parse_cluster_slots(&frame).unwrap();
+        let topo = parse_cluster_slots(&frame, None).unwrap();
         let replicas = topo.replicas_for_slot(0).unwrap();
         assert_eq!(replicas.len(), 2);
     }
