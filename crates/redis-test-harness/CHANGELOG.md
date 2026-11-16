@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- make back-to-back Cluster fixtures use fresh automatic port blocks and wait
+  for process exit before removing their working directories; allow slower
+  cleanup and report surviving PIDs and busy ports when it times out
 - require `redis-server-wrapper` 0.4.3, the first release with the
   `RedisClusterHandle::cluster_base` API the managed Cluster fixture calls;
   0.4.1 and 0.4.2 satisfied the old requirement but failed to compile
