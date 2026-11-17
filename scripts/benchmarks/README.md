@@ -223,3 +223,76 @@ bash scripts/benchmarks/run_publication.sh /absolute/path/to/new-results
 The new run intentionally records its own execution-host fingerprint, so its
 manifest and performance values will differ across hosts even when source,
 lockfile, commands, and configuration match.
+
+
+## Codec CI evidence
+
+The codec gate retains separate first-pass and confirmation evidence artifacts,
+including when the comparator reports a regression. Each subject has its raw
+Criterion baselines, full resolved `Cargo.lock`, build output, saved codec
+executable, command records, source/tree identity and before/after executable
+SHA256. The harness revision and hashes of its helper, sanitizer and workflow
+are recorded separately from the measured base/head revisions.
+
+`dependencies.json` is explicitly labeled `workspace-resolved`: its sanitized
+dependency versions and resolved features describe plain `cargo metadata`'s
+workspace view. That view can differ from the units selected by the protocol
+benchmark build and does not establish measured feature equivalence.
+`build.stdout` retains every actual build unit's complete `compiler-artifact`
+record, including its features. `compiler-artifact.json` selects the codec
+executable's record; it is not the complete build-unit inventory. The verbose
+build log records compiler commands and flags.
+
+The helper builds the existing codec target with `--locked --no-run`, lists its
+expected cases, and performs one measured invocation of the saved executable.
+It supplies Cargo's `--bench` argument and runs from the protocol package root,
+matching [Cargo's benchmark working directory](https://doc.rust-lang.org/cargo/commands/cargo-bench.html).
+`CRITERION_HOME` explicitly selects the original workspace `target/criterion`
+output directory. The measured argv and allowlisted environment are retained;
+its settings remain one-second warmup, two-second measurement and 50 samples.
+The executable's list mode performs no measurements. The direct invocation,
+including the explicit environment overrides, is part of the recorded recipe.
+
+Each subject first runs explicit `cargo metadata --format-version 1` resolution.
+Cargo reuses compatible locked versions and updates the lock when the subject's
+manifests require it, preserving the original `cargo bench` resolution behavior.
+The artifact retains the full pre/post lockfiles, resolved `Cargo.lock`,
+resolution argv/status, source-bound `reused`/`created`/`updated`/`failed`
+classification and lock-diff digest. The diff is independently reconstructable
+from the retained lockfiles; its diagnostic rendering redacts URLs and local
+paths. Raw metadata JSON is omitted in favor of the sanitized dependency view,
+and resolution stderr is redacted. The subsequent build uses `--locked` and
+checks that the resolved lock stays unchanged through measurement. The separate
+confirmation runner retains its own lock identity; no cross-runner lock or
+executable equality is inferred from matching source.
+
+Each artifact has an exact file inventory and hashes. Sealing checks expected
+case/sample completeness, positive finite sample data, raw mean arithmetic,
+build/lock/executable identity and comparison output/status. A failed comparator
+can produce complete evidence; missing or malformed evidence remains explicitly
+incomplete. The final upload uses `always()` even if measurement, comparison or
+sealing fails. An interrupted job may have only partial diagnostic evidence.
+
+To verify a downloaded complete artifact:
+
+```bash
+python3 scripts/benchmarks/codec_evidence.py verify path/to/codec-evidence
+```
+
+Run its synthetic and stub-process contracts without building Rust:
+
+```bash
+python3 scripts/benchmarks/test_codec_evidence.py
+python3 scripts/test_ci_workflow.py
+python3 scripts/test_check_criterion_regressions.py
+python3 scripts/test_decide_codec_benchmark_gate.py
+```
+
+Host snapshots include the runner/image identifiers, CPU/kernel/affinity,
+load/memory/process summaries and available frequency/governor data. Unavailable
+fields are explicit. The environment is allowlisted, not dumped wholesale.
+These hosted-runner observations do not establish a noise mechanism or
+performance equivalence. The existing uniform +10% threshold, benchmark order,
+separate-runner confirmation and fail-closed aggregator remain in force.
+Threshold calibration and a fixed-budget diagnostic campaign remain future
+work under #710; this retention slice launches no additional campaign.
