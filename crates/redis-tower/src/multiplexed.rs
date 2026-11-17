@@ -89,15 +89,26 @@ use crate::transaction::TransactionExecutor;
 /// dispatches each command independently and cannot preserve connection-local
 /// state across calls.
 ///
-/// # Blocking commands
+/// # Blocking and connection-state commands
 ///
-/// **Never run a blocking command on a `MultiplexedClient`.** Because every
-/// clone shares one connection and one pipeline worker, a blocking command
-/// (`BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`, or `XREAD`/`XREADGROUP`
-/// with `BLOCK`) holds that worker for its entire wait, stalling every other
-/// concurrent caller until it returns. Use a dedicated [`RedisConnection`] or a
-/// [`ConnectionPool`](crate::pool::ConnectionPool) connection for blocking
-/// work; such commands report `is_blocking() == true`.
+/// Because every clone shares one connection and one pipeline worker, a
+/// blocking command (`BLPOP`, `BRPOP`, `BLMOVE`, `BZPOPMIN`/`BZPOPMAX`,
+/// `XREAD`/`XREADGROUP` with `BLOCK`, or `WAIT`/`WAITAOF`) would hold that
+/// worker for its entire
+/// wait and stall every other caller, so `execute` rejects it, along with any
+/// typed command reporting `is_blocking() == true`. Use a dedicated
+/// [`RedisConnection`] or a [`ConnectionPool`](crate::pool::ConnectionPool)
+/// for blocking work.
+///
+/// Commands that would change the session for every clone or desynchronize
+/// replies are rejected the same way: subscriptions (use
+/// [`PubSubConnection`](crate::PubSubConnection)), `MONITOR` (use
+/// [`MonitorStream`](crate::MonitorStream)), `RESET`, `HELLO`, `QUIT`,
+/// `CLIENT REPLY`, `SYNC`/`PSYNC`, and stand-alone `MULTI`/`EXEC`/`DISCARD`/
+/// `WATCH` (use [`Transaction`](crate::Transaction)). `AUTH` remains allowed
+/// for credential rotation. `SELECT` and `CLIENT SETNAME` are not rejected,
+/// but they also apply to every clone and a reconnect reverts them; configure
+/// them on the connection factory instead.
 ///
 /// # Middleware
 ///
@@ -145,10 +156,10 @@ use crate::transaction::TransactionExecutor;
 /// when its body is already known; read/compute/build retries require a
 /// dedicated [`RedisConnection`].
 ///
-/// Do **not** drive a transaction with the raw `Multi`/`Exec` command builders
-/// over [`execute`](Self::execute): each `execute` is an independent
+/// The raw `Multi`/`Exec` command builders are rejected by
+/// [`execute`](Self::execute): each `execute` is an independent
 /// auto-pipelined call, so commands from other tasks sharing this connection
-/// can land between your MULTI and EXEC and corrupt the transaction. The
+/// could land between MULTI and EXEC and corrupt the transaction. The
 /// `Transaction` type exists precisely to avoid that.
 #[derive(Clone)]
 pub struct MultiplexedClient<S = AutoPipelineService> {
@@ -320,7 +331,11 @@ impl MultiplexedClient<AutoPipelineService> {
     /// which makes it suitable for serverless initialization paths. The first
     /// command receives [`RedisError::ConnectionClosed`] if that deferred
     /// attempt fails. Later connection loss is handled using the default
-    /// reconnect policy.
+    /// reconnect policy: once a reconnect attempt fails, queued and new
+    /// commands fail with [`RedisError::ConnectionClosed`] while reconnecting
+    /// continues in the background (see [`Self::from_factory`]). The defaults
+    /// set no connect or response timeout; use [`Self::from_lazy_factory`] to
+    /// configure them.
     ///
     /// # Panics
     ///
@@ -391,6 +406,25 @@ impl MultiplexedClient<AutoPipelineService> {
     /// [`UrlConnectionFactory`] for
     /// AUTH+SELECT from a URL, or implement [`ConnectionFactory`] yourself
     /// for custom init.
+    ///
+    /// # During an outage
+    ///
+    /// Commands already written when the connection drops fail with
+    /// [`RedisError::ConnectionClosed`]. Commands still queued wait for the
+    /// first reconnect attempt, so a connection that comes straight back is
+    /// transparent. Once an attempt fails, queued commands and every command
+    /// issued while the worker keeps retrying fail immediately with
+    /// [`RedisError::ConnectionClosed`] instead of waiting for the outage to
+    /// end; the default [`ReconnectConfig`](crate::reconnect::ReconnectConfig)
+    /// retries forever in the background, and the first command after it
+    /// reconnects is served normally. Wrap the client with
+    /// [`retry`](Self::retry) to retry idempotent commands across a short
+    /// outage. The defaults set no connect timeout and no response timeout:
+    /// set [`ReconnectConfig::connect_timeout`](crate::reconnect::ReconnectConfig::connect_timeout)
+    /// so a black-holed endpoint cannot hold that first attempt for the
+    /// operating system's TCP timeout, and
+    /// [`AutoPipelineConfig::response_timeout`] so a server that stops
+    /// answering is detected.
     ///
     /// # Example
     ///
@@ -523,7 +557,9 @@ impl MultiplexedClient<AutoPipelineService> {
     /// Retain this before cloning the client into a router or erasing its type.
     /// Calling [`AutoPipelineShutdownHandle::shutdown`] stops admission across
     /// every clone, drains accepted work, and joins the worker without needing
-    /// to recover and consume the final concrete client value.
+    /// to recover and consume the final concrete client value. Use
+    /// [`AutoPipelineShutdownHandle::shutdown_timeout`] when teardown must be
+    /// bounded even if the server stops answering.
     ///
     /// ```no_run
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -898,7 +934,16 @@ where
     /// A deadline carried by [`redis_tower_core::WithDeadline`] bounds both
     /// waiting for inner readiness and the dispatched call, including clients
     /// built with [`Self::from_layered`].
+    ///
+    /// A command whose [`Command::is_blocking`] is `true` is rejected before
+    /// it is sent, as are the connection-breaking commands listed under
+    /// [`AutoPipelineService`]'s shared-connection safety section.
     pub async fn execute<Cmd: Command>(&self, cmd: Cmd) -> Result<Cmd::Response, RedisError> {
+        if cmd.is_blocking() {
+            return Err(crate::shared_connection::reject_blocking_command(
+                cmd.name(),
+            ));
+        }
         let deadline = cmd.deadline();
         let mut svc = self.inner.clone();
         let operation = async move {

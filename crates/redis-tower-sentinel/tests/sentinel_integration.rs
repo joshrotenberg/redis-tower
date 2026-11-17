@@ -422,6 +422,90 @@ async fn sentinel_pool_exhaustion_and_recovery() {
     }
 }
 
+/// A scripted sentinel that names `master` for every master query, standing
+/// in for a sentinel whose view lags a failover.
+async fn spawn_stale_sentinel(master: String) -> (String, tokio::task::JoinHandle<()>) {
+    use futures::{SinkExt, StreamExt};
+    use redis_tower_protocol::RespCodec;
+    use tokio_util::codec::Framed;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let master = master.clone();
+            tokio::spawn(async move {
+                let mut framed = Framed::new(stream, RespCodec::new());
+                while let Some(Ok(request)) = framed.next().await {
+                    let command = match &request {
+                        Frame::Array(Some(items)) => match items.first() {
+                            Some(Frame::BulkString(Some(name))) => name.to_ascii_uppercase(),
+                            _ => Vec::new(),
+                        },
+                        _ => Vec::new(),
+                    };
+                    let reply = match command.as_slice() {
+                        b"HELLO" => Frame::Error(Bytes::from_static(b"ERR unknown command")),
+                        b"SENTINEL" => {
+                            let (host, port) = master.rsplit_once(':').unwrap();
+                            Frame::Array(Some(vec![
+                                Frame::BulkString(Some(Bytes::from(host.to_owned()))),
+                                Frame::BulkString(Some(Bytes::from(port.to_owned()))),
+                            ]))
+                        }
+                        _ => Frame::SimpleString(Bytes::from_static(b"OK")),
+                    };
+                    if framed.send(reply).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, task)
+}
+
+/// redis-rs #2427: a stale sentinel listed first that names a replica must
+/// not bind any connect path to that replica. Before ROLE verification ran on
+/// initial connects, the first write here failed with READONLY.
+#[tokio::test]
+#[ignore = "live: starts a dedicated Redis Sentinel topology"]
+async fn stale_first_sentinel_does_not_bind_a_replica() {
+    let real = sentinel_addrs().await;
+    let replica = format!("127.0.0.1:{SENTINEL_HEALTHY_REPLICA_BASE_PORT}");
+    let (stale, stale_task) = spawn_stale_sentinel(replica).await;
+    let mut addrs = vec![stale];
+    addrs.extend(real);
+    let k = key("stale_first_sentinel", "k");
+
+    let mut conn = SentinelConnection::connect(&addrs, "mymaster")
+        .await
+        .expect("connect past the stale sentinel");
+    conn.execute(Set::new(&k, "direct"))
+        .await
+        .expect("SentinelConnection was bound to the replica");
+
+    let fixed = MultiplexedSentinelClient::connect(&addrs, "mymaster")
+        .await
+        .expect("multiplexed connect past the stale sentinel");
+    fixed
+        .execute(Set::new(&k, "fixed"))
+        .await
+        .expect("MultiplexedSentinelClient::connect was bound to the replica");
+    fixed.shutdown().await;
+
+    let reconnecting = MultiplexedSentinelClient::connect_with_reconnect(&addrs, "mymaster")
+        .await
+        .expect("reconnecting connect past the stale sentinel");
+    reconnecting
+        .execute(Set::new(&k, "reconnecting"))
+        .await
+        .expect("connect_with_reconnect was bound to the replica");
+    reconnecting.execute(Del::new(&k)).await.unwrap();
+    reconnecting.shutdown().await;
+    stale_task.abort();
+}
+
 // -- Destructive failover phases live in a separate binary --
 //
 // The tests that kill a sentinel and then the master (and the

@@ -11,9 +11,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - connection-setup/client-name builder policies replayed on discovery, masters,
   replicas, redirected/topology-created nodes, dedicated sockets, and replacements
+- `MultiplexedClusterClient::shutdown_handle()` returning a cloneable
+  `ClusterShutdownHandle` with `shutdown()`, `shutdown_timeout(grace)`, and
+  `abort()`. Unlike `shutdown(self)`, which acts only on the final clone, it
+  stops admission across every clone, keeps topology refreshes from installing
+  new node services, and joins every per-node worker, so a host whose router
+  holds clones can still tear the client down deterministically
+  (redis-developer/redis-database-mcp-rs#125). Workers a topology refresh
+  builds are registered as they are created, and `abort()` cancels a
+  background refresh still stalled on a node's handshake, so no worker built
+  by an unfinished refresh outlives an aborted shutdown
+
+### Changed
+
+- a per-node worker fails queued and new commands with `ConnectionClosed`
+  after its first failed reconnect attempt instead of holding them until its
+  reconnect budget runs out, so the topology refresh that heals a dead node
+  starts sooner
 
 ### Fixed
 
+- reject blocking commands and other commands that break a shared per-node
+  connection (subscriptions, `MONITOR`, `RESET`, `HELLO`, `QUIT`, `CLIENT
+  REPLY`, stand-alone `MULTI`/`EXEC`/`WATCH`) in `MultiplexedClusterClient`
+  before dispatch, as the standalone multiplexed client now does
 - move `MultiplexedClusterClient`'s keyless-command default node to a surviving
   master when a topology refresh prunes it; previously a failover or scale-in
   of the first-listed master made PING, INFO, DBSIZE, and other keyless

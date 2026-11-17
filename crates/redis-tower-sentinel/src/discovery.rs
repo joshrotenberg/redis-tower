@@ -485,8 +485,44 @@ pub(crate) fn role_reports_master(frame: &Frame) -> bool {
     }
 }
 
-/// Issue `ROLE` on `conn` and report whether the node is currently a master.
-pub(crate) async fn connection_is_master(conn: &mut RedisConnection) -> Result<bool, RedisError> {
+/// What `ROLE` says about a node a sentinel named as the master.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MasterRole {
+    /// The node reports the master role.
+    Confirmed,
+    /// The node reports another role (`slave` or `sentinel`), or an
+    /// unrecognizable one: the sentinel that named it is stale or the
+    /// failover is still in progress.
+    Rejected(String),
+    /// `ROLE` itself was refused, for example for an ACL user without the
+    /// `role` command. The sentinel's answer is trusted, as discovery did
+    /// before ROLE verification, rather than locking that user out.
+    Unverified(String),
+}
+
+/// Classify a `ROLE` reply for a node a sentinel named as the master.
+pub(crate) fn classify_role_reply(frame: &Frame) -> MasterRole {
+    if role_reports_master(frame) {
+        return MasterRole::Confirmed;
+    }
+    match frame {
+        Frame::Error(message) => {
+            MasterRole::Unverified(String::from_utf8_lossy(message).into_owned())
+        }
+        Frame::Array(Some(items)) => match items.first() {
+            Some(Frame::BulkString(Some(role)) | Frame::SimpleString(role)) => {
+                MasterRole::Rejected(String::from_utf8_lossy(role).into_owned())
+            }
+            _ => MasterRole::Rejected("an unrecognized ROLE reply".to_string()),
+        },
+        _ => MasterRole::Rejected("an unrecognized ROLE reply".to_string()),
+    }
+}
+
+/// Issue `ROLE` on `conn` and classify the node it reaches.
+pub(crate) async fn check_master_role(
+    conn: &mut RedisConnection,
+) -> Result<MasterRole, RedisError> {
     let responses = conn
         .execute_pipeline(vec![array(vec![bulk("ROLE")])])
         .await?;
@@ -494,7 +530,150 @@ pub(crate) async fn connection_is_master(conn: &mut RedisConnection) -> Result<b
         .into_iter()
         .next()
         .ok_or(RedisError::ConnectionClosed)?;
-    Ok(role_reports_master(&frame))
+    Ok(classify_role_reply(&frame))
+}
+
+/// Per-sentinel query budget used by verified discovery.
+const SENTINEL_QUERY_TIMEOUT: Duration = Duration::from_millis(1000);
+
+/// Budget for connecting to one reported master and checking its `ROLE`.
+///
+/// It covers TCP, optional TLS, authentication, protocol negotiation, and the
+/// `ROLE` exchange. A node that stalls longer is skipped like a stale one, so
+/// a hung former master cannot keep discovery from the next sentinel.
+const NODE_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ask each sentinel in turn for the master, connect to the node it names,
+/// and return the first one that does not report a non-master role.
+///
+/// One sentinel's stale answer (a just-demoted master, or a replica) does not
+/// end the pass: the node is skipped and the next sentinel is asked, so a
+/// healthy sentinel later in the list still wins (redis-rs #2427). An address
+/// already rejected or unreachable in this pass is not dialed again when
+/// another sentinel repeats it. A node whose `ROLE` call is refused is
+/// accepted, see [`MasterRole::Unverified`]. Connecting to a reported node and
+/// checking its role are bounded together by [`NODE_CHECK_TIMEOUT`]; a node
+/// that does not finish in time is skipped and the next sentinel is asked.
+///
+/// Returns the connection and the master's `"host:port"` address.
+pub(crate) async fn connect_verified_master_once(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+) -> Result<(RedisConnection, String), RedisError> {
+    verified_master_pass(sentinel_addrs, master_name, config, NODE_CHECK_TIMEOUT).await
+}
+
+async fn verified_master_pass(
+    sentinel_addrs: &[String],
+    master_name: &str,
+    config: &SentinelConfig,
+    node_check_timeout: Duration,
+) -> Result<(RedisConnection, String), RedisError> {
+    let mut answered = false;
+    let mut tried = std::collections::HashSet::new();
+    let mut last_err: Option<RedisError> = None;
+    for sentinel_addr in sentinel_addrs {
+        let master_addr = match tokio::time::timeout(
+            SENTINEL_QUERY_TIMEOUT,
+            query_master_addr(sentinel_addr, master_name, config),
+        )
+        .await
+        {
+            Ok(Ok(addr)) => addr,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    master_name = %master_name,
+                    error = %error,
+                    "sentinel: failed to query sentinel"
+                );
+                continue;
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    master_name = %master_name,
+                    "sentinel: timed out querying sentinel"
+                );
+                continue;
+            }
+        };
+        answered = true;
+        if !tried.insert(master_addr.clone()) {
+            continue;
+        }
+        let candidate = async {
+            let mut conn = connect_hop(
+                &master_addr,
+                config.node_credentials.as_ref(),
+                config.resp_limits,
+                #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
+                config.node_tls.as_ref(),
+            )
+            .await?;
+            let role = check_master_role(&mut conn).await?;
+            Ok::<_, RedisError>((conn, role))
+        };
+        let (conn, role) = match tokio::time::timeout(node_check_timeout, candidate).await {
+            Ok(Ok(checked)) => checked,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    addr = %master_addr,
+                    master_name,
+                    error = %error,
+                    "sentinel: failed to connect to or check the reported master"
+                );
+                last_err = Some(error);
+                continue;
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    addr = %master_addr,
+                    master_name,
+                    timeout_ms = node_check_timeout.as_millis() as u64,
+                    "sentinel: reported master did not finish setup and ROLE in time; asking the next sentinel"
+                );
+                last_err = Some(RedisError::Redis(format!(
+                    "sentinel {sentinel_addr} returned {master_addr} for '{master_name}', but it did not answer setup and ROLE within {node_check_timeout:?}"
+                )));
+                continue;
+            }
+        };
+        match role {
+            MasterRole::Confirmed => return Ok((conn, master_addr)),
+            MasterRole::Unverified(reason) => {
+                tracing::debug!(
+                    addr = %master_addr,
+                    master_name,
+                    reason,
+                    "sentinel: ROLE refused; trusting the sentinel's master address"
+                );
+                return Ok((conn, master_addr));
+            }
+            MasterRole::Rejected(role) => {
+                tracing::warn!(
+                    sentinel_addr = %sentinel_addr,
+                    addr = %master_addr,
+                    master_name,
+                    role,
+                    "sentinel: reported master does not hold the master role; asking the next sentinel"
+                );
+                last_err = Some(RedisError::Redis(format!(
+                    "sentinel {sentinel_addr} returned {master_addr} for '{master_name}', but it reports role {role}, not master"
+                )));
+            }
+        }
+    }
+    if !answered {
+        return Err(RedisError::Redis(format!(
+            "no sentinel responded for master '{master_name}'"
+        )));
+    }
+    Err(last_err
+        .unwrap_or_else(|| RedisError::Redis("sentinel master discovery exhausted".to_string())))
 }
 
 /// Discover the master via sentinel, connect to it, and verify it actually
@@ -514,9 +693,11 @@ pub(crate) async fn connect_verified_master(
 
 /// Discover the master via sentinel and verify its role, using the given config.
 ///
-/// The sentinel hop uses `config.sentinel_credentials` and `config.sentinel_tls`.
-/// The node (master) hop uses `config.node_credentials` and `config.node_tls`.
-/// Both hops use `config.resp_limits`.
+/// Each attempt is one [`connect_verified_master_once`] pass over every
+/// sentinel; attempts back off exponentially while all of them lag a
+/// failover. The sentinel hop uses `config.sentinel_credentials` and
+/// `config.sentinel_tls`. The node (master) hop uses `config.node_credentials`
+/// and `config.node_tls`. Both hops use `config.resp_limits`.
 /// Returns the verified connection and the master's `"host:port"` address.
 pub(crate) async fn connect_verified_master_with_config(
     sentinel_addrs: &[String],
@@ -531,44 +712,17 @@ pub(crate) async fn connect_verified_master_with_config(
         if attempt > 0 {
             tokio::time::sleep(BASE_BACKOFF * 2u32.pow(attempt - 1)).await;
         }
-
-        let master_addr =
-            match discover_master_with_config(sentinel_addrs, master_name, config).await {
-                Ok(addr) => addr,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
-            };
-        let mut conn = match connect_hop(
-            &master_addr,
-            config.node_credentials.as_ref(),
-            config.resp_limits,
-            #[cfg(any(feature = "tls-rustls", feature = "tls-native-tls"))]
-            config.node_tls.as_ref(),
-        )
-        .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
-            }
-        };
-        match connection_is_master(&mut conn).await {
-            Ok(true) => return Ok((conn, master_addr)),
-            Ok(false) => {
+        match connect_verified_master_once(sentinel_addrs, master_name, config).await {
+            Ok(verified) => return Ok(verified),
+            Err(error) => {
                 tracing::warn!(
-                    addr = %master_addr,
                     master_name,
                     attempt,
-                    "sentinel: discovered node is not yet a master, retrying"
+                    error = %error,
+                    "sentinel: no verified master yet, retrying"
                 );
-                last_err = Some(RedisError::Redis(format!(
-                    "sentinel returned {master_addr} but it does not report the master role"
-                )));
+                last_err = Some(error);
             }
-            Err(e) => last_err = Some(e),
         }
     }
 
@@ -632,6 +786,289 @@ mod tests {
         let connection = finish_hop_setup(connection, Some(&provider)).await.unwrap();
         assert!(connection.is_resp3());
         server_task.await.unwrap();
+    }
+
+    /// Replies of a scripted peer standing in for a sentinel or a data node.
+    #[derive(Clone)]
+    struct FakeReplies {
+        /// Address returned for `SENTINEL GET-MASTER-ADDR-BY-NAME`.
+        master: Option<String>,
+        /// Reply to `ROLE`.
+        role: Frame,
+    }
+
+    fn role(name: &str) -> Frame {
+        Frame::Array(Some(vec![Frame::BulkString(Some(Bytes::from(
+            name.to_owned(),
+        )))]))
+    }
+
+    fn first_arg(frame: &Frame) -> Vec<u8> {
+        match frame {
+            Frame::Array(Some(items)) => match items.first() {
+                Some(Frame::BulkString(Some(name))) => name.to_ascii_uppercase(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Spawn a RESP2 peer that answers the connection handshake, sentinel
+    /// queries, and `ROLE` from `replies`. Returns its address and a counter
+    /// of accepted connections.
+    async fn spawn_fake(
+        replies: FakeReplies,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_protocol::RespCodec;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let accepted = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        let task = tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let replies = replies.clone();
+                tokio::spawn(async move {
+                    let mut framed = Framed::new(stream, RespCodec::new());
+                    while let Some(Ok(request)) = framed.next().await {
+                        let reply = match first_arg(&request).as_slice() {
+                            b"HELLO" => Frame::Error(Bytes::from_static(b"ERR unknown command")),
+                            b"ROLE" => replies.role.clone(),
+                            b"SENTINEL" => match &replies.master {
+                                Some(master) => {
+                                    let (host, port) = master.rsplit_once(':').unwrap();
+                                    Frame::Array(Some(vec![
+                                        Frame::BulkString(Some(Bytes::from(host.to_owned()))),
+                                        Frame::BulkString(Some(Bytes::from(port.to_owned()))),
+                                    ]))
+                                }
+                                None => Frame::Null,
+                            },
+                            _ => Frame::SimpleString(Bytes::from_static(b"OK")),
+                        };
+                        if framed.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        (addr, accepted, task)
+    }
+
+    async fn spawn_node(role_reply: Frame) -> String {
+        spawn_fake(FakeReplies {
+            master: None,
+            role: role_reply,
+        })
+        .await
+        .0
+    }
+
+    async fn spawn_sentinel(master: &str) -> String {
+        spawn_fake(FakeReplies {
+            master: Some(master.to_owned()),
+            role: role("sentinel"),
+        })
+        .await
+        .0
+    }
+
+    #[test]
+    fn role_replies_classify_master_other_roles_and_refusals() {
+        assert_eq!(classify_role_reply(&role("master")), MasterRole::Confirmed);
+        assert_eq!(
+            classify_role_reply(&role("slave")),
+            MasterRole::Rejected("slave".into())
+        );
+        assert_eq!(
+            classify_role_reply(&role("sentinel")),
+            MasterRole::Rejected("sentinel".into())
+        );
+        assert!(matches!(
+            classify_role_reply(&Frame::Null),
+            MasterRole::Rejected(_)
+        ));
+        assert_eq!(
+            classify_role_reply(&Frame::Error(Bytes::from_static(b"NOPERM no role"))),
+            MasterRole::Unverified("NOPERM no role".into())
+        );
+    }
+
+    /// redis-rs #2427: a stale first sentinel that names a replica must not
+    /// bind the client to it; the next sentinel's answer wins in the same pass.
+    #[tokio::test]
+    async fn stale_first_sentinel_is_skipped_for_the_next_answer() {
+        let replica = spawn_node(role("slave")).await;
+        let master = spawn_node(role("master")).await;
+        let stale = spawn_sentinel(&replica).await;
+        let good = spawn_sentinel(&master).await;
+
+        let (_conn, addr) = connect_verified_master_once(
+            &[stale.clone(), good.clone()],
+            "mymaster",
+            &SentinelConfig::default(),
+        )
+        .await
+        .expect("the second sentinel names a verified master");
+        assert_eq!(addr, master);
+
+        // The retrying form must also ask beyond the first sentinel, rather
+        // than re-asking it on every backoff attempt.
+        let started = std::time::Instant::now();
+        let (_conn, addr) = connect_verified_master_with_config(
+            &[stale, good],
+            "mymaster",
+            &SentinelConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(addr, master);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "no backoff was needed"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_stale_sentinels_fail_with_the_reported_role() {
+        let replica = spawn_node(role("slave")).await;
+        let stale = spawn_sentinel(&replica).await;
+        let error =
+            match connect_verified_master_once(&[stale], "mymaster", &SentinelConfig::default())
+                .await
+            {
+                Ok(_) => panic!("a replica must not be accepted as the master"),
+                Err(error) => error,
+            };
+        assert!(error.to_string().contains("reports role slave"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn repeated_stale_answer_is_dialed_once_per_pass() {
+        let (replica, replica_connections, _task) = spawn_fake(FakeReplies {
+            master: None,
+            role: role("slave"),
+        })
+        .await;
+        let master = spawn_node(role("master")).await;
+        let stale_a = spawn_sentinel(&replica).await;
+        let stale_b = spawn_sentinel(&replica).await;
+        let good = spawn_sentinel(&master).await;
+
+        let (_conn, addr) = connect_verified_master_once(
+            &[stale_a, stale_b, good],
+            "mymaster",
+            &SentinelConfig::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(addr, master);
+        assert_eq!(
+            replica_connections.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    /// A least-privilege ACL user may be denied `ROLE`; that must not lock it
+    /// out of a master that discovery reached before ROLE checks existed.
+    #[tokio::test]
+    async fn refused_role_trusts_the_sentinel_answer() {
+        let node = spawn_node(Frame::Error(Bytes::from_static(
+            b"NOPERM User has no permissions to run the 'role' command",
+        )))
+        .await;
+        let sentinel = spawn_sentinel(&node).await;
+        let (_conn, addr) =
+            connect_verified_master_once(&[sentinel], "mymaster", &SentinelConfig::default())
+                .await
+                .unwrap();
+        assert_eq!(addr, node);
+    }
+
+    /// A node that completes its connection setup and then never answers
+    /// `ROLE`: a hung or half-failed former master.
+    async fn spawn_silent_role_node() -> String {
+        use futures::{SinkExt, StreamExt};
+        use redis_tower_protocol::RespCodec;
+        use tokio_util::codec::Framed;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut framed = Framed::new(stream, RespCodec::new());
+                    while let Some(Ok(request)) = framed.next().await {
+                        let reply = match first_arg(&request).as_slice() {
+                            b"ROLE" => {
+                                futures::future::pending::<()>().await;
+                                unreachable!()
+                            }
+                            b"HELLO" => Frame::Error(Bytes::from_static(b"ERR unknown command")),
+                            _ => Frame::SimpleString(Bytes::from_static(b"OK")),
+                        };
+                        if framed.send(reply).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    /// Review finding: an unanswered `ROLE` from the first reported node must
+    /// not stop discovery from reaching a later sentinel's healthy master.
+    #[tokio::test]
+    async fn silent_role_moves_on_to_the_next_sentinel() {
+        let silent = spawn_silent_role_node().await;
+        let master = spawn_node(role("master")).await;
+        let first = spawn_sentinel(&silent).await;
+        let second = spawn_sentinel(&master).await;
+
+        let started = std::time::Instant::now();
+        let (_conn, addr) = tokio::time::timeout(
+            Duration::from_secs(5),
+            verified_master_pass(
+                &[first, second],
+                "mymaster",
+                &SentinelConfig::default(),
+                Duration::from_millis(200),
+            ),
+        )
+        .await
+        .expect("discovery hung on a node that never answered ROLE")
+        .unwrap();
+        assert_eq!(addr, master);
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn unreachable_sentinels_report_that_none_responded() {
+        let refused = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().to_string()
+        };
+        let error =
+            match connect_verified_master_once(&[refused], "mymaster", &SentinelConfig::default())
+                .await
+            {
+                Ok(_) => panic!("nothing is listening"),
+                Err(error) => error,
+            };
+        assert!(
+            error.to_string().contains("no sentinel responded"),
+            "{error}"
+        );
     }
 
     #[test]

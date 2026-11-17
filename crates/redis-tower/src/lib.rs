@@ -434,6 +434,7 @@ mod resilient;
 pub mod retry;
 pub mod scan_stream;
 pub mod script;
+mod shared_connection;
 pub mod tracing_layer;
 pub mod transaction;
 
@@ -451,6 +452,16 @@ pub mod cache_support {
     pub use crate::caching::validate_cached_user_command;
 }
 
+/// Shared-connection command checks reused by sibling workspace clients.
+///
+/// Not part of the stable user-facing API; public only so the cluster and
+/// Sentinel multiplexed clients reject the same commands as
+/// [`MultiplexedClient`].
+#[doc(hidden)]
+pub mod shared_connection_support {
+    pub use crate::shared_connection::reject_blocking_command;
+}
+
 #[cfg(feature = "serde")]
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod json_api;
@@ -458,7 +469,9 @@ pub mod json_api;
 #[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod search_api;
 
-pub use auto_pipeline::{AutoPipelineConfig, AutoPipelineService, AutoPipelineShutdownHandle};
+pub use auto_pipeline::{
+    AutoPipelineConfig, AutoPipelineService, AutoPipelineShutdownHandle, ShutdownOutcome,
+};
 pub use cache_layer::{CacheConfig, CacheLayer, CacheService, ReleaseReadiness};
 pub use cache_state::{CacheState, CacheStatistics};
 pub use caching::{CacheTrackingMode, CachedClient, CachedClientConfig};
