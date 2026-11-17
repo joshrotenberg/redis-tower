@@ -205,6 +205,8 @@ jobs:
     name: Codec Benchmark First Pass
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    env:
+      CODEC_EVIDENCE_DIR: ${{ github.workspace }}/codec-evidence
     outputs:
       needs_confirmation: ${{ steps.compare.outputs.needs_confirmation }}
     steps:
@@ -225,12 +227,21 @@ jobs:
         with:
           shared-key: codec-benchmark
 
+      - name: Preserve codec evidence tools before switching subjects
+        run: |
+          mkdir -p "$RUNNER_TEMP/codec-evidence-tools"
+          cp scripts/benchmarks/codec_evidence.py scripts/benchmarks/sanitize_metadata.py "$RUNNER_TEMP/codec-evidence-tools/"
+          cp .github/workflows/ci.yml "$RUNNER_TEMP/codec-evidence-tools/ci.yml"
+          echo "CODEC_HARNESS_SOURCE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Benchmark main
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git checkout --detach "$BASE_SHA"
-          cargo bench -p redis-tower-protocol --bench codec -- \
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" measure \
+            --expected-source "$BASE_SHA" --harness-source "$CODEC_HARNESS_SOURCE" \
+            --workflow "$RUNNER_TEMP/codec-evidence-tools/ci.yml" --output "$CODEC_EVIDENCE_DIR" \
             --warm-up-time 1 --measurement-time 2 --sample-size 50 \
             --save-baseline main
 
@@ -239,7 +250,9 @@ jobs:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git checkout --detach "$CANDIDATE_SHA"
-          cargo bench -p redis-tower-protocol --bench codec -- \
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" measure \
+            --expected-source "$CANDIDATE_SHA" --harness-source "$CODEC_HARNESS_SOURCE" \
+            --workflow "$RUNNER_TEMP/codec-evidence-tools/ci.yml" --output "$CODEC_EVIDENCE_DIR" \
             --warm-up-time 1 --measurement-time 2 --sample-size 50 \
             --save-baseline candidate
 
@@ -249,8 +262,9 @@ jobs:
           critcmp main candidate --list | tee benchmark-comparison.txt
           set +e
           python3 scripts/check_criterion_regressions.py \
-            --baseline main --candidate candidate --threshold 10
-          status=$?
+            --baseline main --candidate candidate --threshold 10 2>&1 | tee -a benchmark-comparison.txt
+          status=${PIPESTATUS[0]}
+          printf '%s\n' "$status" > benchmark-comparison.status
           set -e
           if [[ "$status" -eq 1 ]]; then
             echo "needs_confirmation=true" >> "$GITHUB_OUTPUT"
@@ -273,6 +287,22 @@ jobs:
           path: criterion-baselines.tar.gz
           if-no-files-found: error
 
+      - name: Seal complete codec evidence, including failed comparisons
+        if: always()
+        run: |
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" seal \
+            --output "$CODEC_EVIDENCE_DIR" --labels main candidate \
+            --comparison benchmark-comparison.txt
+
+      - name: Upload complete codec evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-evidence-${{ github.event.pull_request.number }}
+          path: ${{ env.CODEC_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload comparison
         if: always()
         uses: actions/upload-artifact@v4
@@ -286,6 +316,8 @@ jobs:
     needs: bench-regression-first-pass
     if: needs.bench-regression-first-pass.outputs.needs_confirmation == 'true'
     runs-on: ubuntu-latest
+    env:
+      CODEC_EVIDENCE_DIR: ${{ github.workspace }}/codec-evidence
     steps:
       - uses: actions/checkout@v4
         with:
@@ -315,12 +347,21 @@ jobs:
           mkdir -p target
           tar -xzf criterion-baselines.tar.gz -C target
 
+      - name: Preserve codec evidence tools before switching subjects
+        run: |
+          mkdir -p "$RUNNER_TEMP/codec-evidence-tools"
+          cp scripts/benchmarks/codec_evidence.py scripts/benchmarks/sanitize_metadata.py "$RUNNER_TEMP/codec-evidence-tools/"
+          cp .github/workflows/ci.yml "$RUNNER_TEMP/codec-evidence-tools/ci.yml"
+          echo "CODEC_HARNESS_SOURCE=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
       - name: Confirm benchmark pull request first
         env:
           CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           git checkout --detach "$CANDIDATE_SHA"
-          cargo bench -p redis-tower-protocol --bench codec -- \
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" measure \
+            --expected-source "$CANDIDATE_SHA" --harness-source "$CODEC_HARNESS_SOURCE" \
+            --workflow "$RUNNER_TEMP/codec-evidence-tools/ci.yml" --output "$CODEC_EVIDENCE_DIR" \
             --warm-up-time 1 --measurement-time 2 --sample-size 50 \
             --save-baseline candidate-confirm
 
@@ -329,7 +370,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           git checkout --detach "$BASE_SHA"
-          cargo bench -p redis-tower-protocol --bench codec -- \
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" measure \
+            --expected-source "$BASE_SHA" --harness-source "$CODEC_HARNESS_SOURCE" \
+            --workflow "$RUNNER_TEMP/codec-evidence-tools/ci.yml" --output "$CODEC_EVIDENCE_DIR" \
             --warm-up-time 1 --measurement-time 2 --sample-size 50 \
             --save-baseline main-confirm
 
@@ -341,10 +384,31 @@ jobs:
           critcmp main candidate --list | tee benchmark-comparison.txt
           printf '\nReversed-order confirmation (separate runner):\n' | tee -a benchmark-comparison.txt
           critcmp main-confirm candidate-confirm --list | tee -a benchmark-comparison.txt
+          set +e
           python3 scripts/check_criterion_regressions.py \
             --baseline main --candidate candidate --threshold 10 \
             --confirmation-baseline main-confirm \
-            --confirmation-candidate candidate-confirm
+            --confirmation-candidate candidate-confirm 2>&1 | tee -a benchmark-comparison.txt
+          status=${PIPESTATUS[0]}
+          set -e
+          printf '%s\n' "$status" > benchmark-comparison.status
+          exit "$status"
+
+      - name: Seal complete codec evidence, including failed comparisons
+        if: always()
+        run: |
+          python3 "$RUNNER_TEMP/codec-evidence-tools/codec_evidence.py" seal \
+            --output "$CODEC_EVIDENCE_DIR" --labels candidate-confirm main-confirm \
+            --comparison benchmark-comparison.txt
+
+      - name: Upload complete codec evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codec-benchmark-confirmation-evidence-${{ github.event.pull_request.number }}
+          path: ${{ env.CODEC_EVIDENCE_DIR }}
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload comparison
         if: always()

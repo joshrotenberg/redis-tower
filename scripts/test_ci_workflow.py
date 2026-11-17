@@ -121,6 +121,41 @@ class CiWorkflowTests(unittest.TestCase):
             WORKFLOW.read_text().count("name: Codec Benchmark Regression\n"), 1
         )
 
+    def test_complete_codec_evidence_is_always_sealed_and_uploaded(self) -> None:
+        for name, next_name in (("bench-regression-first-pass", "bench-regression-confirm"),
+                                ("bench-regression-confirm", "bench-regression")):
+            job = workflow_job(name, next_name)
+            seal = job.split("      - name: Seal complete codec evidence, including failed comparisons\n", 1)[1]
+            self.assertIn("        if: always()\n", seal.split("      - name:", 1)[0])
+            upload = job.split("      - name: Upload complete codec evidence\n", 1)[1]
+            upload = upload.split("      - name:", 1)[0]
+            self.assertIn("        if: always()\n", upload)
+            self.assertIn("path: ${{ env.CODEC_EVIDENCE_DIR }}", upload)
+            self.assertIn("if-no-files-found: error", upload)
+            self.assertIn("--comparison benchmark-comparison.txt", seal)
+
+    def test_codec_capture_tools_survive_subject_checkouts(self) -> None:
+        for name, next_name in (("bench-regression-first-pass", "bench-regression-confirm"),
+                                ("bench-regression-confirm", "bench-regression")):
+            job = workflow_job(name, next_name)
+            self.assertLess(job.index("cp scripts/benchmarks/codec_evidence.py"),
+                            job.index('git checkout --detach'))
+            self.assertIn("cp .github/workflows/ci.yml", job)
+            self.assertIn("CODEC_HARNESS_SOURCE=$(git rev-parse HEAD)", job)
+            self.assertEqual(job.count("--warm-up-time 1 --measurement-time 2 --sample-size 50"), 2)
+            self.assertEqual(job.count('codec_evidence.py" measure'), 2)
+            self.assertIn('--harness-source "$CODEC_HARNESS_SOURCE"', job)
+
+    def test_codec_comparison_diagnostics_and_exit_status_survive_tee(self) -> None:
+        for name, next_name in (("bench-regression-first-pass", "bench-regression-confirm"),
+                                ("bench-regression-confirm", "bench-regression")):
+            job = workflow_job(name, next_name)
+            self.assertIn("2>&1 | tee -a benchmark-comparison.txt", job)
+            self.assertIn('status=${PIPESTATUS[0]}', job)
+            self.assertIn('"$status" > benchmark-comparison.status', job)
+        confirm = workflow_job("bench-regression-confirm", "bench-regression")
+        self.assertIn('exit "$status"', confirm)
+
     def test_command_capability_ledger_is_tested_and_checked_offline(self) -> None:
         job = command_coverage_job()
         self.assertIn("python3 scripts/test_generate_command_capabilities.py", job)
