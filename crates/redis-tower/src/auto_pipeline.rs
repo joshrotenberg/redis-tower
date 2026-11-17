@@ -47,8 +47,7 @@ use crate::reconnect::{
     ReconnectConfig, connect_with_timeout,
 };
 use crate::shared_connection::{
-    TransactionSpan, transaction_left_open, transaction_spans, validate_shared_batch,
-    validate_shared_request,
+    SessionCheck, session_check, session_left_open, validate_shared_batch, validate_shared_request,
 };
 
 /// Configuration for the auto-pipelining service.
@@ -303,9 +302,10 @@ impl WorkerRequest {
 /// `MULTI`/`EXEC`/`DISCARD`/`WATCH`
 /// sent on their own (use [`Transaction`](crate::Transaction)). A
 /// [`call_pipeline`](Self::call_pipeline) batch may contain a complete
-/// `WATCH`/`MULTI`/`EXEC` sequence, including blocking commands queued inside
-/// `MULTI`, but not one that leaves `MULTI` or `WATCH` open. `AUTH` is
-/// allowed so credential rotation can re-authenticate the shared worker.
+/// `WATCH`/`MULTI`/`EXEC` sequence, but blocking commands are rejected even
+/// inside `MULTI` because the server could refuse `MULTI`. Requests that leave
+/// `MULTI` or `WATCH` open are rejected; actual control replies are checked
+/// before the socket is reused. `AUTH` is allowed for credential rotation.
 /// Run anything else that needs exclusive connection state on a dedicated
 /// [`RedisConnection`].
 ///
@@ -2144,10 +2144,9 @@ async fn flush_batch(
 
     let mut frames: Vec<Frame> = Vec::with_capacity(total_frames);
     let mut responders: Vec<Responder> = Vec::with_capacity(batch.len());
-    // Transactions in this batch, so their replies can be checked for one
-    // that left the shared connection inside MULTI. Single requests cannot
-    // carry transaction control; they are rejected at admission.
-    let mut transactions: Vec<TransactionSpan> = Vec::new();
+    // Check actual transaction-control replies at each caller boundary:
+    // syntax alone cannot prove Redis accepted MULTI or cleared WATCH.
+    let mut sessions: Vec<SessionCheck> = Vec::new();
 
     for req in batch {
         match req {
@@ -2161,11 +2160,9 @@ async fn flush_batch(
             } => {
                 let count = fs.len();
                 let offset = frames.len();
-                transactions.extend(
-                    transaction_spans(&fs)
-                        .into_iter()
-                        .map(|span| span.offset(offset)),
-                );
+                if let Some(check) = session_check(&fs) {
+                    sessions.push(check.offset(offset));
+                }
                 frames.extend(fs);
                 responders.push(Responder::Multi(count, response_tx));
             }
@@ -2208,14 +2205,14 @@ async fn flush_batch(
             // so the caller still gets the error, then signal the worker to
             // reconnect via the factory onto a real master.
             let saw_readonly = reconnect_on_readonly && responses.iter().any(is_readonly_frame);
-            // A refused DISCARD (or an EXEC refused without EXECABORT) leaves
-            // the connection inside MULTI: every later frame was queued, not
-            // executed. Those callers fail instead of receiving QUEUED, and
-            // the connection is discarded rather than reused.
-            let left_open_at = transactions
+            // A refused terminator can leave MULTI or WATCH state behind.
+            // Later callers in this flush may already have executed under
+            // that state; fail their responses and discard the connection.
+            // This cannot undo commands that Redis has already applied.
+            let left_open_at = sessions
                 .iter()
-                .filter(|span| transaction_left_open(span, &responses))
-                .map(|span| span.end)
+                .filter(|check| session_left_open(check, &responses))
+                .map(|check| check.end)
                 .min();
 
             if saw_readonly || left_open_at.is_some() {
@@ -2250,7 +2247,8 @@ async fn flush_batch(
             }
             if left_open_at.is_some() {
                 Err(PipelineFailure::SessionState(RedisError::Redis(
-                    "a refused EXEC or DISCARD left the shared connection inside MULTI".to_owned(),
+                    "transaction control left MULTI or WATCH state on the shared connection"
+                        .to_owned(),
                 )))
             } else if saw_readonly {
                 Err(PipelineFailure::ReadOnly)

@@ -190,8 +190,10 @@ pub(crate) fn validate_shared_request(frame: &Frame) -> Result<(), RedisError> {
 /// connection unusable for other callers.
 ///
 /// A batch is flushed back-to-back, so a complete `[WATCH...] MULTI ... EXEC`
-/// (or `DISCARD`) sequence is safe, and blocking commands queued inside
-/// `MULTI` do not block. A batch that leaves `MULTI` or `WATCH` open, or that
+/// (or `DISCARD`) sequence is supported. Blocking commands are rejected even
+/// inside `MULTI`: Redis could refuse `MULTI` and then execute them outside a
+/// transaction, stalling every caller before replies can be checked.
+/// A batch that leaves `MULTI` or `WATCH` open, or that
 /// contains any other unshareable command, is rejected before it is sent.
 pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> {
     let mut in_multi = false;
@@ -201,8 +203,13 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
             let unwatch = command_args(frame)
                 .and_then(|items| bulk_arg(&items[0]))
                 .is_some_and(|name| name.eq_ignore_ascii_case(b"UNWATCH"));
-            if unwatch && !in_multi {
-                watching = false;
+            if unwatch {
+                if command_args(frame).map_or(0, <[Frame]>::len) != 1 {
+                    return Err(wrong_control_arity("UNWATCH"));
+                }
+                if !in_multi {
+                    watching = false;
+                }
             }
             continue;
         };
@@ -218,11 +225,7 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
                     argc == 1
                 };
                 if !well_formed {
-                    return Err(RedisError::Redis(format!(
-                        "ERR wrong number of arguments for {command} in a batch on a shared \
-                         multiplexed connection: Redis can refuse it without ending the \
-                         transaction, leaving other callers inside MULTI"
-                    )));
+                    return Err(wrong_control_arity(command));
                 }
                 match command {
                     "MULTI" => in_multi = true,
@@ -234,7 +237,6 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
                     _ => {}
                 }
             }
-            Unshareable::Blocking if in_multi => {}
             kind => return Err(rejection(command, kind)),
         }
     }
@@ -249,79 +251,106 @@ pub(crate) fn validate_shared_batch(frames: &[Frame]) -> Result<(), RedisError> 
     Ok(())
 }
 
-/// How a transaction opened by `MULTI` is meant to end.
+fn wrong_control_arity(command: &str) -> RedisError {
+    RedisError::Redis(format!(
+        "ERR wrong number of arguments for {command} in a batch on a shared \
+         multiplexed connection: Redis can refuse it without clearing transaction state"
+    ))
+}
+
+/// One transaction-control command in a contiguous caller request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Terminator {
+enum SessionCommand {
+    Multi,
+    Watch,
+    Unwatch,
     Exec,
     Discard,
 }
 
-/// One `MULTI` and the `EXEC` or `DISCARD` meant to close it, as indexes into
-/// a flushed batch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TransactionSpan {
-    pub(crate) multi: usize,
+/// Controls whose actual replies must leave a caller's shared session clean.
+/// Syntactic MULTI state is insufficient: Redis may refuse MULTI, allowing a
+/// later WATCH in the same request to run outside a transaction.
+#[derive(Debug)]
+pub(crate) struct SessionCheck {
     pub(crate) end: usize,
-    pub(crate) terminator: Terminator,
+    commands: Vec<(usize, SessionCommand)>,
 }
 
-impl TransactionSpan {
-    pub(crate) fn offset(self, by: usize) -> Self {
-        Self {
-            multi: self.multi + by,
-            end: self.end + by,
-            terminator: self.terminator,
+impl SessionCheck {
+    pub(crate) fn offset(mut self, by: usize) -> Self {
+        self.end += by;
+        for (position, _) in &mut self.commands {
+            *position += by;
         }
+        self
     }
 }
 
-/// Locate each `MULTI` in `frames` and the `EXEC` or `DISCARD` that closes it.
-pub(crate) fn transaction_spans(frames: &[Frame]) -> Vec<TransactionSpan> {
-    let mut spans = Vec::new();
-    let mut open = None;
-    for (index, frame) in frames.iter().enumerate() {
-        let Some(name) = command_args(frame).and_then(|items| bulk_arg(&items[0])) else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case(b"MULTI") {
-            open.get_or_insert(index);
-        } else if let Some(multi) = open {
-            let terminator = if name.eq_ignore_ascii_case(b"EXEC") {
-                Terminator::Exec
+pub(crate) fn session_check(frames: &[Frame]) -> Option<SessionCheck> {
+    let commands: Vec<_> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| {
+            let name = command_args(frame).and_then(|items| bulk_arg(&items[0]))?;
+            let command = if name.eq_ignore_ascii_case(b"MULTI") {
+                SessionCommand::Multi
+            } else if name.eq_ignore_ascii_case(b"WATCH") {
+                SessionCommand::Watch
+            } else if name.eq_ignore_ascii_case(b"UNWATCH") {
+                SessionCommand::Unwatch
+            } else if name.eq_ignore_ascii_case(b"EXEC") {
+                SessionCommand::Exec
             } else if name.eq_ignore_ascii_case(b"DISCARD") {
-                Terminator::Discard
+                SessionCommand::Discard
             } else {
-                continue;
+                return None;
             };
-            spans.push(TransactionSpan {
-                multi,
-                end: index,
-                terminator,
-            });
-            open = None;
-        }
-    }
-    spans
+            Some((index, command))
+        })
+        .collect();
+    (!commands.is_empty()).then(|| SessionCheck {
+        end: frames.len() - 1,
+        commands,
+    })
 }
 
-/// Whether a transaction's replies show the connection may still be inside
-/// `MULTI`.
-///
-/// A refused `EXEC` is answered with `EXECABORT` and ends the transaction on
-/// current servers; any other `EXEC` error, and any `DISCARD` error (wrong
-/// arity, ACL denial), may leave it open. A refused `MULTI` never opened one.
-pub(crate) fn transaction_left_open(span: &TransactionSpan, replies: &[Frame]) -> bool {
-    let (Some(multi), Some(end)) = (replies.get(span.multi), replies.get(span.end)) else {
-        return true;
-    };
-    if matches!(multi, Frame::Error(_)) {
-        return false;
+/// Whether actual control replies leave MULTI or WATCH state at the caller's
+/// request boundary. Errors preserve existing state unless EXECABORT confirms
+/// that Redis discarded the transaction. Unknown replies fail closed.
+pub(crate) fn session_left_open(check: &SessionCheck, replies: &[Frame]) -> bool {
+    let mut in_multi = false;
+    let mut watching = false;
+    for &(position, command) in &check.commands {
+        let Some(reply) = replies.get(position) else {
+            return true;
+        };
+        let ok = matches!(reply, Frame::SimpleString(text) if text.as_ref() == b"OK");
+        let error = matches!(reply, Frame::Error(_));
+        match command {
+            SessionCommand::Multi if ok && !in_multi => in_multi = true,
+            SessionCommand::Watch if ok && !in_multi => watching = true,
+            SessionCommand::Unwatch if ok && !in_multi => watching = false,
+            SessionCommand::Unwatch
+                if in_multi
+                    && matches!(reply, Frame::SimpleString(text) if text.as_ref() == b"QUEUED") => {
+            }
+            SessionCommand::Exec
+                if (in_multi && matches!(reply, Frame::Array(_) | Frame::Null))
+                    || matches!(reply, Frame::Error(text) if text.starts_with(b"EXECABORT ")) =>
+            {
+                in_multi = false;
+                watching = false;
+            }
+            SessionCommand::Discard if ok => {
+                in_multi = false;
+                watching = false;
+            }
+            _ if error => {}
+            _ => return true,
+        }
     }
-    match (span.terminator, end) {
-        (Terminator::Exec, Frame::Error(message)) => !message.starts_with(b"EXECABORT"),
-        (Terminator::Discard, Frame::Error(_)) => true,
-        _ => false,
-    }
+    in_multi || watching
 }
 
 /// Reject a typed command that declares [`Command::is_blocking`] before it is
@@ -432,7 +461,6 @@ mod tests {
             cmd(&["WATCH", "k"]),
             cmd(&["MULTI"]),
             cmd(&["SET", "k", "v"]),
-            cmd(&["BLPOP", "q", "0"]),
             cmd(&["EXEC"]),
         ])
         .unwrap();
@@ -493,59 +521,109 @@ mod tests {
     }
 
     #[test]
-    fn transaction_replies_reveal_a_connection_left_inside_multi() {
-        let frames = [
-            cmd(&["GET", "a"]),
+    fn review_guard_blocking_batches_cannot_depend_on_multi_being_accepted() {
+        for blocking in [
+            cmd(&["BLPOP", "q", "0"]),
+            cmd(&["WAIT", "1", "0"]),
+            cmd(&["WAITAOF", "0", "1", "0"]),
+            cmd(&["XREAD", "BLOCK", "0", "STREAMS", "s", "$"]),
+        ] {
+            assert!(
+                matches!(
+                    validate_shared_batch(&[cmd(&["MULTI"]), blocking, cmd(&["EXEC"])]),
+                    Err(RedisError::Redis(message)) if message.contains("ConnectionPool")
+                ),
+                "a refused MULTI would let the command block outside the transaction"
+            );
+        }
+    }
+
+    #[test]
+    fn review_guard_malformed_unwatch_is_rejected_before_any_watch() {
+        for frames in [
+            vec![cmd(&["WATCH", "k"]), cmd(&["UNWATCH", "extra"])],
+            vec![cmd(&["MULTI"]), cmd(&["UNWATCH", "extra"]), cmd(&["EXEC"])],
+        ] {
+            assert!(
+                matches!(validate_shared_batch(&frames), Err(RedisError::Redis(message))
+                    if message.contains("UNWATCH") && message.contains("arguments")),
+                "{frames:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn review_guard_actual_replies_determine_watch_and_multi_cleanup() {
+        let check = |frames: &[Frame], replies: &[Frame]| {
+            session_left_open(&session_check(frames).unwrap(), replies)
+        };
+        let watch_unwatch = [cmd(&["WATCH", "k"]), cmd(&["UNWATCH"])];
+        assert!(!check(&watch_unwatch, &[reply(b"OK"), reply(b"OK")]));
+        assert!(check(
+            &watch_unwatch,
+            &[reply(b"OK"), error(b"NOPERM denied")]
+        ));
+        assert!(!check(
+            &watch_unwatch,
+            &[error(b"NOPERM denied"), error(b"NOPERM denied")]
+        ));
+        let denied_multi_watch = [cmd(&["MULTI"]), cmd(&["WATCH", "k"]), cmd(&["EXEC"])];
+        assert!(check(
+            &denied_multi_watch,
+            &[
+                error(b"NOPERM denied"),
+                reply(b"OK"),
+                error(b"ERR EXEC without MULTI")
+            ]
+        ));
+        let queued_unwatch = [
+            cmd(&["WATCH", "k"]),
             cmd(&["MULTI"]),
-            cmd(&["SET", "k", "v"]),
-            cmd(&["DISCARD"]),
-            cmd(&["MULTI"]),
+            cmd(&["UNWATCH"]),
             cmd(&["EXEC"]),
         ];
-        let spans = transaction_spans(&frames);
-        assert_eq!(
-            spans,
-            vec![
-                TransactionSpan {
-                    multi: 1,
-                    end: 3,
-                    terminator: Terminator::Discard
-                },
-                TransactionSpan {
-                    multi: 4,
-                    end: 5,
-                    terminator: Terminator::Exec
-                },
+        assert!(check(
+            &queued_unwatch,
+            &[
+                reply(b"OK"),
+                reply(b"OK"),
+                reply(b"QUEUED"),
+                error(b"NOPERM denied")
             ]
-        );
-        let discard = spans[0];
-        let exec = spans[1];
-        let ok = |at| {
-            let mut replies = vec![reply(b"OK"); 6];
-            replies[at] = error(b"NOPERM denied");
-            replies
-        };
-        assert!(transaction_left_open(&discard, &ok(3)), "refused DISCARD");
-        assert!(
-            !transaction_left_open(&discard, &ok(1)),
-            "refused MULTI never opened"
-        );
-        assert!(
-            transaction_left_open(&exec, &ok(5)),
-            "EXEC error without EXECABORT"
-        );
-        let mut aborted = vec![reply(b"OK"); 6];
-        aborted[5] = error(b"EXECABORT Transaction discarded");
-        assert!(!transaction_left_open(&exec, &aborted));
-        aborted[5] = Frame::Null;
-        assert!(
-            !transaction_left_open(&exec, &aborted),
-            "WATCH abort ends MULTI"
-        );
-        assert!(
-            transaction_left_open(&exec, &[]),
-            "missing replies are unknown"
-        );
+        ));
+        for end in [
+            Frame::Array(Some(vec![reply(b"OK")])),
+            Frame::Array(None),
+            Frame::Null,
+            error(b"EXECABORT Transaction discarded"),
+        ] {
+            assert!(!check(
+                &queued_unwatch,
+                &[reply(b"OK"), reply(b"OK"), reply(b"QUEUED"), end]
+            ));
+        }
+        let nested = [cmd(&["MULTI"]), cmd(&["MULTI"]), cmd(&["DISCARD"])];
+        assert!(check(
+            &nested,
+            &[
+                reply(b"OK"),
+                error(b"ERR nested MULTI"),
+                error(b"NOPERM denied")
+            ]
+        ));
+        assert!(!check(
+            &nested,
+            &[reply(b"OK"), error(b"ERR nested MULTI"), reply(b"OK")]
+        ));
+        assert!(check(&watch_unwatch, &[]));
+        assert!(check(&watch_unwatch, &[reply(b"OK"), reply(b"unexpected")]));
+        assert!(session_check(&[cmd(&["GET", "k"])]).is_none());
+        let offset = session_check(&watch_unwatch).unwrap().offset(1);
+        assert_eq!(offset.end, 2);
+        assert!(!session_left_open(
+            &offset,
+            &[Frame::Null, reply(b"OK"), reply(b"OK")]
+        ));
     }
 
     #[test]

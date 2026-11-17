@@ -41,8 +41,13 @@ server-side throughput cost. Multiplexed clients reject the commands that would
 otherwise corrupt the shared session for every clone: subscriptions, `MONITOR`,
 `SYNC`/`PSYNC`, `RESET`, `HELLO`, `QUIT`, `CLIENT REPLY`, and stand-alone
 `MULTI`/`EXEC`/`DISCARD`/`WATCH` (use `Transaction`, whose batch stays
-contiguous). `AUTH` remains allowed so credential rotation can re-authenticate
-the shared worker. `SELECT` and `CLIENT SETNAME` are allowed but apply to every
+contiguous). Blocking commands are also rejected inside transaction batches:
+a refused `MULTI` would let them run outside a transaction. Malformed
+`UNWATCH` is rejected before the batch is written. If actual control replies
+leave `WATCH` or `MULTI` state, the socket is discarded; a factory-backed client
+reconnects. Callers flushed behind that request fail with `ConnectionClosed`
+because their results may be affected; their commands may already have run.
+`AUTH` remains allowed so credential rotation can re-authenticate the shared worker. `SELECT` and `CLIENT SETNAME` are allowed but apply to every
 clone and are reverted by a reconnect; put them in the connection factory.
 
 ## Plan for Smart Client Handoff maintenance

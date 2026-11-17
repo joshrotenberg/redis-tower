@@ -506,3 +506,264 @@ async fn wait_commands_are_rejected_before_they_stall_the_worker() {
     assert!(raw_aof.contains("ConnectionPool"), "{raw_aof}");
     assert!(started.elapsed() < Duration::from_secs(2));
 }
+
+async fn guard_client(
+    addr: &str,
+    user: Option<&str>,
+    protocol: ProtocolVersion,
+) -> MultiplexedClient {
+    let url = match user {
+        Some(user) => format!("redis://{user}:pw@{addr}"),
+        None => format!("redis://{addr}"),
+    };
+    MultiplexedClient::from_factory(
+        UrlConnectionFactory::new(url)
+            .with_connection_config(ConnectionConfig::new().with_protocol(protocol)),
+        AutoPipelineConfig {
+            batch_window: Duration::from_millis(50),
+            // Exercise the default unlimited response wait; test observers
+            // and the owned abort handle bound failure and cleanup.
+            response_timeout: None,
+            ..AutoPipelineConfig::default()
+        },
+        AutoPipelineReconnectConfig::default(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn guard_client_id(client: &MultiplexedClient) -> Frame {
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        client.execute(RawCommand::new("CLIENT").arg("ID")),
+    )
+    .await
+    .expect("backend connection did not recover")
+    .unwrap()
+}
+
+/// MULTI may be well formed but denied by ACLs. Its following BLPOP/WAIT
+/// would then run outside a transaction and block the shared worker forever.
+#[tokio::test]
+async fn review_guard_denied_multi_cannot_admit_blocking_frames() {
+    let addr = common::redis_addr().await;
+    let mut admin = RedisConnection::connect(addr).await.unwrap();
+    for protocol in [ProtocolVersion::Resp2, ProtocolVersion::Resp3] {
+        let user = format!("shared_guard_nomulti_{protocol:?}");
+        user_without(&mut admin, &user, "multi").await;
+        for blocking in [
+            array(vec![bulk("BLPOP"), bulk("shared_guard:empty"), bulk("0")]),
+            array(vec![bulk("WAIT"), bulk("1"), bulk("0")]),
+        ] {
+            admin.execute(Del::new("shared_guard:empty")).await.unwrap();
+            let mut client = guard_client(addr, Some(&user), protocol).await;
+            let id = guard_client_id(&client).await;
+            let Frame::Integer(id_number) = id else {
+                panic!("CLIENT ID: {id:?}")
+            };
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(2),
+                redis_tower::PipelineExecutor::execute_pipeline(
+                    &mut client,
+                    vec![
+                        array(vec![bulk("MULTI")]),
+                        blocking.clone(),
+                        array(vec![bulk("EXEC")]),
+                    ],
+                ),
+            )
+            .await;
+            let peer = admin
+                .execute(
+                    RawCommand::new("CLIENT")
+                        .arg("LIST")
+                        .arg("ID")
+                        .arg(id_number.to_string()),
+                )
+                .await;
+            let neighbor =
+                tokio::time::timeout(Duration::from_millis(500), client.health_check()).await;
+            client.shutdown_handle().abort().await;
+            eprintln!(
+                "{protocol:?} {blocking:?}: outcome={outcome:?}; peer={peer:?}; neighbor={neighbor:?}"
+            );
+            assert!(
+                matches!(outcome, Ok(Err(RedisError::Redis(message))) if message.contains("ConnectionPool")),
+                "the unsafe batch must be rejected before relying on MULTI acceptance"
+            );
+            assert!(
+                matches!(neighbor, Ok(Ok(()))),
+                "a neighbor stalled behind a blocking frame"
+            );
+            // A dedicated connection still supports the normal transaction:
+            // accepted MULTI makes Redis execute the blocking command without
+            // blocking during EXEC. Only the shared admission policy changed.
+            let mut direct = RedisConnection::connect_with_config(
+                addr,
+                &ConnectionConfig::new().with_protocol(protocol),
+            )
+            .await
+            .unwrap();
+            let dedicated = tokio::time::timeout(
+                Duration::from_secs(2),
+                direct.execute_pipeline(vec![
+                    array(vec![bulk("MULTI")]),
+                    blocking,
+                    array(vec![bulk("EXEC")]),
+                ]),
+            )
+            .await
+            .expect("a normal dedicated transaction blocked")
+            .unwrap();
+            assert!(matches!(&dedicated[0], Frame::SimpleString(text) if text.as_ref() == b"OK"));
+            assert!(
+                matches!(&dedicated[1], Frame::SimpleString(text) if text.as_ref() == b"QUEUED")
+            );
+            assert!(matches!(&dedicated[2], Frame::Array(Some(_))));
+        }
+        admin
+            .execute(RawCommand::new("ACL").arg("DELUSER").arg(user))
+            .await
+            .unwrap();
+    }
+}
+
+/// Wrong-arity UNWATCH never clears Redis's watch state. Reject the entire
+/// request before WATCH reaches the socket, preserving unrelated transactions.
+#[tokio::test]
+async fn review_guard_malformed_unwatch_never_leaves_a_watch() {
+    let addr = common::redis_addr().await;
+    let mut admin = RedisConnection::connect(addr).await.unwrap();
+    for protocol in [ProtocolVersion::Resp2, ProtocolVersion::Resp3] {
+        let key = format!("shared_guard:malformed:{protocol:?}");
+        let other = format!("{key}:other");
+        admin.execute(Del::new(&other)).await.unwrap();
+        let mut client = guard_client(addr, None, protocol).await;
+        let outcome = redis_tower::PipelineExecutor::execute_pipeline(
+            &mut client,
+            vec![
+                array(vec![bulk("WATCH"), bulk(key.clone())]),
+                array(vec![bulk("UNWATCH"), bulk("extra")]),
+            ],
+        )
+        .await;
+        admin.execute(Set::new(&key, "changed")).await.unwrap();
+        let later = Transaction::new()
+            .push(Set::new(&other, "committed"))
+            .execute(&mut client)
+            .await
+            .map(|result| result.is_committed());
+        let value = admin.execute(Get::new(&other)).await.unwrap();
+        client.shutdown_handle().abort().await;
+        admin.execute(Del::new(&key)).await.unwrap();
+        admin.execute(Del::new(&other)).await.unwrap();
+        eprintln!("{protocol:?}: malformed cleanup={outcome:?}; later={later:?}; value={value:?}");
+        assert!(
+            matches!(outcome, Err(RedisError::Redis(message)) if message.contains("UNWATCH") && message.contains("arguments"))
+        );
+        assert!(later.unwrap(), "another caller inherited WATCH");
+        assert_eq!(value, Some(Bytes::from_static(b"committed")));
+    }
+}
+
+/// Confirm actual cleanup replies, including a WATCH that ran after MULTI
+/// was refused. The socket must be replaced before later requests reuse it.
+/// Commands already flushed behind the failure may have executed; their
+/// callers receive ConnectionClosed because their results may be affected.
+#[tokio::test]
+async fn review_guard_refused_watch_cleanup_retires_the_socket() {
+    let addr = common::redis_addr().await;
+    let mut admin = RedisConnection::connect(addr).await.unwrap();
+    for protocol in [ProtocolVersion::Resp2, ProtocolVersion::Resp3] {
+        for denied in [None, Some("unwatch"), Some("multi")] {
+            let scenario = denied.unwrap_or("allowed");
+            let user = format!("shared_guard_{scenario}_{protocol:?}");
+            if let Some(command) = denied {
+                user_without(&mut admin, &user, command).await;
+            }
+            let key = format!("shared_guard:{scenario}:{protocol:?}");
+            let other = format!("{key}:other");
+            admin.execute(Del::new(&other)).await.unwrap();
+            let client = guard_client(addr, denied.map(|_| user.as_str()), protocol).await;
+            let before = guard_client_id(&client).await;
+            let frames = if denied == Some("multi") {
+                vec![
+                    array(vec![bulk("MULTI")]),
+                    array(vec![bulk("WATCH"), bulk(key.clone())]),
+                    array(vec![bulk("EXEC")]),
+                ]
+            } else {
+                vec![
+                    array(vec![bulk("WATCH"), bulk(key.clone())]),
+                    array(vec![bulk("UNWATCH")]),
+                ]
+            };
+            let mut first = client.clone();
+            // Both futures are first polled on this test's current-thread
+            // runtime, before the worker flushes their shared batch.
+            let (cleanup, follower) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(biased;
+                    redis_tower::PipelineExecutor::execute_pipeline(&mut first, frames),
+                    client.health_check(),
+                )
+            })
+            .await
+            .expect("watch cleanup or its neighbor hung");
+            let after = guard_client_id(&client).await;
+            admin.execute(Set::new(&key, "changed")).await.unwrap();
+            let mut later_client = client.clone();
+            // Grant MULTI for the later unrelated transaction without
+            // changing the connection or clearing any inherited WATCH.
+            if denied == Some("multi") {
+                admin
+                    .execute(
+                        RawCommand::new("ACL")
+                            .arg("SETUSER")
+                            .arg(&user)
+                            .arg("+multi"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let later = Transaction::new()
+                .push(Set::new(&other, "committed"))
+                .execute(&mut later_client)
+                .await
+                .map(|result| result.is_committed());
+            let value = admin.execute(Get::new(&other)).await.unwrap();
+            client.shutdown_handle().abort().await;
+            if denied.is_some() {
+                admin
+                    .execute(RawCommand::new("ACL").arg("DELUSER").arg(&user))
+                    .await
+                    .unwrap();
+            }
+            admin.execute(Del::new(&key)).await.unwrap();
+            admin.execute(Del::new(&other)).await.unwrap();
+            eprintln!(
+                "{protocol:?} {scenario}: before={before:?}; after={after:?}; cleanup={cleanup:?}; follower={follower:?}; later={later:?}; value={value:?}"
+            );
+            let cleanup = cleanup.unwrap();
+            if denied.is_some() {
+                assert!(cleanup.iter().any(
+                    |reply| matches!(reply, Frame::Error(message) if message.starts_with(b"NOPERM"))
+                ));
+                assert_ne!(
+                    before, after,
+                    "refused cleanup left a reusable watched socket"
+                );
+                // This follower was flushed behind the request whose
+                // cleanup failed; its outcome must not be trusted.
+                assert!(
+                    matches!(follower, Err(RedisError::ConnectionClosed)),
+                    "{follower:?}"
+                );
+            } else {
+                assert_eq!(before, after, "successful UNWATCH need not reconnect");
+                follower.unwrap();
+            }
+            assert!(later.unwrap(), "another caller inherited WATCH");
+            assert_eq!(value, Some(Bytes::from_static(b"committed")));
+        }
+    }
+}

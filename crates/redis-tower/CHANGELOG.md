@@ -42,7 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This applies to `AutoPipelineService` and therefore to `MultiplexedClient`,
   `CachedMultiplexedClient`, and layered clients. Explicit pipelines may still
   carry a complete `WATCH`/`MULTI`/`EXEC` block but not one left open or with
-  malformed `MULTI`/`EXEC`/`DISCARD`/`WATCH` arguments. `AUTH` stays allowed
+  malformed `MULTI`/`EXEC`/`DISCARD`/`WATCH`/`UNWATCH` arguments. Blocking
+  commands are rejected even inside raw `MULTI` batches: an ACL-denied `MULTI`
+  lets the following command run outside a transaction. `AUTH` stays allowed
   for credential re-authentication
 - discard a shared connection whose transaction replies show it was left
   inside `MULTI`: Redis refuses a `DISCARD` (wrong arity or ACL denial), and on
@@ -50,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   commands were queued instead of executed. Callers batched behind the refused
   terminator fail with `ConnectionClosed` instead of receiving `QUEUED`; a
   factory-backed worker reconnects and a fixed one closes
+- check actual `WATCH`/`UNWATCH` replies before sharing a socket again,
+  including a `WATCH` that ran after an ACL-denied `MULTI`. Refused cleanup
+  discards the socket instead of letting another caller inherit the watch and
+  unexpectedly abort its transaction. Co-batched followers fail with
+  `ConnectionClosed`; their commands may already have executed
 - stop graceful shutdown from waiting forever on an in-flight batch whose
   callers have all gone away; with no response timeout, one abandoned request
   to an unresponsive server made `AutoPipelineShutdownHandle::shutdown()` hang.
