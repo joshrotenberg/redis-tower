@@ -25,12 +25,29 @@ use redis_tower_protocol::helpers::{array, bulk};
 use crate::CommandArg;
 
 /// A stream entry: an ID and a list of field-value pairs.
+///
+/// Reading a consumer group's pending history (`XREADGROUP ... 0`) can return
+/// entries that were deleted with `XDEL` after delivery. Redis reports those
+/// as an ID with a null payload, which decodes to an entry with no fields; see
+/// [`StreamEntry::is_deleted`]. The ID is still valid for `XACK`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamEntry {
     /// Redis stream entry ID.
     pub id: String,
     /// Ordered field-value pairs stored in the entry.
     pub fields: Vec<(Bytes, Bytes)>,
+}
+
+impl StreamEntry {
+    /// Return `true` when Redis reported this entry's payload as deleted.
+    ///
+    /// `XADD` requires at least one field, so a stored entry always has
+    /// fields. An entry without any comes from a pending-history read whose
+    /// payload was removed by `XDEL`; acknowledge its ID with `XACK` to clear
+    /// it from the pending entries list.
+    pub fn is_deleted(&self) -> bool {
+        self.fields.is_empty()
+    }
 }
 
 /// XADD key \[NOMKSTREAM\] \[MAXLEN|MINID \[=|~\] threshold\] \[*|id\] field value \[field value ...\]
@@ -1940,6 +1957,13 @@ fn parse_stream_entry(frame: &Frame) -> Result<StreamEntry, RedisError> {
 
     let field_values = match &items[1] {
         Frame::Array(Some(fvs)) => fvs,
+        // A pending entry deleted after delivery: `*-1` in RESP2, `_` in RESP3.
+        Frame::Array(None) | Frame::Null => {
+            return Ok(StreamEntry {
+                id,
+                fields: Vec::new(),
+            });
+        }
         other => {
             return Err(RedisError::UnexpectedResponse {
                 expected: "array of field-value pairs",

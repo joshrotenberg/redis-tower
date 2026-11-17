@@ -34,6 +34,7 @@
 //! [command cookbook]: https://github.com/joshrotenberg/redis-tower/blob/main/docs/COMMAND-COOKBOOK.md#streams-consumer-groups-and-blocking-reads
 
 use crate::CommandArg;
+use crate::reply;
 use bytes::Bytes;
 use redis_tower_core::{Command, Frame, RedisError};
 use redis_tower_protocol::helpers::{array, bulk};
@@ -355,26 +356,7 @@ fn parse_key_member_score_or_null(frame: Frame) -> Result<Option<(Bytes, Bytes, 
         Frame::Array(Some(items)) if items.len() == 3 => {
             let key = extract_bytes(&items[0])?;
             let member = extract_bytes(&items[1])?;
-            let score = match &items[2] {
-                Frame::BulkString(Some(b)) => {
-                    let s = std::str::from_utf8(b).map_err(|e| RedisError::UnexpectedResponse {
-                        expected: "valid UTF-8 score",
-                        actual: e.to_string(),
-                    })?;
-                    s.parse::<f64>()
-                        .map_err(|e| RedisError::UnexpectedResponse {
-                            expected: "valid f64 score",
-                            actual: e.to_string(),
-                        })?
-                }
-                Frame::Double(d) => *d,
-                other => {
-                    return Err(RedisError::UnexpectedResponse {
-                        expected: "bulk string or double score",
-                        actual: format!("{other:?}"),
-                    });
-                }
-            };
+            let score = reply::double(&items[2])?;
             Ok(Some((key, member, score)))
         }
         other => Err(RedisError::UnexpectedResponse {
