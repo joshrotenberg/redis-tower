@@ -14,6 +14,52 @@ use common::redis_addr;
 use redis_tower::commands::*;
 use redis_tower::{ProtocolVersion, RedisConnection};
 
+#[tokio::test]
+async fn raw_zscore_queries_keep_redis_boundary_double_text() {
+    let key = "rt:parity:fpconv-boundaries";
+    // Expected text captured on Redis 8.10.3. Inputs identify the exact
+    // binary64 neighbors without relying on the client's score formatter.
+    let cases = [
+        ("9.9999999999999975e22", "99999999999999970000000"),
+        ("-9.9999999999999975e22", "-99999999999999970000000"),
+        ("1e23", "99999999999999990000000"),
+        ("-1e23", "-99999999999999990000000"),
+        ("1.0000000000000001e23", "100000000000000010000000"),
+        ("-1.0000000000000001e23", "-100000000000000010000000"),
+    ];
+    for protocol in [ProtocolVersion::Resp2, ProtocolVersion::Resp3] {
+        let mut c = RedisConnection::connect_with_protocol(redis_addr().await, protocol)
+            .await
+            .unwrap();
+        for (input, expected) in cases {
+            c.execute(RawCommand::new("ZADD").arg(key).arg(input).arg(input))
+                .await
+                .unwrap();
+            let text = c
+                .execute(
+                    RawCommand::new("ZSCORE")
+                        .arg(key)
+                        .arg(input)
+                        .query::<String>(),
+                )
+                .await
+                .unwrap();
+            let bytes = c
+                .execute(
+                    RawCommand::new("ZSCORE")
+                        .arg(key)
+                        .arg(input)
+                        .query::<Bytes>(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(text, expected, "{protocol:?} {input}");
+            assert_eq!(bytes.as_ref(), expected.as_bytes(), "{protocol:?} {input}");
+        }
+        c.execute(Del::keys([key])).await.unwrap();
+    }
+}
+
 /// Typed results that must not depend on the negotiated protocol.
 #[derive(Debug, PartialEq)]
 struct Observed {

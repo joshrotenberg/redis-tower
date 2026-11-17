@@ -356,6 +356,12 @@ Merges are manual -- GitHub auto-merge is **not** enabled (`gh pr merge --auto` 
 
 ## Current Status
 
+`FromFrame` decoding of RESP3 doubles into `String` or `Bytes` uses a private
+port of Redis fpconv's digit generator. Keep its conservative rounding
+boundaries: a generic shortest formatter can select a different decimal for
+values such as `1e23`, breaking text parity with RESP2. The captured-wire and
+live parity suites cover both signs and adjacent binary64 values.
+
 The current follow-up backlog is tracked by issue #701. It covers findings from
 the first substantial external consumer, protocol completeness, conformance,
 comparative fault testing, retained performance evidence, and documentation.

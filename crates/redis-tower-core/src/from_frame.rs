@@ -53,6 +53,8 @@
 //! # }
 //! ```
 
+mod fpconv;
+
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -130,8 +132,8 @@ fn frame_to_bytes(frame: Frame) -> Result<Bytes, RedisError> {
 /// Render a double as Redis writes it in a RESP2 reply.
 ///
 /// This follows Redis's `d2string`: whole values within ±2^62 print as
-/// integers, and everything else uses the shortest round-trip digits laid out
-/// as fpconv does: plain up to six leading fractional zeros or seven trailing
+/// integers, and everything else uses fpconv's Grisu2 digit selection and
+/// layout: plain up to six leading fractional zeros or seven trailing
 /// integer zeros, scientific with a signed exponent beyond that (`0.00001`,
 /// `1.5e-7`, `12345678901234567000`, `1e+20`).
 fn redis_double_text(d: f64) -> String {
@@ -150,7 +152,7 @@ fn redis_double_text(d: f64) -> String {
         return (d as i64).to_string();
     }
 
-    let (digits, last) = shortest_digits(d);
+    let (digits, last) = fpconv::digits(d.abs());
     let len = digits.len() as i32;
     let sign = if d < 0.0 { "-" } else { "" };
     let exponent = last + len - 1;
@@ -173,22 +175,6 @@ fn redis_double_text(d: f64) -> String {
         "{sign}{first}{point}{rest}e{exponent_sign}{}",
         exponent.abs()
     )
-}
-
-/// The shortest round-trip decimal digits of a finite, non-zero `d`, and the
-/// power of ten of the last digit: `digits * 10^last == |d|`.
-fn shortest_digits(d: f64) -> (String, i32) {
-    // `{:e}` writes the shortest round-trip digits as `d.ddde<exp>`.
-    let scientific = format!("{:e}", d.abs());
-    let (mantissa, exponent) = scientific
-        .split_once('e')
-        .expect("LowerExp always writes an exponent");
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let exponent: i32 = exponent
-        .parse()
-        .expect("LowerExp writes an integer exponent");
-    let last = exponent - (digits.len() as i32 - 1);
-    (digits, last)
 }
 
 /// Extract the element vector from an array-like frame.
@@ -860,6 +846,44 @@ mod tests {
         assert_eq!(resp2, resp3);
         let bytes: Bytes = FromFrame::from_frame(Frame::SpecialFloat(Bytes::from("-inf"))).unwrap();
         assert_eq!(bytes, Bytes::from("-inf"));
+    }
+
+    // ZSCORE wire text captured from Redis 8.10.3 for 1e23 and its adjacent
+    // binary64 values, with both signs. The central value's shortest Rust
+    // rendering lies exactly on a rounding boundary excluded by Redis fpconv.
+    const BOUNDARY_DOUBLES: [(u64, &str); 6] = [
+        (0x44b5_2d02_c7e1_4af5, "99999999999999970000000"),
+        (0xc4b5_2d02_c7e1_4af5, "-99999999999999970000000"),
+        (0x44b5_2d02_c7e1_4af6, "99999999999999990000000"),
+        (0xc4b5_2d02_c7e1_4af6, "-99999999999999990000000"),
+        (0x44b5_2d02_c7e1_4af7, "100000000000000010000000"),
+        (0xc4b5_2d02_c7e1_4af7, "-100000000000000010000000"),
+    ];
+
+    #[test]
+    fn string_from_resp3_double_uses_redis_boundary_digits() {
+        let mut mismatches = Vec::new();
+        for (bits, text) in BOUNDARY_DOUBLES {
+            let resp2 = String::from_frame(bulk(text)).unwrap();
+            let resp3 = String::from_frame(Frame::Double(f64::from_bits(bits))).unwrap();
+            if resp3 != resp2 {
+                mismatches.push((format!("{bits:016x}"), resp2, resp3));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn bytes_from_resp3_double_uses_redis_boundary_digits() {
+        let mut mismatches = Vec::new();
+        for (bits, text) in BOUNDARY_DOUBLES {
+            let resp2 = Bytes::from_frame(bulk(text)).unwrap();
+            let resp3 = Bytes::from_frame(Frame::Double(f64::from_bits(bits))).unwrap();
+            if resp3 != resp2 {
+                mismatches.push((format!("{bits:016x}"), resp2, resp3));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     #[test]

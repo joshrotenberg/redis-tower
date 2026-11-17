@@ -18,6 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- use Redis fpconv's digit selection for RESP3 doubles decoded as `String`
+  or `Bytes`, including rounding-boundary scores such as `1e23` and `-1e23`
+  whose RESP2 text differs from Rust's shortest decimal representation
 - replace native-tls default trust roots with every CA in a custom PEM bundle,
   requiring native-tls 0.2.16 or newer
 - honor `danger_accept_invalid_hostnames(true)` on the rustls backend; it was

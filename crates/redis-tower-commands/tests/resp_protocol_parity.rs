@@ -4,7 +4,8 @@
 //! different frame types per protocol. Each test feeds the exact RESP2 and
 //! RESP3 wire bytes captured from redis-server 8.10.2 (with RedisJSON,
 //! RedisBloom, and RedisTimeSeries loaded) through the real `RespCodec`, and
-//! expects both to decode to the same typed value.
+//! expects both to decode to the same typed value. The rounding-boundary
+//! score cases use captures from Redis 8.10.3.
 
 use bytes::{Bytes, BytesMut};
 use redis_tower_commands::*;
@@ -569,6 +570,41 @@ fn raw_string_query_keeps_redis_double_text() {
         let resp2 = format!("${}\r\n{text}\r\n", text.len());
         let resp3 = format!(",{text}\r\n");
         assert_eq!(parity(&cmd, resp2.as_bytes(), resp3.as_bytes()), text);
+    }
+}
+
+// ZSCORE replies captured from Redis 8.10.3 for both signs of 1e23 and its
+// immediate binary64 neighbors. Redis fpconv deliberately excludes the exact
+// rounding midpoint that Rust's generic shortest formatter can select.
+const BOUNDARY_SCORE_TEXTS: [&str; 6] = [
+    "99999999999999970000000",
+    "-99999999999999970000000",
+    "99999999999999990000000",
+    "-99999999999999990000000",
+    "100000000000000010000000",
+    "-100000000000000010000000",
+];
+
+#[test]
+fn raw_string_query_keeps_redis_boundary_double_text() {
+    for text in BOUNDARY_SCORE_TEXTS {
+        let cmd = RawCommand::new("ZSCORE")
+            .arg("z")
+            .arg("m")
+            .query::<String>();
+        let resp2 = format!("${}\r\n{text}\r\n", text.len());
+        let resp3 = format!(",{text}\r\n");
+        assert_eq!(parity(&cmd, resp2.as_bytes(), resp3.as_bytes()), text);
+    }
+}
+
+#[test]
+fn raw_bytes_query_keeps_redis_boundary_double_text() {
+    for text in BOUNDARY_SCORE_TEXTS {
+        let cmd = RawCommand::new("ZSCORE").arg("z").arg("m").query::<Bytes>();
+        let resp2 = format!("${}\r\n{text}\r\n", text.len());
+        let resp3 = format!(",{text}\r\n");
+        assert_eq!(parity(&cmd, resp2.as_bytes(), resp3.as_bytes()), b(text));
     }
 }
 
